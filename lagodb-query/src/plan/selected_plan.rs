@@ -1,10 +1,11 @@
 //! Selected path combining query semantics with provider table scans.
 
+use std::ffi::CStr;
 use std::ptr;
 
 use lagodb_core::plan_data::{PlanDataError, PlanDataReader, PlanDataWriter};
 use lagodb_core::query_contract::{
-    ProviderId, ScanEstimate, ScanEstimateError, ScanId,
+    ScanCost, ScanCostError, TableScanRoute, TableScanRouteKind,
 };
 use pgrx::pg_sys;
 
@@ -16,113 +17,63 @@ use super::{QueryPlanData, QueryPlanDataError};
 const PATH_PAYLOAD: i32 = 1;
 const EXECUTION_PAYLOAD: i32 = 2;
 
-/// Contiguous query-runtime bindings owned by one table-scan predicate.
-///
-/// Query expressions are evaluated once in their global layout. Each scan
-/// receives only this view, while its provider plan keeps a scan-local layout
-/// whose value identities start at zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TableScanRuntimeBindings {
-    start: usize,
-    count: usize,
-}
-
-impl TableScanRuntimeBindings {
-    pub const fn empty() -> Self {
-        Self { start: 0, count: 0 }
-    }
-
-    pub fn try_new(start: usize, count: usize) -> Option<Self> {
-        start.checked_add(count).map(|_| Self { start, count })
-    }
-
-    #[inline]
-    pub const fn start(self) -> usize {
-        self.start
-    }
-
-    #[inline]
-    pub const fn len(self) -> usize {
-        self.count
-    }
-
-    #[inline]
-    pub const fn is_empty(self) -> bool {
-        self.count == 0
-    }
-
-    fn end(self) -> usize {
-        self.start + self.count
-    }
-
-    fn fits(self, runtime_value_count: usize) -> bool {
-        self.end() <= runtime_value_count
-    }
-
-    pub(crate) fn select<T>(self, values: &[T]) -> &[T] {
-        values.get(self.start..self.end()).expect(
-            "selected-plan validation bounds every table-scan runtime binding",
-        )
-    }
-}
-
 /// One provider table scan with opaque plan data and explain metadata.
 pub struct PlannedTableScan<'plan> {
-    provider: ProviderId,
-    scan: ScanId,
-    estimate: ScanEstimate,
-    runtime_bindings: TableScanRuntimeBindings,
+    route: TableScanRoute<'plan>,
+    relation_oid: pg_sys::Oid,
+    alias: &'plan CStr,
+    cost: ScanCost,
     filter_explain: Option<TableScanFilterExplain<'plan>>,
     provider_plan: &'plan pg_sys::List,
 }
 
 impl<'plan> PlannedTableScan<'plan> {
-    /// Bind a provider-owned plan record to one query-local scan.
+    /// Construct one dense scan-table entry around a provider-owned plan record.
+    /// Its position in [`SelectedQueryPlan::scans`] is its query-local `ScanId`.
     ///
     /// # Safety
     ///
     /// `provider_plan` must be a live, non-NIL, `copyObject`-safe PostgreSQL
     /// `T_List` in the current planner memory context. It must remain read-only
-    /// while this borrowed descriptor exists. `runtime_bindings` must select
-    /// the global query values in the same order as the scan-local predicate
-    /// layout encoded in `provider_plan`. Any filter expression text must also
-    /// remain live while this descriptor is encoded or inspected.
+    /// while this borrowed descriptor exists. The relation alias and any
+    /// filter expression text must also remain live while this descriptor is
+    /// encoded or inspected.
     pub unsafe fn new(
-        provider: ProviderId,
-        scan: ScanId,
-        estimate: ScanEstimate,
-        runtime_bindings: TableScanRuntimeBindings,
+        route: TableScanRoute<'plan>,
+        relation_oid: pg_sys::Oid,
+        alias: &'plan CStr,
+        cost: ScanCost,
         filter_explain: Option<TableScanFilterExplain<'plan>>,
         provider_plan: &'plan pg_sys::List,
     ) -> Self {
         Self {
-            provider,
-            scan,
-            estimate,
-            runtime_bindings,
+            route,
+            relation_oid,
+            alias,
+            cost,
             filter_explain,
             provider_plan,
         }
     }
 
     #[inline]
-    pub const fn provider(&self) -> ProviderId {
-        self.provider
+    pub const fn route(&self) -> TableScanRoute<'plan> {
+        self.route
     }
 
     #[inline]
-    pub const fn scan(&self) -> ScanId {
-        self.scan
+    pub const fn relation_oid(&self) -> pg_sys::Oid {
+        self.relation_oid
     }
 
     #[inline]
-    pub const fn estimate(&self) -> ScanEstimate {
-        self.estimate
+    pub const fn alias(&self) -> &'plan CStr {
+        self.alias
     }
 
     #[inline]
-    pub const fn runtime_bindings(&self) -> TableScanRuntimeBindings {
-        self.runtime_bindings
+    pub const fn cost(&self) -> ScanCost {
+        self.cost
     }
 
     #[inline]
@@ -218,25 +169,27 @@ impl<'plan> SelectedQueryPlan<'plan> {
                     unsafe { writer.append_encoded_list(expressions) };
                 }
                 writer.append_count(scan_target_exprs.len());
-                let mut expressions = ptr::null_mut();
-                for expression in scan_target_exprs {
-                    expressions =
-                        unsafe { pg_sys::lappend(expressions, expression.cast()) };
+                if !scan_target_exprs.is_empty() {
+                    let mut expressions = ptr::null_mut();
+                    for expression in scan_target_exprs {
+                        expressions = unsafe {
+                            pg_sys::lappend(expressions, expression.cast())
+                        };
+                    }
+                    unsafe { writer.append_encoded_list(expressions) };
                 }
-                unsafe { writer.append_encoded_list(expressions) };
             }
             for scan in scans {
                 writer.append_nested(|record| {
                     record
-                        .append_count(scan.provider().index())
-                        .append_count(scan.scan().index())
-                        .append_i64(scan.estimate().estimated_rows().to_bits() as i64)
-                        .append_i64(
-                            scan.estimate().estimated_scan_bytes().to_bits() as i64
-                        )
-                        .append_count(scan.runtime_bindings().start())
-                        .append_count(scan.runtime_bindings().len())
-                        .append_bool(scan.filter_explain().is_some());
+                        .append_i32(scan.route().kind().code())
+                        .append_cstr(scan.route().name())
+                        .append_oid(scan.relation_oid())
+                        .append_cstr(scan.alias())
+                        .append_i64(scan.cost().rows_read().to_bits() as i64)
+                        .append_i64(scan.cost().bytes_read().to_bits() as i64)
+                        .append_i64(scan.cost().startup_cost().to_bits() as i64);
+                    record.append_bool(scan.filter_explain().is_some());
                     if let Some(filter) = scan.filter_explain() {
                         record
                             .append_cstr(filter.exact_expression())
@@ -314,38 +267,41 @@ impl<'plan> SelectedQueryPlan<'plan> {
                         expressions
                     };
                     let scan_target_expr_count = reader.read_count()?;
-                    let scan_target_exprs = reader.read_encoded_list()?;
-                    if unsafe { pg_sys::list_length(scan_target_exprs) } as usize
-                        != scan_target_expr_count
-                    {
-                        return Err(
-                            SelectedQueryPlanError::ScanTargetExpressionCount,
-                        );
-                    }
+                    let scan_target_exprs = if scan_target_expr_count == 0 {
+                        ptr::null_mut()
+                    } else {
+                        let expressions = reader.read_encoded_list()?;
+                        if unsafe { pg_sys::list_length(expressions) } as usize
+                            != scan_target_expr_count
+                        {
+                            return Err(
+                                SelectedQueryPlanError::ScanTargetExpressionCount,
+                            );
+                        }
+                        expressions
+                    };
                     (Some(runtime_expr_count), runtime_exprs, scan_target_exprs)
                 } else {
                     (None, ptr::null_mut(), ptr::null_mut())
                 };
             let mut scans = Vec::with_capacity(scan_count);
-            for expected_index in 0..scan_count {
+            for _ in 0..scan_count {
                 scans.push(reader.read_nested(|record| {
-                    let provider = ProviderId::from_index(record.read_count()?);
-                    let scan_index = record.read_count()?;
-                    if scan_index != expected_index {
-                        return Err(SelectedQueryPlanError::NonDenseScanIdentity {
-                            expected: expected_index,
-                            found: scan_index,
-                        });
-                    }
-                    let estimate = ScanEstimate::try_new(
+                    let route_kind_code = record.read_i32()?;
+                    let route_kind = TableScanRouteKind::from_code(route_kind_code)
+                        .ok_or(
+                        SelectedQueryPlanError::UnknownTableScanRouteKind(
+                            route_kind_code,
+                        ),
+                    )?;
+                    let route = TableScanRoute::new(route_kind, record.read_cstr()?);
+                    let relation_oid = record.read_oid()?;
+                    let alias = record.read_cstr()?;
+                    let cost = ScanCost::try_new(
+                        f64::from_bits(record.read_i64()? as u64),
                         f64::from_bits(record.read_i64()? as u64),
                         f64::from_bits(record.read_i64()? as u64),
                     )?;
-                    let runtime_bindings = TableScanRuntimeBindings::try_new(
-                        record.read_count()?,
-                        record.read_count()?,
-                    )
-                    .ok_or(SelectedQueryPlanError::RuntimeBindingRangeOverflow)?;
                     let filter_explain = if record.read_bool()? {
                         Some(TableScanFilterExplain::new(
                             record.read_cstr()?,
@@ -364,10 +320,10 @@ impl<'plan> SelectedQueryPlan<'plan> {
                     let provider_plan: &'plan pg_sys::List =
                         unsafe { &*provider_plan };
                     Ok::<_, SelectedQueryPlanError>(PlannedTableScan {
-                        provider,
-                        scan: ScanId::from_index(scan_index),
-                        estimate,
-                        runtime_bindings,
+                        route,
+                        relation_oid,
+                        alias,
+                        cost,
                         filter_explain,
                         provider_plan,
                     })
@@ -406,22 +362,6 @@ impl<'plan> SelectedQueryPlan<'plan> {
         query: &QueryPlanData,
         scans: &[PlannedTableScan<'_>],
     ) -> Result<(), SelectedQueryPlanError> {
-        for (expected, scan) in scans.iter().enumerate() {
-            if scan.scan().index() != expected {
-                return Err(SelectedQueryPlanError::NonDenseScanIdentity {
-                    expected,
-                    found: scan.scan().index(),
-                });
-            }
-            if !scan.runtime_bindings().fits(query.runtime_values().len()) {
-                return Err(SelectedQueryPlanError::ScanRuntimeValuesOutOfBounds {
-                    scan: scan.scan().index(),
-                    start: scan.runtime_bindings().start(),
-                    count: scan.runtime_bindings().len(),
-                    total: query.runtime_values().len(),
-                });
-            }
-        }
         query.validate(scans.len())?;
         Ok(())
     }
@@ -451,6 +391,58 @@ impl<'plan> SelectedQueryPlan<'plan> {
         self.scan_target_exprs
     }
 
+    /// Return the planner expression aligned with one physical query output.
+    pub fn scan_target_expr(&self, index: usize) -> Option<*mut pg_sys::Expr> {
+        (index < self.query.tuple_layout().len()).then(|| unsafe {
+            pg_sys::list_nth(self.scan_target_exprs, index as i32)
+                .cast::<pg_sys::Expr>()
+        })
+    }
+
+    /// Re-encode this selected path after an upper operator has wrapped the
+    /// query IR. Provider plans, scan output expressions and existing runtime
+    /// expressions remain shared planner-owned nodes; only their containing
+    /// PostgreSQL lists are rebuilt.
+    ///
+    /// # Safety
+    ///
+    /// `additional_runtime_exprs` must remain live in the current planner
+    /// context and correspond exactly to runtime slots appended to `query`.
+    pub unsafe fn encode_replacement_path(
+        &self,
+        query: &QueryPlanData,
+        additional_runtime_exprs: &[*mut pg_sys::Expr],
+    ) -> Result<*mut pg_sys::List, SelectedQueryPlanError> {
+        let existing_count =
+            unsafe { pg_sys::list_length(self.runtime_exprs) } as usize;
+        let mut runtime_exprs =
+            Vec::with_capacity(existing_count + additional_runtime_exprs.len());
+        for index in 0..existing_count {
+            runtime_exprs.push(
+                unsafe { pg_sys::list_nth(self.runtime_exprs, index as i32) }
+                    .cast::<pg_sys::Expr>(),
+            );
+        }
+        runtime_exprs.extend_from_slice(additional_runtime_exprs);
+        let target_count = self.query.tuple_layout().len();
+        let mut scan_target_exprs = Vec::with_capacity(target_count);
+        for index in 0..target_count {
+            scan_target_exprs.push(
+                self.scan_target_expr(index)
+                    .expect("decoded selected path has a complete scan target list"),
+            );
+        }
+        unsafe {
+            Self::encode_path(
+                query,
+                self.execution,
+                &self.scans,
+                &runtime_exprs,
+                &scan_target_exprs,
+            )
+        }
+    }
+
     pub fn into_parts(
         self,
     ) -> (
@@ -470,8 +462,8 @@ pub enum SelectedQueryPlanError {
     QueryPlan(#[from] QueryPlanDataError),
     #[error("query engine plan is invalid: {0}")]
     InvalidPlan(#[from] super::QueryPlanError),
-    #[error("scan identities must be dense; expected {expected}, found {found}")]
-    NonDenseScanIdentity { expected: usize, found: usize },
+    #[error("selected query plan contains unknown table-scan route kind {0}")]
+    UnknownTableScanRouteKind(i32),
     #[error(
         "selected query runtime expression count does not match its expression list"
     )]
@@ -480,23 +472,12 @@ pub enum SelectedQueryPlanError {
         "selected query scan-target expression count does not match its tuple layout"
     )]
     ScanTargetExpressionCount,
-    #[error("table scan runtime binding range overflows usize")]
-    RuntimeBindingRangeOverflow,
-    #[error(
-        "table scan {scan} runtime binding range {start}..+{count} exceeds query layout length {total}"
-    )]
-    ScanRuntimeValuesOutOfBounds {
-        scan: usize,
-        start: usize,
-        count: usize,
-        total: usize,
-    },
     #[error(
         "selected query payload kind mismatch: expected {expected}, found {found}"
     )]
     WrongPayloadKind { expected: i32, found: i32 },
-    #[error("table scan estimate is invalid: {0}")]
-    InvalidScanEstimate(#[from] ScanEstimateError),
+    #[error("table scan cost facts are invalid: {0}")]
+    InvalidScanCost(#[from] ScanCostError),
     #[error("query execution profile is invalid: {0}")]
     InvalidExecutionProfile(#[from] ExecutionProfileError),
 }

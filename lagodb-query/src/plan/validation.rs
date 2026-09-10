@@ -2,11 +2,12 @@
 
 use std::mem;
 
-use lagodb_core::expr::{ColumnRef, ExprType, RuntimeValueLayout};
+use lagodb_core::expr::{ColumnRef, ExprType, PgIntegerWidening, RuntimeValueLayout};
 use pgrx::pg_sys;
 
 use super::{
-    ExecutionExpr, ExecutionScalarRepr, QueryNode, QueryPlanError, ScalarSemantics,
+    Decimal128Semantics, ExecutionExpr, ExecutionScalarRepr, QueryNode,
+    QueryPlanError, ScalarSemantics,
 };
 
 struct NodeFacts {
@@ -17,7 +18,22 @@ struct NodeFacts {
 #[derive(Clone, Copy)]
 struct OutputFact {
     value_type: ExprType,
+    execution_type: ExprType,
     supports_having: bool,
+    nullable: bool,
+}
+
+impl OutputFact {
+    /// HAVING normally follows PostgreSQL's declared aggregate type. Decimal
+    /// MIN/MAX are the one current exception: PostgreSQL erases their typmod,
+    /// while DataFusion retains the bounded Decimal128 input representation.
+    fn predicate_type(self) -> ExprType {
+        if Decimal128Semantics::for_type(self.execution_type).is_some() {
+            self.execution_type
+        } else {
+            self.value_type
+        }
+    }
 }
 
 pub(super) struct PlanExpressionValidator<'a> {
@@ -37,14 +53,6 @@ impl<'a> PlanExpressionValidator<'a> {
     }
 
     pub(super) fn validate(&self, node: &QueryNode) -> Result<(), QueryPlanError> {
-        if self
-            .runtime_values
-            .values()
-            .iter()
-            .any(|value| !value.source_kind.is_rescan_stable())
-        {
-            return Err(QueryPlanError::UnsupportedRuntimeValueSource);
-        }
         self.validate_node(node).map(|_| ())
     }
 
@@ -89,7 +97,9 @@ impl<'a> PlanExpressionValidator<'a> {
                     }
                     outputs[group.output().index()] = Some(OutputFact {
                         value_type: group.result_type(),
+                        execution_type: group.result_type(),
                         supports_having: true,
+                        nullable: true,
                     });
                 }
                 for aggregate in aggregate.aggregates() {
@@ -107,13 +117,48 @@ impl<'a> PlanExpressionValidator<'a> {
                     }
                     outputs[aggregate.output().index()] = Some(OutputFact {
                         value_type: aggregate.result_type(),
+                        execution_type: aggregate.execution_result_type(),
                         supports_having: aggregate.supports_having_result(),
+                        nullable: aggregate.nullable(),
                     });
                 }
                 Ok(NodeFacts {
                     columns: Vec::new(),
                     outputs,
                 })
+            }
+            QueryNode::Join(join) => {
+                let left = self.validate_node(join.left())?;
+                let right = self.validate_node(join.right())?;
+                for key in join.keys() {
+                    let left_type = Self::column_type(key.left(), &left)?;
+                    let right_type = Self::column_type(key.right(), &right)?;
+                    if left_type != right_type
+                        || key.validate_semantics()? != left_type
+                    {
+                        return Err(QueryPlanError::MismatchedJoinKey);
+                    }
+                }
+                let mut joined_columns = left.columns.clone();
+                joined_columns.extend_from_slice(&right.columns);
+                let joined = NodeFacts {
+                    columns: joined_columns,
+                    outputs: vec![None; self.output_count],
+                };
+                if let Some(filter) = join.on_filter() {
+                    self.validate_boolean(filter, &joined, false)?;
+                }
+                if let Some(filter) = join.mark_filter() {
+                    let _ = Self::column_type(filter.null_test(), &left)?;
+                }
+                if join.join_type().emits_right() {
+                    Ok(joined)
+                } else {
+                    Ok(NodeFacts {
+                        columns: left.columns,
+                        outputs: vec![None; self.output_count],
+                    })
+                }
             }
             QueryNode::Distinct(distinct) => {
                 let input = self.validate_node(distinct.input())?;
@@ -126,7 +171,9 @@ impl<'a> PlanExpressionValidator<'a> {
                     }
                     outputs[key.output().index()] = Some(OutputFact {
                         value_type,
+                        execution_type: value_type,
                         supports_having: false,
+                        nullable: true,
                     });
                 }
                 Ok(NodeFacts {
@@ -136,11 +183,109 @@ impl<'a> PlanExpressionValidator<'a> {
             }
             QueryNode::Filter(filter) => {
                 let input = self.validate_node(filter.input())?;
-                self.validate_boolean(filter.predicate(), &input, true)?;
+                let allow_outputs = input.columns.is_empty();
+                self.validate_boolean(filter.predicate(), &input, allow_outputs)?;
                 Ok(input)
             }
-            QueryNode::Project(project) => self.validate_node(project.input()),
+            QueryNode::Project(project) => {
+                let input = self.validate_node(project.input())?;
+                let mut outputs = vec![None; self.output_count];
+                let projects_semantic_outputs = matches!(
+                    project.input(),
+                    QueryNode::Aggregate(_) | QueryNode::Distinct(_)
+                ) || matches!(
+                    project.input(),
+                    QueryNode::Filter(filter)
+                        if matches!(filter.input(), QueryNode::Aggregate(_))
+                );
+                for expression in project.expressions() {
+                    let supported = if projects_semantic_outputs {
+                        matches!(expression.expression(), ExecutionExpr::Output(_))
+                    } else {
+                        !matches!(expression.expression(), ExecutionExpr::Output(_))
+                    };
+                    if !supported {
+                        return Err(QueryPlanError::UnsupportedTopology);
+                    }
+                    let (result_type, nullable) = match expression.expression() {
+                        ExecutionExpr::Output(output) => {
+                            let fact = input
+                                .outputs
+                                .get(output.index())
+                                .and_then(|fact| *fact)
+                                .ok_or(QueryPlanError::OutputOutOfBounds {
+                                    index: output.index(),
+                                })?;
+                            (fact.value_type, fact.nullable)
+                        }
+                        expression => {
+                            (self.expression_type(expression, &input, false)?, true)
+                        }
+                    };
+                    if result_type != expression.result_type() {
+                        return Err(QueryPlanError::TupleLayoutTypeMismatch);
+                    }
+                    if nullable != expression.nullable() {
+                        return Err(QueryPlanError::TupleLayoutNullabilityMismatch);
+                    }
+                    outputs[expression.output().index()] = Some(OutputFact {
+                        value_type: result_type,
+                        execution_type: result_type,
+                        supports_having: false,
+                        nullable,
+                    });
+                }
+                Ok(NodeFacts {
+                    columns: Vec::new(),
+                    outputs,
+                })
+            }
+            QueryNode::Sort(sort) => {
+                let input = self.validate_node(sort.input())?;
+                for key in sort.keys() {
+                    let fact = input
+                        .outputs
+                        .get(key.output().index())
+                        .and_then(|fact| *fact)
+                        .ok_or(QueryPlanError::OutputOutOfBounds {
+                            index: key.output().index(),
+                        })?;
+                    if fact.value_type != key.result_type() {
+                        return Err(QueryPlanError::UnsupportedSortKey);
+                    }
+                }
+                Ok(input)
+            }
+            QueryNode::Limit(limit) => {
+                let input = self.validate_node(limit.input())?;
+                for value in [limit.offset(), limit.count()].into_iter().flatten() {
+                    let spec = self
+                        .runtime_values
+                        .values()
+                        .get(value.index())
+                        .ok_or(QueryPlanError::RuntimeValueOutOfBounds)?;
+                    if spec.value_type.type_oid != pg_sys::INT8OID
+                        || spec.value_type.typmod != -1
+                        || spec.value_type.collation != pg_sys::InvalidOid
+                    {
+                        return Err(QueryPlanError::UnsupportedRuntimeValueType);
+                    }
+                }
+                Ok(input)
+            }
         }
+    }
+
+    fn column_type(
+        column: ColumnRef,
+        facts: &NodeFacts,
+    ) -> Result<ExprType, QueryPlanError> {
+        facts
+            .columns
+            .iter()
+            .find(|candidate| candidate.same_storage_column(column))
+            .map(|_| column.value_type)
+            .ok_or(QueryPlanError::MismatchedJoinKey)
     }
 
     fn validate_boolean(
@@ -186,6 +331,20 @@ impl<'a> PlanExpressionValidator<'a> {
                     .ok_or(QueryPlanError::UnsupportedRuntimeValueType)?;
                 Ok(value_type)
             }
+            ExecutionExpr::DecimalValue { value, semantics } => {
+                let spec = self
+                    .runtime_values
+                    .values()
+                    .get(value.index())
+                    .ok_or(QueryPlanError::RuntimeValueOutOfBounds)?;
+                if spec.value_type.type_oid != pg_sys::NUMERICOID
+                    || spec.value_type.collation != pg_sys::InvalidOid
+                    || !spec.source_kind.is_static()
+                {
+                    return Err(QueryPlanError::UnsupportedRuntimeValueType);
+                }
+                Ok(semantics.value_type())
+            }
             ExecutionExpr::Output(output) if allow_outputs => {
                 let fact = facts
                     .outputs
@@ -197,28 +356,71 @@ impl<'a> PlanExpressionValidator<'a> {
                 if !fact.supports_having {
                     return Err(QueryPlanError::UnsupportedPredicate);
                 }
-                Ok(fact.value_type)
+                Ok(fact.predicate_type())
             }
             ExecutionExpr::Output(output) => Err(QueryPlanError::OutputOutOfBounds {
                 index: output.index(),
             }),
             ExecutionExpr::Comparison {
                 operator,
-                left,
-                right,
+                left: left_expression,
+                right: right_expression,
             } => {
-                let left = self.expression_type(left, facts, allow_outputs)?;
-                let right = self.expression_type(right, facts, allow_outputs)?;
-                let comparison = if allow_outputs {
-                    ScalarSemantics::Having.comparison(*operator, left, right)
+                let left =
+                    self.expression_type(left_expression, facts, allow_outputs)?;
+                let right =
+                    self.expression_type(right_expression, facts, allow_outputs)?;
+                let semantics = if allow_outputs {
+                    ScalarSemantics::Having
                 } else {
-                    ScalarSemantics::Exact.comparison(*operator, left, right)
+                    ScalarSemantics::Exact
                 };
-                comparison.ok_or(QueryPlanError::UnsupportedPredicate)?;
+                semantics
+                    .comparison(*operator, left, right)
+                    .ok_or(QueryPlanError::UnsupportedPredicate)?;
+                if let Some((_, decimal)) =
+                    semantics.decimal_comparison(*operator, left, right)
+                    && (!Self::has_decimal128_representation(
+                        left_expression,
+                        decimal,
+                    ) || !Self::has_decimal128_representation(
+                        right_expression,
+                        decimal,
+                    ))
+                {
+                    return Err(QueryPlanError::UnsupportedPredicate);
+                }
                 Ok(Self::boolean_type())
             }
             ExecutionExpr::IsNull(value) | ExecutionExpr::IsNotNull(value) => {
                 let _ = self.expression_type(value, facts, allow_outputs)?;
+                Ok(Self::boolean_type())
+            }
+            ExecutionExpr::IsNan(value) | ExecutionExpr::IsNotNan(value) => {
+                let value_type = self.expression_type(value, facts, allow_outputs)?;
+                if !matches!(
+                    value_type.type_oid,
+                    pg_sys::FLOAT4OID | pg_sys::FLOAT8OID
+                ) || value_type.typmod != -1
+                    || value_type.collation != pg_sys::InvalidOid
+                {
+                    return Err(QueryPlanError::UnsupportedPredicate);
+                }
+                Ok(Self::boolean_type())
+            }
+            ExecutionExpr::StrictTrue(value) | ExecutionExpr::StrictFalse(value) => {
+                if !matches!(value.as_ref(), ExecutionExpr::Column(_)) {
+                    return Err(QueryPlanError::UnsupportedPredicate);
+                }
+                let value_type = self.expression_type(value, facts, allow_outputs)?;
+                if !matches!(
+                    value_type.type_oid,
+                    pg_sys::FLOAT4OID | pg_sys::FLOAT8OID
+                ) || value_type.typmod != -1
+                    || value_type.collation != pg_sys::InvalidOid
+                {
+                    return Err(QueryPlanError::UnsupportedPredicate);
+                }
                 Ok(Self::boolean_type())
             }
             ExecutionExpr::BooleanTest { value, .. } => {
@@ -246,6 +448,22 @@ impl<'a> PlanExpressionValidator<'a> {
                         result_type.type_oid,
                     )
                 } {
+                    return Err(QueryPlanError::UnsupportedPredicate);
+                }
+                Ok(*result_type)
+            }
+            ExecutionExpr::WidenInteger { value, result_type } => {
+                let input_type = self.expression_type(value, facts, allow_outputs)?;
+                if input_type.typmod != -1
+                    || result_type.typmod != -1
+                    || input_type.collation != pg_sys::InvalidOid
+                    || result_type.collation != pg_sys::InvalidOid
+                    || PgIntegerWidening::for_types(
+                        input_type.type_oid,
+                        result_type.type_oid,
+                    )
+                    .is_none()
+                {
                     return Err(QueryPlanError::UnsupportedPredicate);
                 }
                 Ok(*result_type)
@@ -279,13 +497,29 @@ impl<'a> PlanExpressionValidator<'a> {
                     return Err(QueryPlanError::UnsupportedPredicate);
                 }
                 let value_type = self.expression_type(value, facts, allow_outputs)?;
-                if !ScalarSemantics::Integer.supports_type(value_type) {
+                if !ScalarSemantics::Exact.supports_type(value_type) {
+                    return Err(QueryPlanError::UnsupportedPredicate);
+                }
+                let decimal = Decimal128Semantics::for_type(value_type);
+                if decimal.is_some_and(|decimal| {
+                    !Self::has_decimal128_representation(value, decimal)
+                }) {
                     return Err(QueryPlanError::UnsupportedPredicate);
                 }
                 for item in list {
-                    if self.expression_type(item, facts, allow_outputs)? != value_type
+                    let item_type =
+                        self.expression_type(item, facts, allow_outputs)?;
+                    if item_type != value_type
+                        && !(value_type.type_oid == pg_sys::TEXTOID
+                            && item_type.type_oid == pg_sys::TEXTOID
+                            && item_type.typmod == value_type.typmod)
                     {
                         return Err(QueryPlanError::TupleLayoutTypeMismatch);
+                    }
+                    if decimal.is_some_and(|decimal| {
+                        !Self::has_decimal128_representation(item, decimal)
+                    }) {
+                        return Err(QueryPlanError::UnsupportedPredicate);
                     }
                 }
                 Ok(Self::boolean_type())
@@ -360,5 +594,13 @@ impl<'a> PlanExpressionValidator<'a> {
             typmod: -1,
             collation: pg_sys::InvalidOid,
         }
+    }
+
+    fn has_decimal128_representation(
+        expression: &ExecutionExpr,
+        semantics: Decimal128Semantics,
+    ) -> bool {
+        matches!(expression, ExecutionExpr::Output(_))
+            || expression.decimal128_semantics() == Some(semantics)
     }
 }
