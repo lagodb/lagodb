@@ -1,19 +1,22 @@
 //! Runtime value binding for already-planned Iceberg predicates.
 
-use iceberg_lite::expr::{
-    BinaryExpression, Predicate, PredicateOperator, Reference, UnaryExpression,
-};
+use iceberg_lite::expr::{Predicate, PredicateOperator};
 use iceberg_lite::spec::Datum;
 use lagodb_arrow::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};
 use lagodb_core::expr::pushdown::FilterBindResult;
 use lagodb_core::expr::{RuntimeValue, RuntimeValueBindings};
+use lagodb_core::tuple::Decimal128ComparisonValue;
 use pgrx::FromDatum;
 
+use crate::error::IcebergError;
+
+use super::IcebergPredicateBuilder;
 use super::error::IcebergFilterError;
 use super::plan::{
     PlannedComparisonOperator, PlannedIcebergColumn, PlannedIcebergNode,
     PlannedIcebergPredicate, PlannedValueType,
 };
+use super::policy::Int32OutOfRange;
 
 pub(crate) struct BoundIcebergPredicate {
     schema_id: i32,
@@ -74,6 +77,16 @@ impl IcebergFilterBinder<'_> {
         negated: bool,
     ) -> Result<Option<Predicate>, IcebergFilterError> {
         match node {
+            PlannedIcebergNode::AlwaysTrue => Ok(Some(if negated {
+                Predicate::AlwaysFalse
+            } else {
+                Predicate::AlwaysTrue
+            })),
+            PlannedIcebergNode::AlwaysFalse => Ok(Some(if negated {
+                Predicate::AlwaysTrue
+            } else {
+                Predicate::AlwaysFalse
+            })),
             PlannedIcebergNode::Comparison {
                 operator,
                 column,
@@ -91,6 +104,15 @@ impl IcebergFilterBinder<'_> {
             }
             PlannedIcebergNode::IsNotNull(column) => {
                 Ok(Some(Self::null_test(column, !negated)))
+            }
+            PlannedIcebergNode::IsNan(column) => {
+                Ok(Some(Self::nan_test(column, negated)))
+            }
+            PlannedIcebergNode::IsNotNan(column) => {
+                Ok(Some(Self::nan_test(column, !negated)))
+            }
+            PlannedIcebergNode::StartsWith { column, prefix } => {
+                self.bind_starts_with(column, self.values.value(*prefix), negated)
             }
             PlannedIcebergNode::And(children) => self.bind_logical(
                 children,
@@ -114,6 +136,24 @@ impl IcebergFilterBinder<'_> {
         }
     }
 
+    fn bind_starts_with(
+        &self,
+        column: &PlannedIcebergColumn,
+        value: RuntimeValue,
+        negated: bool,
+    ) -> Result<Option<Predicate>, IcebergFilterError> {
+        if value.is_null() {
+            return Ok(Some(Predicate::AlwaysFalse));
+        }
+        let Some(BoundComparisonValue::Datum(prefix)) =
+            (unsafe { Self::decode_value(PlannedValueType::String, value) })?
+        else {
+            return Ok(None);
+        };
+        let predicate = Self::builder(column).starts_with(prefix);
+        Ok(Some(if negated { !predicate } else { predicate }))
+    }
+
     fn bind_comparison(
         &self,
         operator: PlannedComparisonOperator,
@@ -128,15 +168,47 @@ impl IcebergFilterBinder<'_> {
         if value.is_null() {
             return Ok(Some(Predicate::AlwaysFalse));
         }
-        let Some(datum) = (unsafe { Self::decode_datum(value_type, value) })? else {
+        let Some(value) = (unsafe { Self::decode_value(value_type, value) })? else {
             return Ok(None);
         };
-        let predicate = Predicate::Binary(BinaryExpression::new(
-            operator.into(),
-            Self::reference(column),
-            datum,
-        ));
-        Ok(Some(if negated { !predicate } else { predicate }))
+        let predicate = match value {
+            BoundComparisonValue::Datum(datum) => {
+                let operator = if negated {
+                    operator.negated()
+                } else {
+                    operator
+                };
+                Self::builder(column).comparison(operator.into(), datum)
+            }
+            BoundComparisonValue::OutsideFinite(value) => {
+                let operator = if negated {
+                    operator.negated()
+                } else {
+                    operator
+                };
+                if value
+                    .matches_finite_column(operator.kind())
+                    .expect("outside-finite Decimal128 value")
+                {
+                    Self::null_test(column, true)
+                } else {
+                    Predicate::AlwaysFalse
+                }
+            }
+            BoundComparisonValue::OutsideInteger(value) => {
+                let operator = if negated {
+                    operator.negated()
+                } else {
+                    operator
+                };
+                if value.comparison_matches_non_null(operator.kind()) {
+                    Self::null_test(column, true)
+                } else {
+                    Predicate::AlwaysFalse
+                }
+            }
+        };
+        Ok(Some(predicate))
     }
 
     fn bind_logical(
@@ -160,51 +232,58 @@ impl IcebergFilterBinder<'_> {
     }
 
     fn null_test(column: &PlannedIcebergColumn, is_not_null: bool) -> Predicate {
-        Predicate::Unary(UnaryExpression::new(
-            if is_not_null {
-                PredicateOperator::NotNull
-            } else {
-                PredicateOperator::IsNull
-            },
-            Self::reference(column),
-        ))
+        Self::builder(column).null_test(is_not_null)
     }
 
-    fn reference(column: &PlannedIcebergColumn) -> Reference {
-        Reference::new_bound_field(column.debug_name.clone(), column.field_id)
+    fn nan_test(column: &PlannedIcebergColumn, is_not_nan: bool) -> Predicate {
+        Self::builder(column).nan_test(is_not_nan)
+    }
+
+    fn builder(column: &PlannedIcebergColumn) -> IcebergPredicateBuilder {
+        IcebergPredicateBuilder::new(column.debug_name.clone(), column.field_id)
     }
 
     /// # Safety
     ///
     /// The value metadata must describe its non-NULL PostgreSQL Datum, whose
     /// memory remains live for this binding call.
-    unsafe fn decode_datum(
+    unsafe fn decode_value(
         value_type: PlannedValueType,
         value: RuntimeValue,
-    ) -> Result<Option<Datum>, IcebergFilterError> {
+    ) -> Result<Option<BoundComparisonValue>, IcebergFilterError> {
         let type_oid = value.metadata().value_type.type_oid;
         let datum = unsafe { value.datum() };
         let decoded = match value_type {
-            PlannedValueType::Int2 => Some(Datum::int(
+            PlannedValueType::Int2 => Some(BoundComparisonValue::Datum(Datum::int(
                 unsafe { i16::from_datum(datum, false) }
                     .ok_or(IcebergFilterError::DatumDecode { type_oid })?
                     as i32,
-            )),
-            PlannedValueType::Int4 => Some(Datum::int(
+            ))),
+            PlannedValueType::Int4 => Some(BoundComparisonValue::Datum(Datum::int(
                 unsafe { i32::from_datum(datum, false) }
                     .ok_or(IcebergFilterError::DatumDecode { type_oid })?,
-            )),
-            PlannedValueType::Int8 => Some(Datum::long(
+            ))),
+            PlannedValueType::Int8 => Some(BoundComparisonValue::Datum(Datum::long(
                 unsafe { i64::from_datum(datum, false) }
                     .ok_or(IcebergFilterError::DatumDecode { type_oid })?,
-            )),
+            ))),
+            PlannedValueType::Int8ToInt => {
+                let value = unsafe { i64::from_datum(datum, false) }
+                    .ok_or(IcebergFilterError::DatumDecode { type_oid })?;
+                Some(match Int32OutOfRange::narrow(value) {
+                    Ok(value) => BoundComparisonValue::Datum(Datum::int(value)),
+                    Err(boundary) => BoundComparisonValue::OutsideInteger(boundary),
+                })
+            }
             PlannedValueType::Date => {
                 let days = unsafe { i32::from_datum(datum, false) }
                     .ok_or(IcebergFilterError::DatumDecode { type_oid })?;
                 if matches!(days, i32::MIN | i32::MAX) {
                     None
                 } else {
-                    pg_epoch_days_to_unix_days(days).map(Datum::date)
+                    pg_epoch_days_to_unix_days(days)
+                        .map(Datum::date)
+                        .map(BoundComparisonValue::Datum)
                 }
             }
             PlannedValueType::Timestamp => {
@@ -217,26 +296,65 @@ impl IcebergFilterBinder<'_> {
                     .ok_or(IcebergFilterError::DatumDecode { type_oid })?;
                 Self::timestamp_micros(micros, true)
             }
-            PlannedValueType::String => Some(Datum::string(
-                unsafe { String::from_datum(datum, false) }
-                    .ok_or(IcebergFilterError::DatumDecode { type_oid })?,
-            )),
+            PlannedValueType::String => {
+                Some(BoundComparisonValue::Datum(Datum::string(
+                    // The persisted String plan proves the planner resolved
+                    // `Utf8ServerEncoding`; execution intentionally does not
+                    // repeat that statement-invariant check.
+                    unsafe { String::from_datum(datum, false) }
+                        .ok_or(IcebergFilterError::DatumDecode { type_oid })?,
+                )))
+            }
+            PlannedValueType::Decimal128(semantics) => Some(
+                match unsafe { semantics.codec().encode_comparison_datum(datum) }? {
+                    Decimal128ComparisonValue::Finite(coefficient) => {
+                        BoundComparisonValue::Datum(
+                            Datum::decimal_from_unscaled(
+                                coefficient,
+                                u32::from(semantics.precision()),
+                                u32::try_from(semantics.scale()).expect(
+                                    "validated Decimal128 scale is non-negative",
+                                ),
+                            )
+                            .map_err(IcebergError::from)?,
+                        )
+                    }
+                    Decimal128ComparisonValue::NegativeInfinity => {
+                        BoundComparisonValue::OutsideFinite(
+                            Decimal128ComparisonValue::NegativeInfinity,
+                        )
+                    }
+                    special @ (Decimal128ComparisonValue::PositiveInfinity
+                    | Decimal128ComparisonValue::NaN) => {
+                        BoundComparisonValue::OutsideFinite(special)
+                    }
+                },
+            ),
         };
         Ok(decoded)
     }
 
-    fn timestamp_micros(value: i64, with_timezone: bool) -> Option<Datum> {
+    fn timestamp_micros(
+        value: i64,
+        with_timezone: bool,
+    ) -> Option<BoundComparisonValue> {
         if matches!(value, i64::MIN | i64::MAX) {
             return None;
         }
         pg_epoch_micros_to_unix_micros(value).map(|value| {
-            if with_timezone {
+            BoundComparisonValue::Datum(if with_timezone {
                 Datum::timestamptz_micros(value)
             } else {
                 Datum::timestamp_micros(value)
-            }
+            })
         })
     }
+}
+
+enum BoundComparisonValue {
+    Datum(Datum),
+    OutsideFinite(Decimal128ComparisonValue),
+    OutsideInteger(Int32OutOfRange),
 }
 
 #[derive(Clone, Copy)]

@@ -2,6 +2,7 @@
 
 use lagodb_core::diag::SqlStateError;
 use lagodb_core::plan_data::PlanDataError;
+use lagodb_core::tuple::DecimalCodecError;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
@@ -24,6 +25,9 @@ pub(crate) enum IcebergFilterError {
     #[error("Iceberg planned filter contains unknown value type tag {0}")]
     UnknownValueTypeTag(i32),
 
+    #[error("Iceberg planned filter contains an invalid Decimal128 shape")]
+    InvalidDecimalShape,
+
     #[error("Iceberg planned filter contains an empty {kind} node")]
     EmptyLogicalNode { kind: &'static str },
 
@@ -42,6 +46,9 @@ pub(crate) enum IcebergFilterError {
 
     #[error("failed to decode PostgreSQL Datum with type OID {}", u32::from(*type_oid))]
     DatumDecode { type_oid: pg_sys::Oid },
+
+    #[error("Iceberg Decimal128 predicate binding failed: {0}")]
+    DecimalCodec(#[from] DecimalCodecError),
 }
 
 impl SqlStateError for IcebergFilterError {
@@ -52,11 +59,13 @@ impl SqlStateError for IcebergFilterError {
             | Self::UnknownNodeTag(_)
             | Self::UnknownOperatorTag(_)
             | Self::UnknownValueTypeTag(_)
+            | Self::InvalidDecimalShape
             | Self::EmptyLogicalNode { .. }
             | Self::BindingSlotOutOfBounds { .. }
             | Self::MissingFieldBinding(_)
             | Self::SchemaMismatch { .. }
-            | Self::DatumDecode { .. } => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            | Self::DatumDecode { .. }
+            | Self::DecimalCodec(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
         }
     }
 }

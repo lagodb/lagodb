@@ -1,12 +1,16 @@
 //! Shared Iceberg capability policy and PostgreSQL operator mapping.
 
-use lagodb_core::expr::{ColumnRef, RuntimeValueSpec};
-use lagodb_core::expr::{PgComparisonIdentity, PgComparisonSignature};
+mod integer;
+mod postgres;
+
+use lagodb_core::expr::{
+    PgComparisonIdentity, PgComparisonSignature, PgTextComparisonSemantics,
+};
 use pgrx::{PgBuiltInOids, PgOid, pg_sys};
 
-use super::plan::PlannedValueType;
-
+pub(crate) use integer::Int32OutOfRange;
 pub(crate) use lagodb_core::expr::PgComparisonKind as ComparisonOpClass;
+pub(crate) use postgres::PgPredicatePushdownPolicy;
 
 /// One comparison accepted by the PostgreSQL-facing Iceberg policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,26 +25,80 @@ pub(crate) enum SupportedPredicateCapability {
     Conservative,
 }
 
-/// Collation facts consumed by the pure capability policy.
-///
-/// PostgreSQL catalog lookup belongs to [`PgPredicatePushdownPolicy`]; the
-/// policy itself reasons only about this resolved value.
+/// Logical scalar kinds understood by Iceberg predicate construction.
+/// PostgreSQL OIDs and Arrow types are translated by their respective
+/// adapters before entering this provider policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CollationSemantics {
-    /// `InvalidOid`: no collation applies.
-    None,
-    /// Built-in `C` or `POSIX`; byte ordering matches Iceberg string ordering.
-    COrPosix,
-    /// A deterministic non-C PostgreSQL collation.
-    Deterministic,
-    /// A non-deterministic PostgreSQL collation.
-    NonDeterministic,
+pub(crate) enum PredicateValueKind {
+    Boolean,
+    Integer,
+    Long,
+    Date,
+    Timestamp,
+    Timestamptz,
+    Decimal,
+    Float,
+    String,
 }
 
 /// Pure Iceberg predicate policy used by planned-predicate construction.
+///
+/// Set membership is deliberately not part of this policy. iceberg-lite's
+/// current Arrow row filter evaluates one full-batch equality and OR per
+/// literal, giving `O(batch_rows * literals)` work and intermediate Boolean
+/// arrays. PostgreSQL can select hashed ScalarArrayOp execution, and DataFusion
+/// builds a hash-based static filter. Compact temporal arrays also cannot be
+/// costed until plan-time admission can prove that every value will remain
+/// representable when the predicate binds.
 pub(crate) struct PredicatePushdownPolicy;
 
 impl PredicatePushdownPolicy {
+    pub(crate) fn comparison_capability(
+        value_kind: PredicateValueKind,
+        operator: ComparisonOpClass,
+    ) -> Option<SupportedPredicateCapability> {
+        match value_kind {
+            PredicateValueKind::Boolean => match operator {
+                ComparisonOpClass::Equal | ComparisonOpClass::NotEqual => {
+                    Some(SupportedPredicateCapability::Exact)
+                }
+                _ => None,
+            },
+            PredicateValueKind::Float => None,
+            PredicateValueKind::Integer
+            | PredicateValueKind::Long
+            | PredicateValueKind::Date
+            | PredicateValueKind::Timestamp
+            | PredicateValueKind::Timestamptz
+            | PredicateValueKind::Decimal
+            | PredicateValueKind::String => Some(SupportedPredicateCapability::Exact),
+        }
+    }
+
+    pub(crate) const fn supports_starts_with(value_kind: PredicateValueKind) -> bool {
+        matches!(value_kind, PredicateValueKind::String)
+    }
+
+    pub(crate) const fn supports_nan_test(value_kind: PredicateValueKind) -> bool {
+        matches!(value_kind, PredicateValueKind::Float)
+    }
+
+    /// Iceberg null predicates inspect only validity, so every logical kind
+    /// represented by the provider schema has exact null-test semantics.
+    pub(crate) const fn supports_null_test(value_kind: PredicateValueKind) -> bool {
+        match value_kind {
+            PredicateValueKind::Boolean
+            | PredicateValueKind::Integer
+            | PredicateValueKind::Long
+            | PredicateValueKind::Date
+            | PredicateValueKind::Timestamp
+            | PredicateValueKind::Timestamptz
+            | PredicateValueKind::Decimal
+            | PredicateValueKind::Float
+            | PredicateValueKind::String => true,
+        }
+    }
+
     /// Map a comparison from an Iceberg-supported operator family.
     ///
     /// PostgreSQL normalization already guarantees compatibility between the
@@ -54,6 +112,7 @@ impl PredicatePushdownPolicy {
             | (pg_sys::DATEOID, pg_sys::DATEOID)
             | (pg_sys::TIMESTAMPOID, pg_sys::TIMESTAMPOID)
             | (pg_sys::TIMESTAMPTZOID, pg_sys::TIMESTAMPTZOID)
+            | (pg_sys::NUMERICOID, pg_sys::NUMERICOID)
             | (pg_sys::TEXTOID, pg_sys::TEXTOID) => Some(signature.kind()),
             _ => None,
         }
@@ -62,7 +121,7 @@ impl PredicatePushdownPolicy {
     fn capability_for_class(
         type_oid: pg_sys::Oid,
         op_key: PgComparisonIdentity,
-        input_collation: CollationSemantics,
+        text_semantics: Option<PgTextComparisonSemantics>,
         class: ComparisonOpClass,
     ) -> Option<SupportedPredicateCapability> {
         match PgOid::from(type_oid) {
@@ -72,7 +131,14 @@ impl PredicatePushdownPolicy {
                 | PgBuiltInOids::INT8OID,
             ) => {
                 if Self::is_collation_free(op_key) {
-                    Some(SupportedPredicateCapability::Exact)
+                    Self::comparison_capability(
+                        if type_oid == pg_sys::INT8OID {
+                            PredicateValueKind::Long
+                        } else {
+                            PredicateValueKind::Integer
+                        },
+                        class,
+                    )
                 } else {
                     // Integer comparisons with a tagged collation are not
                     // translatable; do not mark pushable.
@@ -84,33 +150,34 @@ impl PredicatePushdownPolicy {
                 PgBuiltInOids::DATEOID
                 | PgBuiltInOids::TIMESTAMPOID
                 | PgBuiltInOids::TIMESTAMPTZOID,
-            ) => Self::conservative_pruning_for_eq_and_ordered(class),
+            ) => {
+                let kind = match PgOid::from(type_oid) {
+                    PgOid::BuiltIn(PgBuiltInOids::DATEOID) => {
+                        PredicateValueKind::Date
+                    }
+                    PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPOID) => {
+                        PredicateValueKind::Timestamp
+                    }
+                    PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPTZOID) => {
+                        PredicateValueKind::Timestamptz
+                    }
+                    _ => unreachable!("matched temporal PostgreSQL type"),
+                };
+                Self::comparison_capability(kind, class)?;
+                Self::conservative_pruning_for_eq_and_ordered(class)
+            }
+
+            PgOid::BuiltIn(PgBuiltInOids::NUMERICOID) => {
+                if Self::is_collation_free(op_key) {
+                    Self::comparison_capability(PredicateValueKind::Decimal, class)
+                } else {
+                    None
+                }
+            }
 
             PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID) => {
-                match class {
-                    ComparisonOpClass::Equal => {
-                        if matches!(
-                            input_collation,
-                            CollationSemantics::COrPosix
-                                | CollationSemantics::Deterministic
-                        ) {
-                            Some(SupportedPredicateCapability::Conservative)
-                        } else {
-                            None
-                        }
-                    }
-                    ComparisonOpClass::Less
-                    | ComparisonOpClass::LessEqual
-                    | ComparisonOpClass::Greater
-                    | ComparisonOpClass::GreaterEqual => {
-                        if input_collation == CollationSemantics::COrPosix {
-                            Some(SupportedPredicateCapability::Conservative)
-                        } else {
-                            None
-                        }
-                    }
-                    ComparisonOpClass::NotEqual => None,
-                }
+                text_semantics?;
+                Self::comparison_capability(PredicateValueKind::String, class)
             }
 
             // `char(n)` / `bpchar` comparison pushdown is gated off (falls
@@ -123,7 +190,7 @@ impl PredicatePushdownPolicy {
             // provider has is a byte-wise Iceberg/Arrow string comparison, so a
             // stored `'ab   '` would not match a planned `col = 'ab'` even though
             // PostgreSQL treats them as equal — a silent false negative (wrong
-            // results), the same failure class as numeric/float comparisons.
+            // results), the same failure class as float comparisons.
             // This hazard is orthogonal to collation: it persists even under
             // `C` / `POSIX`. `IS NULL` / `IS NOT NULL` on `bpchar` is unaffected
             // (see `supports_null_test`): a null test inspects only the null
@@ -188,139 +255,38 @@ impl PredicatePushdownPolicy {
     /// *comparison* pushdown does not apply here. Float IS NULL / IS NOT NULL
     /// remains safe even though float comparisons are unsupported.
     ///
-    /// The type allowlist admits the same scan value types as the comparison
-    /// policy plus floats. Types outside this set (e.g. `bool`, `bytea`) return
-    /// `false` as a conservative policy choice.
-    pub(crate) fn supports_null_test(type_oid: pg_sys::Oid) -> bool {
+    /// The type allowlist admits every logical scalar kind that the provider
+    /// schema can map without inspecting the value. Types outside this set
+    /// (for example `bytea`) remain unsupported.
+    fn null_test_value_kind(type_oid: pg_sys::Oid) -> Option<PredicateValueKind> {
         // IS NULL / IS NOT NULL only inspects the null bitmap — there is no
         // value comparison, so NaN ordering/equality divergence does not apply.
         // Float null-tests are safe even though float comparisons are unsupported.
-        matches!(
-            PgOid::from(type_oid),
-            PgOid::BuiltIn(
-                PgBuiltInOids::INT2OID
-                    | PgBuiltInOids::INT4OID
-                    | PgBuiltInOids::INT8OID
-                    | PgBuiltInOids::NUMERICOID
-                    | PgBuiltInOids::DATEOID
-                    | PgBuiltInOids::TIMESTAMPOID
-                    | PgBuiltInOids::TIMESTAMPTZOID
-                    | PgBuiltInOids::TEXTOID
-                    | PgBuiltInOids::VARCHAROID
-                    | PgBuiltInOids::FLOAT4OID
-                    | PgBuiltInOids::FLOAT8OID,
-            )
-        )
-    }
-}
-
-/// PostgreSQL-facing adapter that resolves catalog-backed collation facts
-/// before delegating to [`PredicatePushdownPolicy`].
-pub(crate) struct PgPredicatePushdownPolicy;
-
-impl PgPredicatePushdownPolicy {
-    pub(crate) fn plan_comparison(
-        column: &ColumnRef,
-        value: &RuntimeValueSpec,
-        op_key: PgComparisonIdentity,
-    ) -> Option<(SupportedComparison, PlannedValueType)> {
-        let value_type = Self::planned_value_type(column, value)?;
-        let type_oid = column.value_type.type_oid;
-        let operator = PredicatePushdownPolicy::op_class(op_key.opno)?;
-        let collation = Self::resolved_collation(type_oid, op_key.inputcollid);
-        let capability = PredicatePushdownPolicy::capability_for_class(
-            type_oid, op_key, collation, operator,
-        )?;
-        Some((
-            SupportedComparison {
-                operator,
-                capability,
-            },
-            value_type,
-        ))
-    }
-
-    fn planned_value_type(
-        column: &ColumnRef,
-        value: &RuntimeValueSpec,
-    ) -> Option<PlannedValueType> {
-        let declared = PgOid::from(column.declared_type.type_oid);
-        let effective = PgOid::from(column.value_type.type_oid);
-        let value = PgOid::from(value.value_type.type_oid);
-        match (declared, effective, value) {
-            (
-                PgOid::BuiltIn(PgBuiltInOids::INT2OID),
-                PgOid::BuiltIn(PgBuiltInOids::INT2OID),
-                PgOid::BuiltIn(PgBuiltInOids::INT2OID),
-            ) => Some(PlannedValueType::Int2),
-            (
-                PgOid::BuiltIn(PgBuiltInOids::INT4OID),
-                PgOid::BuiltIn(PgBuiltInOids::INT4OID),
-                PgOid::BuiltIn(PgBuiltInOids::INT4OID),
-            ) => Some(PlannedValueType::Int4),
-            (
-                PgOid::BuiltIn(PgBuiltInOids::INT8OID),
-                PgOid::BuiltIn(PgBuiltInOids::INT8OID),
-                PgOid::BuiltIn(PgBuiltInOids::INT8OID),
-            ) => Some(PlannedValueType::Int8),
-            (
-                PgOid::BuiltIn(PgBuiltInOids::DATEOID),
-                PgOid::BuiltIn(PgBuiltInOids::DATEOID),
-                PgOid::BuiltIn(PgBuiltInOids::DATEOID),
-            ) => Some(PlannedValueType::Date),
-            (
-                PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPOID),
-                PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPOID),
-                PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPOID),
-            ) => Some(PlannedValueType::Timestamp),
-            (
-                PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPTZOID),
-                PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPTZOID),
-                PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPTZOID),
-            ) => Some(PlannedValueType::Timestamptz),
-            (
-                PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID),
-                PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID),
-                PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID),
-            ) => Some(PlannedValueType::String),
+        match PgOid::from(type_oid) {
+            PgOid::BuiltIn(PgBuiltInOids::BOOLOID) => {
+                Some(PredicateValueKind::Boolean)
+            }
+            PgOid::BuiltIn(PgBuiltInOids::INT2OID | PgBuiltInOids::INT4OID) => {
+                Some(PredicateValueKind::Integer)
+            }
+            PgOid::BuiltIn(PgBuiltInOids::INT8OID) => Some(PredicateValueKind::Long),
+            PgOid::BuiltIn(PgBuiltInOids::NUMERICOID) => {
+                Some(PredicateValueKind::Decimal)
+            }
+            PgOid::BuiltIn(PgBuiltInOids::DATEOID) => Some(PredicateValueKind::Date),
+            PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPOID) => {
+                Some(PredicateValueKind::Timestamp)
+            }
+            PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPTZOID) => {
+                Some(PredicateValueKind::Timestamptz)
+            }
+            PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID) => {
+                Some(PredicateValueKind::String)
+            }
+            PgOid::BuiltIn(PgBuiltInOids::FLOAT4OID | PgBuiltInOids::FLOAT8OID) => {
+                Some(PredicateValueKind::Float)
+            }
             _ => None,
-        }
-    }
-
-    fn resolved_collation(
-        type_oid: pg_sys::Oid,
-        input_collation: pg_sys::Oid,
-    ) -> CollationSemantics {
-        if matches!(
-            PgOid::from(type_oid),
-            PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID)
-        ) {
-            Self::collation_semantics(input_collation)
-        } else {
-            // Non-text policy branches never consume catalog collation facts.
-            // In particular, an invalid synthetic integer tag must be rejected
-            // by the pure `(opcollid, inputcollid)` gate, not looked up in
-            // pg_collation first.
-            CollationSemantics::None
-        }
-    }
-
-    /// Resolve `pg_collation.collisdeterministic` for one analyzed expression.
-    pub(crate) fn collation_semantics(oid: pg_sys::Oid) -> CollationSemantics {
-        if oid == pg_sys::Oid::INVALID {
-            return CollationSemantics::None;
-        }
-        if oid == pg_sys::C_COLLATION_OID || oid == pg_sys::POSIX_COLLATION_OID {
-            return CollationSemantics::COrPosix;
-        }
-        // SAFETY: non-zero `inputcollid` comes from PostgreSQL's analyzed
-        // expression tree and therefore names a live `pg_collation` row.
-        // `get_collation_isdeterministic` reports catalog corruption through
-        // PostgreSQL ERROR; that error reaches the framework's FFI boundary.
-        if unsafe { pg_sys::get_collation_isdeterministic(oid) } {
-            CollationSemantics::Deterministic
-        } else {
-            CollationSemantics::NonDeterministic
         }
     }
 }

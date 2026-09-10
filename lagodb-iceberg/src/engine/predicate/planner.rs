@@ -2,11 +2,12 @@
 
 use lagodb_core::expr::RuntimeValueSource;
 use lagodb_core::expr::pushdown::{
-    FilterPlan, FilterPlanningContext, FilterPushdownPlanner, PredicateExpr,
-    PredicateFragment, ScalarExpr,
+    FilterPlan, FilterPlanningContext, FilterPushdownPlanner, PredicateFragment,
+    PredicatePlan, PredicatePlanner, ScalarExpr,
 };
 use lagodb_core::expr::{PgComparisonOp, PushdownCosting};
 use lagodb_core::handles::RelationGuard;
+use lagodb_core::tuple::Utf8ServerEncoding;
 use pgrx::pg_sys;
 use std::sync::Arc;
 
@@ -30,6 +31,7 @@ use super::policy::{
 pub(crate) struct IcebergFilterPlanner {
     schema_id: i32,
     fields: RelationFieldIndex,
+    utf8: Option<Utf8ServerEncoding>,
 }
 
 impl IcebergFilterPlanner {
@@ -48,42 +50,8 @@ impl IcebergFilterPlanner {
         Ok(Self {
             schema_id: schema.schema_id(),
             fields,
+            utf8: Utf8ServerEncoding::resolve().ok(),
         })
-    }
-
-    fn plan_node(
-        &self,
-        fragment: &PredicateFragment,
-        node: &PredicateExpr,
-    ) -> Result<Option<PlannedNode>, IcebergFilterError> {
-        match node {
-            PredicateExpr::Comparison {
-                operator,
-                left,
-                right,
-            } => self.plan_comparison(fragment, *operator, left, right),
-            PredicateExpr::IsNull(value) => self.plan_null_test(value, false),
-            PredicateExpr::IsNotNull(value) => self.plan_null_test(value, true),
-            PredicateExpr::And(children) => {
-                self.plan_logical(fragment, children, LogicalKind::And)
-            }
-            PredicateExpr::Or(children) => {
-                self.plan_logical(fragment, children, LogicalKind::Or)
-            }
-            PredicateExpr::Not(child) => {
-                let Some(child) = self.plan_node(fragment, child)? else {
-                    return Ok(None);
-                };
-                if child.contract != PlannedContract::Exact {
-                    return Ok(None);
-                }
-                Ok(Some(PlannedNode {
-                    node: PlannedIcebergNode::Not(Box::new(child.node)),
-                    contract: child.contract,
-                    costing: child.costing,
-                }))
-            }
-        }
     }
 
     fn plan_comparison(
@@ -92,7 +60,7 @@ impl IcebergFilterPlanner {
         operator: PgComparisonOp,
         left: &ScalarExpr,
         right: &ScalarExpr,
-    ) -> Result<Option<PlannedNode>, IcebergFilterError> {
+    ) -> Result<PredicatePlan<PlannedNode>, IcebergFilterError> {
         let (column, value, mirrored) = match (left, right) {
             (ScalarExpr::Column(column), ScalarExpr::Value(value)) => {
                 (column, *value, false)
@@ -100,7 +68,7 @@ impl IcebergFilterPlanner {
             (ScalarExpr::Value(value), ScalarExpr::Column(column)) => {
                 (column, *value, true)
             }
-            _ => return Ok(None),
+            _ => return Ok(PredicatePlan::Unsupported),
         };
         let value_slot = fragment.value(value);
         let Some((supported, value_type)) =
@@ -108,9 +76,10 @@ impl IcebergFilterPlanner {
                 column,
                 value_slot,
                 operator.identity(),
+                self.utf8,
             )
         else {
-            return Ok(None);
+            return Ok(PredicatePlan::Unsupported);
         };
         let mut planned_operator =
             PlannedComparisonOperator::from(supported.operator);
@@ -128,77 +97,98 @@ impl IcebergFilterPlanner {
         } else {
             PushdownCosting::CostedPruning
         };
-        let contract = match supported.capability {
-            SupportedPredicateCapability::Exact => PlannedContract::Exact,
-            SupportedPredicateCapability::Conservative => {
-                PlannedContract::Conservative
-            }
-        };
-        Ok(Some(PlannedNode {
+        let planned = PlannedNode {
             node: PlannedIcebergNode::Comparison {
                 operator: planned_operator,
                 column: self.column(column.attno)?,
                 value,
                 value_type,
             },
-            contract,
             costing,
-        }))
+        };
+        Ok(match supported.capability {
+            SupportedPredicateCapability::Exact => PredicatePlan::Exact(planned),
+            SupportedPredicateCapability::Conservative => {
+                PredicatePlan::Conservative(planned)
+            }
+        })
     }
 
     fn plan_null_test(
         &self,
         value: &ScalarExpr,
         is_not_null: bool,
-    ) -> Result<Option<PlannedNode>, IcebergFilterError> {
+    ) -> Result<PredicatePlan<PlannedNode>, IcebergFilterError> {
         let ScalarExpr::Column(column) = value else {
-            return Ok(None);
+            return Ok(PredicatePlan::Unsupported);
         };
-        if !PredicatePushdownPolicy::supports_null_test(column.declared_type.type_oid)
-        {
-            return Ok(None);
+        if !PgPredicatePushdownPolicy::supports_null_test(
+            column.declared_type.type_oid,
+        ) {
+            return Ok(PredicatePlan::Unsupported);
         }
         let column = self.column(column.attno)?;
-        Ok(Some(PlannedNode {
+        Ok(PredicatePlan::Exact(PlannedNode {
             node: if is_not_null {
                 PlannedIcebergNode::IsNotNull(column)
             } else {
                 PlannedIcebergNode::IsNull(column)
             },
-            contract: PlannedContract::Exact,
             costing: PushdownCosting::CostedPruning,
         }))
     }
 
-    fn plan_logical(
+    fn plan_nan_test(
+        &self,
+        value: &ScalarExpr,
+        is_not_nan: bool,
+    ) -> Result<PredicatePlan<PlannedNode>, IcebergFilterError> {
+        let ScalarExpr::Column(column) = value else {
+            return Ok(PredicatePlan::Unsupported);
+        };
+        if !PgPredicatePushdownPolicy::supports_nan_test(column) {
+            return Ok(PredicatePlan::Unsupported);
+        }
+        let column = self.column(column.attno)?;
+        let planned = PlannedNode {
+            node: if is_not_nan {
+                PlannedIcebergNode::IsNotNan(column)
+            } else {
+                PlannedIcebergNode::IsNan(column)
+            },
+            costing: PushdownCosting::CostedPruning,
+        };
+        // Negation remains semantic until binding. The binder therefore swaps
+        // these nodes directly and adds the NotNull guard required by NotNan,
+        // instead of complementing an already-built native predicate.
+        Ok(PredicatePlan::Exact(planned))
+    }
+
+    fn plan_starts_with(
         &self,
         fragment: &PredicateFragment,
-        children: &[PredicateExpr],
-        kind: LogicalKind,
-    ) -> Result<Option<PlannedNode>, IcebergFilterError> {
-        let mut planned = Vec::with_capacity(children.len());
-        let mut contract = PlannedContract::Exact;
-        let mut costing = PushdownCosting::CostedPruning;
-        for child in children {
-            let Some(child) = self.plan_node(fragment, child)? else {
-                return Ok(None);
-            };
-            if child.contract == PlannedContract::Conservative {
-                contract = PlannedContract::Conservative;
-            }
-            if !child.costing.is_costed() {
-                costing = PushdownCosting::UncostedBestEffort;
-            }
-            planned.push(child.node);
+        value: &ScalarExpr,
+        prefix: &ScalarExpr,
+    ) -> Result<PredicatePlan<PlannedNode>, IcebergFilterError> {
+        let (ScalarExpr::Column(column), ScalarExpr::Value(prefix)) = (value, prefix)
+        else {
+            return Ok(PredicatePlan::Unsupported);
+        };
+        if PgPredicatePushdownPolicy::plan_starts_with(
+            column,
+            fragment.value(*prefix),
+            self.utf8,
+        )
+        .is_none()
+        {
+            return Ok(PredicatePlan::Unsupported);
         }
-        let planned = planned.into_boxed_slice();
-        Ok(Some(PlannedNode {
-            node: match kind {
-                LogicalKind::And => PlannedIcebergNode::And(planned),
-                LogicalKind::Or => PlannedIcebergNode::Or(planned),
+        Ok(PredicatePlan::ExactNoComplement(PlannedNode {
+            node: PlannedIcebergNode::StartsWith {
+                column: self.column(column.attno)?,
+                prefix: *prefix,
             },
-            contract,
-            costing,
+            costing: PushdownCosting::CostedPruning,
         }))
     }
 
@@ -217,6 +207,145 @@ impl IcebergFilterPlanner {
     }
 }
 
+struct RelationPredicateAdapter<'a> {
+    planner: &'a IcebergFilterPlanner,
+    fragment: &'a PredicateFragment,
+}
+
+impl RelationPredicateAdapter<'_> {
+    fn logical(
+        &self,
+        children: Vec<PlannedNode>,
+        build: impl FnOnce(Box<[PlannedIcebergNode]>) -> PlannedIcebergNode,
+    ) -> PlannedNode {
+        let costing = if children.iter().all(|child| child.costing.is_costed()) {
+            PushdownCosting::CostedPruning
+        } else {
+            PushdownCosting::UncostedBestEffort
+        };
+        let children = children
+            .into_iter()
+            .map(|child| child.node)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        PlannedNode {
+            node: build(children),
+            costing,
+        }
+    }
+}
+
+impl PredicatePlanner<ScalarExpr, PgComparisonOp> for RelationPredicateAdapter<'_> {
+    type Predicate = PlannedNode;
+    type Error = IcebergFilterError;
+
+    fn always_true(&self) -> Result<PredicatePlan<PlannedNode>, Self::Error> {
+        Ok(PredicatePlan::Exact(PlannedNode {
+            node: PlannedIcebergNode::AlwaysTrue,
+            costing: PushdownCosting::CostedPruning,
+        }))
+    }
+
+    fn always_false(&self) -> Result<PredicatePlan<PlannedNode>, Self::Error> {
+        Ok(PredicatePlan::Exact(PlannedNode {
+            node: PlannedIcebergNode::AlwaysFalse,
+            costing: PushdownCosting::CostedPruning,
+        }))
+    }
+
+    fn strict_true(
+        &self,
+        value: &ScalarExpr,
+    ) -> Result<PredicatePlan<PlannedNode>, Self::Error> {
+        let ScalarExpr::Column(column) = value else {
+            return Ok(PredicatePlan::Unsupported);
+        };
+        let column = self.planner.column(column.attno)?;
+        Ok(PredicatePlan::ExactNoComplement(PlannedNode {
+            node: PlannedIcebergNode::IsNotNull(column),
+            costing: PushdownCosting::CostedPruning,
+        }))
+    }
+
+    fn strict_false(
+        &self,
+        value: &ScalarExpr,
+    ) -> Result<PredicatePlan<PlannedNode>, Self::Error> {
+        let ScalarExpr::Column(column) = value else {
+            return Ok(PredicatePlan::Unsupported);
+        };
+        self.planner
+            .fields
+            .binding_for_attno(column.attno)
+            .ok_or(IcebergFilterError::MissingFieldBinding(column.attno))?;
+        Ok(PredicatePlan::ExactNoComplement(PlannedNode {
+            node: PlannedIcebergNode::AlwaysFalse,
+            costing: PushdownCosting::CostedPruning,
+        }))
+    }
+
+    fn comparison(
+        &self,
+        operator: &PgComparisonOp,
+        left: &ScalarExpr,
+        right: &ScalarExpr,
+    ) -> Result<PredicatePlan<PlannedNode>, Self::Error> {
+        self.planner
+            .plan_comparison(self.fragment, *operator, left, right)
+    }
+
+    fn is_null(
+        &self,
+        value: &ScalarExpr,
+    ) -> Result<PredicatePlan<PlannedNode>, Self::Error> {
+        self.planner.plan_null_test(value, false)
+    }
+
+    fn is_not_null(
+        &self,
+        value: &ScalarExpr,
+    ) -> Result<PredicatePlan<PlannedNode>, Self::Error> {
+        self.planner.plan_null_test(value, true)
+    }
+
+    fn is_nan(
+        &self,
+        value: &ScalarExpr,
+    ) -> Result<PredicatePlan<PlannedNode>, Self::Error> {
+        self.planner.plan_nan_test(value, false)
+    }
+
+    fn is_not_nan(
+        &self,
+        value: &ScalarExpr,
+    ) -> Result<PredicatePlan<PlannedNode>, Self::Error> {
+        self.planner.plan_nan_test(value, true)
+    }
+
+    fn starts_with(
+        &self,
+        value: &ScalarExpr,
+        prefix: &ScalarExpr,
+    ) -> Result<PredicatePlan<PlannedNode>, Self::Error> {
+        self.planner.plan_starts_with(self.fragment, value, prefix)
+    }
+
+    fn conjunction(&self, children: Vec<PlannedNode>) -> PlannedNode {
+        self.logical(children, PlannedIcebergNode::And)
+    }
+
+    fn disjunction(&self, children: Vec<PlannedNode>) -> PlannedNode {
+        self.logical(children, PlannedIcebergNode::Or)
+    }
+
+    fn negate(&self, child: PlannedNode) -> PlannedNode {
+        PlannedNode {
+            node: PlannedIcebergNode::Not(Box::new(child.node)),
+            costing: child.costing,
+        }
+    }
+}
+
 impl FilterPushdownPlanner for IcebergFilterPlanner {
     type PlannedPredicate = PlannedIcebergPredicate;
     type Error = IcebergFilterError;
@@ -225,35 +354,32 @@ impl FilterPushdownPlanner for IcebergFilterPlanner {
         &mut self,
         fragment: &PredicateFragment,
     ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
-        let Some(planned) = self.plan_node(fragment, fragment.root())? else {
-            return Ok(FilterPlan::Unsupported);
+        let adapter = RelationPredicateAdapter {
+            planner: self,
+            fragment,
         };
-        let predicate = PlannedIcebergPredicate::new(self.schema_id, planned.node);
-        Ok(match planned.contract {
-            PlannedContract::Exact => FilterPlan::exact(predicate, planned.costing),
-            PlannedContract::Conservative => {
-                FilterPlan::conservative(predicate, planned.costing)
-            }
+        Ok(match fragment.root().plan_with(&adapter)? {
+            PredicatePlan::Unsupported => FilterPlan::Unsupported,
+            PredicatePlan::Partial(planned) => FilterPlan::partial(
+                PlannedIcebergPredicate::new(self.schema_id, planned.node),
+                planned.costing,
+            ),
+            PredicatePlan::Exact(planned)
+            | PredicatePlan::ExactNoComplement(planned) => FilterPlan::exact(
+                PlannedIcebergPredicate::new(self.schema_id, planned.node),
+                planned.costing,
+            ),
+            PredicatePlan::Conservative(planned) => FilterPlan::conservative(
+                PlannedIcebergPredicate::new(self.schema_id, planned.node),
+                planned.costing,
+            ),
         })
     }
 }
 
 struct PlannedNode {
     node: PlannedIcebergNode,
-    contract: PlannedContract,
     costing: PushdownCosting,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PlannedContract {
-    Exact,
-    Conservative,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LogicalKind {
-    And,
-    Or,
 }
 
 impl From<ComparisonOpClass> for PlannedComparisonOperator {

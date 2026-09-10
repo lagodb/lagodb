@@ -1,25 +1,28 @@
 //! PostgreSQL comparison semantics and bound scalar values.
 //!
-//! Exact pushdown is intentionally limited to boolean equality, integer
-//! comparisons, and collation-compatible strings. Arrow's floating comparison
-//! uses IEEE total ordering (including distinct signed zero), which is not
-//! PostgreSQL's equality semantics; temporal values also require PostgreSQL
-//! epoch/infinity normalization. Comparisons on those types remain local quals
-//! until an exact representation is implemented.
+//! Exact pushdown is intentionally limited to boolean equality, integer and
+//! bounded-decimal comparisons, and collation-compatible strings. Arrow's
+//! floating comparison uses IEEE total ordering (including distinct signed
+//! zero), which is not PostgreSQL's equality semantics; temporal values also
+//! require PostgreSQL epoch/infinity normalization. Comparisons on those types
+//! remain local quals until an exact representation is implemented.
 
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Int32Array, Int64Array, LargeStringArray, Scalar,
-    StringArray,
+    Array, ArrayRef, BooleanArray, Decimal128Array, Int32Array, Int64Array,
+    LargeStringArray, Scalar, StringArray,
 };
 use arrow_ord::cmp;
 use arrow_schema::{ArrowError, DataType};
 use lagodb_core::expr::{
-    ColumnRef, PgComparisonKind, PgComparisonSignature, RuntimeValue,
-    RuntimeValueSpec,
+    ColumnRef, PgComparisonIdentity, PgComparisonKind, PgComparisonSignature,
+    PgTextComparisonSemantics, RuntimeValue, RuntimeValueSpec,
 };
-use lagodb_core::tuple::ColumnDatumTarget;
+use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
+use lagodb_core::tuple::{
+    Decimal128ComparisonValue, Decimal128Semantics, Utf8ServerEncoding,
+};
 use pgrx::{FromDatum, PgBuiltInOids, PgOid, pg_sys};
 
 use crate::error::ConnectorError;
@@ -36,6 +39,7 @@ const VALUE_BOOL: i32 = 0;
 const VALUE_I32: i32 = 1;
 const VALUE_I64: i32 = 2;
 const VALUE_STRING: i32 = 3;
+const VALUE_DECIMAL128: i32 = 4;
 
 #[derive(Clone, Copy)]
 pub(super) enum ComparisonOperator {
@@ -48,6 +52,17 @@ pub(super) enum ComparisonOperator {
 }
 
 impl ComparisonOperator {
+    pub(super) const fn kind(self) -> PgComparisonKind {
+        match self {
+            Self::Eq => PgComparisonKind::Equal,
+            Self::NotEq => PgComparisonKind::NotEqual,
+            Self::Lt => PgComparisonKind::Less,
+            Self::Le => PgComparisonKind::LessEqual,
+            Self::Gt => PgComparisonKind::Greater,
+            Self::Ge => PgComparisonKind::GreaterEqual,
+        }
+    }
+
     pub(super) const fn sql(self) -> &'static str {
         match self {
             Self::Eq => "=",
@@ -69,6 +84,7 @@ impl ComparisonOperator {
             | (pg_sys::INT2OID, pg_sys::INT2OID)
             | (pg_sys::INT4OID, pg_sys::INT4OID)
             | (pg_sys::INT8OID, pg_sys::INT8OID)
+            | (pg_sys::NUMERICOID, pg_sys::NUMERICOID)
             | (pg_sys::TEXTOID, pg_sys::TEXTOID) => {}
             _ => return None,
         }
@@ -148,6 +164,7 @@ pub(super) enum ValueType {
     I32,
     I64,
     String,
+    Decimal128(Decimal128Semantics),
 }
 
 impl ValueType {
@@ -162,6 +179,7 @@ impl ValueType {
         opno: pg_sys::Oid,
         opcollid: pg_sys::Oid,
         inputcollid: pg_sys::Oid,
+        utf8: Option<Utf8ServerEncoding>,
     ) -> Option<(Self, ComparisonOperator)> {
         let declared = PgOid::from(column.declared_type.type_oid);
         let effective = PgOid::from(column.value_type.type_oid);
@@ -195,6 +213,15 @@ impl ValueType {
                 PgOid::BuiltIn(PgBuiltInOids::INT8OID),
             ) => Self::I64,
             (
+                PgOid::BuiltIn(PgBuiltInOids::NUMERICOID),
+                PgOid::BuiltIn(PgBuiltInOids::NUMERICOID),
+                PgOid::BuiltIn(PgBuiltInOids::NUMERICOID),
+            ) => Self::Decimal128(Decimal128Semantics::for_storage_comparison(
+                column.declared_type,
+                column.value_type,
+                value.value_type,
+            )?),
+            (
                 PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID),
                 PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID),
                 PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID),
@@ -203,62 +230,67 @@ impl ValueType {
         };
 
         let value_type = match value_type {
-            Self::Bool | Self::I32 | Self::I64
+            Self::Bool | Self::I32 | Self::I64 | Self::Decimal128(_)
                 if opcollid == pg_sys::Oid::INVALID
                     && inputcollid == pg_sys::Oid::INVALID =>
             {
                 Some(value_type)
             }
             Self::String => {
-                // pgrx String datums and Arrow UTF-8 scalars both require a
-                // UTF-8 PostgreSQL database encoding.
-                if ColumnDatumTarget::validate_utf8_server_encoding().is_err() {
-                    return None;
+                utf8?;
+                let kind = operator.kind();
+                unsafe {
+                    PgTextComparisonSemantics::for_comparison(
+                        PgComparisonIdentity {
+                            opno,
+                            opcollid,
+                            inputcollid,
+                        },
+                        kind,
+                    )
                 }
-                let c_order = inputcollid == pg_sys::C_COLLATION_OID
-                    || inputcollid == pg_sys::POSIX_COLLATION_OID;
-                let deterministic = c_order
-                    || (inputcollid != pg_sys::Oid::INVALID
-                        && unsafe {
-                            pg_sys::get_collation_isdeterministic(inputcollid)
-                        });
-                match operator {
-                    ComparisonOperator::Eq | ComparisonOperator::NotEq
-                        if deterministic =>
-                    {
-                        Some(value_type)
-                    }
-                    ComparisonOperator::Lt
-                    | ComparisonOperator::Le
-                    | ComparisonOperator::Gt
-                    | ComparisonOperator::Ge
-                        if c_order =>
-                    {
-                        Some(value_type)
-                    }
-                    _ => None,
-                }
+                .map(|_| value_type)
             }
             _ => None,
         }?;
         Some((value_type, operator))
     }
 
-    pub(super) const fn tag(self) -> i32 {
+    pub(super) fn encode(self, writer: &mut PlanDataWriter) {
         match self {
-            Self::Bool => VALUE_BOOL,
-            Self::I32 => VALUE_I32,
-            Self::I64 => VALUE_I64,
-            Self::String => VALUE_STRING,
-        }
+            Self::Bool => writer.append_i32(VALUE_BOOL),
+            Self::I32 => writer.append_i32(VALUE_I32),
+            Self::I64 => writer.append_i32(VALUE_I64),
+            Self::String => writer.append_i32(VALUE_STRING),
+            Self::Decimal128(semantics) => writer
+                .append_i32(VALUE_DECIMAL128)
+                .append_i32(i32::from(semantics.precision()))
+                .append_i32(i32::from(semantics.scale())),
+        };
     }
 
-    pub(super) fn from_tag(tag: i32) -> Result<Self, ConnectorError> {
-        match tag {
+    pub(super) fn decode_plan(
+        reader: &mut PlanDataReader<'_>,
+    ) -> Result<Self, ConnectorError> {
+        match reader.read_i32()? {
             VALUE_BOOL => Ok(Self::Bool),
             VALUE_I32 => Ok(Self::I32),
             VALUE_I64 => Ok(Self::I64),
             VALUE_STRING => Ok(Self::String),
+            VALUE_DECIMAL128 => {
+                let encoded_precision = reader.read_i32()?;
+                let encoded_scale = reader.read_i32()?;
+                let semantics = u8::try_from(encoded_precision)
+                    .ok()
+                    .and_then(|precision| {
+                        let scale = i8::try_from(encoded_scale).ok()?;
+                        Decimal128Semantics::new(precision, scale)
+                    })
+                    .ok_or_else(|| {
+                        ConnectorError::invalid_filter_plan(FormatKind::Parquet)
+                    })?;
+                Ok(Self::Decimal128(semantics))
+            }
             _ => Err(ConnectorError::invalid_filter_plan(FormatKind::Parquet)),
         }
     }
@@ -271,35 +303,57 @@ impl ValueType {
     pub(super) unsafe fn decode(
         self,
         value: RuntimeValue,
-    ) -> Result<BoundValue, ConnectorError> {
+    ) -> Result<DecodedValue, ConnectorError> {
         let datum = unsafe { value.datum() };
         let type_oid = value.metadata().value_type.type_oid;
         let decoded = match (self, type_oid) {
-            (Self::Bool, pg_sys::BOOLOID) => BoundValue::Bool(
+            (Self::Bool, pg_sys::BOOLOID) => DecodedValue::Scalar(BoundValue::Bool(
                 unsafe { bool::from_datum(datum, false) }
                     .ok_or_else(|| ConnectorError::invalid_filter_datum(type_oid))?,
-            ),
-            (Self::I32, pg_sys::INT2OID) => BoundValue::I32(
+            )),
+            (Self::I32, pg_sys::INT2OID) => DecodedValue::Scalar(BoundValue::I32(
                 unsafe { i16::from_datum(datum, false) }
                     .ok_or_else(|| ConnectorError::invalid_filter_datum(type_oid))?
                     as i32,
-            ),
-            (Self::I32, pg_sys::INT4OID) => BoundValue::I32(
+            )),
+            (Self::I32, pg_sys::INT4OID) => DecodedValue::Scalar(BoundValue::I32(
                 unsafe { i32::from_datum(datum, false) }
                     .ok_or_else(|| ConnectorError::invalid_filter_datum(type_oid))?,
-            ),
-            (Self::I64, pg_sys::INT8OID) => BoundValue::I64(
+            )),
+            (Self::I64, pg_sys::INT8OID) => DecodedValue::Scalar(BoundValue::I64(
                 unsafe { i64::from_datum(datum, false) }
                     .ok_or_else(|| ConnectorError::invalid_filter_datum(type_oid))?,
-            ),
+            )),
             (Self::String, pg_sys::TEXTOID | pg_sys::VARCHAROID) => {
-                BoundValue::String(
+                DecodedValue::Scalar(BoundValue::String(
+                    // ValueType::String can only be persisted when the planner
+                    // holds Utf8ServerEncoding, so this bind does not repeat
+                    // the statement-invariant server-encoding check.
                     unsafe { String::from_datum(datum, false) }
                         .ok_or_else(|| {
                             ConnectorError::invalid_filter_datum(type_oid)
                         })?
                         .into_boxed_str(),
-                )
+                ))
+            }
+            (Self::Decimal128(semantics), pg_sys::NUMERICOID) => {
+                match unsafe { semantics.codec().encode_comparison_datum(datum) }? {
+                    Decimal128ComparisonValue::Finite(coefficient) => {
+                        DecodedValue::Scalar(BoundValue::Decimal128 {
+                            coefficient,
+                            semantics,
+                        })
+                    }
+                    Decimal128ComparisonValue::NegativeInfinity => {
+                        DecodedValue::OutsideFinite(
+                            Decimal128ComparisonValue::NegativeInfinity,
+                        )
+                    }
+                    special @ (Decimal128ComparisonValue::PositiveInfinity
+                    | Decimal128ComparisonValue::NaN) => {
+                        DecodedValue::OutsideFinite(special)
+                    }
+                }
             }
             _ => {
                 return Err(ConnectorError::invalid_filter_plan(FormatKind::Parquet));
@@ -315,6 +369,15 @@ pub(super) enum BoundValue {
     I32(i32),
     I64(i64),
     String(Box<str>),
+    Decimal128 {
+        coefficient: i128,
+        semantics: Decimal128Semantics,
+    },
+}
+
+pub(super) enum DecodedValue {
+    Scalar(BoundValue),
+    OutsideFinite(Decimal128ComparisonValue),
 }
 
 impl BoundValue {
@@ -337,6 +400,20 @@ impl BoundValue {
             }
             (Self::String(value), DataType::LargeUtf8) => {
                 Arc::new(LargeStringArray::from(vec![value.as_ref()]))
+            }
+            (
+                Self::Decimal128 {
+                    coefficient,
+                    semantics,
+                },
+                DataType::Decimal128(precision, scale),
+            ) if *precision == semantics.precision()
+                && *scale == semantics.scale() =>
+            {
+                Arc::new(
+                    Decimal128Array::from(vec![*coefficient])
+                        .with_precision_and_scale(*precision, *scale)?,
+                )
             }
             _ => {
                 return Err(ConnectorError::invalid_object_schema(

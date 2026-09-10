@@ -54,16 +54,18 @@ pub(crate) mod host_matrix {
 
 use std::{array, collections::HashSet};
 
-use lagodb_core::expr::PgComparisonOp;
 use lagodb_core::expr::{ColumnRef, ExprType, RuntimeValueSource, RuntimeValueSpec};
+use lagodb_core::expr::{PgComparisonOp, PgTextComparisonSemantics};
+use lagodb_core::query_contract::ScanId;
+use lagodb_core::tuple::Decimal128Semantics;
 use pgrx::pg_sys;
 use pgrx::pg_sys::Oid;
 use proptest::prelude::*;
 
 use self::host_matrix::{self as op, CLASS_BY_COLUMN, opno_table};
 use super::{
-    CollationSemantics, ComparisonOpClass, PgPredicatePushdownPolicy,
-    PredicatePushdownPolicy, SupportedPredicateCapability,
+    ComparisonOpClass, PgPredicatePushdownPolicy, PredicatePushdownPolicy,
+    SupportedPredicateCapability,
 };
 use crate::engine::predicate::plan::PlannedValueType;
 
@@ -87,12 +89,34 @@ fn capability(
     collation: CollationSemantics,
 ) -> Option<SupportedPredicateCapability> {
     let class = PredicatePushdownPolicy::op_class(op.opno)?;
+    let text_semantics = match (collation, class) {
+        (
+            CollationSemantics::COrPosix,
+            ComparisonOpClass::Less
+            | ComparisonOpClass::LessEqual
+            | ComparisonOpClass::Greater
+            | ComparisonOpClass::GreaterEqual,
+        ) => Some(PgTextComparisonSemantics::Ordering),
+        (
+            CollationSemantics::COrPosix | CollationSemantics::Deterministic,
+            ComparisonOpClass::Equal | ComparisonOpClass::NotEqual,
+        ) => Some(PgTextComparisonSemantics::Equality),
+        _ => None,
+    };
     PredicatePushdownPolicy::capability_for_class(
         type_oid,
         op.identity(),
-        collation,
+        text_semantics,
         class,
     )
+}
+
+#[derive(Clone, Copy)]
+enum CollationSemantics {
+    None,
+    COrPosix,
+    Deterministic,
+    NonDeterministic,
 }
 
 fn metadata(type_oid: pg_sys::Oid) -> ExprType {
@@ -110,7 +134,7 @@ fn planned_value_type(
 ) -> Option<PlannedValueType> {
     PgPredicatePushdownPolicy::planned_value_type(
         &ColumnRef {
-            scan: lagodb_core::query_contract::ScanId::from_index(0),
+            scan: ScanId::from_index(0),
             attno: 1,
             declared_type: metadata(declared),
             value_type: metadata(column_effective),
@@ -119,6 +143,7 @@ fn planned_value_type(
             value_type: metadata(value_effective),
             source_kind: RuntimeValueSource::OuterValue,
         },
+        None,
     )
 }
 
@@ -135,8 +160,48 @@ fn planned_decoder_requires_a_total_column_value_type_combination() {
     );
     assert_eq!(
         planned_value_type(pg_sys::VARCHAROID, pg_sys::TEXTOID, pg_sys::TEXTOID),
-        Some(PlannedValueType::String),
-        "a binary-compatible varchar-to-text operand remains pushable",
+        None,
+        "text planning requires the outer UTF-8 capability proof",
+    );
+}
+
+#[test]
+fn planned_decimal_value_requires_one_bounded_shape() {
+    let decimal = Decimal128Semantics::new(18, 4).unwrap().value_type();
+    let column = ColumnRef {
+        scan: ScanId::from_index(0),
+        attno: 1,
+        declared_type: decimal,
+        value_type: decimal,
+    };
+    let value = |value_type| RuntimeValueSpec {
+        value_type,
+        source_kind: RuntimeValueSource::Constant,
+    };
+
+    assert_eq!(
+        PgPredicatePushdownPolicy::planned_value_type(&column, &value(decimal), None,),
+        Some(PlannedValueType::Decimal128(
+            Decimal128Semantics::new(18, 4).unwrap(),
+        )),
+    );
+    assert_eq!(
+        PgPredicatePushdownPolicy::planned_value_type(
+            &column,
+            &value(metadata(pg_sys::NUMERICOID)),
+            None,
+        ),
+        None,
+        "unbounded runtime NUMERIC must not acquire an Exact contract",
+    );
+    assert_eq!(
+        PgPredicatePushdownPolicy::planned_value_type(
+            &column,
+            &value(Decimal128Semantics::new(18, 3).unwrap().value_type()),
+            None,
+        ),
+        None,
+        "a different Decimal128 scale must remain residual",
     );
 }
 
@@ -302,7 +367,7 @@ fn supported_predicate_numeric_temporal_float_matrix() {
     for opno in op::operator_row(pg_sys::NUMERICOID) {
         assert_eq!(
             capability(pg_sys::NUMERICOID, triple(opno), CollationSemantics::None),
-            None,
+            Some(SupportedPredicateCapability::Exact),
         );
     }
     for (type_oid, opnos) in [
@@ -319,8 +384,8 @@ fn supported_predicate_numeric_temporal_float_matrix() {
 }
 
 #[test]
-fn supported_predicate_only_integers_are_exact() {
-    for (type_oid, opnos) in opno_table().into_iter().skip(3) {
+fn supported_predicate_non_decimal_non_text_types_are_not_exact() {
+    for (type_oid, opnos) in opno_table().into_iter().skip(3).take(3) {
         let collation = if type_oid == pg_sys::TEXTOID {
             CollationSemantics::COrPosix
         } else {
@@ -360,7 +425,7 @@ fn text_capability_depends_only_on_resolved_collation_semantics() {
         ] {
             assert_eq!(
                 capability(type_oid, triple(text[0]), semantics),
-                Some(SupportedPredicateCapability::Conservative),
+                Some(SupportedPredicateCapability::Exact),
             );
         }
         for semantics in [
@@ -372,7 +437,7 @@ fn text_capability_depends_only_on_resolved_collation_semantics() {
         for opno in text[2..].iter().copied() {
             assert_eq!(
                 capability(type_oid, triple(opno), CollationSemantics::COrPosix),
-                Some(SupportedPredicateCapability::Conservative),
+                Some(SupportedPredicateCapability::Exact),
             );
             assert_eq!(
                 capability(type_oid, triple(opno), CollationSemantics::Deterministic),
@@ -381,7 +446,7 @@ fn text_capability_depends_only_on_resolved_collation_semantics() {
         }
         assert_eq!(
             capability(type_oid, triple(text[1]), CollationSemantics::COrPosix),
-            None,
+            Some(SupportedPredicateCapability::Exact),
         );
     }
 }
@@ -389,6 +454,7 @@ fn text_capability_depends_only_on_resolved_collation_semantics() {
 #[test]
 fn null_tests_admit_supported_types_including_float() {
     for type_oid in [
+        pg_sys::BOOLOID,
         pg_sys::INT2OID,
         pg_sys::INT4OID,
         pg_sys::INT8OID,
@@ -402,7 +468,7 @@ fn null_tests_admit_supported_types_including_float() {
         pg_sys::FLOAT8OID,
     ] {
         assert!(
-            PredicatePushdownPolicy::supports_null_test(type_oid),
+            PgPredicatePushdownPolicy::supports_null_test(type_oid),
             "null tests must be supported for type {}",
             u32::from(type_oid),
         );
@@ -411,9 +477,9 @@ fn null_tests_admit_supported_types_including_float() {
 
 #[test]
 fn null_tests_reject_unsupported_types() {
-    for type_oid in [pg_sys::BOOLOID, pg_sys::BYTEAOID, Oid::from(9_999_999u32)] {
+    for type_oid in [pg_sys::BYTEAOID, Oid::from(9_999_999u32)] {
         assert!(
-            !PredicatePushdownPolicy::supports_null_test(type_oid),
+            !PgPredicatePushdownPolicy::supports_null_test(type_oid),
             "null tests must be unsupported for type {}",
             u32::from(type_oid),
         );

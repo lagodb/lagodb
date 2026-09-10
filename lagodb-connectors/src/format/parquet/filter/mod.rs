@@ -15,6 +15,7 @@ use lagodb_core::expr::{PushdownCosting, RuntimeValueBindings};
 use lagodb_core::fdw::ForeignFilterExplainValues;
 use lagodb_core::handles::RelationGuard;
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
+use lagodb_core::tuple::Utf8ServerEncoding;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
@@ -24,7 +25,7 @@ use crate::format::{
 };
 
 use self::runtime::BoundNode;
-use self::value::{ComparisonOperator, ValueType};
+use self::value::{ComparisonOperator, DecodedValue, ValueType};
 
 pub(crate) use self::pruning::ParquetFilePredicate;
 pub(crate) use self::runtime::ParquetBoundPredicate;
@@ -38,6 +39,7 @@ const NODE_NOT: i32 = 5;
 
 pub(super) struct ParquetFilterPlanner {
     columns: Box<[Option<PlannedColumn>]>,
+    utf8: Option<Utf8ServerEncoding>,
 }
 
 impl ParquetFilterPlanner {
@@ -67,6 +69,7 @@ impl ParquetFilterPlanner {
         }
         Ok(Self {
             columns: columns.into_boxed_slice(),
+            utf8: Utf8ServerEncoding::resolve().ok(),
         })
     }
 
@@ -76,6 +79,13 @@ impl ParquetFilterPlanner {
         node: &PredicateExpr,
     ) -> Option<PlannedNode> {
         match node {
+            PredicateExpr::AlwaysTrue
+            | PredicateExpr::AlwaysFalse
+            | PredicateExpr::StrictTrue(_)
+            | PredicateExpr::StrictFalse(_)
+            | PredicateExpr::IsNan(_)
+            | PredicateExpr::IsNotNan(_)
+            | PredicateExpr::StartsWith { .. } => None,
             PredicateExpr::Comparison {
                 operator,
                 left,
@@ -96,6 +106,7 @@ impl ParquetFilterPlanner {
                     operator.opno,
                     operator.opcollid,
                     operator.inputcollid,
+                    self.utf8,
                 )?;
                 if mirrored {
                     operator = operator.mirrored();
@@ -255,9 +266,8 @@ impl PlannedNode {
                     .append_i32(NODE_COMPARISON)
                     .append_i32(operator.tag());
                 column.encode(writer);
-                writer
-                    .append_count(value.index())
-                    .append_i32(value_type.tag());
+                writer.append_count(value.index());
+                value_type.encode(writer);
             }
             Self::IsNull(column) => {
                 writer.append_i32(NODE_IS_NULL);
@@ -297,7 +307,7 @@ impl PlannedNode {
                     .ok_or_else(|| {
                         ConnectorError::invalid_filter_plan(FormatKind::Parquet)
                     })?;
-                let value_type = ValueType::from_tag(reader.read_i32()?)?;
+                let value_type = ValueType::decode_plan(reader)?;
                 if !value_type.accepts_operator(operator) {
                     return Err(ConnectorError::invalid_filter_plan(
                         FormatKind::Parquet,
@@ -366,14 +376,27 @@ impl PlannedNode {
                     // truth set, so UNKNOWN can be folded to NeverTrue here.
                     BoundNode::NeverTrue
                 } else {
-                    BoundNode::Comparison {
-                        operator: if negated {
-                            operator.negated()
-                        } else {
-                            *operator
+                    let operator = if negated {
+                        operator.negated()
+                    } else {
+                        *operator
+                    };
+                    match unsafe { value_type.decode(value)? } {
+                        DecodedValue::Scalar(value) => BoundNode::Comparison {
+                            operator,
+                            column: column.clone(),
+                            value,
                         },
-                        column: column.clone(),
-                        value: unsafe { value_type.decode(value)? },
+                        DecodedValue::OutsideFinite(value) => {
+                            if value
+                                .matches_finite_column(operator.kind())
+                                .expect("outside-finite Decimal128 value")
+                            {
+                                BoundNode::IsNotNull(column.clone())
+                            } else {
+                                BoundNode::NeverTrue
+                            }
+                        }
                     }
                 }
             }
