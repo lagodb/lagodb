@@ -36,6 +36,8 @@ impl FdwPlannedPredicate {
         values: ForeignFilterExplainValues<'_>,
     ) -> String {
         match node {
+            PlannedIcebergNode::AlwaysTrue => "TRUE".to_owned(),
+            PlannedIcebergNode::AlwaysFalse => "FALSE".to_owned(),
             PlannedIcebergNode::Comparison {
                 operator,
                 column,
@@ -53,6 +55,17 @@ impl FdwPlannedPredicate {
             PlannedIcebergNode::IsNotNull(column) => {
                 format!("{} IS NOT NULL", column.debug_name)
             }
+            PlannedIcebergNode::IsNan(column) => {
+                format!("{} IS NAN", column.debug_name)
+            }
+            PlannedIcebergNode::IsNotNan(column) => {
+                format!("{} IS NOT NAN", column.debug_name)
+            }
+            PlannedIcebergNode::StartsWith { column, prefix } => format!(
+                "{} STARTS WITH {}",
+                column.debug_name,
+                values.value(*prefix)
+            ),
             PlannedIcebergNode::And(children) => {
                 Self::explain_logical(children, values, " AND ")
             }
@@ -138,6 +151,9 @@ impl FilterPushdownPlanner for IcebergFdwFilterPlanner {
         };
         Ok(match plan {
             FilterPlan::Unsupported => FilterPlan::Unsupported,
+            FilterPlan::Partial(planned) => {
+                FilterPlan::partial(wrap(planned.predicate), planned.costing)
+            }
             FilterPlan::Exact(planned) => {
                 FilterPlan::exact(wrap(planned.predicate), planned.costing)
             }
