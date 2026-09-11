@@ -3,16 +3,18 @@
 use std::ops::Not;
 
 use datafusion::common::{DataFusionError, ScalarValue};
+use datafusion::functions::math::expr_fn::isnan;
 use datafusion::logical_expr::expr::{Case, InList};
+use datafusion::logical_expr::expr_fn::cast;
 use datafusion::logical_expr::{Expr, col};
 use lagodb_arrow::PgDatumArrayBuilder;
-use lagodb_core::expr::{ColumnRef, RuntimeValue};
+use lagodb_core::expr::{ColumnRef, RuntimeValue, RuntimeValueSource};
 use lagodb_core::query_contract::OutputId;
 use pgrx::{AnyNumeric, FromDatum, pg_sys};
 
 use crate::plan::{
-    BooleanTestKind, ComparisonKind, ExecutionExpr, ExecutionScalarRepr,
-    ScalarFunctionKind,
+    BooleanTestKind, ComparisonKind, Decimal128Semantics, ExecutionExpr,
+    ExecutionScalarRepr, ScalarFunctionKind,
 };
 
 use super::native_semantics::PgIntegerAbsUdf;
@@ -44,6 +46,18 @@ impl<'a> DataFusionExpressionCompiler<'a> {
         expression: &ExecutionExpr,
     ) -> Result<Expr, DataFusionPlanError> {
         match expression {
+            ExecutionExpr::StrictTrue(value) => {
+                let value = self.compile(value)?;
+                // Arrow comparisons propagate NULL and compare every value,
+                // including a NaN bit pattern, equal to itself.
+                Ok(value.clone().eq(value))
+            }
+            ExecutionExpr::StrictFalse(value) => {
+                let value = self.compile(value)?;
+                // The same reflexive ordering makes self-greater-than false
+                // for every non-NULL value while retaining UNKNOWN for NULL.
+                Ok(value.clone().gt(value))
+            }
             ExecutionExpr::Column(column) => self.column(column),
             ExecutionExpr::Value(value) => self
                 .values
@@ -53,6 +67,15 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                     index: value.index(),
                 })
                 .and_then(Self::runtime_value)
+                .map(|value| Expr::Literal(value, None)),
+            ExecutionExpr::DecimalValue { value, semantics } => self
+                .values
+                .get(value.index())
+                .copied()
+                .ok_or(DataFusionPlanError::MissingRuntimeValue {
+                    index: value.index(),
+                })
+                .and_then(|value| Self::decimal_runtime_value(value, *semantics))
                 .map(|value| Expr::Literal(value, None)),
             ExecutionExpr::Output(output) => Ok(col(Self::output_name(*output))),
             ExecutionExpr::Comparison {
@@ -83,6 +106,8 @@ impl<'a> DataFusionExpressionCompiler<'a> {
             }
             ExecutionExpr::IsNull(value) => Ok(self.compile(value)?.is_null()),
             ExecutionExpr::IsNotNull(value) => Ok(self.compile(value)?.is_not_null()),
+            ExecutionExpr::IsNan(value) => Ok(isnan(self.compile(value)?)),
+            ExecutionExpr::IsNotNan(value) => Ok(isnan(self.compile(value)?).not()),
             ExecutionExpr::BooleanTest { kind, value } => {
                 let value = self.compile(value)?;
                 Ok(match kind {
@@ -112,6 +137,15 @@ impl<'a> DataFusionExpressionCompiler<'a> {
             }
             ExecutionExpr::Not(child) => Ok(self.compile(child)?.not()),
             ExecutionExpr::Relabel { value, .. } => self.compile(value),
+            ExecutionExpr::WidenInteger { value, result_type } => {
+                let representation =
+                    ExecutionScalarRepr::for_runtime_value(*result_type).ok_or(
+                        DataFusionPlanError::UnsupportedRuntimeType {
+                            oid: result_type.type_oid,
+                        },
+                    )?;
+                Ok(cast(self.compile(value)?, representation.data_type()))
+            }
             ExecutionExpr::Case {
                 when_then,
                 else_expr,
@@ -191,6 +225,12 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                 "native scalar function has an invalid argument layout".to_owned(),
             )
         };
+        // Compatibility boundary for native text constructors such as Repeat
+        // and Replace: DataFusion limits one Utf8 value by Arrow's i32 offset
+        // range, whereas PostgreSQL is bounded by MaxAllocSize and reports
+        // PostgreSQL-specific error codes. Parade-compatible native behavior
+        // is retained for now; exact allocation/error parity belongs in the
+        // later semantic-governance phase, not in the per-row adapter.
         Ok(match kind {
             ScalarFunctionKind::Ascii => ascii(arguments.next().ok_or_else(missing)?),
             ScalarFunctionKind::Repeat => repeat(
@@ -305,6 +345,37 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                         .map_err(|_| invalid())
                 })
         }
+    }
+
+    fn decimal_runtime_value(
+        value: RuntimeValue,
+        semantics: Decimal128Semantics,
+    ) -> Result<ScalarValue, DataFusionPlanError> {
+        let metadata = value.metadata();
+        let oid = metadata.value_type.type_oid;
+        let invalid = || DataFusionPlanError::InvalidRuntimeValue { oid };
+        if oid != pg_sys::NUMERICOID
+            || metadata.source_kind != RuntimeValueSource::Constant
+        {
+            return Err(invalid());
+        }
+        if value.is_null() {
+            return Ok(ScalarValue::Decimal128(
+                None,
+                semantics.precision(),
+                semantics.scale(),
+            ));
+        }
+        let codec = semantics.codec();
+        // SAFETY: RuntimeValueState evaluated this NUMERIC expression in the
+        // current executor context and retains the datum for plan compilation.
+        let coefficient = unsafe { codec.encode_bound_datum(value.datum()) }
+            .map_err(|_| invalid())?;
+        Ok(ScalarValue::Decimal128(
+            Some(coefficient),
+            semantics.precision(),
+            semantics.scale(),
+        ))
     }
 
     pub(super) fn output_name(output: OutputId) -> String {
