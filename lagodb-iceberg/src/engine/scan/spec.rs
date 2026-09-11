@@ -91,19 +91,62 @@ pub(crate) struct AnalyzeScanInput {
     pub(crate) storage_bytes: u64,
 }
 
-/// Query-offload preparation output.
+/// Query-offload statement binding output.
 ///
 /// This is the private upstream-trait boundary between PostgreSQL-facing
 /// [`ScanSpec`] and the DataFusion source. Slot decoding and mutation state have
-/// already been discarded; the retained scan and tasks are the exact pair from
-/// one captured transaction view. The destination is `Send + Sync` only so it
+/// already been discarded; the retained scan and task planner share one
+/// captured transaction view. The destination is `Send + Sync` only so it
 /// can enter the private DataFusion adapter; its outer serial execution owner
 /// remains bound to the current PostgreSQL backend thread.
-pub(crate) struct PreparedQueryScanInput {
+pub(crate) struct BoundQueryScanInput {
     pub(crate) scan: TableScan,
-    pub(crate) tasks: Arc<[FileScanTask]>,
     pub(crate) arrow_schema: arrow_schema::SchemaRef,
     pub(crate) row_filter: Option<Predicate>,
+    pub(crate) task_planner: QueryTaskPlanner,
+}
+
+/// Statement-bound inputs capable of producing either the cacheable stable
+/// task inventory or a fresh task plan narrowed by one QueryRun predicate.
+#[derive(Debug)]
+pub(crate) struct QueryTaskPlanner {
+    table: Table,
+    field_ids: Box<[i32]>,
+    planning_filter: Option<Predicate>,
+    delta: Option<Arc<SnapshotDelta>>,
+}
+
+impl QueryTaskPlanner {
+    pub(crate) fn field_ids(&self) -> &[i32] {
+        &self.field_ids
+    }
+
+    pub(crate) fn plan_files(
+        &self,
+        projected_field_ids: &[i32],
+        additional_filter: Option<&Predicate>,
+    ) -> IcebergResult<Vec<FileScanTask>> {
+        let filter = match (&self.planning_filter, additional_filter) {
+            (Some(stable), Some(runtime)) => {
+                Some(Predicate::and(stable.clone(), runtime.clone()))
+            }
+            (Some(predicate), None) | (None, Some(predicate)) => {
+                Some(predicate.clone())
+            }
+            (None, None) => None,
+        };
+        let mut builder = self
+            .table
+            .scan()
+            .select_field_ids(projected_field_ids.iter().copied());
+        if let Some(filter) = filter {
+            builder = builder.with_filter(filter);
+        }
+        if let Some(delta) = &self.delta {
+            builder = builder.with_delta(Arc::clone(delta));
+        }
+        Ok(builder.build()?.plan_files()?)
+    }
 }
 
 /// Typed zero-column scan preparation. Only the scalar-COUNT constructor can
@@ -112,16 +155,8 @@ pub(crate) struct PreparedQueryScanInput {
 pub(crate) struct CountRowsScanSpec(ScanSpec);
 
 impl CountRowsScanSpec {
-    pub(crate) fn set_predicates(
-        &mut self,
-        planning_filter: Option<Predicate>,
-        row_filter: Option<Predicate>,
-    ) {
-        self.0.set_predicates(planning_filter, row_filter);
-    }
-
-    pub(crate) fn prepare(self) -> IcebergResult<PreparedQueryScanInput> {
-        self.0.prepare_query_source()
+    pub(crate) fn bind(self) -> IcebergResult<BoundQueryScanInput> {
+        self.0.bind_query_source()
     }
 }
 
@@ -334,23 +369,24 @@ impl ScanSpec {
         })
     }
 
-    pub(crate) fn prepare_query_source(
-        self,
-    ) -> IcebergResult<PreparedQueryScanInput> {
+    pub(crate) fn bind_query_source(self) -> IcebergResult<BoundQueryScanInput> {
         let arrow_schema = Arc::new(self.plan.query_arrow_schema()?);
+        let field_ids = self.plan.project_field_ids().into();
         let scan = self.build_scan(
             RowLocationProjection::Exclude,
             self.planning_filter.as_ref(),
         )?;
-        let tasks = match self.query_tasks {
-            Some(tasks) => tasks,
-            None => Arc::from(scan.plan_files()?.into_boxed_slice()),
+        let task_planner = QueryTaskPlanner {
+            table: self.table,
+            field_ids,
+            planning_filter: self.planning_filter,
+            delta: self.delta,
         };
-        Ok(PreparedQueryScanInput {
+        Ok(BoundQueryScanInput {
             scan,
-            tasks,
             arrow_schema,
             row_filter: self.row_filter,
+            task_planner,
         })
     }
 
