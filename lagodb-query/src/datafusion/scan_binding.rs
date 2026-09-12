@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use datafusion::catalog::TableProvider;
 use datafusion::common::{Column, Result, TableReference};
 use datafusion::dataframe::DataFrame;
 use datafusion::execution::context::SessionContext;
@@ -28,9 +29,8 @@ impl ScanBinding {
     }
 
     pub(super) fn frame(&self, session: &SessionContext) -> Result<DataFrame> {
-        session
-            .read_table(self.provider.clone())?
-            .alias(self.qualifier.table())
+        let provider: Arc<dyn TableProvider> = self.provider.clone();
+        session.read_table(provider)?.alias(self.qualifier.table())
     }
 
     pub(super) fn column(&self, attno: pg_sys::AttrNumber) -> Option<Column> {

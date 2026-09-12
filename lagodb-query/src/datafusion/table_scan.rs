@@ -1,32 +1,42 @@
 //! Provider-neutral DataFusion table scan backed by Arrow C Stream.
 
-use std::fmt;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
+mod metrics;
+mod predicate;
+mod runtime_filters;
+mod static_filters;
+mod stream;
 
-use arrow_array::{RecordBatch, RecordBatchReader};
-use arrow_schema::{ArrowError, SchemaRef};
+use std::fmt;
+use std::sync::Arc;
+
+use arrow_schema::SchemaRef;
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
+use datafusion::common::config::ConfigOptions;
 use datafusion::common::stats::Precision;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DataFusionError, Result, Statistics};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
-use datafusion::logical_expr::{Expr, TableType};
+use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::filter_pushdown::{
+    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation,
+};
+use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::{
     ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan,
-    Partitioning, PlanProperties, RecordBatchStream, ReplaceChildrenOptions,
+    Partitioning, PlanProperties, ReplaceChildrenOptions,
 };
-use futures::Stream;
-use lagodb_core::diag::PgReportError;
-use lagodb_core::query_contract::{ScanEstimate, ScanId};
+use lagodb_core::query_contract::{ScanCost, ScanId};
 use pgrx::pg_sys;
 
+use self::metrics::ScanExecMetrics;
+use self::runtime_filters::RuntimeFilterSet;
+use self::static_filters::StaticFilterSet;
+use self::stream::ExternalTableScanStream;
 use super::metrics::ExecutionMetrics;
-use super::scan_callbacks::{PreparedTableScanHandle, ProviderStreamReader};
+use super::scan_callbacks::BoundTableScanHandle;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ExternalTableStatistics {
@@ -34,9 +44,9 @@ pub(super) struct ExternalTableStatistics {
 }
 
 impl ExternalTableStatistics {
-    pub(super) fn from_estimate(estimate: ScanEstimate) -> Self {
+    pub(super) fn from_scan_cost(cost: ScanCost) -> Self {
         Self {
-            estimated_rows: estimate.estimated_rows().min(usize::MAX as f64) as usize,
+            estimated_rows: cost.rows_read().min(usize::MAX as f64) as usize,
         }
     }
 }
@@ -51,11 +61,11 @@ pub(super) struct ExternalTableScanLimits {
 pub(super) struct ExternalTableProvider {
     scan: ScanId,
     schema: SchemaRef,
-    positions_by_attno: Box<[Option<usize>]>,
+    positions_by_attno: Arc<[Option<usize>]>,
     statistics: ExternalTableStatistics,
     limits: ExternalTableScanLimits,
-    prepared: Arc<PreparedTableScanHandle>,
-    metrics: Arc<ExecutionMetrics>,
+    bound: Arc<BoundTableScanHandle>,
+    metrics: Option<Arc<ExecutionMetrics>>,
 }
 
 impl ExternalTableProvider {
@@ -65,9 +75,14 @@ impl ExternalTableProvider {
         projected_attnos: Box<[pg_sys::AttrNumber]>,
         statistics: ExternalTableStatistics,
         limits: ExternalTableScanLimits,
-        prepared: Arc<PreparedTableScanHandle>,
-        metrics: Arc<ExecutionMetrics>,
+        bound: Arc<BoundTableScanHandle>,
+        metrics: Option<Arc<ExecutionMetrics>>,
     ) -> Result<Self> {
+        // `bound_schema` is part of the provider's statement-binding contract:
+        // its fields correspond positionally to this projection. Validate the
+        // structural arity once at Begin, then trust the provider-owned Arrow
+        // types rather than repeating PostgreSQL type checks while reading.
+        // The final query-output decoder separately binds the destination slot.
         if schema.fields().len() != projected_attnos.len() {
             return Err(DataFusionError::Internal(format!(
                 "table scan {} returned {} Arrow fields for {} projected attributes",
@@ -88,10 +103,10 @@ impl ExternalTableProvider {
         Ok(Self {
             scan,
             schema,
-            positions_by_attno: positions_by_attno.into_boxed_slice(),
+            positions_by_attno: positions_by_attno.into(),
             statistics,
             limits,
-            prepared,
+            bound,
             metrics,
         })
     }
@@ -129,6 +144,18 @@ impl TableProvider for ExternalTableProvider {
         })
     }
 
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> Result<Vec<TableProviderFilterPushDown>> {
+        filters
+            .iter()
+            .map(|filter| {
+                StaticFilterSet::support(filter, self.schema.as_ref(), &self.bound)
+            })
+            .collect()
+    }
+
     async fn scan(
         &self,
         _state: &dyn Session,
@@ -145,16 +172,8 @@ impl TableProvider for ExternalTableProvider {
                 "table scan projection is out of bounds".to_owned(),
             ));
         }
-        if !filters.is_empty() {
-            // PostgreSQL scan-local predicates have already gone through the
-            // typed provider contract. A filter arriving here is optimizer-
-            // derived and cannot bypass that negotiation.
-            // TODO(query filter pushdown): route it through the ScanId-scoped
-            // static-filter contract before accepting it here.
-            return Err(DataFusionError::Plan(
-                "external table scan does not accept engine filters".to_owned(),
-            ));
-        }
+        let static_filters =
+            StaticFilterSet::plan(filters, self.schema.as_ref(), &self.bound)?;
         let projection = projection
             .cloned()
             .unwrap_or_else(|| (0..self.schema.fields().len()).collect());
@@ -162,16 +181,11 @@ impl TableProvider for ExternalTableProvider {
             Arc::new(self.schema.project(&projection).map_err(|error| {
                 DataFusionError::ArrowError(Box::new(error), None)
             })?);
-        let identity_projection = projection.len() == self.schema.fields().len()
-            && projection
-                .iter()
-                .enumerate()
-                .all(|(position, projected)| position == *projected);
         Ok(Arc::new(ExternalTableScanExec::new(
             self,
             output_schema,
             projection.into_boxed_slice(),
-            identity_projection,
+            static_filters,
         )))
     }
 }
@@ -179,13 +193,14 @@ impl TableProvider for ExternalTableProvider {
 #[derive(Debug)]
 pub(super) struct ExternalTableScanExec {
     scan: ScanId,
-    source_schema: SchemaRef,
     schema: SchemaRef,
     projection: Box<[usize]>,
-    identity_projection: bool,
+    static_filters: StaticFilterSet,
     limits: ExternalTableScanLimits,
-    prepared: Arc<PreparedTableScanHandle>,
-    metrics: Arc<ExecutionMetrics>,
+    bound: Arc<BoundTableScanHandle>,
+    metrics: Option<Arc<ExecutionMetrics>>,
+    runtime_filters: RuntimeFilterSet,
+    scan_metrics: Option<ScanExecMetrics>,
     properties: Arc<PlanProperties>,
 }
 
@@ -194,7 +209,7 @@ impl ExternalTableScanExec {
         provider: &ExternalTableProvider,
         schema: SchemaRef,
         projection: Box<[usize]>,
-        identity_projection: bool,
+        static_filters: StaticFilterSet,
     ) -> Self {
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(Arc::clone(&schema)),
@@ -204,15 +219,34 @@ impl ExternalTableScanExec {
         ));
         Self {
             scan: provider.scan,
-            source_schema: Arc::clone(&provider.schema),
             schema,
             projection,
-            identity_projection,
+            static_filters,
             limits: provider.limits,
-            prepared: Arc::clone(&provider.prepared),
-            metrics: Arc::clone(&provider.metrics),
+            bound: Arc::clone(&provider.bound),
+            metrics: provider.metrics.as_ref().map(Arc::clone),
+            runtime_filters: RuntimeFilterSet::default(),
+            scan_metrics: provider.metrics.as_ref().map(|_| ScanExecMetrics::new()),
             properties,
         }
+    }
+
+    fn with_runtime_filters(
+        &self,
+        runtime_filters: RuntimeFilterSet,
+    ) -> Arc<dyn ExecutionPlan> {
+        Arc::new(Self {
+            scan: self.scan,
+            schema: Arc::clone(&self.schema),
+            projection: self.projection.clone(),
+            static_filters: self.static_filters.clone(),
+            limits: self.limits,
+            bound: Arc::clone(&self.bound),
+            metrics: self.metrics.as_ref().map(Arc::clone),
+            runtime_filters,
+            scan_metrics: self.scan_metrics.clone(),
+            properties: Arc::clone(&self.properties),
+        })
     }
 }
 
@@ -226,8 +260,9 @@ impl DisplayAs for ExternalTableScanExec {
             DisplayFormatType::Default | DisplayFormatType::Verbose => {
                 write!(
                     formatter,
-                    "ExternalTableScanExec: scan={}",
-                    self.scan.index()
+                    "ExternalTableScanExec: scan={}, runtime_filters={}",
+                    self.scan.index(),
+                    self.runtime_filters.len(),
                 )
             }
             DisplayFormatType::TreeRender => formatter.write_str("ExternalTableScan"),
@@ -250,9 +285,9 @@ impl ExecutionPlan for ExternalTableScanExec {
 
     fn apply_expressions(
         &self,
-        _visitor: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+        visitor: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
     ) -> Result<TreeNodeRecursion> {
-        Ok(TreeNodeRecursion::Continue)
+        self.runtime_filters.visit(visitor)
     }
 
     fn replace_children(
@@ -280,6 +315,27 @@ impl ExecutionPlan for ExternalTableScanExec {
         )
     }
 
+    fn handle_child_pushdown_result(
+        &self,
+        phase: FilterPushdownPhase,
+        child_pushdown_result: ChildPushdownResult,
+        _config: &ConfigOptions,
+    ) -> Result<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
+        if !matches!(phase, FilterPushdownPhase::Post) {
+            return Ok(FilterPushdownPropagation::if_all(child_pushdown_result));
+        }
+        let (runtime_filters, results, changed) = self
+            .runtime_filters
+            .merge(&child_pushdown_result.parent_filters);
+        let propagation =
+            FilterPushdownPropagation::with_parent_pushdown_result(results);
+        Ok(if changed {
+            propagation.with_updated_node(self.with_runtime_filters(runtime_filters))
+        } else {
+            propagation
+        })
+    }
+
     fn execute(
         &self,
         partition: usize,
@@ -290,84 +346,10 @@ impl ExecutionPlan for ExternalTableScanExec {
                 "ExternalTableScanExec partition {partition} is outside its single partition"
             )));
         }
-        let reader = self
-            .prepared
-            .open_serial_stream(self.limits.maximum_batch_rows)
-            .map_err(|error| DataFusionError::External(Box::new(error)))?;
-        if reader.schema() != self.source_schema {
-            return Err(DataFusionError::Execution(
-                "table-scan Arrow C Stream schema differs from its planned schema"
-                    .to_owned(),
-            ));
-        }
-        Ok(Box::pin(ExternalTableScanStream {
-            schema: Arc::clone(&self.schema),
-            projection: self.projection.clone(),
-            identity_projection: self.identity_projection,
-            reader,
-            metrics: Arc::clone(&self.metrics),
-        }))
+        Ok(Box::pin(ExternalTableScanStream::new(self)))
     }
-}
 
-struct ExternalTableScanStream {
-    schema: SchemaRef,
-    projection: Box<[usize]>,
-    identity_projection: bool,
-    reader: ProviderStreamReader,
-    metrics: Arc<ExecutionMetrics>,
-}
-
-impl ExternalTableScanStream {
-    fn map_error(error: ArrowError) -> DataFusionError {
-        match error {
-            ArrowError::ExternalError(error) => {
-                match error.downcast::<PgReportError>() {
-                    Ok(error) => DataFusionError::Context(
-                        "table scan batch".to_owned(),
-                        Box::new(DataFusionError::External(error)),
-                    ),
-                    Err(error) => DataFusionError::ArrowError(
-                        Box::new(ArrowError::ExternalError(error)),
-                        None,
-                    ),
-                }
-            }
-            error => DataFusionError::ArrowError(Box::new(error), None),
-        }
-    }
-}
-
-impl Stream for ExternalTableScanStream {
-    type Item = Result<RecordBatch>;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        _context: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        // PostgreSQL does not regain control while an aggregate query consumes
-        // the input. Check once at each scan batch boundary, never per row.
-        pg_sys::check_for_interrupts!();
-        let batch = match self.reader.next() {
-            Some(Ok(batch)) => {
-                self.metrics.record_input(&batch);
-                if self.identity_projection {
-                    Some(Ok(batch))
-                } else {
-                    Some(batch.project(&self.projection).map_err(|error| {
-                        DataFusionError::ArrowError(Box::new(error), None)
-                    }))
-                }
-            }
-            Some(Err(error)) => Some(Err(Self::map_error(error))),
-            None => None,
-        };
-        Poll::Ready(batch)
-    }
-}
-
-impl RecordBatchStream for ExternalTableScanStream {
-    fn schema(&self) -> SchemaRef {
-        Arc::clone(&self.schema)
+    fn metrics(&self) -> Option<MetricsSet> {
+        self.scan_metrics.as_ref().map(ScanExecMetrics::snapshot)
     }
 }
