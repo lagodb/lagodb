@@ -1,6 +1,7 @@
 //! Statement-owned query preparation and one-run-at-a-time execution state.
 
-use std::ffi::CStr;
+mod table_scans;
+
 use std::mem;
 use std::sync::Arc;
 
@@ -12,27 +13,23 @@ use futures::StreamExt;
 use lagodb_arrow::BoundBatch;
 use lagodb_core::customscan::custom_exprs::PgExpressionSections;
 use lagodb_core::expr::RuntimeValueState;
-use lagodb_core::query_contract::ScanId;
-use lagodb_core::runtime_api::TableScanRuntimeValue;
 use pgrx::pg_sys;
 use tokio::runtime::{Builder, Runtime};
 
 use super::{QueryExecutionError, QueryOutputDecoder};
 use crate::datafusion::SerialExecutionLimits;
 use crate::datafusion::metrics::ExecutionMetrics;
-use crate::datafusion::physical_plan::CompiledPhysicalPlan;
+use crate::datafusion::physical_plan::{
+    CompiledPhysicalPlan, PhysicalPlanMetricsAccumulator,
+};
 use crate::datafusion::plan_compiler::DataFusionPlanCompiler;
 use crate::datafusion::postgres_eval::{PgExprRuntime, without_pg_cleanup};
-use crate::datafusion::scan_callbacks::{
-    PreparedTableScanHandle, SerialTableScanCallbacks,
-};
-use crate::datafusion::table_scan::{
-    ExternalTableProvider, ExternalTableScanLimits, ExternalTableStatistics,
-};
+use crate::datafusion::scan_callbacks::SerialTableScanCallbacks;
+use crate::datafusion::table_scan::ExternalTableProvider;
 use crate::plan::{
-    PlannedTableScan, QueryFragment, QueryNode, QueryPlanData, QueryTupleLayout,
-    ScanNode,
+    PlanExplainNode, PlannedTableScan, QueryFragment, QueryPlanData, QueryTupleLayout,
 };
+use table_scans::BoundTableScans;
 
 enum QueryExecutionState {
     Ready,
@@ -45,6 +42,12 @@ struct QueryRun {
     batch: Option<BoundBatch>,
     next_row: usize,
     batch_rows: usize,
+}
+
+struct QueryPreparation<'a> {
+    fragment: &'a QueryFragment,
+    layout: &'a QueryTupleLayout,
+    limits: SerialExecutionLimits,
 }
 
 impl QueryRun {
@@ -67,181 +70,42 @@ impl QueryRun {
     }
 }
 
-struct PreparedScan {
-    scan: ScanId,
-    statistics: ExternalTableStatistics,
-    handle: Arc<PreparedTableScanHandle>,
-}
-
-/// Dense, statement-owned provider handles corresponding to the plan scan table.
-struct PreparedTableScans {
-    entries: Box<[PreparedScan]>,
-}
-
-impl PreparedTableScans {
-    fn prepare(
-        scans: &[PlannedTableScan<'_>],
-        callbacks: &[SerialTableScanCallbacks],
-        runtime_values: &[TableScanRuntimeValue],
-    ) -> Result<Self, QueryExecutionError> {
-        if scans.len() != callbacks.len() {
-            return Err(QueryExecutionError::ScanCallbackCount {
-                scans: scans.len(),
-                callbacks: callbacks.len(),
-            });
-        }
-
-        let mut entries = Vec::with_capacity(scans.len());
-        for (scan, callbacks) in scans.iter().zip(callbacks) {
-            let runtime_values = scan.runtime_bindings().select(runtime_values);
-            // SAFETY: the selected plan ties every provider payload to the
-            // live PostgreSQL plan-data input, and registry resolution supplies
-            // the callbacks for this entry's provider identity. Selected-plan
-            // validation bounds the scan-local runtime binding view.
-            let handle = match unsafe {
-                callbacks.prepare(scan.scan(), scan.provider_plan(), runtime_values)
-            } {
-                Ok(handle) => handle,
-                Err(error) => {
-                    let cleanup = Self {
-                        entries: entries.into_boxed_slice(),
-                    }
-                    .close()
-                    .err()
-                    .map(Box::new);
-                    return Err(QueryExecutionError::Initialization {
-                        primary: Box::new(QueryExecutionError::ScanPrepare(error)),
-                        cleanup,
-                    });
-                }
-            };
-            entries.push(PreparedScan {
-                scan: scan.scan(),
-                statistics: ExternalTableStatistics::from_estimate(scan.estimate()),
-                handle: Arc::new(handle),
-            });
-        }
-        Ok(Self {
-            entries: entries.into_boxed_slice(),
-        })
-    }
-
-    fn providers(
-        &self,
-        fragment: &QueryFragment,
-        limits: SerialExecutionLimits,
-        metrics: &Arc<ExecutionMetrics>,
-    ) -> Result<Box<[Arc<ExternalTableProvider>]>, QueryExecutionError> {
-        self.entries
-            .iter()
-            .map(|entry| {
-                let schema = entry
-                    .handle
-                    .schema()
-                    .map_err(QueryExecutionError::ScanPrepare)?;
-                let projected_attnos: Box<[pg_sys::AttrNumber]> =
-                    Self::scan_node(fragment.root(), entry.scan)
-                        .map(|scan| {
-                            scan.columns().iter().map(|column| column.attno).collect()
-                        })
-                        .ok_or(QueryExecutionError::MissingScanMetadata {
-                            scan: entry.scan.index(),
-                        })?;
-                Ok(Arc::new(ExternalTableProvider::new(
-                    entry.scan,
-                    schema,
-                    projected_attnos,
-                    entry.statistics,
-                    ExternalTableScanLimits {
-                        maximum_batch_rows: limits.maximum_batch_rows() as u64,
-                    },
-                    Arc::clone(&entry.handle),
-                    Arc::clone(metrics),
-                )?))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(Vec::into_boxed_slice)
-    }
-
-    fn scan_node(node: &QueryNode, scan: ScanId) -> Option<&ScanNode> {
-        match node {
-            QueryNode::Scan(node) => (node.scan() == scan).then_some(node),
-            QueryNode::Aggregate(node) => Self::scan_node(node.input(), scan),
-            QueryNode::Distinct(node) => Self::scan_node(node.input(), scan),
-            QueryNode::Filter(node) => Self::scan_node(node.input(), scan),
-            QueryNode::Project(node) => Self::scan_node(node.input(), scan),
-        }
-    }
-
-    fn finish_run(&self) -> Result<(), QueryExecutionError> {
-        let mut first_error = None;
-        // Streams are opened from the prepared-handle acquisition stack.
-        // Finish every participant in reverse order even when one release
-        // reports an error; otherwise a future multi-source run can leave a
-        // later participant's stream live.
-        for entry in self.entries.iter().rev() {
-            let result = entry
-                .handle
-                .finish_serial_stream()
-                .map_err(QueryExecutionError::ScanRelease);
-            if first_error.is_none() {
-                first_error = result.err();
-            }
-        }
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    fn close(self) -> Result<(), QueryExecutionError> {
-        let mut first_error = None;
-        // Prepared handles form an acquisition stack. Release in reverse so a
-        // later provider can never observe an earlier dependency torn down
-        // while it is still closing.
-        for entry in self.entries.into_vec().into_iter().rev() {
-            let result = Arc::try_unwrap(entry.handle)
-                .map_err(|_| QueryExecutionError::PreparedScanStillShared {
-                    scan: entry.scan.index(),
-                })
-                .and_then(|handle| {
-                    handle.close().map_err(QueryExecutionError::ScanRelease)
-                });
-            if first_error.is_none() {
-                first_error = result.err();
-            }
-        }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-}
-
 /// Resources whose values remain stable for one PostgreSQL statement.
 ///
 /// Field order preserves the unwind fallback order: the physical plan and
-/// session release their prepared-scan shares before the runtime stops and
-/// before the provider-owned prepared handle is released.
+/// session release their bound-scan shares before the runtime stops and
+/// before the provider-owned binding is released.
 struct PreparedQueryExecution {
     physical_plan: CompiledPhysicalPlan,
+    physical_metrics: Option<PhysicalPlanMetricsAccumulator>,
+    providers: Box<[Arc<ExternalTableProvider>]>,
+    fragment: QueryFragment,
+    postgres: PgExprRuntime,
     session: SessionContext,
     runtime: Runtime,
-    prepared_scans: PreparedTableScans,
+    bound_scans: BoundTableScans,
     runtime_values: RuntimeValueState,
+    parent: *mut pg_sys::PlanState,
+    dynamic_rebind_required: bool,
+    physical_plan_rebuild_required: bool,
+    physical_plan_executed: bool,
 }
 
 impl PreparedQueryExecution {
     fn prepare(
-        fragment: &QueryFragment,
-        layout: &QueryTupleLayout,
-        limits: SerialExecutionLimits,
-        prepared_scans: PreparedTableScans,
+        preparation: QueryPreparation<'_>,
+        bound_scans: BoundTableScans,
         runtime_values: RuntimeValueState,
         postgres: PgExprRuntime,
-        metrics: &Arc<ExecutionMetrics>,
+        metrics: Option<&Arc<ExecutionMetrics>>,
+        parent: *mut pg_sys::PlanState,
     ) -> Result<(Self, Arc<PeakRecordingPool>, QueryOutputDecoder), QueryExecutionError>
     {
+        let QueryPreparation {
+            fragment,
+            layout,
+            limits,
+        } = preparation;
         let result: Result<_, QueryExecutionError> = (|| {
             let runtime = Builder::new_current_thread()
                 .build()
@@ -273,7 +137,7 @@ impl PreparedQueryExecution {
                     .build()
             };
             let session = SessionContext::new_with_state(state);
-            let providers = prepared_scans.providers(fragment, limits, metrics)?;
+            let providers = bound_scans.providers(fragment, limits, metrics)?;
             let compiler = DataFusionPlanCompiler::new(&session, postgres);
             let physical_plan = runtime.block_on(compiler.compile(
                 fragment,
@@ -282,9 +146,9 @@ impl PreparedQueryExecution {
             ))?;
             let output =
                 QueryOutputDecoder::try_new(layout, &physical_plan.schema())?;
-            drop(providers);
             Ok((
                 physical_plan,
+                providers,
                 session,
                 runtime,
                 runtime_resources.memory,
@@ -292,19 +156,29 @@ impl PreparedQueryExecution {
             ))
         })();
         match result {
-            Ok((physical_plan, session, runtime, memory, output)) => Ok((
+            Ok((physical_plan, providers, session, runtime, memory, output)) => Ok((
                 Self {
                     physical_plan,
+                    physical_metrics: metrics
+                        .is_some()
+                        .then(PhysicalPlanMetricsAccumulator::default),
+                    providers,
+                    fragment: fragment.clone(),
+                    postgres,
                     session,
                     runtime,
-                    prepared_scans,
+                    bound_scans,
+                    dynamic_rebind_required: runtime_values.has_dynamic_values(),
+                    physical_plan_rebuild_required: false,
+                    physical_plan_executed: false,
                     runtime_values,
+                    parent,
                 },
                 memory,
                 output,
             )),
             Err(primary) => {
-                let cleanup = prepared_scans.close().err().map(Box::new);
+                let cleanup = bound_scans.close().err().map(Box::new);
                 Err(QueryExecutionError::Initialization {
                     primary: Box::new(primary),
                     cleanup,
@@ -313,8 +187,36 @@ impl PreparedQueryExecution {
         }
     }
 
-    fn start_run(&self) -> Result<QueryRun, QueryExecutionError> {
+    fn rebuild_plan_if_required(&mut self) -> Result<(), QueryExecutionError> {
+        if !self.dynamic_rebind_required && !self.physical_plan_rebuild_required {
+            return Ok(());
+        }
+        if self.dynamic_rebind_required {
+            let econtext = unsafe { (*self.parent).ps_ExprContext };
+            unsafe { self.runtime_values.rebind_complete(econtext) };
+        }
+        let compiler = DataFusionPlanCompiler::new(&self.session, self.postgres);
+        let physical_plan = self.runtime.block_on(compiler.compile(
+            &self.fragment,
+            &self.providers,
+            self.runtime_values.values(),
+        ))?;
+        if self.physical_plan_executed
+            && let Some(physical_metrics) = &mut self.physical_metrics
+        {
+            physical_metrics.record(&self.physical_plan);
+        }
+        self.physical_plan = physical_plan;
+        self.physical_plan_executed = false;
+        self.dynamic_rebind_required = false;
+        self.physical_plan_rebuild_required = false;
+        Ok(())
+    }
+
+    fn start_run(&mut self) -> Result<QueryRun, QueryExecutionError> {
+        self.rebuild_plan_if_required()?;
         let stream = self.physical_plan.execute(self.session.task_ctx())?;
+        self.physical_plan_executed = true;
         Ok(QueryRun {
             stream,
             batch: None,
@@ -324,33 +226,67 @@ impl PreparedQueryExecution {
     }
 
     fn finish_run(&self) -> Result<(), QueryExecutionError> {
-        self.prepared_scans.finish_run()
+        self.bound_scans.finish_run()
+    }
+
+    unsafe fn mark_changed_runtime_values(
+        &mut self,
+        changed_parameters: *mut pg_sys::Bitmapset,
+    ) {
+        if self.runtime_values.has_dynamic_values()
+            && unsafe { self.runtime_values.values_changed(changed_parameters) }
+        {
+            self.dynamic_rebind_required = true;
+        }
+    }
+
+    fn mark_dynamic_filter_plan_consumed(&mut self) {
+        if self.physical_plan.has_dynamic_filters() {
+            self.physical_plan_rebuild_required = true;
+        }
     }
 
     fn close(self) -> Result<(), QueryExecutionError> {
         let Self {
             physical_plan,
+            physical_metrics,
+            providers,
+            fragment,
+            postgres: _,
             session,
             runtime,
-            prepared_scans,
+            bound_scans,
             runtime_values,
+            parent: _,
+            dynamic_rebind_required: _,
+            physical_plan_rebuild_required: _,
+            physical_plan_executed: _,
         } = self;
         drop(physical_plan);
+        drop(physical_metrics);
+        drop(providers);
+        drop(fragment);
         drop(session);
         drop(runtime);
         drop(runtime_values);
-        prepared_scans.close()
+        bound_scans.close()
     }
 
-    fn physical_operators(&self) -> &CStr {
-        self.physical_plan.description()
+    fn physical_plan_analyze(&self, include_timing: bool) -> Option<PlanExplainNode> {
+        self.physical_metrics
+            .as_ref()
+            .map(|metrics| metrics.analyze_tree(&self.physical_plan, include_timing))
+    }
+
+    fn fragment(&self) -> &QueryFragment {
+        &self.fragment
     }
 }
 
 /// The single resource owner consumed by explicit close or the unwind fallback.
 pub(super) struct QueryExecutionResources {
     // Rust drops fields in declaration order. The run must release its stream
-    // before the physical plan/session/runtime and prepared provider handles.
+    // before the physical plan/session/runtime and bound provider handles.
     state: QueryExecutionState,
     prepared: PreparedQueryExecution,
 }
@@ -361,7 +297,7 @@ impl QueryExecutionResources {
         scans: &[PlannedTableScan<'_>],
         callbacks: &[SerialTableScanCallbacks],
         limits: SerialExecutionLimits,
-        metrics: &Arc<ExecutionMetrics>,
+        metrics: Option<&Arc<ExecutionMetrics>>,
         runtime_exprs: *mut pg_sys::List,
         parent: *mut pg_sys::PlanState,
     ) -> Result<(Self, Arc<PeakRecordingPool>, QueryOutputDecoder), QueryExecutionError>
@@ -382,25 +318,19 @@ impl QueryExecutionResources {
         }
         .map_err(QueryExecutionError::RuntimeValues)?;
         let econtext = unsafe { (*parent).ps_ExprContext };
-        unsafe { runtime_values.bind_initial(econtext) };
-        let raw_values = runtime_values
-            .values()
-            .iter()
-            .map(|value| TableScanRuntimeValue {
-                datum: unsafe { value.datum() },
-                is_null: value.is_null(),
-            })
-            .collect::<Vec<_>>();
-        let prepared_scans =
-            PreparedTableScans::prepare(scans, callbacks, &raw_values)?;
+        unsafe { runtime_values.bind_initial_template(econtext) };
+        let bound_scans = BoundTableScans::bind(scans, callbacks)?;
         let (prepared, memory, output) = PreparedQueryExecution::prepare(
-            &fragment,
-            &layout,
-            limits,
-            prepared_scans,
+            QueryPreparation {
+                fragment: &fragment,
+                layout: &layout,
+                limits,
+            },
+            bound_scans,
             runtime_values,
             postgres,
             metrics,
+            parent,
         )?;
         Ok((
             Self {
@@ -489,15 +419,27 @@ impl QueryExecutionResources {
         }
     }
 
-    pub(super) fn rescan(&mut self) -> Result<(), QueryExecutionError> {
+    pub(super) unsafe fn rescan(
+        &mut self,
+        changed_parameters: *mut pg_sys::Bitmapset,
+    ) -> Result<(), QueryExecutionError> {
         let prior = mem::replace(&mut self.state, QueryExecutionState::Ready);
-        match prior {
+        let (result, plan_was_executed) = match prior {
             QueryExecutionState::Running(run) => {
                 drop(run);
-                self.prepared.finish_run()
+                (self.prepared.finish_run(), true)
             }
-            QueryExecutionState::Ready | QueryExecutionState::Exhausted => Ok(()),
+            QueryExecutionState::Exhausted => (Ok(()), true),
+            QueryExecutionState::Ready => (Ok(()), false),
+        };
+        unsafe {
+            self.prepared
+                .mark_changed_runtime_values(changed_parameters)
+        };
+        if plan_was_executed {
+            self.prepared.mark_dynamic_filter_plan_consumed();
         }
+        result
     }
 
     pub(super) fn close(self) -> Result<(), QueryExecutionError> {
@@ -510,7 +452,14 @@ impl QueryExecutionResources {
         let _ = without_pg_cleanup(|| self.close());
     }
 
-    pub(super) fn physical_operators(&self) -> &CStr {
-        self.prepared.physical_operators()
+    pub(super) fn physical_plan_analyze(
+        &self,
+        include_timing: bool,
+    ) -> Option<PlanExplainNode> {
+        self.prepared.physical_plan_analyze(include_timing)
+    }
+
+    pub(super) fn fragment(&self) -> &QueryFragment {
+        self.prepared.fragment()
     }
 }

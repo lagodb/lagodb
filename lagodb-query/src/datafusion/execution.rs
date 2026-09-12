@@ -1,9 +1,8 @@
-//! Current-thread DataFusion lifecycle for serial aggregate queries.
+//! Current-thread DataFusion lifecycle for serial query offload.
 
 mod resources;
 
 use std::error::Error;
-use std::ffi::CStr;
 use std::io;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -25,13 +24,33 @@ use lagodb_core::tuple::SlotColumns;
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{PgMemoryContexts, pg_sys};
 
-use crate::plan::{PlannedTableScan, QueryPlanData, QueryTupleLayout};
+use crate::plan::{
+    PlanExplainNode, PlannedTableScan, QueryFragment, QueryPlanData, QueryTupleLayout,
+};
 
 use super::SerialExecutionLimits;
 use super::metrics::{ExecutionMetrics, ExecutionMetricsSnapshot};
 use super::plan_compiler::DataFusionPlanError;
 use super::scan_callbacks::SerialTableScanCallbacks;
 use resources::QueryExecutionResources;
+
+/// Whether LagoDB records counters and retains physical-plan metrics for
+/// PostgreSQL instrumentation.
+///
+/// This switch does not control DataFusion 55's intrinsic operator metrics:
+/// standard physical operators create their own timers and update them while
+/// executing. `Disabled` guarantees that ordinary PostgreSQL execution adds no
+/// LagoDB scan counters or physical-plan metric retention. EXPLAIN `TIMING OFF`
+/// suppresses DataFusion duration metrics when the retained plan is rendered;
+/// eliminating DataFusion's internal timer reads requires upstream engine
+/// support rather than a LagoDB execution-mode flag.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionMetricsMode {
+    /// Do not collect LagoDB counters or retain physical-plan metrics.
+    Disabled,
+    /// Collect and retain metrics requested by PostgreSQL instrumentation.
+    Enabled,
+}
 
 /// Arrow output columns bound once to the plan's PostgreSQL slot layout.
 pub(super) struct QueryOutputDecoder {
@@ -167,8 +186,7 @@ impl QueryOutputDecoder {
 /// Begin-owned query state with statement resources and at most one lazy run.
 pub struct SerialQueryExecution {
     output: QueryOutputDecoder,
-    output_rows: u64,
-    metrics: Arc<ExecutionMetrics>,
+    metrics: Option<Arc<ExecutionMetrics>>,
     memory: Arc<PeakRecordingPool>,
     resources: Option<QueryExecutionResources>,
     backend_thread: PhantomData<Rc<()>>,
@@ -179,23 +197,24 @@ impl SerialQueryExecution {
         query: QueryPlanData,
         scans: &[PlannedTableScan<'_>],
         limits: SerialExecutionLimits,
+        metrics_mode: ExecutionMetricsMode,
         callbacks: &[SerialTableScanCallbacks],
         runtime_exprs: *mut pg_sys::List,
         parent: *mut pg_sys::PlanState,
     ) -> Result<Self, QueryExecutionError> {
-        let metrics = Arc::new(ExecutionMetrics::default());
+        let metrics = (metrics_mode == ExecutionMetricsMode::Enabled)
+            .then(|| Arc::new(ExecutionMetrics::new(scans.len())));
         let (resources, memory, output) = QueryExecutionResources::prepare(
             query,
             scans,
             callbacks,
             limits,
-            &metrics,
+            metrics.as_ref(),
             runtime_exprs,
             parent,
         )?;
         Ok(Self {
             output,
-            output_rows: 0,
             metrics,
             memory,
             resources: Some(resources),
@@ -220,15 +239,23 @@ impl SerialQueryExecution {
             .expect("active query execution owns its resources");
         let produced =
             unsafe { resources.next_into_slot(&self.output, slot, datum_context) }?;
-        self.output_rows += u64::from(produced);
         Ok(produced)
     }
 
-    pub fn rescan(&mut self) -> Result<(), QueryExecutionError> {
-        self.resources
-            .as_mut()
-            .expect("active query execution owns its resources")
-            .rescan()
+    /// # Safety
+    ///
+    /// `changed_parameters` is NULL or the live `PlanState::chgParam` bitmap
+    /// supplied during PostgreSQL's `ExecReScan` callback.
+    pub unsafe fn rescan(
+        &mut self,
+        changed_parameters: *mut pg_sys::Bitmapset,
+    ) -> Result<(), QueryExecutionError> {
+        unsafe {
+            self.resources
+                .as_mut()
+                .expect("active query execution owns its resources")
+                .rescan(changed_parameters)
+        }
     }
 
     pub fn close(mut self) -> Result<(), QueryExecutionError> {
@@ -244,16 +271,27 @@ impl SerialQueryExecution {
         }
     }
 
-    pub fn metrics(&self) -> ExecutionMetricsSnapshot {
+    pub fn metrics(&self) -> Option<ExecutionMetricsSnapshot> {
         self.metrics
-            .snapshot(self.memory.peak_reserved(), self.output_rows)
+            .as_ref()
+            .map(|metrics| metrics.snapshot(self.memory.peak_reserved()))
     }
 
-    pub fn physical_operators(&self) -> &CStr {
+    pub fn physical_plan_analyze(
+        &self,
+        include_timing: bool,
+    ) -> Option<PlanExplainNode> {
         self.resources
             .as_ref()
             .expect("active query execution owns its resources")
-            .physical_operators()
+            .physical_plan_analyze(include_timing)
+    }
+
+    pub fn fragment(&self) -> &QueryFragment {
+        self.resources
+            .as_ref()
+            .expect("active query execution owns its resources")
+            .fragment()
     }
 }
 
@@ -273,8 +311,8 @@ pub enum QueryExecutionError {
     Runtime(#[source] io::Error),
     #[error("DataFusion query execution failed: {0}")]
     DataFusion(#[from] DataFusionError),
-    #[error("table scan preparation failed: {0}")]
-    ScanPrepare(#[source] PgReportError),
+    #[error("table scan binding failed: {0}")]
+    ScanBind(#[source] PgReportError),
     #[error("failed to initialize query runtime values: {0}")]
     RuntimeValues(#[source] RuntimeValueStateError),
     #[error("invalid PostgreSQL expression sections: {0}")]
@@ -285,8 +323,8 @@ pub enum QueryExecutionError {
     InvalidQueryOutput { columns: usize, rows: usize },
     #[error("failed to convert the DataFusion result batch: {0}")]
     OutputConversion(#[from] PgReportError),
-    #[error("prepared table scan {scan} remained shared while closing execution")]
-    PreparedScanStillShared { scan: usize },
+    #[error("bound table scan {scan} remained shared while closing execution")]
+    BoundScanStillShared { scan: usize },
     #[error("query fragment is missing metadata for table scan {scan}")]
     MissingScanMetadata { scan: usize },
     #[error("table scan release failed: {0}")]
@@ -303,7 +341,7 @@ impl SqlStateError for QueryExecutionError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
             Self::DataFusion(error) => Self::datafusion_sqlstate(error),
-            Self::ScanPrepare(error)
+            Self::ScanBind(error)
             | Self::ScanRelease(error)
             | Self::OutputConversion(error) => error.sql_error_code(),
             Self::Initialization { primary, .. } => primary.sql_error_code(),
@@ -314,7 +352,7 @@ impl SqlStateError for QueryExecutionError {
             | Self::ExpressionSections(_)
             | Self::ScanCallbackCount { .. }
             | Self::MissingScanMetadata { .. }
-            | Self::PreparedScanStillShared { .. } => {
+            | Self::BoundScanStillShared { .. } => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
             }
         }
@@ -341,7 +379,7 @@ impl QueryExecutionError {
     pub fn into_report(self) -> PgReportError {
         match self {
             Self::DataFusion(error) => Self::datafusion_report(error),
-            Self::ScanPrepare(error)
+            Self::ScanBind(error)
             | Self::OutputConversion(error)
             | Self::ScanRelease(error) => error,
             Self::Initialization { primary, cleanup } => {
