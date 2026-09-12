@@ -1,36 +1,33 @@
 //! Statement-owned DataFusion physical plan for serial query execution.
 
-use std::ffi::{CStr, CString};
+mod metrics_accumulator;
+
 use std::sync::Arc;
 
 use arrow_schema::SchemaRef;
 use datafusion::common::DataFusionError;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion::physical_expr::DynamicFilterTracking;
 use datafusion::physical_plan::{ExecutionPlan, execute_stream};
 
-/// Compiled plan plus its stable, statement-scoped EXPLAIN description.
+pub(super) use metrics_accumulator::PhysicalPlanMetricsAccumulator;
+
+/// Statement-scoped executable plan and current-instance metrics source.
 pub(super) struct CompiledPhysicalPlan {
     plan: Arc<dyn ExecutionPlan>,
-    description: CString,
+    contains_dynamic_filters: bool,
 }
 
 impl CompiledPhysicalPlan {
-    pub(super) fn new(plan: Arc<dyn ExecutionPlan>) -> Self {
-        let mut description = String::new();
-        Self::write_operator_names(&plan, &mut description);
-        let description = CString::new(description)
-            .expect("DataFusion operator names contain no NUL bytes");
-        Self { plan, description }
-    }
-
-    fn write_operator_names(plan: &Arc<dyn ExecutionPlan>, output: &mut String) {
-        if !output.is_empty() {
-            output.push_str(" -> ");
-        }
-        output.push_str(plan.name());
-        for child in plan.children() {
-            Self::write_operator_names(child, output);
-        }
+    pub(super) fn try_new(
+        plan: Arc<dyn ExecutionPlan>,
+    ) -> Result<Self, DataFusionError> {
+        let contains_dynamic_filters = Self::contains_dynamic_filters(plan.as_ref())?;
+        Ok(Self {
+            plan,
+            contains_dynamic_filters,
+        })
     }
 
     pub(super) fn execute(
@@ -40,11 +37,31 @@ impl CompiledPhysicalPlan {
         execute_stream(Arc::clone(&self.plan), task_context)
     }
 
-    pub(super) fn description(&self) -> &CStr {
-        &self.description
-    }
-
     pub(super) fn schema(&self) -> SchemaRef {
         self.plan.schema()
+    }
+
+    pub(super) const fn has_dynamic_filters(&self) -> bool {
+        self.contains_dynamic_filters
+    }
+
+    fn contains_dynamic_filters(
+        plan: &dyn ExecutionPlan,
+    ) -> Result<bool, DataFusionError> {
+        let mut found = false;
+        plan.apply_expressions(&mut |expression| {
+            found |=
+                DynamicFilterTracking::classify(expression).contains_dynamic_filter();
+            Ok(TreeNodeRecursion::Continue)
+        })?;
+        if found {
+            return Ok(true);
+        }
+        for child in plan.children() {
+            if Self::contains_dynamic_filters(child.as_ref())? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }

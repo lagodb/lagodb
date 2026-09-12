@@ -13,7 +13,9 @@ mod scan_binding;
 mod scan_callbacks;
 mod table_scan;
 
-pub use execution::{QueryExecutionError, SerialQueryExecution};
+pub use execution::{
+    ExecutionMetricsMode, QueryExecutionError, SerialQueryExecution,
+};
 pub use memory::SerialExecutionLimits;
-pub use metrics::ExecutionMetricsSnapshot;
+pub use metrics::{ExecutionMetricsSnapshot, ScanExecutionMetricsSnapshot};
 pub use scan_callbacks::SerialTableScanCallbacks;

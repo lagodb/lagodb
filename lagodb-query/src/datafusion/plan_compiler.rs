@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use datafusion::common::DataFusionError;
+use datafusion::common::{Column, DataFusionError, NullEquality};
 use datafusion::dataframe::DataFrame;
 use datafusion::execution::context::SessionContext;
 use datafusion::functions_aggregate::expr_fn::{
@@ -11,13 +11,19 @@ use datafusion::functions_aggregate::expr_fn::{
 };
 use datafusion::functions_aggregate::string_agg::string_agg;
 use datafusion::logical_expr::expr::{AggregateFunction, Sort};
-use datafusion::logical_expr::{Expr, col, lit};
+use datafusion::logical_expr::{
+    Expr, JoinType as DataFusionJoinType, LogicalPlanBuilder, lit,
+};
+use datafusion::physical_plan::limit::GlobalLimitExec;
 use futures::FutureExt;
 use futures::future::LocalBoxFuture;
-use lagodb_core::expr::RuntimeValue;
-use pgrx::pg_sys;
+use lagodb_core::expr::{RuntimeValue, RuntimeValueId};
+use pgrx::{FromDatum, pg_sys};
 
-use crate::plan::{AggCall, AggregateKind, QueryFragment, QueryNode, SortDirection};
+use crate::plan::{
+    AggCall, AggregateKind, ExecutionExpr, JoinType, LimitNode, QueryFragment,
+    QueryNode, SortDirection,
+};
 
 use super::expression_compiler::DataFusionExpressionCompiler;
 use super::numeric_aggregate;
@@ -49,6 +55,8 @@ pub(super) enum DataFusionPlanError {
     UnsupportedRuntimeType { oid: pg_sys::Oid },
     #[error("query runtime value could not be decoded as PostgreSQL type {oid:?}")]
     InvalidRuntimeValue { oid: pg_sys::Oid },
+    #[error("LIMIT/OFFSET value is outside the execution range")]
+    InvalidLimit,
     #[error("STRING_AGG delimiter is not valid UTF-8")]
     InvalidStringAggDelimiter,
     #[error("PostgreSQL expression fallback has an unsupported type contract")]
@@ -58,6 +66,52 @@ pub(super) enum DataFusionPlanError {
 pub(super) struct DataFusionPlanCompiler<'session> {
     session: &'session SessionContext,
     postgres: PgExprRuntime,
+}
+
+struct LimitWindow {
+    offset: usize,
+    count: Option<usize>,
+}
+
+impl LimitWindow {
+    fn bind(
+        limit: &LimitNode,
+        values: &[RuntimeValue],
+    ) -> Result<Self, DataFusionPlanError> {
+        Ok(Self {
+            offset: Self::value(limit.offset(), values)?.unwrap_or(0),
+            count: Self::value(limit.count(), values)?,
+        })
+    }
+
+    fn value(
+        id: Option<RuntimeValueId>,
+        values: &[RuntimeValue],
+    ) -> Result<Option<usize>, DataFusionPlanError> {
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        let value = values
+            .get(id.index())
+            .copied()
+            .ok_or(DataFusionPlanError::MissingRuntimeValue { index: id.index() })?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let value = unsafe { i64::from_datum(value.datum(), false) }
+            .ok_or(DataFusionPlanError::InvalidLimit)?;
+        usize::try_from(value)
+            .map(Some)
+            .map_err(|_| DataFusionPlanError::InvalidLimit)
+    }
+
+    fn supports_bounded_top_k(&self) -> bool {
+        self.count.is_none_or(|count| {
+            self.offset
+                .checked_add(count)
+                .is_some_and(|top_k| top_k <= i64::MAX as usize)
+        })
+    }
 }
 
 impl<'session> DataFusionPlanCompiler<'session> {
@@ -75,9 +129,22 @@ impl<'session> DataFusionPlanCompiler<'session> {
         values: &[RuntimeValue],
     ) -> Result<CompiledPhysicalPlan, DataFusionPlanError> {
         let scans = ScanBindings::new(scans);
+        if let QueryNode::Limit(limit) = fragment.root() {
+            let window = LimitWindow::bind(limit, values)?;
+            if !window.supports_bounded_top_k() {
+                let frame = self.compile_node(limit.input(), &scans, values).await?;
+                let input = frame.create_physical_plan().await?;
+                let exact_limit = Arc::new(GlobalLimitExec::new(
+                    input,
+                    window.offset,
+                    window.count,
+                ));
+                return Ok(CompiledPhysicalPlan::try_new(exact_limit)?);
+            }
+        }
         let frame = self.compile_node(fragment.root(), &scans, values).await?;
         let physical_plan = frame.create_physical_plan().await?;
-        Ok(CompiledPhysicalPlan::new(physical_plan))
+        Ok(CompiledPhysicalPlan::try_new(physical_plan)?)
     }
 
     fn compile_node<'a>(
@@ -96,11 +163,15 @@ impl<'session> DataFusionPlanCompiler<'session> {
                             index: scan.scan().index(),
                         },
                     )?;
+                    let predicate = scan
+                        .filter()
+                        .map(|predicate| expressions.compile(predicate))
+                        .transpose()?;
                     let input = binding.frame(self.session)?;
-                    match scan.filter() {
-                        Some(predicate) => input
-                            .filter(expressions.compile(predicate)?)
-                            .map_err(Into::into),
+                    match predicate {
+                        Some(predicate) => {
+                            input.filter(predicate).map_err(Into::into)
+                        }
                         None => Ok(input),
                     }
                 }
@@ -124,6 +195,95 @@ impl<'session> DataFusionPlanCompiler<'session> {
                         .map(|aggregate| Self::aggregate(aggregate, &expressions))
                         .collect::<Result<Vec<_>, _>>()?;
                     input.aggregate(groups, aggregates).map_err(Into::into)
+                }
+                QueryNode::Join(join) => {
+                    let left = self.compile_node(join.left(), scans, values).await?;
+                    let right =
+                        self.compile_node(join.right(), scans, values).await?;
+                    let mut on = Vec::with_capacity(
+                        join.keys().len() + usize::from(join.on_filter().is_some()),
+                    );
+                    for key in join.keys() {
+                        on.push(
+                            expressions
+                                .compile(&ExecutionExpr::Column(key.left()))?
+                                .eq(expressions
+                                    .compile(&ExecutionExpr::Column(key.right()))?),
+                        );
+                    }
+                    if let Some(filter) = join.on_filter() {
+                        on.push(expressions.compile(filter)?);
+                    }
+                    // DataFusion rejects a non-inner join with no condition.
+                    // EXISTS/NOT EXISTS are exactly keyless semi/anti joins;
+                    // a constant-true filter preserves their empty/non-empty
+                    // semantics and selects the nested-loop implementation.
+                    if on.is_empty()
+                        && matches!(
+                            join.join_type(),
+                            JoinType::LeftSemi | JoinType::LeftAnti
+                        )
+                    {
+                        on.push(lit(true));
+                    }
+                    if join.null_aware() {
+                        return Self::null_aware_anti_join(left, right, &on);
+                    }
+                    if join.mark_filter().is_some_and(|filter| filter.anti()) {
+                        let [equality] = on.as_slice() else {
+                            return Err(DataFusionError::Plan(
+                                "anti Mark join requires exactly one key".to_owned(),
+                            )
+                            .into());
+                        };
+                        // LeftMark itself emits a non-null boolean. Extending
+                        // its match condition with an inner-key NULL match is
+                        // what preserves NOT IN's UNKNOWN result for non-null
+                        // outer keys; the immediate filter below then inverts
+                        // that closed mark while retaining outer NULL rows.
+                        let inner_null = expressions
+                            .compile(&ExecutionExpr::Column(join.keys()[0].right()))?
+                            .is_null();
+                        on = vec![equality.clone().or(inner_null)];
+                    }
+                    let left_projection = join.mark_filter().map(|_| {
+                        left.schema()
+                            .columns()
+                            .into_iter()
+                            .map(Expr::Column)
+                            .collect::<Vec<_>>()
+                    });
+                    // DataFusion 55 lowers join_on through join_detailed with
+                    // NullEqualsNothing. That matches ordinary PostgreSQL
+                    // equality and filter-only semi/anti join semantics.
+                    let joined =
+                        left.join_on(right, Self::join_type(join.join_type()), on)?;
+                    if let Some(filter) = join.mark_filter() {
+                        // DataFusion appends the synthetic mark field to the
+                        // LeftMark schema. Resolve that exact qualified field
+                        // instead of looking up the public name "mark", which
+                        // can also be a real left-table column.
+                        let mark_column = joined
+                            .schema()
+                            .columns()
+                            .last()
+                            .cloned()
+                            .expect("LeftMark always appends its mark column");
+                        let mark = Expr::Column(mark_column).eq(lit(!filter.anti()));
+                        let outer_null = expressions
+                            .compile(&ExecutionExpr::Column(filter.null_test()))?
+                            .is_null();
+                        joined
+                            .filter(mark.or(outer_null))?
+                            .select(
+                                left_projection.expect(
+                                    "mark filter captured its left projection",
+                                ),
+                            )
+                            .map_err(Into::into)
+                    } else {
+                        Ok(joined)
+                    }
                 }
                 QueryNode::Distinct(distinct) => {
                     let input =
@@ -152,19 +312,98 @@ impl<'session> DataFusionPlanCompiler<'session> {
                     let input =
                         self.compile_node(project.input(), scans, values).await?;
                     let expressions = project
-                        .outputs()
+                        .expressions()
                         .iter()
                         .enumerate()
-                        .map(|(position, output)| {
-                            col(DataFusionExpressionCompiler::output_name(*output))
-                                .alias(Self::result_name(position))
+                        .map(|(position, expression)| {
+                            Ok(expressions
+                                .compile(expression.expression())?
+                                .alias(Self::result_name(position)))
                         })
-                        .collect::<Vec<_>>();
+                        .collect::<Result<Vec<_>, DataFusionPlanError>>()?;
                     input.select(expressions).map_err(Into::into)
+                }
+                QueryNode::Sort(sort) => {
+                    let input =
+                        self.compile_node(sort.input(), scans, values).await?;
+                    let QueryNode::Project(project) = sort.input() else {
+                        unreachable!("validated Sort input is the output Project")
+                    };
+                    let keys = sort
+                        .keys()
+                        .iter()
+                        .map(|key| {
+                            let position = project
+                                .expressions()
+                                .iter()
+                                .position(|expression| {
+                                    expression.output() == key.output()
+                                })
+                                .expect(
+                                    "validated Sort key names one Project output",
+                                );
+                            let expression = Expr::Column(Column::from_name(
+                                Self::result_name(position),
+                            ));
+                            expression.sort(
+                                matches!(key.direction(), SortDirection::Ascending),
+                                key.nulls_first(),
+                            )
+                        })
+                        .collect();
+                    input.sort(keys).map_err(Into::into)
+                }
+                QueryNode::Limit(limit) => {
+                    let input =
+                        self.compile_node(limit.input(), scans, values).await?;
+                    let offset =
+                        LimitWindow::value(limit.offset(), values)?.unwrap_or(0);
+                    let count = LimitWindow::value(limit.count(), values)?;
+                    input.limit(offset, count).map_err(Into::into)
                 }
             }
         }
         .boxed_local()
+    }
+
+    const fn join_type(join_type: JoinType) -> DataFusionJoinType {
+        match join_type {
+            JoinType::Inner => DataFusionJoinType::Inner,
+            JoinType::Left => DataFusionJoinType::Left,
+            JoinType::Right => DataFusionJoinType::Right,
+            JoinType::Full => DataFusionJoinType::Full,
+            JoinType::LeftSemi => DataFusionJoinType::LeftSemi,
+            JoinType::LeftAnti => DataFusionJoinType::LeftAnti,
+            JoinType::LeftMark => DataFusionJoinType::LeftMark,
+        }
+    }
+
+    /// DataFusion's NOT IN contract requires a filter-based, single-key
+    /// LeftAnti join with the logical plan's null-aware flag enabled.
+    fn null_aware_anti_join(
+        left: DataFrame,
+        right: DataFrame,
+        on: &[Expr],
+    ) -> Result<DataFrame, DataFusionPlanError> {
+        let [predicate] = on else {
+            return Err(DataFusionError::Plan(
+                "null-aware anti join requires exactly one key".to_owned(),
+            )
+            .into());
+        };
+        let (session, left_plan) = left.into_parts();
+        let right_plan = right.into_unoptimized_plan();
+        let plan = LogicalPlanBuilder::from(left_plan)
+            .join_detailed_with_options(
+                right_plan,
+                DataFusionJoinType::LeftAnti,
+                (Vec::<Column>::new(), Vec::<Column>::new()),
+                Some(predicate.clone()),
+                NullEquality::NullEqualsNothing,
+                true,
+            )?
+            .build()?;
+        Ok(DataFrame::new(session, plan))
     }
 
     fn aggregate(
@@ -181,8 +420,8 @@ impl<'session> DataFusionPlanCompiler<'session> {
             // Float MIN/MAX delegates to DataFusion. Its native partial ordering
             // does not implement PostgreSQL's rule that NaN is greater than every
             // non-NaN value, so a NaN result can depend on input order. This
-            // accepted compatibility boundary is documented in the S3 capability
-            // contract.
+            // execution-semantic difference is explicitly admitted by the
+            // current aggregate capability.
             (AggregateKind::Min, Some(argument)) => min(argument),
             (AggregateKind::Max, Some(argument)) => max(argument),
             // Keep integer-input SUM/AVG on DataFusion's optimized native
@@ -245,11 +484,14 @@ impl<'session> DataFusionPlanCompiler<'session> {
         };
         // The first aggregate-DISTINCT capability intentionally uses
         // DataFusion's native state semantics. In DataFusion 55, floating-point
-        // DISTINCT keys use their bit representation (-0/+0 and NaN therefore
-        // differ from PostgreSQL); AVG/variance coerce integer inputs to
-        // Float64 before DISTINCT evaluation; collated text uses Arrow byte
-        // equality; aggregate-local text ORDER BY uses Arrow byte ordering;
-        // and growing distinct state is reserved after accumulator update.
+        // DISTINCT keys use their bit representation: -0/+0 and distinct NaN
+        // payloads can remain separate even though PostgreSQL considers each
+        // pair equal. AVG/variance coerce integer inputs to Float64 before
+        // DISTINCT evaluation, so distinct int8 values outside Float64's exact
+        // integer domain (above 2^53 in magnitude) can collapse to one key.
+        // Collated text uses Arrow byte equality, aggregate-local text ORDER BY
+        // uses Arrow byte ordering, and growing distinct state is reserved
+        // after accumulator update.
         // These limitations are recorded at the capability boundary and do
         // not add per-datum normalization or reservation checks to the hot
         // path.
