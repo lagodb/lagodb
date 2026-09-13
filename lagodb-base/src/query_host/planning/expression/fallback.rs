@@ -98,6 +98,7 @@ impl DependencyInputs {
             ExecutionExpr::Value(value) => {
                 DependencyIdentity::RuntimeValue(value.index())
             }
+            ExecutionExpr::DecimalValue { .. } => return None,
             ExecutionExpr::Output(output) => {
                 DependencyIdentity::Output(output.index())
             }

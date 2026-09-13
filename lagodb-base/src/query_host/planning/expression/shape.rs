@@ -2,7 +2,7 @@
 
 use lagodb_core::expr::{ExprType, PgComparisonKind, PgComparisonOp};
 use lagodb_query::plan::{
-    BooleanTestKind, CaseWhen, ExecutionExpr, ScalarFunctionKind,
+    BooleanTestKind, CaseWhen, Decimal128Semantics, ExecutionExpr, ScalarFunctionKind,
 };
 use pgrx::pg_sys;
 
@@ -35,7 +35,7 @@ impl QueryExpressionPlanner {
                 self.lower_nullif(expression.cast(), scope)
             },
             pg_sys::NodeTag::T_ScalarArrayOpExpr => unsafe {
-                self.lower_scalar_array(expression.cast(), scope)
+                self.lower_scalar_array(expression.cast(), scope, domain)
             },
             // CoerceViaIO is deliberately handled by PostgreSQL fallback.
             // NAME input/output can truncate at NAMEDATALEN, so the text-family
@@ -195,6 +195,7 @@ impl QueryExpressionPlanner {
         &mut self,
         expression: *mut pg_sys::ScalarArrayOpExpr,
         scope: ExpressionScope<'_>,
+        domain: PredicateDomain,
     ) -> ExpressionPlanResult<ExecutionExpr> {
         let args = unsafe { Self::list_nodes((*expression).args) };
         if args.len() != 2
@@ -210,11 +211,9 @@ impl QueryExpressionPlanner {
         if elements.is_empty() {
             return Err(ExpressionDecline::InvalidShape);
         }
-        let value_type = Self::expr_type(args[0].cast());
-        if !PredicateDomain::Integer.supports_type(value_type)
-            || elements
-                .iter()
-                .any(|element| Self::expr_type((*element).cast()) != value_type)
+        let value_type = unsafe { Self::predicate_type(args[0].cast(), scope) };
+        if !domain.supports_type(value_type)
+            || !PredicateDomain::Exact.supports_type(value_type)
         {
             return Err(ExpressionDecline::UnsupportedSemantics);
         }
@@ -225,21 +224,78 @@ impl QueryExpressionPlanner {
             opcollid: pg_sys::InvalidOid,
             inputcollid: unsafe { (*expression).inputcollid },
         };
-        let comparison = PredicateDomain::Integer
-            .comparison(operator, value_type, value_type)
-            .ok_or(ExpressionDecline::UnsupportedSemantics)?;
+        let decimal = Decimal128Semantics::for_type(value_type);
+        let comparison = if let Some(decimal) = decimal {
+            let first_type = Self::expr_type(elements[0].cast());
+            let Some((comparison, resolved)) =
+                domain.decimal_comparison(operator, value_type, first_type)
+            else {
+                return Err(ExpressionDecline::UnsupportedSemantics);
+            };
+            if resolved != decimal
+                || elements[1..].iter().any(|element| {
+                    domain.decimal_comparison(
+                        operator,
+                        value_type,
+                        Self::expr_type((*element).cast()),
+                    ) != Some((comparison, decimal))
+                })
+            {
+                return Err(ExpressionDecline::UnsupportedSemantics);
+            }
+            comparison
+        } else {
+            // ScalarArrayOpExpr carries the resolved comparison collation in
+            // inputcollid; its text elements can retain their original
+            // expression collations while sharing the same Utf8 representation.
+            if elements
+                .iter()
+                .map(|element| Self::expr_type((*element).cast()))
+                .any(|element_type| {
+                    element_type != value_type
+                        && !(value_type.type_oid == pg_sys::TEXTOID
+                            && element_type.type_oid == pg_sys::TEXTOID
+                            && element_type.typmod == value_type.typmod)
+                })
+            {
+                return Err(ExpressionDecline::UnsupportedSemantics);
+            }
+            domain
+                .comparison(operator, value_type, value_type)
+                .ok_or(ExpressionDecline::UnsupportedSemantics)?
+        };
         let negated = match (unsafe { (*expression).useOr }, comparison) {
             (true, PgComparisonKind::Equal) => false,
             (false, PgComparisonKind::NotEqual) => true,
             _ => return Err(ExpressionDecline::UnsupportedSemantics),
         };
-        Ok(ExecutionExpr::InList {
-            value: Box::new(unsafe { self.lower(args[0], scope.as_scalar()) }?),
-            list: elements
+        let value = if let Some(decimal) = decimal {
+            unsafe {
+                self.lower_decimal_operand(args[0].cast(), scope.as_scalar(), decimal)
+            }?
+        } else {
+            unsafe { self.lower(args[0], scope.as_scalar()) }?
+        };
+        let list = if let Some(decimal) = decimal {
+            elements
+                .into_iter()
+                .map(|element| unsafe {
+                    self.lower_decimal_operand(
+                        element.cast(),
+                        scope.as_scalar(),
+                        decimal,
+                    )
+                })
+                .collect::<ExpressionPlanResult<Vec<_>>>()?
+        } else {
+            elements
                 .into_iter()
                 .map(|element| unsafe { self.lower(element, scope.as_scalar()) })
                 .collect::<ExpressionPlanResult<Vec<_>>>()?
-                .into_boxed_slice(),
+        };
+        Ok(ExecutionExpr::InList {
+            value: Box::new(value),
+            list: list.into_boxed_slice(),
             negated,
         })
     }

@@ -3,31 +3,20 @@
 use std::ffi::{CString, c_void};
 
 use lagodb_core::expr::explain::deparse_and_join;
-use lagodb_query::plan::ExecutionExpr;
 use pgrx::pg_sys;
 
 use crate::query_host::error::QueryHostError;
 
-/// The exact expression is always executed by DataFusion. Pruning candidates
-/// are negotiated by the provider and may only reduce file input.
+/// PostgreSQL source identity for a ScanNode predicate. The exact expression
+/// is owned and always executed by the ScanNode; provider negotiation may only
+/// use this source tree to reduce file input.
 pub(super) struct TableScanFilter {
-    exact_residual: ExecutionExpr,
     source_expression: *mut pg_sys::Node,
 }
 
 impl TableScanFilter {
-    pub(super) fn new(
-        exact_residual: ExecutionExpr,
-        source_expression: *mut pg_sys::Node,
-    ) -> Self {
-        Self {
-            exact_residual,
-            source_expression,
-        }
-    }
-
-    pub(super) const fn exact_residual(&self) -> &ExecutionExpr {
-        &self.exact_residual
+    pub(super) const fn new(source_expression: *mut pg_sys::Node) -> Self {
+        Self { source_expression }
     }
 
     pub(super) const fn source_expression(&self) -> *mut pg_sys::Node {

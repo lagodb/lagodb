@@ -1,23 +1,33 @@
 //! Statement-level exact-expression planning for query offload.
 
+mod decimal;
 mod fallback;
 mod native;
+mod predicate;
 mod shape;
 mod state;
 
-use lagodb_core::expr::pg::{
-    PgExprRef, PgNullTestKind, PgPredicateLeafRef, PgScalarExprRef,
-};
+use std::ptr;
+
+use lagodb_core::expr::pg::{PgExprRef, PgScalarExprRef};
 use lagodb_core::expr::{
-    ColumnRef, ExprType, RuntimeValueExpr, RuntimeValueSource, RuntimeValueSpec,
+    ColumnRef, ExprType, PgComparisonOp, RuntimeValueExpr, RuntimeValueSource,
+    RuntimeValueSpec,
 };
-use lagodb_query::plan::{ExecutionExpr, ExecutionScalarRepr, ScalarSemantics};
+use lagodb_core::query_contract::ScanId;
+use lagodb_query::plan::{
+    Decimal128Semantics, ExecutionExpr, ExecutionScalarRepr, JoinKey, ScalarSemantics,
+};
 use pgrx::pg_sys;
 
 use fallback::PostgresExpressionBuilder;
 use native::NativeScalarCall;
-use state::{ExpressionDecline, ExpressionPlanResult};
-pub(super) use state::{ExpressionScope, ExpressionSourceCatalog, OutputCatalog};
+pub(in crate::query_host::planning) use state::{
+    ExpressionDecline, ExpressionPlanResult,
+};
+pub(super) use state::{
+    ExpressionScope, ExpressionSourceCatalog, OutputCatalog, ResolvedOutput,
+};
 
 pub(super) type PredicateDomain = ScalarSemantics;
 
@@ -26,11 +36,18 @@ pub(super) struct QueryExpressionPlanner {
     runtime_exprs: Vec<RuntimeValueExpr>,
     runtime_specs: Vec<RuntimeValueSpec>,
     columns_by_scan: Vec<Vec<Option<ColumnRef>>>,
+    column_registrations: Vec<ColumnRegistration>,
 }
 
 struct PlanCheckpoint {
     runtime_count: usize,
-    columns_by_scan: Vec<Vec<Option<ColumnRef>>>,
+    column_registration_count: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ColumnRegistration {
+    scan: ScanId,
+    index: usize,
 }
 
 impl QueryExpressionPlanner {
@@ -40,7 +57,16 @@ impl QueryExpressionPlanner {
             runtime_exprs: Vec::new(),
             runtime_specs: Vec::new(),
             columns_by_scan: Vec::new(),
+            column_registrations: Vec::new(),
         }
+    }
+
+    pub(super) fn add_source_relations(
+        &mut self,
+        root: *mut pg_sys::PlannerInfo,
+        relations: &[(pg_sys::Index, ScanId)],
+    ) -> Option<()> {
+        self.sources.add_relations(root, relations, ptr::null_mut())
     }
 
     /// The sole capability/lowering entry point for exact execution.
@@ -73,9 +99,9 @@ impl QueryExpressionPlanner {
         expression: *mut pg_sys::Expr,
         scope: ExpressionScope<'_>,
     ) -> ExpressionPlanResult<ExecutionExpr> {
-        if let Ok(leaf) = self.attempt(|planner| unsafe {
-            planner.lower_leaf(expression, scope.outputs())
-        }) {
+        if let Ok(leaf) =
+            self.attempt(|planner| unsafe { planner.lower_leaf(expression, scope) })
+        {
             return Ok(leaf);
         }
         if unsafe { pg_sys::exprType(expression.cast()) } == pg_sys::BOOLOID {
@@ -97,7 +123,7 @@ impl QueryExpressionPlanner {
         }) {
             return Ok(native);
         }
-        unsafe { self.lower_postgres(expression.cast(), scope.outputs()) }
+        unsafe { self.lower_postgres(expression.cast(), scope) }
     }
 
     unsafe fn lower_exact(
@@ -117,7 +143,7 @@ impl QueryExpressionPlanner {
             }));
         }
         if let Ok(leaf) = self.attempt(|planner| unsafe {
-            planner.lower_leaf(expression.cast(), scope.outputs())
+            planner.lower_leaf(expression.cast(), scope)
         }) {
             return Ok(leaf);
         }
@@ -143,7 +169,7 @@ impl QueryExpressionPlanner {
         }) {
             return Ok(native);
         }
-        unsafe { self.lower_postgres(expression, scope.outputs()) }
+        unsafe { self.lower_postgres(expression, scope) }
     }
 
     unsafe fn lower_native_call(
@@ -172,12 +198,13 @@ impl QueryExpressionPlanner {
     unsafe fn lower_leaf(
         &mut self,
         expression: *mut pg_sys::Expr,
-        outputs: Option<&dyn OutputCatalog>,
+        scope: ExpressionScope<'_>,
     ) -> ExpressionPlanResult<ExecutionExpr> {
-        if let Some(output) =
-            outputs.and_then(|catalog| unsafe { catalog.resolve_output(expression) })
+        if let Some(output) = scope
+            .outputs()
+            .and_then(|catalog| unsafe { catalog.resolve_output(expression) })
         {
-            return Ok(ExecutionExpr::Output(output));
+            return Ok(ExecutionExpr::Output(output.output));
         }
         let expression_ref = unsafe { PgExprRef::from_raw(expression) };
         match PgScalarExprRef::parse(expression_ref).map_err(|_| {
@@ -190,10 +217,21 @@ impl QueryExpressionPlanner {
                 if var.varattno() <= 0 {
                     return Err(ExpressionDecline::UnsupportedSource);
                 }
-                let scan = self
-                    .sources
-                    .resolve(var.varno())
-                    .ok_or(ExpressionDecline::UnsupportedSource)?;
+                let Some(scan) =
+                    self.sources.resolve(scope.source_root(), var.varno())
+                else {
+                    if var.varlevelsup() == 0
+                        && self
+                            .sources
+                            .is_runtime_outer(scope.source_root(), var.varno())
+                    {
+                        return self.lower_runtime_value(
+                            expression.as_ptr(),
+                            RuntimeValueSource::OuterValue,
+                        );
+                    }
+                    return Err(ExpressionDecline::UnsupportedSource);
+                };
                 let column = ColumnRef {
                     scan,
                     attno: var.varattno(),
@@ -207,6 +245,35 @@ impl QueryExpressionPlanner {
                 self.record_column(column)?;
                 Ok(ExecutionExpr::Column(column))
             }
+            PgScalarExprRef::WidenedIntegerVar {
+                node: var,
+                expression,
+            } => {
+                if var.varattno() <= 0 {
+                    return Err(ExpressionDecline::UnsupportedSource);
+                }
+                let Some(scan) =
+                    self.sources.resolve(scope.source_root(), var.varno())
+                else {
+                    return Err(ExpressionDecline::UnsupportedSource);
+                };
+                let declared_type = ExprType {
+                    type_oid: var.vartype(),
+                    typmod: var.vartypmod(),
+                    collation: var.varcollid(),
+                };
+                let column = ColumnRef {
+                    scan,
+                    attno: var.varattno(),
+                    declared_type,
+                    value_type: declared_type,
+                };
+                self.record_column(column)?;
+                Ok(ExecutionExpr::WidenInteger {
+                    value: Box::new(ExecutionExpr::Column(column)),
+                    result_type: Self::expr_type(expression.as_ptr()),
+                })
+            }
             PgScalarExprRef::Const { expression, .. } => self.lower_runtime_value(
                 expression.as_ptr(),
                 RuntimeValueSource::Constant,
@@ -215,13 +282,14 @@ impl QueryExpressionPlanner {
                 node: parameter,
                 expression,
             } => {
-                if parameter.paramkind() != pg_sys::ParamKind::PARAM_EXTERN {
-                    return Err(ExpressionDecline::UnsupportedRuntimeSource);
-                }
-                self.lower_runtime_value(
-                    expression.as_ptr(),
-                    RuntimeValueSource::ExternalParam,
-                )
+                let source = match parameter.paramkind() {
+                    pg_sys::ParamKind::PARAM_EXTERN => {
+                        RuntimeValueSource::ExternalParam
+                    }
+                    pg_sys::ParamKind::PARAM_EXEC => RuntimeValueSource::ExecParam,
+                    _ => return Err(ExpressionDecline::UnsupportedRuntimeSource),
+                };
+                self.lower_runtime_value(expression.as_ptr(), source)
             }
         }
     }
@@ -246,7 +314,7 @@ impl QueryExpressionPlanner {
     unsafe fn lower_postgres(
         &mut self,
         expression: *mut pg_sys::Node,
-        outputs: Option<&dyn OutputCatalog>,
+        scope: ExpressionScope<'_>,
     ) -> ExpressionPlanResult<ExecutionExpr> {
         let result_type = Self::expr_type(expression.cast());
         ExecutionScalarRepr::for_postgres_eval(result_type)
@@ -255,12 +323,13 @@ impl QueryExpressionPlanner {
             PostgresExpressionBuilder::lower(expression, |dependency| {
                 let value_type = Self::expr_type(dependency.cast());
                 ExecutionScalarRepr::for_postgres_eval(value_type)?;
-                let lowered = if let Some(output) = outputs
+                let lowered = if let Some(output) = scope
+                    .outputs()
                     .and_then(|catalog| catalog.resolve_output(dependency.cast()))
                 {
-                    ExecutionExpr::Output(output)
+                    ExecutionExpr::Output(output.output)
                 } else {
-                    self.lower_leaf(dependency.cast(), None).ok()?
+                    self.lower_leaf(dependency.cast(), scope).ok()?
                 };
                 Some((lowered, value_type))
             })
@@ -316,50 +385,6 @@ impl QueryExpressionPlanner {
         }
     }
 
-    unsafe fn lower_predicate_leaf(
-        &mut self,
-        expression: *mut pg_sys::Node,
-        scope: ExpressionScope<'_>,
-        domain: PredicateDomain,
-    ) -> ExpressionPlanResult<ExecutionExpr> {
-        let expression_ref = unsafe { PgExprRef::from_raw(expression.cast()) };
-        match PgPredicateLeafRef::parse(expression_ref).map_err(|_| {
-            ExpressionDecline::UnsupportedNode(expression_ref.node_tag())
-        })? {
-            PgPredicateLeafRef::Comparison { op, left, right } => {
-                domain
-                    .comparison(
-                        op,
-                        Self::expr_type(left.as_ptr()),
-                        Self::expr_type(right.as_ptr()),
-                    )
-                    .ok_or(ExpressionDecline::UnsupportedSemantics)?;
-                Ok(ExecutionExpr::Comparison {
-                    operator: op,
-                    left: Box::new(unsafe {
-                        self.lower(left.as_ptr().cast(), scope.as_scalar())
-                    }?),
-                    right: Box::new(unsafe {
-                        self.lower(right.as_ptr().cast(), scope.as_scalar())
-                    }?),
-                })
-            }
-            PgPredicateLeafRef::NullTest { kind, value } => {
-                domain
-                    .supports_type(Self::expr_type(value.as_ptr()))
-                    .then_some(())
-                    .ok_or(ExpressionDecline::UnsupportedSemantics)?;
-                let value = Box::new(unsafe {
-                    self.lower(value.as_ptr().cast(), scope.as_scalar())
-                }?);
-                match kind {
-                    PgNullTestKind::IsNull => Ok(ExecutionExpr::IsNull(value)),
-                    PgNullTestKind::IsNotNull => Ok(ExecutionExpr::IsNotNull(value)),
-                }
-            }
-        }
-    }
-
     pub(super) unsafe fn unwrap_relabel(
         mut expression: *mut pg_sys::Expr,
     ) -> *mut pg_sys::Expr {
@@ -367,5 +392,224 @@ impl QueryExpressionPlanner {
             expression = unsafe { (*expression.cast::<pg_sys::RelabelType>()).arg };
         }
         expression
+    }
+
+    /// Resolve the type used to select an exact predicate domain. PostgreSQL's
+    /// declared type remains authoritative except when DataFusion preserves a
+    /// bounded Decimal128 representation that the aggregate result typmod lost.
+    unsafe fn predicate_type(
+        expression: *mut pg_sys::Expr,
+        scope: ExpressionScope<'_>,
+    ) -> ExprType {
+        let declared_type = Self::expr_type(expression);
+        scope
+            .outputs()
+            .and_then(|catalog| unsafe { catalog.resolve_output(expression) })
+            .and_then(|output| {
+                Decimal128Semantics::for_type(output.execution_type)
+                    .map(|_| output.execution_type)
+            })
+            .unwrap_or(declared_type)
+    }
+
+    /// Inspect a direct join-key column through type-preserving RelabelType
+    /// wrappers without changing the eventual scan projection. PlaceHolderVar
+    /// remains outside the query executor contract.
+    unsafe fn inspect_join_column(
+        &self,
+        source_root: *mut pg_sys::PlannerInfo,
+        expression: *mut pg_sys::Expr,
+    ) -> ExpressionPlanResult<ColumnRef> {
+        let direct = unsafe { Self::unwrap_relabel(expression) };
+        if unsafe { (*direct).type_ } != pg_sys::NodeTag::T_Var {
+            return Err(ExpressionDecline::InvalidShape);
+        }
+        let var = unsafe { &*direct.cast::<pg_sys::Var>() };
+        if var.varlevelsup != 0 || var.varattno <= 0 {
+            return Err(ExpressionDecline::UnsupportedSource);
+        }
+        let scan = self
+            .sources
+            .resolve(source_root, var.varno)
+            .ok_or(ExpressionDecline::UnsupportedSource)?;
+        let declared_type = ExprType {
+            type_oid: var.vartype,
+            typmod: var.vartypmod,
+            collation: var.varcollid,
+        };
+        let column = ColumnRef {
+            scan,
+            attno: var.varattno,
+            declared_type,
+            value_type: Self::expr_type(expression),
+        };
+        if !column.has_binary_compatible_value() {
+            return Err(ExpressionDecline::UnsupportedSemantics);
+        }
+        Ok(column)
+    }
+
+    /// Translate one PostgreSQL equality expression into the shared join-key
+    /// contract without registering either input column. Relation-tree key
+    /// orientation is the single commit point, including EC substitutions.
+    pub(in crate::query_host::planning) unsafe fn lower_join_key(
+        &self,
+        source_root: *mut pg_sys::PlannerInfo,
+        expression: *mut pg_sys::Node,
+    ) -> ExpressionPlanResult<JoinKey> {
+        if unsafe { (*expression).type_ } != pg_sys::NodeTag::T_OpExpr {
+            return Err(ExpressionDecline::InvalidShape);
+        }
+        let operator = expression.cast::<pg_sys::OpExpr>();
+        if unsafe { pg_sys::list_length((*operator).args) } != 2 {
+            return Err(ExpressionDecline::InvalidShape);
+        }
+        let left = unsafe {
+            self.inspect_join_column(
+                source_root,
+                pg_sys::list_nth((*operator).args, 0).cast(),
+            )
+        }?;
+        let right = unsafe {
+            self.inspect_join_column(
+                source_root,
+                pg_sys::list_nth((*operator).args, 1).cast(),
+            )
+        }?;
+        if left.scan == right.scan
+            || !unsafe {
+                pg_sys::op_hashjoinable((*operator).opno, left.value_type.type_oid)
+            }
+        {
+            return Err(ExpressionDecline::UnsupportedSemantics);
+        }
+        JoinKey::try_new(
+            left,
+            right,
+            PgComparisonOp {
+                opno: unsafe { (*operator).opno },
+                opfuncid: unsafe { (*operator).opfuncid },
+                opresulttype: unsafe { (*operator).opresulttype },
+                opcollid: unsafe { (*operator).opcollid },
+                inputcollid: unsafe { (*operator).inputcollid },
+            },
+        )
+        .map_err(|_| ExpressionDecline::UnsupportedSemantics)
+    }
+
+    /// Translate the equality carried by an ANY/IN SubPlan. PostgreSQL's
+    /// `build_subplan` has replaced the parser's PARAM_SUBLINK with the
+    /// PARAM_EXEC recorded in `SubPlan::paramIds`, so the two column endpoints
+    /// must be validated and resolved in different PlannerInfo namespaces.
+    ///
+    /// # Safety
+    ///
+    /// Both planner roots, `subplan`, and `inner_output` must remain live for
+    /// the current PostgreSQL planning callback.
+    pub(in crate::query_host::planning) unsafe fn lower_subplan_join_key(
+        &self,
+        outer_root: *mut pg_sys::PlannerInfo,
+        inner_root: *mut pg_sys::PlannerInfo,
+        subplan: *mut pg_sys::SubPlan,
+        inner_output: *mut pg_sys::Expr,
+    ) -> ExpressionPlanResult<JoinKey> {
+        if unsafe { pg_sys::list_length((*subplan).paramIds) } != 1 {
+            return Err(ExpressionDecline::InvalidShape);
+        }
+        let test_expression = unsafe { (*subplan).testexpr };
+        if test_expression.is_null()
+            || unsafe { (*test_expression).type_ } != pg_sys::NodeTag::T_OpExpr
+        {
+            return Err(ExpressionDecline::InvalidShape);
+        }
+        let operator = test_expression.cast::<pg_sys::OpExpr>();
+        if unsafe { pg_sys::list_length((*operator).args) } != 2 {
+            return Err(ExpressionDecline::InvalidShape);
+        }
+        let first =
+            unsafe { pg_sys::list_nth((*operator).args, 0).cast::<pg_sys::Expr>() };
+        let second =
+            unsafe { pg_sys::list_nth((*operator).args, 1).cast::<pg_sys::Expr>() };
+        let first_direct = unsafe { Self::unwrap_relabel(first) };
+        let second_direct = unsafe { Self::unwrap_relabel(second) };
+        let subplan_param_id =
+            unsafe { pg_sys::list_nth_int((*subplan).paramIds, 0) };
+        let outer_expression = match (unsafe { (*first_direct).type_ }, unsafe {
+            (*second_direct).type_
+        }) {
+            (pg_sys::NodeTag::T_Var, pg_sys::NodeTag::T_Param) => {
+                let parameter = second_direct.cast::<pg_sys::Param>();
+                if unsafe { (*parameter).paramkind } != pg_sys::ParamKind::PARAM_EXEC
+                    || unsafe { (*parameter).paramid } != subplan_param_id
+                {
+                    return Err(ExpressionDecline::UnsupportedRuntimeSource);
+                }
+                first
+            }
+            (pg_sys::NodeTag::T_Param, pg_sys::NodeTag::T_Var) => {
+                let parameter = first_direct.cast::<pg_sys::Param>();
+                if unsafe { (*parameter).paramkind } != pg_sys::ParamKind::PARAM_EXEC
+                    || unsafe { (*parameter).paramid } != subplan_param_id
+                {
+                    return Err(ExpressionDecline::UnsupportedRuntimeSource);
+                }
+                second
+            }
+            _ => return Err(ExpressionDecline::InvalidShape),
+        };
+        let outer =
+            unsafe { self.inspect_join_column(outer_root, outer_expression) }?;
+        let inner = unsafe { self.inspect_join_column(inner_root, inner_output) }?;
+        if !unsafe {
+            pg_sys::op_hashjoinable((*operator).opno, outer.value_type.type_oid)
+        } {
+            return Err(ExpressionDecline::UnsupportedSemantics);
+        }
+        JoinKey::try_new(
+            outer,
+            inner,
+            PgComparisonOp {
+                opno: unsafe { (*operator).opno },
+                opfuncid: unsafe { (*operator).opfuncid },
+                opresulttype: unsafe { (*operator).opresulttype },
+                opcollid: unsafe { (*operator).opcollid },
+                inputcollid: unsafe { (*operator).inputcollid },
+            },
+        )
+        .map_err(|_| ExpressionDecline::UnsupportedSemantics)
+    }
+
+    /// RestrictInfo-aware entry point used for predicates selected by the
+    /// PostgreSQL join planner. The metadata check prevents an arbitrary
+    /// equality expression from being reclassified as a planner join key.
+    pub(in crate::query_host::planning) unsafe fn lower_restrictinfo_join_key(
+        &self,
+        source_root: *mut pg_sys::PlannerInfo,
+        restriction: &pg_sys::RestrictInfo,
+    ) -> ExpressionPlanResult<JoinKey> {
+        if !restriction.can_join
+            || restriction.hashjoinoperator == pg_sys::InvalidOid
+            || unsafe { (*restriction.clause).type_ } != pg_sys::NodeTag::T_OpExpr
+            || unsafe { (*restriction.clause.cast::<pg_sys::OpExpr>()).opno }
+                != restriction.hashjoinoperator
+        {
+            return Err(ExpressionDecline::InvalidShape);
+        }
+        unsafe { self.lower_join_key(source_root, restriction.clause.cast()) }
+    }
+
+    /// Register both endpoints selected for one relational Join key.
+    ///
+    /// This is also the commit point for equivalence-class substitutions: if
+    /// either endpoint conflicts with the scan projection contract, neither
+    /// newly registered endpoint survives the failed planning attempt.
+    pub(in crate::query_host::planning) fn record_join_key(
+        &mut self,
+        key: JoinKey,
+    ) -> ExpressionPlanResult<()> {
+        self.attempt(|planner| {
+            planner.record_column(key.left())?;
+            planner.record_column(key.right())
+        })
     }
 }

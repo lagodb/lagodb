@@ -9,7 +9,9 @@ use lagodb_core::expr::{
 use lagodb_core::query_contract::{OutputId, ScanId};
 use pgrx::pg_sys;
 
-use super::{PlanCheckpoint, PredicateDomain, QueryExpressionPlanner};
+use super::{
+    ColumnRegistration, PlanCheckpoint, PredicateDomain, QueryExpressionPlanner,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::query_host::planning) enum ExpressionDecline {
@@ -25,31 +27,91 @@ pub(in crate::query_host::planning) enum ExpressionDecline {
 pub(in crate::query_host::planning) type ExpressionPlanResult<T> =
     Result<T, ExpressionDecline>;
 
-/// Query-local RTI to ScanId mapping. PostgreSQL attribute numbers remain the
-/// inner dense index in `QueryExpressionPlanner::columns_by_scan`.
-pub(in crate::query_host::planning) struct ExpressionSourceCatalog {
+/// One PostgreSQL planner scope with its dense RTI-to-ScanId mapping.
+struct ExpressionSourceScope {
+    root: *mut pg_sys::PlannerInfo,
     sources: Box<[Option<ScanId>]>,
+    runtime_outer_relids: *mut pg_sys::Bitmapset,
+}
+
+/// Query-local source catalog. RTIs are only unique inside one PlannerInfo;
+/// ScanIds remain unique across the complete offloaded relation tree.
+pub(in crate::query_host::planning) struct ExpressionSourceCatalog {
+    scopes: Vec<ExpressionSourceScope>,
 }
 
 impl ExpressionSourceCatalog {
-    pub(in crate::query_host::planning) fn for_relation(
-        rti: pg_sys::Index,
-        scan: ScanId,
-    ) -> Self {
-        let mut sources = vec![None; rti as usize + 1];
-        sources[rti as usize] = Some(scan);
-        Self {
-            sources: sources.into_boxed_slice(),
-        }
+    pub(in crate::query_host::planning) fn for_relations(
+        root: *mut pg_sys::PlannerInfo,
+        relations: &[(pg_sys::Index, ScanId)],
+        runtime_outer_relids: *mut pg_sys::Bitmapset,
+    ) -> Option<Self> {
+        let mut catalog = Self { scopes: Vec::new() };
+        catalog.add_relations(root, relations, runtime_outer_relids)?;
+        Some(catalog)
     }
 
-    pub(super) fn resolve(&self, varno: c_int) -> Option<ScanId> {
+    pub(in crate::query_host::planning) fn add_relations(
+        &mut self,
+        root: *mut pg_sys::PlannerInfo,
+        relations: &[(pg_sys::Index, ScanId)],
+        runtime_outer_relids: *mut pg_sys::Bitmapset,
+    ) -> Option<()> {
+        if root.is_null() || self.scopes.iter().any(|scope| scope.root == root) {
+            return None;
+        }
+        let maximum = relations.iter().map(|(rti, _)| *rti as usize).max()?;
+        let mut sources = vec![None; maximum + 1];
+        for &(rti, scan) in relations {
+            if rti == 0 {
+                return None;
+            }
+            let entry = &mut sources[rti as usize];
+            if entry.replace(scan).is_some() {
+                return None;
+            }
+        }
+        self.scopes.push(ExpressionSourceScope {
+            root,
+            sources: sources.into_boxed_slice(),
+            runtime_outer_relids,
+        });
+        Some(())
+    }
+
+    pub(super) fn resolve(
+        &self,
+        root: *mut pg_sys::PlannerInfo,
+        varno: c_int,
+    ) -> Option<ScanId> {
+        let scope = self.scopes.iter().find(|scope| scope.root == root)?;
         usize::try_from(varno)
             .ok()
-            .and_then(|index| self.sources.get(index))
+            .and_then(|index| scope.sources.get(index))
             .copied()
             .flatten()
     }
+
+    pub(super) fn is_runtime_outer(
+        &self,
+        root: *mut pg_sys::PlannerInfo,
+        varno: c_int,
+    ) -> bool {
+        varno > 0
+            && self
+                .scopes
+                .iter()
+                .find(|scope| scope.root == root)
+                .is_some_and(|scope| unsafe {
+                    pg_sys::bms_is_member(varno, scope.runtime_outer_relids)
+                })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::query_host::planning) struct ResolvedOutput {
+    pub(in crate::query_host::planning) output: OutputId,
+    pub(in crate::query_host::planning) execution_type: ExprType,
 }
 
 pub(in crate::query_host::planning) trait OutputCatalog {
@@ -59,19 +121,23 @@ pub(in crate::query_host::planning) trait OutputCatalog {
     unsafe fn resolve_output(
         &self,
         expression: *mut pg_sys::Expr,
-    ) -> Option<OutputId>;
+    ) -> Option<ResolvedOutput>;
 }
 
 #[derive(Clone, Copy)]
 pub(in crate::query_host::planning) struct ExpressionScope<'a> {
+    source_root: *mut pg_sys::PlannerInfo,
     outputs: Option<&'a dyn OutputCatalog>,
     predicate: Option<PredicateDomain>,
     scalar_domain: PredicateDomain,
 }
 
 impl<'a> ExpressionScope<'a> {
-    pub(in crate::query_host::planning) const fn scalar() -> Self {
+    pub(in crate::query_host::planning) const fn scalar(
+        source_root: *mut pg_sys::PlannerInfo,
+    ) -> Self {
         Self {
+            source_root,
             outputs: None,
             predicate: None,
             scalar_domain: PredicateDomain::Exact,
@@ -79,9 +145,11 @@ impl<'a> ExpressionScope<'a> {
     }
 
     pub(in crate::query_host::planning) const fn predicate(
+        source_root: *mut pg_sys::PlannerInfo,
         domain: PredicateDomain,
     ) -> Self {
         Self {
+            source_root,
             outputs: None,
             predicate: Some(domain),
             scalar_domain: domain,
@@ -89,10 +157,12 @@ impl<'a> ExpressionScope<'a> {
     }
 
     pub(in crate::query_host::planning) const fn output_predicate(
+        source_root: *mut pg_sys::PlannerInfo,
         outputs: &'a dyn OutputCatalog,
         domain: PredicateDomain,
     ) -> Self {
         Self {
+            source_root,
             outputs: Some(outputs),
             predicate: Some(domain),
             scalar_domain: domain,
@@ -101,6 +171,7 @@ impl<'a> ExpressionScope<'a> {
 
     pub(super) const fn as_scalar(self) -> Self {
         Self {
+            source_root: self.source_root,
             outputs: self.outputs,
             predicate: None,
             scalar_domain: self.scalar_domain,
@@ -109,6 +180,7 @@ impl<'a> ExpressionScope<'a> {
 
     pub(super) const fn with_predicate(self, domain: PredicateDomain) -> Self {
         Self {
+            source_root: self.source_root,
             outputs: self.outputs,
             predicate: Some(domain),
             scalar_domain: domain,
@@ -117,6 +189,10 @@ impl<'a> ExpressionScope<'a> {
 
     pub(super) const fn outputs(self) -> Option<&'a dyn OutputCatalog> {
         self.outputs
+    }
+
+    pub(super) const fn source_root(self) -> *mut pg_sys::PlannerInfo {
+        self.source_root
     }
 
     pub(super) const fn predicate_domain(self) -> Option<PredicateDomain> {
@@ -129,19 +205,28 @@ impl<'a> ExpressionScope<'a> {
 }
 
 impl QueryExpressionPlanner {
-    pub(super) fn attempt<T>(
+    pub(in crate::query_host::planning) fn attempt<T>(
         &mut self,
         operation: impl FnOnce(&mut Self) -> ExpressionPlanResult<T>,
     ) -> ExpressionPlanResult<T> {
         let checkpoint = PlanCheckpoint {
             runtime_count: self.runtime_specs.len(),
-            columns_by_scan: self.columns_by_scan.clone(),
+            column_registration_count: self.column_registrations.len(),
         };
         let result = operation(self);
         if result.is_err() {
             self.runtime_exprs.truncate(checkpoint.runtime_count);
             self.runtime_specs.truncate(checkpoint.runtime_count);
-            self.columns_by_scan = checkpoint.columns_by_scan;
+            while self.column_registrations.len()
+                > checkpoint.column_registration_count
+            {
+                let registration = self
+                    .column_registrations
+                    .pop()
+                    .expect("registration length was checked above");
+                self.columns_by_scan[registration.scan.index()][registration.index] =
+                    None;
+            }
         }
         result
     }
@@ -168,6 +253,10 @@ impl QueryExpressionPlanner {
             }
         } else {
             columns[index] = Some(column);
+            self.column_registrations.push(ColumnRegistration {
+                scan: column.scan,
+                index,
+            });
         }
         Ok(())
     }
@@ -184,9 +273,13 @@ impl QueryExpressionPlanner {
         id
     }
 
-    pub(in crate::query_host::planning) fn columns(&self) -> Vec<ColumnRef> {
+    pub(in crate::query_host::planning) fn columns_for_scan(
+        &self,
+        scan: ScanId,
+    ) -> Vec<ColumnRef> {
         self.columns_by_scan
-            .iter()
+            .get(scan.index())
+            .into_iter()
             .flatten()
             .filter_map(|column| *column)
             .collect()
