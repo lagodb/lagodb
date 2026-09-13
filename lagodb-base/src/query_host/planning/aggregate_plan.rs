@@ -2,68 +2,57 @@
 
 use std::ffi::{CStr, CString, c_int, c_void};
 
-use lagodb_core::expr::{ExprType, RuntimeValueExpr, RuntimeValueLayout};
-use lagodb_core::query_contract::{OutputId, ScanId};
+use lagodb_core::expr::{ExprType, RuntimeValueLayout};
+use lagodb_core::query_contract::OutputId;
 use lagodb_query::plan::{
-    AggCall, AggregateArguments, AggregateNode, AggregateOrderExpr, FilterNode,
-    GroupExpr, ProjectNode, QueryFragment, QueryNode, QueryPlanData,
-    QueryTupleLayout, QueryTupleSlot, ScalarSemantics, ScanNode, SortDirection,
+    AggCall, AggregateArguments, AggregateNode, AggregateOrderExpr, ExecutionExpr,
+    FilterNode, GroupExpr, ProjectExpr, ProjectNode, QueryFragment, QueryNode,
+    QueryPlanData, QueryTupleLayout, QueryTupleSlot, ScalarSemantics, SortDirection,
 };
 use pgrx::pg_sys;
 
-use super::candidate::SingleRelationCandidate;
 use super::expression::{
-    ExpressionScope, ExpressionSourceCatalog, OutputCatalog, PredicateDomain,
-    QueryExpressionPlanner,
+    ExpressionScope, OutputCatalog, PredicateDomain, QueryExpressionPlanner,
+    ResolvedOutput,
 };
-use super::table_scan_filter::TableScanFilter;
+use super::planned_query::PlannedQuery;
+use super::relation_tree::{PlannedRelationInput, PlannedRelationTree};
 
-pub(super) struct PlannedQuery {
-    pub(super) query: QueryPlanData,
-    pub(super) runtime_exprs: Vec<RuntimeValueExpr>,
-    pub(super) scan_target_exprs: Vec<*mut pg_sys::Expr>,
-    pub(super) projected_columns: Vec<pg_sys::AttrNumber>,
-    pub(super) table_scan_filter: Option<TableScanFilter>,
-}
-
-pub(super) struct AggregatePlanBuilder<'a> {
-    candidate: &'a SingleRelationCandidate,
+pub(super) struct AggregatePlanBuilder {
+    input: Option<PlannedRelationInput>,
+    root: *mut pg_sys::PlannerInfo,
+    path_target: *mut pg_sys::PathTarget,
+    scan_count: usize,
+    aggregate_rows: f64,
+    output_rows: f64,
     expressions: QueryExpressionPlanner,
 }
 
-impl<'a> AggregatePlanBuilder<'a> {
-    pub(super) unsafe fn new(candidate: &'a SingleRelationCandidate) -> Self {
+impl AggregatePlanBuilder {
+    pub(super) fn over_relation_tree(
+        root: *mut pg_sys::PlannerInfo,
+        path_target: *mut pg_sys::PathTarget,
+        relation_tree: PlannedRelationTree,
+        aggregate_rows: f64,
+        output_rows: f64,
+    ) -> Self {
+        let (input, expressions) = relation_tree.into_parts();
+        let scan_count = input.scan_count();
         Self {
-            candidate,
-            expressions: QueryExpressionPlanner::new(
-                ExpressionSourceCatalog::for_relation(
-                    candidate.range_table_index,
-                    ScanId::from_index(0),
-                ),
-            ),
+            input: Some(input),
+            root,
+            path_target,
+            scan_count,
+            aggregate_rows,
+            output_rows,
+            expressions,
         }
     }
 
     pub(super) unsafe fn build(&mut self) -> Option<PlannedQuery> {
-        let parse = unsafe { &*(*self.candidate.root).parse };
-        let table_scan_filter = if unsafe { (*parse.jointree).quals.is_null() } {
-            None
-        } else {
-            let predicate = unsafe {
-                self.expressions.lower(
-                    (*parse.jointree).quals,
-                    ExpressionScope::predicate(PredicateDomain::Exact),
-                )
-            }
-            .ok()?;
-            Some(TableScanFilter::new(predicate, unsafe {
-                (*parse.jointree).quals
-            }))
-        };
-
+        let parse = unsafe { &*(*self.root).parse };
         let mut groups = Vec::new();
-        let processed_groups =
-            unsafe { (*self.candidate.root).processed_groupClause };
+        let processed_groups = unsafe { (*self.root).processed_groupClause };
         let group_count = unsafe { pg_sys::list_length(processed_groups) };
         for index in 0..group_count {
             let clause = unsafe { pg_sys::list_nth(processed_groups, index) }
@@ -79,15 +68,14 @@ impl<'a> AggregatePlanBuilder<'a> {
             }
             let scalar = unsafe {
                 self.expressions
-                    .lower((*target).expr.cast(), ExpressionScope::scalar())
+                    .lower((*target).expr.cast(), ExpressionScope::scalar(self.root))
             }
             .ok()?;
             let result_type =
                 QueryExpressionPlanner::expr_type(unsafe { (*target).expr });
-            if !ScalarSemantics::Integer.supports_grouping(
+            if !ScalarSemantics::Exact.supports_grouping(
                 result_type,
                 unsafe { (*clause).eqop },
-                unsafe { (*clause).sortop },
                 unsafe { (*clause).hashable },
             ) {
                 return None;
@@ -103,13 +91,13 @@ impl<'a> AggregatePlanBuilder<'a> {
         let mut project = Vec::new();
         let mut slots = Vec::new();
         let mut scan_target_exprs = Vec::new();
-        let output_target = self.candidate.path_target;
+        let output_target = self.path_target;
         let target_count = unsafe { pg_sys::list_length((*output_target).exprs) };
         for index in 0..target_count {
             let expression =
                 unsafe { pg_sys::list_nth((*output_target).exprs, index) }
                     .cast::<pg_sys::Expr>();
-            let (output, scan_expression) = if let Some((_, group)) =
+            let (semantic_output, scan_expression) = if let Some((_, group)) =
                 groups.iter().find(|(group_expression, _)| unsafe {
                     pg_sys::equal(
                         group_expression.cast::<c_void>(),
@@ -145,12 +133,18 @@ impl<'a> AggregatePlanBuilder<'a> {
             let result_type = QueryExpressionPlanner::expr_type(scan_expression);
             let nullable = aggregates
                 .iter()
-                .find(|(_, aggregate)| aggregate.output() == output)
+                .find(|(_, aggregate)| aggregate.output() == semantic_output)
                 .is_none_or(|(_, aggregate)| aggregate.nullable());
-            project.push(output);
+            let physical_output = OutputId::from_index(index as usize);
+            project.push(ProjectExpr::new(
+                ExecutionExpr::Output(semantic_output),
+                result_type,
+                physical_output,
+                nullable,
+            ));
             scan_target_exprs.push(scan_expression);
             slots.push(QueryTupleSlot::new(
-                output,
+                physical_output,
                 result_type.type_oid,
                 result_type.typmod,
                 result_type.collation,
@@ -198,9 +192,15 @@ impl<'a> AggregatePlanBuilder<'a> {
             let catalog = HavingOutputCatalog {
                 entries: groups
                     .iter()
-                    .map(|(expression, group)| (*expression, group.output()))
+                    .map(|(expression, group)| {
+                        (*expression, group.output(), group.result_type())
+                    })
                     .chain(aggregates.iter().map(|(expression, aggregate)| {
-                        (*expression, aggregate.output())
+                        (
+                            *expression,
+                            aggregate.output(),
+                            aggregate.execution_result_type(),
+                        )
                     }))
                     .collect(),
             };
@@ -209,6 +209,7 @@ impl<'a> AggregatePlanBuilder<'a> {
                     self.expressions.lower(
                         parse.havingQual,
                         ExpressionScope::output_predicate(
+                            self.root,
                             &catalog,
                             PredicateDomain::Having,
                         ),
@@ -221,18 +222,10 @@ impl<'a> AggregatePlanBuilder<'a> {
             return None;
         }
 
-        let columns = self.expressions.columns();
-        let projected_columns = columns.iter().map(|column| column.attno).collect();
-        let scan = QueryNode::Scan(ScanNode::new(
-            ScanId::from_index(0),
-            columns.into_boxed_slice(),
-            table_scan_filter
-                .as_ref()
-                .map(|filter| filter.exact_residual().clone()),
-        ));
+        let (input, scans) = self.input.take()?.materialize(&self.expressions)?;
         let aggregate = QueryNode::Aggregate(
             AggregateNode::new(
-                scan,
+                input,
                 groups
                     .into_iter()
                     .map(|(_, group)| group)
@@ -243,31 +236,32 @@ impl<'a> AggregatePlanBuilder<'a> {
                     .map(|(_, aggregate)| aggregate)
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
+                self.aggregate_rows,
             )
             .ok()?,
         );
         let aggregate = match having {
-            Some(predicate) => {
-                QueryNode::Filter(FilterNode::new(aggregate, predicate))
-            }
+            Some(predicate) => QueryNode::Filter(
+                FilterNode::new(aggregate, predicate, self.output_rows).ok()?,
+            ),
             None => aggregate,
         };
-        let fragment = QueryFragment::new(QueryNode::Project(
-            ProjectNode::new(aggregate, project.into_boxed_slice()).ok()?,
-        ));
+        let fragment = QueryFragment::new(QueryNode::Project(ProjectNode::new(
+            aggregate,
+            project.into_boxed_slice(),
+        )));
         let query = QueryPlanData::new(
             fragment,
-            QueryTupleLayout::from_slots(slots.into_boxed_slice()).ok()?,
+            QueryTupleLayout::from_slots(slots.into_boxed_slice()),
             RuntimeValueLayout::new(self.expressions.take_runtime_layout()),
-            1,
+            self.scan_count,
         )
         .ok()?;
         Some(PlannedQuery {
             query,
             runtime_exprs: self.expressions.take_runtime_exprs(),
             scan_target_exprs,
-            projected_columns,
-            table_scan_filter,
+            scans,
         })
     }
 
@@ -324,7 +318,7 @@ impl<'a> AggregatePlanBuilder<'a> {
             };
             let value = unsafe {
                 self.expressions
-                    .lower((*value).expr.cast(), ExpressionScope::scalar())
+                    .lower((*value).expr.cast(), ExpressionScope::scalar(self.root))
             }
             .ok()?;
             let delimiter = unsafe { Self::string_agg_delimiter((*delimiter).expr) }?;
@@ -335,8 +329,10 @@ impl<'a> AggregatePlanBuilder<'a> {
             };
             AggregateArguments::Unary(
                 unsafe {
-                    self.expressions
-                        .lower((*target).expr.cast(), ExpressionScope::scalar())
+                    self.expressions.lower(
+                        (*target).expr.cast(),
+                        ExpressionScope::scalar(self.root),
+                    )
                 }
                 .ok()?,
             )
@@ -355,7 +351,7 @@ impl<'a> AggregatePlanBuilder<'a> {
                 unsafe {
                     self.expressions.lower(
                         aggregate.aggfilter.cast(),
-                        ExpressionScope::predicate(PredicateDomain::Exact),
+                        ExpressionScope::predicate(self.root, PredicateDomain::Exact),
                     )
                 }
                 .ok()?,
@@ -439,8 +435,10 @@ impl<'a> AggregatePlanBuilder<'a> {
             };
             if retain_order {
                 let expression = unsafe {
-                    self.expressions
-                        .lower(target_expression.cast(), ExpressionScope::scalar())
+                    self.expressions.lower(
+                        target_expression.cast(),
+                        ExpressionScope::scalar(self.root),
+                    )
                 }
                 .ok()?;
                 order_by.push(
@@ -479,19 +477,27 @@ impl<'a> AggregatePlanBuilder<'a> {
 }
 
 struct HavingOutputCatalog {
-    entries: Vec<(*mut pg_sys::Expr, OutputId)>,
+    entries: Vec<(*mut pg_sys::Expr, OutputId, ExprType)>,
 }
 
 impl OutputCatalog for HavingOutputCatalog {
     unsafe fn resolve_output(
         &self,
         expression: *mut pg_sys::Expr,
-    ) -> Option<OutputId> {
-        self.entries.iter().find_map(|(candidate, output)| {
-            unsafe {
-                pg_sys::equal(candidate.cast::<c_void>(), expression.cast::<c_void>())
-            }
-            .then_some(*output)
-        })
+    ) -> Option<ResolvedOutput> {
+        self.entries
+            .iter()
+            .find_map(|(candidate, output, execution_type)| {
+                unsafe {
+                    pg_sys::equal(
+                        candidate.cast::<c_void>(),
+                        expression.cast::<c_void>(),
+                    )
+                }
+                .then_some(ResolvedOutput {
+                    output: *output,
+                    execution_type: *execution_type,
+                })
+            })
     }
 }

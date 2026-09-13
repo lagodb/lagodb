@@ -17,6 +17,8 @@ pub(super) unsafe fn add_path(
     selected_plan: *mut pg_sys::List,
     cost: PlanCost,
     rows: f64,
+    parameter_info: *mut pg_sys::ParamPathInfo,
+    pathkeys: *mut pg_sys::List,
 ) {
     let custom_path = unsafe {
         pg_sys::palloc0(size_of::<pg_sys::CustomPath>()).cast::<pg_sys::CustomPath>()
@@ -27,7 +29,7 @@ pub(super) unsafe fn add_path(
         path.pathtype = pg_sys::NodeTag::T_CustomScan;
         path.parent = output_rel;
         path.pathtarget = path_target;
-        path.param_info = ptr::null_mut();
+        path.param_info = parameter_info;
         path.parallel_aware = false;
         // This is part of the expression-safety contract: parallel-unsafe PG
         // fallback expressions execute only in the leader's serial plan.
@@ -36,14 +38,49 @@ pub(super) unsafe fn add_path(
         path.rows = rows;
         path.startup_cost = cost.startup();
         path.total_cost = cost.total();
-        path.pathkeys = ptr::null_mut();
+        path.pathkeys = pathkeys;
 
-        (*custom_path).flags = pg_sys::CUSTOMPATH_SUPPORT_PROJECTION;
+        // The encoded query fixes both its tuple layout and the corresponding
+        // PostgreSQL scan expressions.  PostgreSQL must therefore place a
+        // ProjectionPath above this path when it needs a different target,
+        // rather than mutating the CustomPath target in place.
+        (*custom_path).flags = 0;
         (*custom_path).custom_paths = ptr::null_mut();
         (*custom_path).custom_restrictinfo = ptr::null_mut();
         (*custom_path).custom_private = selected_plan;
         (*custom_path).methods = methods::tables().path();
         pg_sys::add_path(output_rel, path);
+    }
+}
+
+/// Replace one PostgreSQL wrapper path whose semantics have been absorbed by
+/// the query IR. Other competing paths remain untouched and `add_path` still
+/// performs PostgreSQL's normal dominance tournament.
+pub(super) unsafe fn replace_path(
+    output_rel: *mut pg_sys::RelOptInfo,
+    old_index: i32,
+    selected_plan: *mut pg_sys::List,
+    cost: PlanCost,
+) {
+    let old_path = unsafe { pg_sys::list_nth((*output_rel).pathlist, old_index) };
+    let old_path_fields = unsafe { &*old_path.cast::<pg_sys::Path>() };
+    let path_target = old_path_fields.pathtarget;
+    let rows = old_path_fields.rows;
+    let parameter_info = old_path_fields.param_info;
+    let pathkeys = old_path_fields.pathkeys;
+    unsafe {
+        (*output_rel).pathlist =
+            pg_sys::list_delete_nth_cell((*output_rel).pathlist, old_index);
+        pg_sys::pfree(old_path);
+        add_path(
+            output_rel,
+            path_target,
+            selected_plan,
+            cost,
+            rows,
+            parameter_info,
+            pathkeys,
+        );
     }
 }
 
