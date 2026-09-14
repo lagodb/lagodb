@@ -7,7 +7,8 @@ use lagodb_core::runtime_api::CallbackErrorReport;
 use pgrx::{pg_guard, pg_sys};
 
 use super::{
-    PREV_CREATE_UPPER_PATHS, PREV_SET_REL_PATHLIST, callback_result, directory,
+    PREV_CREATE_UPPER_PATHS, PREV_SET_JOIN_PATHLIST, PREV_SET_REL_PATHLIST,
+    callback_result, directory,
 };
 
 #[pg_guard]
@@ -22,24 +23,47 @@ pub(super) unsafe extern "C-unwind" fn set_rel_pathlist(
         // current hook arguments remain live for the duration of the call.
         unsafe { previous(root, rel, rti, rte) };
     }
-    directory::relation_scan_snapshot()
-        .try_for_each(|descriptor| {
-            let mut error = CallbackErrorReport::default();
-            // SAFETY: registration validated this exact-build callback, and
-            // all PostgreSQL pointers are forwarded only synchronously.
-            let status = unsafe {
-                (descriptor.plan_relation)(
-                    descriptor.context,
-                    root,
-                    rel,
-                    rti,
-                    rte,
-                    &mut error,
-                )
-            };
-            callback_result(status, &error, "relation planning callback")
+    let result = directory::relation_scan_snapshot().try_for_each(|descriptor| {
+        let mut error = CallbackErrorReport::default();
+        // SAFETY: registration validated this exact-build callback, and
+        // all PostgreSQL pointers are forwarded only synchronously.
+        let status = unsafe {
+            (descriptor.plan_relation)(
+                descriptor.context,
+                root,
+                rel,
+                rti,
+                rte,
+                &mut error,
+            )
+        };
+        callback_result(status, &error, "relation planning callback")
+    });
+    result
+        .and_then(|()| unsafe {
+            crate::query_host::set_rel_pathlist(root, rel, rti, rte)
         })
         .report_unwrap();
+}
+
+#[pg_guard]
+pub(super) unsafe extern "C-unwind" fn set_join_pathlist(
+    root: *mut pg_sys::PlannerInfo,
+    join_rel: *mut pg_sys::RelOptInfo,
+    outer_rel: *mut pg_sys::RelOptInfo,
+    inner_rel: *mut pg_sys::RelOptInfo,
+    join_type: pg_sys::JoinType::Type,
+    extra: *mut pg_sys::JoinPathExtraData,
+) {
+    if let Some(Some(previous)) = PREV_SET_JOIN_PATHLIST.get() {
+        unsafe { previous(root, join_rel, outer_rel, inner_rel, join_type, extra) };
+    }
+    unsafe {
+        crate::query_host::set_join_pathlist(
+            root, join_rel, outer_rel, inner_rel, join_type, extra,
+        )
+    }
+    .report_unwrap();
 }
 
 #[pg_guard]
@@ -84,6 +108,8 @@ unsafe fn route_upper_paths(
         callback_result(status, &error, "modify upper-path callback")
     })?;
     unsafe {
-        crate::query_host::create_upper_paths(root, stage, input_rel, output_rel)
+        crate::query_host::create_upper_paths(
+            root, stage, input_rel, output_rel, extra,
+        )
     }
 }

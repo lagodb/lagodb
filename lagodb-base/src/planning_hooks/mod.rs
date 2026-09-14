@@ -16,6 +16,8 @@ pub(crate) use directory::{PreparedPlanningHooks, commit, prepare};
 static PREV_PLANNER: OnceLock<pg_sys::planner_hook_type> = OnceLock::new();
 static PREV_SET_REL_PATHLIST: OnceLock<pg_sys::set_rel_pathlist_hook_type> =
     OnceLock::new();
+static PREV_SET_JOIN_PATHLIST: OnceLock<pg_sys::set_join_pathlist_hook_type> =
+    OnceLock::new();
 static PREV_CREATE_UPPER_PATHS: OnceLock<pg_sys::create_upper_paths_hook_type> =
     OnceLock::new();
 
@@ -31,6 +33,11 @@ pub(crate) fn init() {
         PREV_SET_REL_PATHLIST.get_or_init(|| {
             let previous = pg_sys::set_rel_pathlist_hook;
             pg_sys::set_rel_pathlist_hook = Some(pathlist::set_rel_pathlist);
+            previous
+        });
+        PREV_SET_JOIN_PATHLIST.get_or_init(|| {
+            let previous = pg_sys::set_join_pathlist_hook;
+            pg_sys::set_join_pathlist_hook = Some(pathlist::set_join_pathlist);
             previous
         });
         PREV_CREATE_UPPER_PATHS.get_or_init(|| {

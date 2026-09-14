@@ -8,7 +8,8 @@ use std::{mem, ptr};
 use lagodb_core::resource::{ResourceHandle, forget_resource, remember_resource};
 use lagodb_query::ExecutionProfile;
 use lagodb_query::datafusion::{
-    QueryExecutionError, SerialExecutionLimits, SerialQueryExecution,
+    ExecutionMetricsMode, QueryExecutionError, SerialExecutionLimits,
+    SerialQueryExecution,
 };
 use lagodb_query::plan::SelectedQueryPlan;
 use pgrx::{PgMemoryContexts, pg_guard, pg_sys};
@@ -16,7 +17,7 @@ use pgrx::{PgMemoryContexts, pg_guard, pg_sys};
 use crate::runtime_api::table_scan_registry::TableScanRegistry;
 
 use super::error::QueryHostError;
-use super::explain::QueryOffloadExplain;
+use super::explain::{ExplainOptions, QueryOffloadExplain};
 use super::methods;
 
 enum QueryPhase {
@@ -192,16 +193,17 @@ pub(super) unsafe extern "C-unwind" fn create_state(
 #[pg_guard]
 pub(super) unsafe extern "C-unwind" fn begin(
     node: *mut pg_sys::CustomScanState,
-    _estate: *mut pg_sys::EState,
+    estate: *mut pg_sys::EState,
     eflags: c_int,
 ) {
-    if let Err(error) = unsafe { begin_scan(node, eflags) } {
+    if let Err(error) = unsafe { begin_scan(node, estate, eflags) } {
         error.into_report().report();
     }
 }
 
 unsafe fn begin_scan(
     node: *mut pg_sys::CustomScanState,
+    estate: *mut pg_sys::EState,
     eflags: c_int,
 ) -> Result<(), QueryHostError> {
     // Read the plan before borrowing the complete Rust state wrapper; both
@@ -214,16 +216,18 @@ unsafe fn begin_scan(
         ));
     }
     let explain_only = (eflags as u32) & pg_sys::EXEC_FLAG_EXPLAIN_ONLY != 0;
-    if !explain_only {
-        state.explain.start_execution();
-    }
+    // ExecInitNode installs PlanState instrumentation after BeginCustomScan;
+    // EState carries the executor's request at this callback boundary.
+    let instrumented = !explain_only && unsafe { (*estate).es_instrument } != 0;
     let selected =
         unsafe { SelectedQueryPlan::decode_execution(&*(*scan).custom_private) }
             .map_err(QueryHostError::invalid_plan)?;
+    if explain_only {
+        unsafe {
+            state.explain.record_plan(&selected, true);
+        }
+    }
     let (query, execution_profile, scans) = selected.into_parts();
-    state
-        .explain
-        .record_plan(&scans, execution_profile, query.fragment().summary());
 
     if explain_only {
         state.phase = QueryPhase::ExplainOnly;
@@ -231,14 +235,20 @@ unsafe fn begin_scan(
     }
 
     let limits = WorkMemBudget::execution_limits(execution_profile)?;
+    let metrics_mode = if instrumented {
+        ExecutionMetricsMode::Enabled
+    } else {
+        ExecutionMetricsMode::Disabled
+    };
     let callbacks = scans
         .iter()
-        .map(|scan| TableScanRegistry::callbacks(scan.provider()))
+        .map(|scan| TableScanRegistry::resolve_serial_callbacks(scan.route()))
         .collect::<Result<Vec<_>, _>>()?;
     let execution = Rc::new(QueryExecutionCell::new(SerialQueryExecution::try_new(
         query,
         &scans,
         limits,
+        metrics_mode,
         &callbacks,
         unsafe { (*scan).custom_exprs },
         unsafe { &mut (*node).ss.ps },
@@ -311,11 +321,14 @@ pub(super) unsafe extern "C-unwind" fn rescan(node: *mut pg_sys::CustomScanState
     let state = unsafe { QueryOffloadScanState::from_node(&mut *node) };
     let result = (|| match &mut state.phase {
         QueryPhase::Running(execution) => {
-            unsafe { execution.with_mut(SerialQueryExecution::rescan) }
-                .ok_or(QueryHostError::ExecutorContract(
-                    "query-offload execution was already released",
-                ))?
-                .map_err(QueryHostError::from)
+            let changed_parameters = unsafe { (*node).ss.ps.chgParam };
+            unsafe {
+                execution.with_mut(|execution| execution.rescan(changed_parameters))
+            }
+            .ok_or(QueryHostError::ExecutorContract(
+                "query-offload execution was already released",
+            ))?
+            .map_err(QueryHostError::from)
         }
         QueryPhase::ExplainOnly => Ok(()),
         QueryPhase::Created | QueryPhase::Closed => {
@@ -343,23 +356,50 @@ pub(super) unsafe extern "C-unwind" fn explain(
     _ancestors: *mut pg_sys::List,
     explain: *mut pg_sys::ExplainState,
 ) {
+    // Read the PostgreSQL-owned plan before borrowing the complete wrapper;
+    // `node` aliases its leading `CustomScanState` field.
+    let scan = unsafe { (*node).ss.ps.plan }.cast::<pg_sys::CustomScan>();
     let state = unsafe { QueryOffloadScanState::from_node(&mut *node) };
-    let result = match &state.phase {
-        QueryPhase::Running(execution) => unsafe {
-            execution.with_ref(|execution| {
-                let metrics = execution.metrics();
-                state.explain.emit(
-                    Some(&metrics),
-                    Some(execution.physical_operators()),
-                    explain,
-                )
-            })
+    let options = unsafe { ExplainOptions::from_state(explain) };
+    let result = (|| {
+        // auto_explain without ANALYZE installs no instrumentation, so Begin
+        // deliberately does no EXPLAIN work. If it later elects to log this
+        // statement, its callback still owns the live CustomScan plan and can
+        // capture the presentation metadata on demand.
+        if matches!(&state.phase, QueryPhase::Running(_)) && !state.explain.has_plan()
+        {
+            let selected = unsafe {
+                SelectedQueryPlan::decode_execution(&*(*scan).custom_private)
+            }
+            .map_err(QueryHostError::invalid_plan)?;
+            unsafe { state.explain.record_plan(&selected, false) };
         }
-        .unwrap_or_else(|| unsafe { state.explain.emit(None, None, explain) }),
-        QueryPhase::Created | QueryPhase::ExplainOnly | QueryPhase::Closed => unsafe {
-            state.explain.emit(None, None, explain)
-        },
-    };
+
+        match &state.phase {
+            QueryPhase::Running(execution) => unsafe {
+                execution.with_ref(|execution| {
+                    let metrics = execution.metrics();
+                    let physical_plan = options
+                        .engine_diagnostics()
+                        .then(|| execution.physical_plan_analyze(options.timing))
+                        .flatten();
+                    state.explain.emit(
+                        Some(execution.fragment()),
+                        metrics.as_ref(),
+                        physical_plan.as_ref(),
+                        options,
+                        explain,
+                    )
+                })
+            }
+            .unwrap_or_else(|| unsafe {
+                state.explain.emit(None, None, None, options, explain)
+            }),
+            QueryPhase::Created | QueryPhase::ExplainOnly | QueryPhase::Closed => unsafe {
+                state.explain.emit(None, None, None, options, explain)
+            },
+        }
+    })();
     if let Err(error) = result {
         error.into_report().report();
     }

@@ -1,27 +1,22 @@
-//! Runtime-owned registry of provider table-scan capabilities.
+//! Backend-local registry of provider table-scan capabilities indexed by
+//! PostgreSQL storage routes.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::mem::size_of;
 
 use lagodb_core::diag::PgReportError;
-use lagodb_core::expr::RuntimeValueExpr;
-use lagodb_core::expr::pushdown::PredicateFragment;
-use lagodb_core::query_contract::{ProviderId, ScanEstimate, ScanId};
+use lagodb_core::query_contract::{TableScanRoute, TableScanRouteKind};
 use lagodb_core::runtime_api::{
-    CallbackErrorReport, GetPreparedTableScanSchema, OpenTableScanStream,
-    PlanTableScan, PlannedTableScanResult, PrepareTableScan,
-    ReleasePreparedTableScan, TABLE_SCAN_FAILED, TABLE_SCAN_NOT_OWNED,
-    TABLE_SCAN_PLANNED, TABLE_SCAN_UNSUPPORTED, TableScanDescriptor,
-    TableScanPlanningRequest,
+    CallbackErrorReport, PlanTableScan, PlannedTableScanResult,
+    REGISTER_DUPLICATE_TABLE_SCAN_ROUTE, REGISTER_INVALID_DESCRIPTOR,
+    TableScanDescriptor, TableScanPlanningRequest,
 };
 use lagodb_query::datafusion::SerialTableScanCallbacks;
-use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
 use crate::descriptor_directory::{
     DescriptorDirectory, DescriptorNode, DescriptorSnapshot,
 };
-use crate::provider_bootstrap;
 
 thread_local! {
     static TABLE_SCANS: DescriptorDirectory<StoredTableScan> =
@@ -29,40 +24,96 @@ thread_local! {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct StoredTableScan {
-    pub(crate) provider_id: ProviderId,
-    pub(crate) provider_name: *const c_char,
-    pub(crate) context: *mut c_void,
-    pub(crate) plan_scan: PlanTableScan,
-    pub(crate) prepare_scan: PrepareTableScan,
-    pub(crate) get_prepared_schema: GetPreparedTableScanSchema,
-    pub(crate) open_serial_stream: OpenTableScanStream,
-    pub(crate) release_prepared: ReleasePreparedTableScan,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct ValidatedTableScan {
+struct TableScanCallbacks {
     context: *mut c_void,
     plan_scan: PlanTableScan,
-    prepare_scan: PrepareTableScan,
-    get_prepared_schema: GetPreparedTableScanSchema,
-    open_serial_stream: OpenTableScanStream,
-    release_prepared: ReleasePreparedTableScan,
+    serial: SerialTableScanCallbacks,
 }
 
-impl ValidatedTableScan {
+impl TableScanCallbacks {
     fn from_descriptor(descriptor: &TableScanDescriptor) -> Option<Self> {
-        if descriptor.struct_size() != size_of::<TableScanDescriptor>() as u32 {
+        let expected_size = u32::try_from(size_of::<TableScanDescriptor>()).ok()?;
+        if descriptor.struct_size() != expected_size {
             return None;
         }
+        // SAFETY: the descriptor has the exact runtime ABI layout. Registration
+        // treats its callback and context contracts as trusted unsafe input.
+        let serial = unsafe {
+            SerialTableScanCallbacks::from_validated_descriptor(descriptor)
+        }?;
         Some(Self {
             context: descriptor.context(),
             plan_scan: descriptor.plan_scan()?,
-            prepare_scan: descriptor.prepare_scan()?,
-            get_prepared_schema: descriptor.get_prepared_schema()?,
-            open_serial_stream: descriptor.open_serial_stream()?,
-            release_prepared: descriptor.release_prepared()?,
+            serial,
         })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StoredTableScan {
+    access_method_name: *const c_char,
+    foreign_data_wrapper_name: *const c_char,
+    callbacks: TableScanCallbacks,
+}
+
+impl StoredTableScan {
+    fn from_descriptor(descriptor: &TableScanDescriptor) -> Option<Self> {
+        let callbacks = TableScanCallbacks::from_descriptor(descriptor)?;
+        let access_method_name = descriptor.access_method_name();
+        let foreign_data_wrapper_name = descriptor.foreign_data_wrapper_name();
+        if access_method_name.is_null() && foreign_data_wrapper_name.is_null() {
+            return None;
+        }
+        for name in [access_method_name, foreign_data_wrapper_name] {
+            // SAFETY: the trusted registration ABI requires every non-null
+            // route pointer to reference a backend-lifetime C string.
+            if !name.is_null() && unsafe { CStr::from_ptr(name) }.is_empty() {
+                return None;
+            }
+        }
+        Some(Self {
+            access_method_name,
+            foreign_data_wrapper_name,
+            callbacks,
+        })
+    }
+
+    fn conflicts_with_registered_route(self) -> bool {
+        // SAFETY: route pointers were validated by `from_descriptor` under the
+        // trusted registration ABI and remain live for the backend lifetime.
+        (!self.access_method_name.is_null()
+            && TableScanRegistry::contains_route(TableScanRoute::access_method(
+                unsafe { CStr::from_ptr(self.access_method_name) },
+            )))
+            || (!self.foreign_data_wrapper_name.is_null()
+                && TableScanRegistry::contains_route(
+                    TableScanRoute::foreign_data_wrapper(unsafe {
+                        CStr::from_ptr(self.foreign_data_wrapper_name)
+                    }),
+                ))
+    }
+
+    fn matches(self, route: TableScanRoute<'_>) -> bool {
+        let registered_name = match route.kind() {
+            TableScanRouteKind::AccessMethod => self.access_method_name,
+            TableScanRouteKind::ForeignDataWrapper => self.foreign_data_wrapper_name,
+        };
+        // SAFETY: stored names came from a validated backend-lifetime
+        // descriptor; the null case is excluded before constructing `CStr`.
+        !registered_name.is_null()
+            && unsafe { CStr::from_ptr(registered_name) } == route.name()
+    }
+
+    fn resolved(self, kind: TableScanRouteKind) -> ResolvedTableScan {
+        let route_name = match kind {
+            TableScanRouteKind::AccessMethod => self.access_method_name,
+            TableScanRouteKind::ForeignDataWrapper => self.foreign_data_wrapper_name,
+        };
+        ResolvedTableScan {
+            route_kind: kind,
+            route_name,
+            callbacks: self.callbacks,
+        }
     }
 }
 
@@ -71,35 +122,20 @@ pub(crate) struct PendingTableScanRegistration {
 }
 
 impl PendingTableScanRegistration {
-    pub(crate) fn validate(
-        descriptor: Option<&TableScanDescriptor>,
-    ) -> Option<Option<ValidatedTableScan>> {
-        match descriptor {
-            Some(descriptor) => {
-                Some(Some(ValidatedTableScan::from_descriptor(descriptor)?))
-            }
-            None => Some(None),
-        }
-    }
-
     pub(crate) fn prepare(
-        provider_id: ProviderId,
-        provider_name: *const c_char,
-        descriptor: Option<ValidatedTableScan>,
-    ) -> Self {
-        let entry = descriptor.map(|descriptor| {
-            DescriptorNode::new(StoredTableScan {
-                provider_id,
-                provider_name,
-                context: descriptor.context,
-                plan_scan: descriptor.plan_scan,
-                prepare_scan: descriptor.prepare_scan,
-                get_prepared_schema: descriptor.get_prepared_schema,
-                open_serial_stream: descriptor.open_serial_stream,
-                release_prepared: descriptor.release_prepared,
+        descriptor: Option<&TableScanDescriptor>,
+    ) -> Result<Self, u32> {
+        let descriptor = descriptor
+            .map(|descriptor| {
+                StoredTableScan::from_descriptor(descriptor)
+                    .ok_or(REGISTER_INVALID_DESCRIPTOR)
             })
-        });
-        Self { entry }
+            .transpose()?;
+        if descriptor.is_some_and(StoredTableScan::conflicts_with_registered_route) {
+            return Err(REGISTER_DUPLICATE_TABLE_SCAN_ROUTE);
+        }
+        let entry = descriptor.map(DescriptorNode::new);
+        Ok(Self { entry })
     }
 
     pub(crate) fn commit(self) {
@@ -107,189 +143,42 @@ impl PendingTableScanRegistration {
     }
 }
 
-pub(crate) struct PlannedScanRecord {
-    pub(crate) provider_id: ProviderId,
-    pub(crate) provider_name: &'static CStr,
-    pub(crate) plan_data: *mut pg_sys::List,
-    pub(crate) pruning: Option<PlannedScanPruning>,
-    pub(crate) estimate: ScanEstimate,
+/// One immutable callback bundle selected by a PostgreSQL storage route.
+#[derive(Clone, Copy)]
+pub(crate) struct ResolvedTableScan {
+    route_kind: TableScanRouteKind,
+    route_name: *const c_char,
+    callbacks: TableScanCallbacks,
 }
 
-pub(crate) struct PlannedScanPruning {
-    pub(crate) bindings: Box<[RuntimeValueExpr]>,
-    pub(crate) expression: *mut pg_sys::Expr,
-}
-
-enum OwnedResolution {
-    Unsupported { provider_name: &'static CStr },
-    Planned(PlannedScanRecord),
-}
-
-impl OwnedResolution {
-    fn provider_name(&self) -> &'static CStr {
-        match self {
-            Self::Unsupported { provider_name, .. } => provider_name,
-            Self::Planned(scan) => scan.provider_name,
-        }
+impl ResolvedTableScan {
+    pub(crate) fn route(self) -> TableScanRoute<'static> {
+        // SAFETY: registration accepts only backend-lifetime route strings and
+        // the selected kind always chooses a non-null registered route.
+        TableScanRoute::new(self.route_kind, unsafe {
+            CStr::from_ptr(self.route_name)
+        })
     }
-}
 
-struct ScanResolver {
-    scan: ScanId,
-    request: TableScanPlanningRequest,
-    owned: Option<OwnedResolution>,
-}
-
-impl ScanResolver {
-    fn new(scan: ScanId, request: TableScanPlanningRequest) -> Self {
-        Self {
-            scan,
-            request,
-            owned: None,
+    pub(crate) fn plan(
+        self,
+        request: &TableScanPlanningRequest,
+        output: &mut PlannedTableScanResult,
+        error: &mut CallbackErrorReport,
+    ) -> u32 {
+        // SAFETY: registration validated the callback table; all arguments
+        // remain live for this synchronous FFI call.
+        unsafe {
+            (self.callbacks.plan_scan)(self.callbacks.context, request, output, error)
         }
     }
 
-    fn visit(&mut self, descriptor: StoredTableScan) -> Result<(), PgReportError> {
-        let mut output = PlannedTableScanResult::default();
-        let mut error = CallbackErrorReport::default();
-        let status = unsafe {
-            (descriptor.plan_scan)(
-                descriptor.context,
-                &self.request,
-                &mut output,
-                &mut error,
-            )
-        };
-        let provider_name = unsafe { CStr::from_ptr(descriptor.provider_name) };
-        let resolution = match status {
-            TABLE_SCAN_NOT_OWNED => return Ok(()),
-            TABLE_SCAN_UNSUPPORTED => OwnedResolution::Unsupported { provider_name },
-            TABLE_SCAN_PLANNED => {
-                if output.struct_size != size_of::<PlannedTableScanResult>() as u32
-                    || output.plan_data.is_null()
-                    || unsafe { (*output.plan_data).type_ } != pg_sys::NodeTag::T_List
-                    || (output.pruning_fragment.is_null()
-                        != output.pruning_expression.is_null())
-                    || (self.request.predicate_expression.is_null()
-                        && !output.pruning_fragment.is_null())
-                    || (output.pruning_fragment.is_null()
-                        && !output.pruning_binding_exprs.is_null())
-                    || (!output.pruning_fragment.is_null()
-                        && unsafe { (*output.pruning_fragment).type_ }
-                            != pg_sys::NodeTag::T_List)
-                    || (!output.pruning_binding_exprs.is_null()
-                        && unsafe { (*output.pruning_binding_exprs).type_ }
-                            != pg_sys::NodeTag::T_List)
-                {
-                    return Err(PgReportError::from_message(
-                        PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                        "table scan returned invalid plan data",
-                    ));
-                }
-                let estimate = ScanEstimate::try_new(
-                    output.estimated_rows,
-                    output.estimated_scan_bytes,
-                )
-                .map_err(|error| {
-                    PgReportError::from_message(
-                        PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                        format!("table scan returned invalid statistics: {error}"),
-                    )
-                })?;
-                let pruning = if output.pruning_fragment.is_null() {
-                    None
-                } else {
-                    let fragment = unsafe {
-                        PredicateFragment::decode_plan_data(output.pruning_fragment)
-                    }
-                    .map_err(|error| {
-                        PgReportError::from_message(
-                            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                            format!(
-                                "table scan returned invalid pruning plan: {error}"
-                            ),
-                        )
-                    })?;
-                    let (_, layout) = fragment.into_parts();
-                    let binding_count =
-                        unsafe { pg_sys::list_length(output.pruning_binding_exprs) }
-                            as usize;
-                    if binding_count != layout.len() {
-                        return Err(PgReportError::from_message(
-                            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                            "table scan pruning expressions do not match their layout",
-                        ));
-                    }
-                    let bindings = layout
-                        .values()
-                        .iter()
-                        .enumerate()
-                        .map(|(index, &metadata)| {
-                            let expression: *mut pg_sys::Expr = unsafe {
-                                pg_sys::list_nth(
-                                    output.pruning_binding_exprs,
-                                    index as i32,
-                                )
-                            }
-                            .cast();
-                            if expression.is_null() {
-                                return Err(PgReportError::from_message(
-                                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                                    "table scan returned a null pruning expression",
-                                ));
-                            }
-                            Ok(RuntimeValueExpr::new(expression, metadata))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                        .into_boxed_slice();
-                    Some(PlannedScanPruning {
-                        bindings,
-                        expression: output.pruning_expression,
-                    })
-                };
-                OwnedResolution::Planned(PlannedScanRecord {
-                    provider_id: descriptor.provider_id,
-                    provider_name,
-                    plan_data: output.plan_data,
-                    pruning,
-                    estimate,
-                })
-            }
-            TABLE_SCAN_FAILED => {
-                return Err(unsafe { error.to_error("table scan planning") });
-            }
-            status => {
-                return Err(PgReportError::from_message(
-                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    format!("table scan planning returned unknown status {status}"),
-                ));
-            }
-        };
-
-        if let Some(existing) = &self.owned {
-            return Err(PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                format!(
-                    "table scan {} is owned by both {:?} and {:?}",
-                    self.scan.index(),
-                    existing.provider_name(),
-                    provider_name,
-                ),
-            ));
-        }
-        self.owned = Some(resolution);
-        Ok(())
-    }
-
-    fn finish(self) -> Option<PlannedScanRecord> {
-        match self.owned {
-            None | Some(OwnedResolution::Unsupported { .. }) => None,
-            Some(OwnedResolution::Planned(scan)) => Some(scan),
-        }
+    fn serial_callbacks(self) -> SerialTableScanCallbacks {
+        self.callbacks.serial
     }
 }
 
-/// Backend-local owner of table-scan registration and resolution operations.
+/// Backend-local owner of table-scan registration and exact route lookup.
 pub(crate) struct TableScanRegistry;
 
 impl TableScanRegistry {
@@ -301,63 +190,33 @@ impl TableScanRegistry {
         TABLE_SCANS.with(|registry| registry.snapshot())
     }
 
-    /// Resolve the immutable callbacks for a provider referenced by selected
-    /// plan data. Absence or duplication is a selected-path invariant
-    /// violation, not a capability decline.
-    pub(crate) fn callbacks(
-        provider: ProviderId,
-    ) -> Result<SerialTableScanCallbacks, PgReportError> {
-        let mut found = None;
-        Self::snapshot().try_for_each(|descriptor| {
-            if descriptor.provider_id != provider {
-                return Ok(());
-            }
-            let provider_name = unsafe { CStr::from_ptr(descriptor.provider_name) };
-            if found.is_some() {
-                return Err(PgReportError::from_message(
-                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    format!(
-                        "provider {provider_name:?} ({}) has multiple registered table scan descriptors",
-                        provider.index(),
-                    ),
-                ));
-            }
-            found = Some(unsafe {
-                SerialTableScanCallbacks::from_validated_callbacks(
-                    descriptor.context,
-                    descriptor.prepare_scan,
-                    descriptor.get_prepared_schema,
-                    descriptor.open_serial_stream,
-                    descriptor.release_prepared,
-                )
-            });
-            Ok(())
-        })?;
-        found.ok_or_else(|| {
-            let message = match provider_bootstrap::provider_name(provider) {
-                Some(provider_name) => format!(
-                    "selected query plan references provider {:?} ({}) without a table scan descriptor",
-                    provider_name.as_c_str(),
-                    provider.index(),
-                ),
-                None => format!(
-                    "selected query plan references unknown provider id {}",
-                    provider.index(),
-                ),
-            };
-            PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                message,
-            )
-        })
+    fn contains_route(route: TableScanRoute<'_>) -> bool {
+        Self::resolve(route).is_some()
     }
 
-    pub(crate) fn plan(
-        scan: ScanId,
-        request: TableScanPlanningRequest,
-    ) -> Result<Option<PlannedScanRecord>, PgReportError> {
-        let mut resolver = ScanResolver::new(scan, request);
-        Self::snapshot().try_for_each(|descriptor| resolver.visit(descriptor))?;
-        Ok(resolver.finish())
+    pub(crate) fn resolve(route: TableScanRoute<'_>) -> Option<ResolvedTableScan> {
+        let mut found = None;
+        Self::snapshot().for_each_if(
+            |descriptor| descriptor.matches(route),
+            |descriptor| found = Some(descriptor.resolved(route.kind())),
+        );
+        found
+    }
+
+    pub(crate) fn resolve_serial_callbacks(
+        route: TableScanRoute<'_>,
+    ) -> Result<SerialTableScanCallbacks, PgReportError> {
+        Self::resolve(route)
+            .map(ResolvedTableScan::serial_callbacks)
+            .ok_or_else(|| {
+                PgReportError::from_message(
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    format!(
+                        "selected query plan references unregistered {:?} table-scan route {:?}",
+                        route.kind(),
+                        route.name(),
+                    ),
+                )
+            })
     }
 }

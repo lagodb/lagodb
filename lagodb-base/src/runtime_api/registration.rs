@@ -155,18 +155,12 @@ impl PreparedProviderRegistration {
         )
         .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
         let table_scan =
-            PendingTableScanRegistration::validate(registration.table_scan)
-                .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
+            PendingTableScanRegistration::prepare(registration.table_scan)?;
         // Validate bootstrap ownership only after the complete batch has been
         // validated. This preserves the more specific duplicate-provider and
         // invalid-descriptor results while still preventing every directory
         // from being committed outside the bootstrap window.
         let provider = provider_bootstrap::prepare_identity(registration.provider)?;
-        let table_scan = PendingTableScanRegistration::prepare(
-            provider.provider_id(),
-            provider.provider_name(),
-            table_scan,
-        );
         Ok(Self {
             maintenance,
             provider,

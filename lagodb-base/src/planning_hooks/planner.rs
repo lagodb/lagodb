@@ -1,8 +1,9 @@
 //! ModifyTable-only PlannerPre -> previous/standard planner -> PlannerPost routing.
 //!
 //! Query offload does not use this hook. It contributes an upper CustomPath
-//! through `create_upper_paths_hook` and then uses PostgreSQL CustomScan method
-//! tables. The planner hook remains required by the pre-existing custom-modify
+//! through `set_join_pathlist_hook`/`create_upper_paths_hook` and then uses
+//! PostgreSQL CustomScan method tables. The planner hook remains required by
+//! the pre-existing custom-modify
 //! contract, which injects whole-row inputs before planning and fixes the
 //! resulting ModifyTable plan afterward.
 

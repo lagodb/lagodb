@@ -8,14 +8,13 @@ use pgrx::pg_sys;
 
 use super::{execution, planning};
 
-const NAME: &CStr = c"LagoDB Query Offload";
-
-static TABLES: OnceLock<CustomScanMethodTables> = OnceLock::new();
+const QUERY_NAME: &CStr = c"LagoDB Query Offload";
+static QUERY_TABLES: OnceLock<CustomScanMethodTables> = OnceLock::new();
 
 pub(super) fn tables() -> &'static CustomScanMethodTables {
-    TABLES.get_or_init(|| {
+    QUERY_TABLES.get_or_init(|| {
         CustomScanMethodTables::serial(
-            NAME,
+            QUERY_NAME,
             SerialCustomScanCallbacks {
                 plan: planning::plan_custom_path,
                 reparameterize: None,
@@ -32,7 +31,7 @@ pub(super) fn tables() -> &'static CustomScanMethodTables {
 
 pub(crate) fn register() {
     let scan = tables().scan();
-    // SAFETY: `scan` is process-lifetime immutable storage and registration is
-    // performed once during shared-preload initialization.
+    // SAFETY: the table is process-lifetime immutable storage and is
+    // registered once during shared-preload initialization.
     unsafe { pg_sys::RegisterCustomScanMethods(scan) };
 }
