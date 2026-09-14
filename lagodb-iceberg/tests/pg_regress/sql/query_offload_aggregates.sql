@@ -1,5 +1,5 @@
 -- query_offload_aggregates.sql
--- Basic single-relation S2/S3 grouping, aggregate, FILTER, and HAVING coverage.
+-- Basic single-relation grouping, aggregate, FILTER, and HAVING coverage.
 
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
@@ -25,7 +25,7 @@ CREATE TABLE query_offload_aggregate_basic (
     value_time time,
     value_timestamp timestamp,
     value_timestamptz timestamptz,
-    value_text text COLLATE "C"
+    value_text text
 ) USING iceberg;
 
 INSERT INTO query_offload_aggregate_basic VALUES
@@ -71,7 +71,7 @@ FROM query_offload_aggregate_basic
 WHERE id = 1;
 
 -- ============================================================================
--- S2: unfiltered and filtered grouped aggregates, pure GROUP BY, COUNT, and
+-- Unfiltered and filtered grouped aggregates, pure GROUP BY, COUNT, and
 -- integer MIN/MAX. The filtered EXPLAIN must show both the exact `Filter`
 -- evaluated by DataFusion and the provider-accepted `Pushed Filter` used
 -- for Iceberg storage pruning.
@@ -177,7 +177,7 @@ GROUP BY group_i4, group_i8
 ORDER BY group_i4, group_i8;
 
 -- ============================================================================
--- S3: integer aggregates, aggregate FILTER, and HAVING.
+-- Integer aggregates, aggregate FILTER, and HAVING.
 -- Cast AVG results to a fixed scale so the accepted native-Float64 transition
 -- contract is compared over values with a stable PostgreSQL representation.
 -- ============================================================================
@@ -265,7 +265,7 @@ HAVING sum(value_i4) >= 0 AND avg(value_i4) >= 10
 ORDER BY group_i4;
 
 -- ============================================================================
--- S3: bounded NUMERIC aggregates.
+-- Bounded NUMERIC aggregates.
 -- ============================================================================
 
 -- Query offload plan and result.
@@ -294,7 +294,7 @@ SELECT min(value_numeric) AS min_numeric,
 FROM query_offload_aggregate_basic;
 
 -- ============================================================================
--- S3: float, temporal, boolean, ARRAY_AGG, and STRING_AGG families.
+-- Float, temporal, boolean, ARRAY_AGG, and STRING_AGG families.
 -- Only finite exactly representable float inputs are used by this basic
 -- parity test; NaN and signed-zero behavior belongs to the documented
 -- capability-boundary suite.
@@ -377,7 +377,7 @@ SELECT min(value_f4) AS min_f4,
 FROM query_offload_aggregate_basic;
 
 -- ============================================================================
--- S3: variance/stddev output and empty-input aggregate semantics.
+-- Variance/stddev output and empty-input aggregate semantics.
 -- ============================================================================
 
 -- Query offload plan and result.
@@ -509,6 +509,18 @@ EXPLAIN (COSTS OFF)
 SELECT sum(abs(value_i4)) FILTER (WHERE id >= 2)
 FROM query_offload_aggregate_basic;
 
+SELECT sum(abs(value_i4)) FILTER (WHERE id >= 2)
+FROM query_offload_aggregate_basic;
+
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT sum(abs(value_i4)) FILTER (WHERE id >= 2)
+FROM query_offload_aggregate_basic;
+
+SELECT sum(abs(value_i4)) FILTER (WHERE id >= 2)
+FROM query_offload_aggregate_basic;
+
 -- ============================================================================
 -- PARAM_EXTERN is bound when each query-offload execution begins.
 -- Separate prepared statements prevent a cached generic plan from crossing
@@ -542,23 +554,6 @@ EXECUTE query_native_aggregate_param(100);
 DEALLOCATE query_native_aggregate_param;
 
 RESET plan_cache_mode;
-
--- ============================================================================
--- Capability boundary: force must not admit aggregate-over-join before the
--- join stage is implemented. PostgreSQL remains responsible for this query.
--- ============================================================================
-
--- Query offload is forced, but the unsupported join shape must remain native.
-SET lagodb.customscan_mode = 'off';
-SET lagodb.query_offload_mode = 'force';
-EXPLAIN (COSTS OFF)
-SELECT count(*)
-FROM query_offload_aggregate_basic AS lake
-JOIN (VALUES (1), (2)) AS ids(id) USING (id);
-
-SELECT count(*)
-FROM query_offload_aggregate_basic AS lake
-JOIN (VALUES (1), (2)) AS ids(id) USING (id);
 
 -- ============================================================================
 -- Cleanup

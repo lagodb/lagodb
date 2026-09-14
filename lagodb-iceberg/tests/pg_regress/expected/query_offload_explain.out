@@ -1,0 +1,427 @@
+-- query_offload_explain.sql
+-- Stable user-facing and structured EXPLAIN contract.
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
+SET lagodb.query_batch_rows = 2;
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'force';
+CREATE TABLE query_offload_explain_left (
+    id integer,
+    key integer,
+    value integer
+) USING iceberg;
+CREATE TABLE query_offload_explain_right (
+    key integer,
+    value integer
+) USING iceberg;
+INSERT INTO query_offload_explain_left VALUES
+    (1, 1, 10),
+    (2, 2, 20),
+    (3, 2, 30);
+INSERT INTO query_offload_explain_right VALUES
+    (1, 100),
+    (2, 200);
+CREATE FUNCTION query_offload_explain_json(options text, query text)
+RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (%s, FORMAT JSON) %s', options, query) INTO plan;
+    RETURN plan;
+END;
+$$;
+-- Default output is one logical tree without configuration, internal IDs, or
+-- projection details. COSTS OFF removes every provider estimate.
+EXPLAIN (COSTS OFF)
+SELECT count(*)
+FROM query_offload_explain_left
+WHERE id = 1;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on query_offload_explain_left
+               Access Method: iceberg
+               Filter: (id = 1)
+               Pushed Filter: (id = 1)
+(9 rows)
+
+-- Provider estimates are attached to the corresponding scan only when costs
+-- are requested. Provider cost components remain VERBOSE diagnostics.
+EXPLAIN (COSTS ON)
+SELECT count(*)
+FROM query_offload_explain_left
+WHERE id = 1;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)  (cost=0.00..1.00 rows=1 width=8)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on query_offload_explain_left
+               Access Method: iceberg
+               Estimated Rows Read: 1
+               Estimated Bytes Read: 2731 bytes
+               Filter: (id = 1)
+               Pushed Filter: (id = 1)
+(11 rows)
+
+EXPLAIN (VERBOSE, COSTS ON)
+SELECT count(*)
+FROM query_offload_explain_left
+WHERE id = 1;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)  (cost=0.00..1.00 rows=1 width=8)
+   Output: (count(*))
+   Engine: DataFusion
+   Execution Mode: Serial
+   Maximum Batch Rows: 2
+   ->  Projection
+         Output: COUNT(*)
+         ->  Aggregate
+               Aggregates: COUNT(*)
+               ->  Table Scan on public.query_offload_explain_left
+                     Access Method: iceberg
+                     Scan ID: 0
+                     Output: id
+                     Estimated Rows Read: 1
+                     Estimated Bytes Read: 2731 bytes
+                     Provider Startup Cost: 0.00
+                     Filter: (id = 1)
+                     Pushed Filter Conservative: (id = 1)
+(18 rows)
+
+-- VERBOSE may expose stable runtime-binding slots, but never the IR's
+-- `$valueN` spelling or `#N` output identities.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT id, count(*)
+FROM query_offload_explain_left
+GROUP BY id
+ORDER BY id
+LIMIT 1 OFFSET 1;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Output: id, (count(*))
+   Engine: DataFusion
+   Execution Mode: Serial
+   Maximum Batch Rows: 2
+   ->  Limit
+         Offset: Runtime Binding 1
+         Count: Runtime Binding 2
+         ->  Sort
+               Sort Key: id ASC NULLS LAST
+               ->  Projection
+                     Output: id, COUNT(*)
+                     ->  Aggregate
+                           Group Key: id
+                           Aggregates: COUNT(*)
+                           ->  Table Scan on public.query_offload_explain_left
+                                 Access Method: iceberg
+                                 Scan ID: 0
+                                 Output: id
+(19 rows)
+
+-- Join children and their relation aliases occupy one PostgreSQL Plans tree.
+EXPLAIN (COSTS OFF)
+SELECT l.key, count(*)
+FROM query_offload_explain_left AS l
+JOIN query_offload_explain_right AS r USING (key)
+GROUP BY l.key
+ORDER BY l.key;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Sort
+         Sort Key: l.key ASC NULLS LAST
+         ->  Aggregate
+               Group Key: l.key
+               Aggregates: COUNT(*)
+               ->  Hash Join
+                     Join Type: Inner
+                     Hash Cond: l.key = r.key
+                     ->  Table Scan on query_offload_explain_left l
+                           Access Method: iceberg
+                     ->  Table Scan on query_offload_explain_right r
+                           Access Method: iceberg
+(15 rows)
+
+-- Text headings and expressions use PostgreSQL identifier quoting rather than
+-- concatenating raw relation aliases.
+EXPLAIN (COSTS OFF)
+SELECT count(*)
+FROM query_offload_explain_left AS "Left Side"
+JOIN query_offload_explain_right AS "Right Side"
+  ON "Left Side".key = "Right Side".key;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Hash Join
+               Join Type: Inner
+               Hash Cond: "Left Side".key = "Right Side".key
+               ->  Table Scan on query_offload_explain_left "Left Side"
+                     Access Method: iceberg
+               ->  Table Scan on query_offload_explain_right "Right Side"
+                     Access Method: iceberg
+(12 rows)
+
+-- Actual metrics survive COSTS OFF, are associated with their scan leaves,
+-- and exclude timing when PostgreSQL requests TIMING OFF.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT l.key, count(*)
+FROM query_offload_explain_left AS l
+JOIN query_offload_explain_right AS r USING (key)
+GROUP BY l.key
+ORDER BY l.key;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload) (actual rows=2 loops=1)
+   Engine: DataFusion
+   Execution Mode: Serial
+   Engine Peak Memory Bytes: 4192
+   ->  Sort
+         Sort Key: l.key ASC NULLS LAST
+         ->  Aggregate
+               Group Key: l.key
+               Aggregates: COUNT(*)
+               ->  Hash Join
+                     Join Type: Inner
+                     Hash Cond: l.key = r.key
+                     ->  Table Scan on query_offload_explain_left l
+                           Access Method: iceberg
+                           Actual Input Batches: 2
+                           Actual Input Rows: 3
+                           Scan Tasks: 1
+                           Data Files Selected: 1
+                           Selected File Bytes: 1293
+                     ->  Table Scan on query_offload_explain_right r
+                           Access Method: iceberg
+                           Actual Input Batches: 1
+                           Actual Input Rows: 2
+                           Scan Tasks: 1
+                           Data Files Selected: 1
+                           Selected File Bytes: 931
+(26 rows)
+
+-- Engine physical diagnostics are restricted to ANALYZE VERBOSE.
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT l.key, count(*)
+FROM query_offload_explain_left AS l
+JOIN query_offload_explain_right AS r USING (key)
+GROUP BY l.key
+ORDER BY l.key;
+                                                            QUERY PLAN                                                             
+-----------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload) (actual rows=2 loops=1)
+   Output: l.key, (count(*))
+   Engine: DataFusion
+   Execution Mode: Serial
+   Maximum Batch Rows: 2
+   Engine Peak Memory Bytes: 4192
+   ->  Sort
+         Sort Key: l.key ASC NULLS LAST
+         ->  Projection
+               Output: l.key, COUNT(*)
+               ->  Aggregate
+                     Group Key: l.key
+                     Aggregates: COUNT(*)
+                     ->  Hash Join
+                           Join Type: Inner
+                           Hash Cond: l.key = r.key
+                           ->  Table Scan on public.query_offload_explain_left l
+                                 Access Method: iceberg
+                                 Scan ID: 0
+                                 Output: l.key
+                                 Actual Input Batches: 2
+                                 Actual Input Rows: 3
+                                 Scan Tasks: 1
+                                 Data Files Selected: 1
+                                 Selected File Bytes: 1293
+                                 Arrow Batch Bytes: 204
+                           ->  Table Scan on public.query_offload_explain_right r
+                                 Access Method: iceberg
+                                 Scan ID: 1
+                                 Output: r.key
+                                 Actual Input Batches: 1
+                                 Actual Input Rows: 2
+                                 Scan Tasks: 1
+                                 Data Files Selected: 1
+                                 Selected File Bytes: 931
+                                 Arrow Batch Bytes: 104
+   Engine Plan:
+     ->  ProjectionExec
+           Details: ProjectionExec: expr=[__lagodb_output_0@0 as __lagodb_result_0, __lagodb_output_1@1 as __lagodb_result_1]
+           Metric: output_rows: 2
+           Metric: output_bytes: 24
+           Metric: output_batches: 1
+           Metrics Scope: all physical plan instances
+           Physical Plan Instances: 1
+           ->  SortExec
+                 Details: SortExec: expr=[__lagodb_output_0@0 ASC NULLS LAST], preserve_partitioning=[false]
+                 Metric: output_rows: 2
+                 Metric: output_bytes: 24
+                 Metric: output_batches: 1
+                 Metric: spill_count: 0
+                 Metric: spilled_bytes: 0
+                 Metric: spilled_rows: 0
+                 ->  AggregateExec
+                       Details: AggregateExec: mode=Single, gby=[key@0 as __lagodb_output_0], aggr=[count(1) as __lagodb_output_1]
+                       Metric: output_rows: 2
+                       Metric: output_bytes: 544
+                       Metric: output_batches: 1
+                       Metric: spill_count: 0
+                       Metric: spilled_bytes: 0
+                       Metric: spilled_rows: 0
+                       ->  HashJoinExec
+                             Details: HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(key@0, key@0)], projection=[key@0]
+                             Metric: output_rows: 3
+                             Metric: output_bytes: 24
+                             Metric: output_batches: 2
+                             Metric: build_mem_used: 32
+                             Metric: array_map_created_count: 1
+                             Metric: build_input_batches: 2
+                             Metric: build_input_rows: 3
+                             Metric: input_batches: 1
+                             Metric: input_rows: 2
+                             Metric: avg_fanout: 100% (3/3)
+                             Metric: probe_hit_rate: 75% (3/4)
+                             ->  CooperativeExec
+                                   Details: CooperativeExec
+                                   ->  ExternalTableScanExec
+                                         Details: ExternalTableScanExec: scan=0, runtime_filters=0
+                                         Metric: dynamic_filter_input_rows: 0
+                                         Metric: dynamic_filter_output_rows: 0
+                                         Metric: planned_bytes: 1293
+                                         Metric: planned_files: 1
+                                         Metric: planned_tasks: 1
+                             ->  CooperativeExec
+                                   Details: CooperativeExec
+                                   ->  ExternalTableScanExec
+                                         Details: ExternalTableScanExec: scan=1, runtime_filters=1
+                                         Metric: dynamic_filter_input_rows: 2
+                                         Metric: dynamic_filter_output_rows: 2
+                                         Metric: planned_bytes: 931
+                                         Metric: planned_files: 1
+                                         Metric: planned_tasks: 1
+(91 rows)
+
+-- JSON protects real Plans nesting and native numeric property types without
+-- snapshotting the complete structured document into the expected file.
+WITH document AS (
+    SELECT query_offload_explain_json(
+        'VERBOSE, COSTS ON',
+        'SELECT l.key, count(*)
+         FROM query_offload_explain_left AS l
+         JOIN query_offload_explain_right AS r USING (key)
+         GROUP BY l.key'
+    ) AS plan
+)
+SELECT (plan #> '{0,Plan}') ? 'Plans' AS has_main_plans,
+       NOT ((plan #> '{0,Plan}') ?| ARRAY['Relation Tree', 'Table Scans'])
+           AS has_no_competing_tree,
+       jsonb_path_exists(
+           plan #> '{0,Plan,Plans}',
+           '$.** ? (@."Node Type" == "Table Scan")'
+       ) AS scan_is_in_main_tree,
+       jsonb_typeof(jsonb_path_query_first(
+           plan,
+           '$.**."Estimated Rows Read"'
+       )) = 'number' AS estimate_is_number,
+       jsonb_typeof(jsonb_path_query_first(
+           plan,
+           '$.**."Scan ID"'
+       )) = 'number' AS scan_id_is_number
+FROM document;
+ has_main_plans | has_no_competing_tree | scan_is_in_main_tree | estimate_is_number | scan_id_is_number 
+----------------+-----------------------+----------------------+--------------------+-------------------
+ t              | t                     | t                    | t                  | t
+(1 row)
+
+-- A NULL-aware anti join contributes a custom boolean property. COSTS OFF
+-- removes estimates from structured output as well as text output.
+WITH document AS (
+    SELECT query_offload_explain_json(
+        'COSTS OFF',
+        'SELECT l.id
+         FROM query_offload_explain_left AS l
+         WHERE l.key NOT IN (
+             SELECT r.key FROM query_offload_explain_right AS r
+         )'
+    ) AS plan
+)
+SELECT jsonb_typeof(jsonb_path_query_first(
+           plan,
+           '$.**."Null Aware"'
+       )) = 'boolean' AS null_aware_is_boolean,
+       NOT jsonb_path_exists(plan, '$.**."Estimated Rows Read"')
+           AS costs_off_hides_estimates
+FROM document;
+ null_aware_is_boolean | costs_off_hides_estimates 
+-----------------------+---------------------------
+ t                     | t
+(1 row)
+
+-- TIMING controls engine duration metrics independently of actual counters.
+-- Numeric predicates avoid unstable wall-clock values in regression output.
+WITH documents AS (
+    SELECT query_offload_explain_json(
+               'ANALYZE, VERBOSE, COSTS OFF, TIMING ON, SUMMARY OFF',
+               'SELECT count(*) FROM query_offload_explain_left'
+           ) AS timed,
+           query_offload_explain_json(
+               'ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF',
+               'SELECT count(*) FROM query_offload_explain_left'
+           ) AS untimed
+)
+SELECT jsonb_typeof(jsonb_path_query_first(
+           timed,
+           '$.**."Metric: elapsed_compute"'
+       )) = 'number' AS timing_metric_is_number,
+       NOT jsonb_path_exists(untimed, '$.**."Metric: elapsed_compute"')
+           AS timing_off_hides_engine_time
+FROM documents;
+ timing_metric_is_number | timing_off_hides_engine_time 
+-------------------------+------------------------------
+ t                       | t
+(1 row)
+
+-- Zero fallback counts stay hidden; a real PostgreSQL evaluator boundary is
+-- visible without restoring the old aggregate/join summary inventory.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT count(*) FILTER (WHERE random() >= 0)
+FROM query_offload_explain_left;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Output: (count(*) FILTER (WHERE (random() >= '0'::double precision)))
+   Engine: DataFusion
+   Execution Mode: Serial
+   Maximum Batch Rows: 2
+   PostgreSQL Expression Fallbacks: 1
+   ->  Projection
+         Output: COUNT(*) FILTER (WHERE PostgreSQL volatile expression)
+         ->  Aggregate
+               Aggregates: COUNT(*) FILTER (WHERE PostgreSQL volatile expression)
+               ->  Table Scan on public.query_offload_explain_left
+                     Access Method: iceberg
+                     Scan ID: 0
+(13 rows)
+
+DROP FUNCTION query_offload_explain_json(text, text);
+DROP TABLE query_offload_explain_right;
+DROP TABLE query_offload_explain_left;
+RESET lagodb.query_batch_rows;
+RESET lagodb.query_offload_mode;
+RESET lagodb.customscan_mode;

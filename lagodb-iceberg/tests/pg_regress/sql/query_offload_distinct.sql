@@ -15,7 +15,7 @@ CREATE TABLE query_offload_distinct_basic (
     value_i4 integer,
     value_f8 double precision,
     value_numeric numeric(12, 2),
-    value_text text COLLATE "C",
+    value_text text,
     value_date date,
     value_time time,
     value_timestamp timestamp,
@@ -263,6 +263,21 @@ ORDER BY value_i4 NULLS LAST;
 SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
+SELECT DISTINCT ON (value_i4) value_i4, id
+FROM query_offload_distinct_basic
+ORDER BY value_i4 NULLS LAST, id;
+
+SELECT DISTINCT ON (value_i4) value_i4, id
+FROM query_offload_distinct_basic
+ORDER BY value_i4 NULLS LAST, id;
+
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT ON (value_i4) value_i4, id
+FROM query_offload_distinct_basic
+ORDER BY value_i4 NULLS LAST, id;
+
 SELECT DISTINCT ON (value_i4) value_i4, id
 FROM query_offload_distinct_basic
 ORDER BY value_i4 NULLS LAST, id;

@@ -1,5 +1,5 @@
 -- query_offload_aggregates.sql
--- Basic single-relation S2/S3 grouping, aggregate, FILTER, and HAVING coverage.
+-- Basic single-relation grouping, aggregate, FILTER, and HAVING coverage.
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 -- A tiny batch limit makes every positive query consume more than one Arrow
@@ -22,7 +22,7 @@ CREATE TABLE query_offload_aggregate_basic (
     value_time time,
     value_timestamp timestamp,
     value_timestamptz timestamptz,
-    value_text text COLLATE "C"
+    value_text text
 ) USING iceberg;
 INSERT INTO query_offload_aggregate_basic VALUES
     (1, 1, 10,  1,  10,  100,  1.0,  10.0,  1.25, true,
@@ -69,24 +69,21 @@ EXPLAIN (COSTS OFF)
 SELECT count(*)
 FROM query_offload_aggregate_basic
 WHERE id = 1;
-              QUERY PLAN              
---------------------------------------
+                       QUERY PLAN                        
+---------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Offload: Serial Query
-   Maximum Batch Rows: 2
-   COUNT(*) Aggregates: 1
-   PostgreSQL Expression Fallbacks: 0
-   Provider ID: 0
-   Scan ID: 0
-   Estimated Scan Rows: 6
-   Estimated Scan Bytes: 8192
-   Filter: (id = 1)
-   Pushed Filter: (id = 1)
-(12 rows)
+   Execution Mode: Serial
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on query_offload_aggregate_basic
+               Access Method: iceberg
+               Filter: (id = 1)
+               Pushed Filter: (id = 1)
+(9 rows)
 
 -- ============================================================================
--- S2: unfiltered and filtered grouped aggregates, pure GROUP BY, COUNT, and
+-- Unfiltered and filtered grouped aggregates, pure GROUP BY, COUNT, and
 -- integer MIN/MAX. The filtered EXPLAIN must show both the exact `Filter`
 -- evaluated by DataFusion and the provider-accepted `Pushed Filter` used
 -- for Iceberg storage pruning.
@@ -106,25 +103,19 @@ SELECT group_i4,
 FROM query_offload_aggregate_basic
 GROUP BY group_i4, group_i8
 ORDER BY group_i4, group_i8;
-                 QUERY PLAN                 
---------------------------------------------
- Sort
-   Sort Key: group_i4, group_i8
-   ->  Custom Scan (LagoDB Query Offload)
-         Engine: DataFusion
-         Offload: Serial Query
-         Maximum Batch Rows: 2
-         Group Keys: 2
-         COUNT(*) Aggregates: 1
-         COUNT(expr) Aggregates: 1
-         MIN Aggregates: 2
-         MAX Aggregates: 2
-         PostgreSQL Expression Fallbacks: 0
-         Provider ID: 0
-         Scan ID: 0
-         Estimated Scan Rows: 6
-         Estimated Scan Bytes: 8192
-(16 rows)
+                                                   QUERY PLAN                                                    
+-----------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Sort
+         Sort Key: group_i4 ASC NULLS LAST, group_i8 ASC NULLS LAST
+         ->  Aggregate
+               Group Key: group_i4, group_i8
+               Aggregates: COUNT(*), COUNT(value_i4), MIN(value_i4), MAX(value_i4), MIN(value_i8), MAX(value_i8)
+               ->  Table Scan on query_offload_aggregate_basic
+                     Access Method: iceberg
+(10 rows)
 
 SELECT group_i4,
        group_i8,
@@ -179,26 +170,21 @@ FROM query_offload_aggregate_basic
 WHERE id >= 2
 GROUP BY group_i4
 ORDER BY group_i4;
-                 QUERY PLAN                 
---------------------------------------------
- Sort
-   Sort Key: group_i4
-   ->  Custom Scan (LagoDB Query Offload)
-         Engine: DataFusion
-         Offload: Serial Query
-         Maximum Batch Rows: 2
-         Group Keys: 1
-         COUNT(*) Aggregates: 1
-         MIN Aggregates: 1
-         MAX Aggregates: 1
-         PostgreSQL Expression Fallbacks: 0
-         Provider ID: 0
-         Scan ID: 0
-         Estimated Scan Rows: 6
-         Estimated Scan Bytes: 8192
-         Filter: (id >= 2)
-         Pushed Filter: (id >= 2)
-(17 rows)
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Sort
+         Sort Key: group_i4 ASC NULLS LAST
+         ->  Aggregate
+               Group Key: group_i4
+               Aggregates: COUNT(*), MIN(value_i4), MAX(value_i4)
+               ->  Table Scan on query_offload_aggregate_basic
+                     Access Method: iceberg
+                     Filter: (id >= 2)
+                     Pushed Filter: (id >= 2)
+(12 rows)
 
 SELECT group_i4,
        count(*) AS rows,
@@ -241,21 +227,18 @@ SELECT group_i4, group_i8
 FROM query_offload_aggregate_basic
 GROUP BY group_i4, group_i8
 ORDER BY group_i4, group_i8;
-                 QUERY PLAN                 
---------------------------------------------
- Sort
-   Sort Key: group_i4, group_i8
-   ->  Custom Scan (LagoDB Query Offload)
-         Engine: DataFusion
-         Offload: Serial Query
-         Maximum Batch Rows: 2
-         Group Keys: 2
-         PostgreSQL Expression Fallbacks: 0
-         Provider ID: 0
-         Scan ID: 0
-         Estimated Scan Rows: 6
-         Estimated Scan Bytes: 8192
-(12 rows)
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Sort
+         Sort Key: group_i4 ASC NULLS LAST, group_i8 ASC NULLS LAST
+         ->  Aggregate
+               Group Key: group_i4, group_i8
+               ->  Table Scan on query_offload_aggregate_basic
+                     Access Method: iceberg
+(9 rows)
 
 SELECT group_i4, group_i8
 FROM query_offload_aggregate_basic
@@ -285,7 +268,7 @@ ORDER BY group_i4, group_i8;
 (4 rows)
 
 -- ============================================================================
--- S3: integer aggregates, aggregate FILTER, and HAVING.
+-- Integer aggregates, aggregate FILTER, and HAVING.
 -- Cast AVG results to a fixed scale so the accepted native-Float64 transition
 -- contract is compared over values with a stable PostgreSQL representation.
 -- ============================================================================
@@ -306,26 +289,21 @@ FROM query_offload_aggregate_basic
 GROUP BY group_i4
 HAVING count(*) >= 2
 ORDER BY group_i4;
-                 QUERY PLAN                 
---------------------------------------------
- Sort
-   Sort Key: group_i4
-   ->  Custom Scan (LagoDB Query Offload)
-         Engine: DataFusion
-         Offload: Serial Query
-         Maximum Batch Rows: 2
-         Group Keys: 1
-         COUNT(*) Aggregates: 2
-         SUM Aggregates: 4
-         AVG Aggregates: 3
-         Aggregate FILTERs: 2
-         HAVING Filters: 1
-         PostgreSQL Expression Fallbacks: 0
-         Provider ID: 0
-         Scan ID: 0
-         Estimated Scan Rows: 6
-         Estimated Scan Bytes: 8192
-(17 rows)
+                                                                                                              QUERY PLAN                                                                                                               
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Sort
+         Sort Key: group_i4 ASC NULLS LAST
+         ->  Filter
+               Filter: ((COUNT(*) >= runtime value))
+               ->  Aggregate
+                     Group Key: group_i4
+                     Aggregates: COUNT(*) FILTER (WHERE (id >= runtime value)), SUM(value_i4) FILTER (WHERE (id >= runtime value)), SUM(value_i2), SUM(value_i4), SUM(value_i8), AVG(value_i2), AVG(value_i4), AVG(value_i8), COUNT(*)
+                     ->  Table Scan on query_offload_aggregate_basic
+                           Access Method: iceberg
+(12 rows)
 
 SELECT group_i4,
        count(*) FILTER (WHERE id >= 2) AS filtered_rows,
@@ -381,24 +359,21 @@ FROM query_offload_aggregate_basic
 GROUP BY group_i4
 HAVING sum(value_i4) >= 0 AND avg(value_i4) >= 10
 ORDER BY group_i4;
-                 QUERY PLAN                 
---------------------------------------------
- Sort
-   Sort Key: group_i4
-   ->  Custom Scan (LagoDB Query Offload)
-         Engine: DataFusion
-         Offload: Serial Query
-         Maximum Batch Rows: 2
-         Group Keys: 1
-         SUM Aggregates: 1
-         AVG Aggregates: 1
-         HAVING Filters: 1
-         PostgreSQL Expression Fallbacks: 0
-         Provider ID: 0
-         Scan ID: 0
-         Estimated Scan Rows: 6
-         Estimated Scan Bytes: 8192
-(15 rows)
+                                          QUERY PLAN                                           
+-----------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Sort
+         Sort Key: group_i4 ASC NULLS LAST
+         ->  Filter
+               Filter: ((SUM(value_i4) >= runtime value) AND (AVG(value_i4) >= runtime value))
+               ->  Aggregate
+                     Group Key: group_i4
+                     Aggregates: SUM(value_i4), AVG(value_i4)
+                     ->  Table Scan on query_offload_aggregate_basic
+                           Access Method: iceberg
+(12 rows)
 
 SELECT group_i4,
        sum(value_i4) AS sum_i4,
@@ -428,7 +403,7 @@ ORDER BY group_i4;
 (1 row)
 
 -- ============================================================================
--- S3: bounded NUMERIC aggregates.
+-- Bounded NUMERIC aggregates.
 -- ============================================================================
 -- Query offload plan and result.
 SET lagodb.customscan_mode = 'off';
@@ -439,22 +414,16 @@ SELECT min(value_numeric) AS min_numeric,
        sum(value_numeric)::numeric(20, 2) AS sum_numeric,
        avg(value_numeric)::numeric(20, 4) AS avg_numeric
 FROM query_offload_aggregate_basic;
-              QUERY PLAN              
---------------------------------------
+                                             QUERY PLAN                                             
+----------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Offload: Serial Query
-   Maximum Batch Rows: 2
-   MIN Aggregates: 1
-   MAX Aggregates: 1
-   SUM Aggregates: 1
-   AVG Aggregates: 1
-   PostgreSQL Expression Fallbacks: 0
-   Provider ID: 0
-   Scan ID: 0
-   Estimated Scan Rows: 6
-   Estimated Scan Bytes: 8192
-(13 rows)
+   Execution Mode: Serial
+   ->  Aggregate
+         Aggregates: MIN(value_numeric), MAX(value_numeric), SUM(value_numeric), AVG(value_numeric)
+         ->  Table Scan on query_offload_aggregate_basic
+               Access Method: iceberg
+(7 rows)
 
 SELECT min(value_numeric) AS min_numeric,
        max(value_numeric) AS max_numeric,
@@ -480,7 +449,7 @@ FROM query_offload_aggregate_basic;
 (1 row)
 
 -- ============================================================================
--- S3: float, temporal, boolean, ARRAY_AGG, and STRING_AGG families.
+-- Float, temporal, boolean, ARRAY_AGG, and STRING_AGG families.
 -- Only finite exactly representable float inputs are used by this basic
 -- parity test; NaN and signed-zero behavior belongs to the documented
 -- capability-boundary suite.
@@ -511,26 +480,16 @@ SELECT min(value_f4) AS min_f4,
        string_agg(value_text, ',' ORDER BY id) AS ordered_text,
        string_agg(value_text, NULL ORDER BY id) AS concatenated_text
 FROM query_offload_aggregate_basic;
-              QUERY PLAN              
---------------------------------------
+                                                                                                                                                                                                                                                      QUERY PLAN                                                                                                                                                                                                                                                      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Offload: Serial Query
-   Maximum Batch Rows: 2
-   MIN Aggregates: 6
-   MAX Aggregates: 6
-   SUM Aggregates: 2
-   AVG Aggregates: 2
-   Boolean Aggregates: 2
-   ARRAY_AGG Aggregates: 1
-   STRING_AGG Aggregates: 2
-   Ordered Aggregates: 3
-   PostgreSQL Expression Fallbacks: 0
-   Provider ID: 0
-   Scan ID: 0
-   Estimated Scan Rows: 6
-   Estimated Scan Bytes: 8192
-(17 rows)
+   Execution Mode: Serial
+   ->  Aggregate
+         Aggregates: MIN(value_f4), MAX(value_f4), SUM(value_f4), AVG(value_f4), MIN(value_f8), MAX(value_f8), SUM(value_f8), AVG(value_f8), MIN(value_date), MAX(value_date), MIN(value_time), MAX(value_time), MIN(value_timestamp), MAX(value_timestamp), MIN(value_timestamptz), MAX(value_timestamptz), BOOL_AND(value_bool), BOOL_OR(value_bool), ARRAY_AGG(value_i4 ORDER BY id ASC NULLS LAST), STRING_AGG(value_text, ',' ORDER BY id ASC NULLS LAST), STRING_AGG(value_text, '' ORDER BY id ASC NULLS LAST)
+         ->  Table Scan on query_offload_aggregate_basic
+               Access Method: iceberg
+(7 rows)
 
 SELECT min(value_f4) AS min_f4,
        max(value_f4) AS max_f4,
@@ -590,7 +549,7 @@ FROM query_offload_aggregate_basic;
 (1 row)
 
 -- ============================================================================
--- S3: variance/stddev output and empty-input aggregate semantics.
+-- Variance/stddev output and empty-input aggregate semantics.
 -- ============================================================================
 -- Query offload plan and result.
 SET lagodb.customscan_mode = 'off';
@@ -602,22 +561,18 @@ SELECT round(var_pop(value_i4), 6) AS var_pop_i4,
        round(stddev_samp(value_i4), 6) AS stddev_samp_i4
 FROM query_offload_aggregate_basic
 WHERE id <= 2;
-              QUERY PLAN              
---------------------------------------
+                                               QUERY PLAN                                               
+--------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Offload: Serial Query
-   Maximum Batch Rows: 2
-   VARIANCE Aggregates: 2
-   STDDEV Aggregates: 2
-   PostgreSQL Expression Fallbacks: 0
-   Provider ID: 0
-   Scan ID: 0
-   Estimated Scan Rows: 6
-   Estimated Scan Bytes: 8192
-   Filter: (id <= 2)
-   Pushed Filter: (id <= 2)
-(13 rows)
+   Execution Mode: Serial
+   ->  Aggregate
+         Aggregates: VAR_POP(value_i4), VAR_SAMP(value_i4), STDDEV_POP(value_i4), STDDEV_SAMP(value_i4)
+         ->  Table Scan on query_offload_aggregate_basic
+               Access Method: iceberg
+               Filter: (id <= 2)
+               Pushed Filter: (id <= 2)
+(9 rows)
 
 SELECT round(var_pop(value_i4), 6) AS var_pop_i4,
        round(var_samp(value_i4), 6) AS var_samp_i4,
@@ -656,26 +611,18 @@ SELECT count(*) AS rows,
        avg(value_i4)::numeric(20, 4) AS avg_i4
 FROM query_offload_aggregate_basic
 WHERE id > 100;
-              QUERY PLAN              
---------------------------------------
+                                                QUERY PLAN                                                 
+-----------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Offload: Serial Query
-   Maximum Batch Rows: 2
-   COUNT(*) Aggregates: 1
-   COUNT(expr) Aggregates: 1
-   MIN Aggregates: 1
-   MAX Aggregates: 1
-   SUM Aggregates: 1
-   AVG Aggregates: 1
-   PostgreSQL Expression Fallbacks: 0
-   Provider ID: 0
-   Scan ID: 0
-   Estimated Scan Rows: 6
-   Estimated Scan Bytes: 8192
-   Filter: (id > 100)
-   Pushed Filter: (id > 100)
-(17 rows)
+   Execution Mode: Serial
+   ->  Aggregate
+         Aggregates: COUNT(*), COUNT(value_i4), MIN(value_i4), MAX(value_i4), SUM(value_i4), AVG(value_i4)
+         ->  Table Scan on query_offload_aggregate_basic
+               Access Method: iceberg
+               Filter: (id > 100)
+               Pushed Filter: (id > 100)
+(9 rows)
 
 SELECT count(*) AS rows,
        count(value_i4) AS nonnull_i4,
@@ -722,26 +669,28 @@ FROM query_offload_aggregate_basic
 WHERE id >= 2 AND lower(value_text) = 'alpha'
 GROUP BY group_i4
 ORDER BY group_i4;
-                            QUERY PLAN                             
--------------------------------------------------------------------
- Sort
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
    Output: group_i4, (count(*))
-   Sort Key: query_offload_aggregate_basic.group_i4
-   ->  Custom Scan (LagoDB Query Offload)
-         Output: group_i4, (count(*))
-         Engine: DataFusion
-         Offload: Serial Query
-         Maximum Batch Rows: 2
-         Group Keys: 1
-         COUNT(*) Aggregates: 1
-         PostgreSQL Expression Fallbacks: 1
-         Provider ID: 0
-         Scan ID: 0
-         Estimated Scan Rows: 6
-         Estimated Scan Bytes: 8192
-         Filter: (id >= 2) AND (lower(value_text) = 'alpha'::text)
-         Pushed Filter Conservative: (id >= 2)
-(17 rows)
+   Engine: DataFusion
+   Execution Mode: Serial
+   Maximum Batch Rows: 2
+   PostgreSQL Expression Fallbacks: 1
+   ->  Sort
+         Sort Key: group_i4 ASC NULLS LAST
+         ->  Projection
+               Output: group_i4, COUNT(*)
+               ->  Aggregate
+                     Group Key: group_i4
+                     Aggregates: COUNT(*)
+                     ->  Table Scan on public.query_offload_aggregate_basic
+                           Access Method: iceberg
+                           Scan ID: 0
+                           Output: id, group_i4, value_text
+                           Filter: (id >= 2) AND (lower(value_text) = 'alpha'::text)
+                           Pushed Filter Conservative: (id >= 2)
+(19 rows)
 
 SELECT group_i4, count(*) AS rows
 FROM query_offload_aggregate_basic
@@ -775,25 +724,22 @@ FROM query_offload_aggregate_basic
 GROUP BY group_i4
 HAVING mod(sum(value_i4), 7) >= 0
 ORDER BY group_i4;
-                 QUERY PLAN                 
---------------------------------------------
- Sort
-   Sort Key: group_i4
-   ->  Custom Scan (LagoDB Query Offload)
-         Engine: DataFusion
-         Offload: Serial Query
-         Maximum Batch Rows: 2
-         Group Keys: 1
-         COUNT(*) Aggregates: 1
-         SUM Aggregates: 1
-         Aggregate FILTERs: 1
-         HAVING Filters: 1
-         PostgreSQL Expression Fallbacks: 2
-         Provider ID: 0
-         Scan ID: 0
-         Estimated Scan Rows: 6
-         Estimated Scan Bytes: 8192
-(16 rows)
+                                                   QUERY PLAN                                                   
+----------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   PostgreSQL Expression Fallbacks: 2
+   ->  Sort
+         Sort Key: group_i4 ASC NULLS LAST
+         ->  Filter
+               Filter: ((PostgreSQL expression >= runtime value))
+               ->  Aggregate
+                     Group Key: group_i4
+                     Aggregates: COUNT(*) FILTER (WHERE (PostgreSQL expression = runtime value)), SUM(value_i4)
+                     ->  Table Scan on query_offload_aggregate_basic
+                           Access Method: iceberg
+(13 rows)
 
 SELECT group_i4,
        count(*) FILTER (WHERE lower(value_text) = 'alpha') AS alpha_rows
@@ -834,6 +780,31 @@ FROM query_offload_aggregate_basic;
    ->  Seq Scan on query_offload_aggregate_basic
 (2 rows)
 
+SELECT sum(abs(value_i4)) FILTER (WHERE id >= 2)
+FROM query_offload_aggregate_basic;
+ sum 
+-----
+  70
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT sum(abs(value_i4)) FILTER (WHERE id >= 2)
+FROM query_offload_aggregate_basic;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Aggregate
+   ->  Seq Scan on query_offload_aggregate_basic
+(2 rows)
+
+SELECT sum(abs(value_i4)) FILTER (WHERE id >= 2)
+FROM query_offload_aggregate_basic;
+ sum 
+-----
+  70
+(1 row)
+
 -- ============================================================================
 -- PARAM_EXTERN is bound when each query-offload execution begins.
 -- Separate prepared statements prevent a cached generic plan from crossing
@@ -848,22 +819,24 @@ FROM query_offload_aggregate_basic
 WHERE id >= $1;
 EXPLAIN (VERBOSE, COSTS OFF)
 EXECUTE query_offload_aggregate_param(2);
-                QUERY PLAN                
-------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Output: (count(*))
    Engine: DataFusion
-   Offload: Serial Query
+   Execution Mode: Serial
    Maximum Batch Rows: 2
-   COUNT(*) Aggregates: 1
-   PostgreSQL Expression Fallbacks: 0
-   Provider ID: 0
-   Scan ID: 0
-   Estimated Scan Rows: 6
-   Estimated Scan Bytes: 8192
-   Filter: (id >= $1)
-   Pushed Filter Conservative: (id >= $1)
-(13 rows)
+   ->  Projection
+         Output: COUNT(*)
+         ->  Aggregate
+               Aggregates: COUNT(*)
+               ->  Table Scan on public.query_offload_aggregate_basic
+                     Access Method: iceberg
+                     Scan ID: 0
+                     Output: id
+                     Filter: (id >= $1)
+                     Pushed Filter Conservative: (id >= $1)
+(15 rows)
 
 EXECUTE query_offload_aggregate_param(2);
  count 
@@ -898,35 +871,6 @@ EXECUTE query_native_aggregate_param(100);
 
 DEALLOCATE query_native_aggregate_param;
 RESET plan_cache_mode;
--- ============================================================================
--- Capability boundary: force must not admit aggregate-over-join before the
--- join stage is implemented. PostgreSQL remains responsible for this query.
--- ============================================================================
--- Query offload is forced, but the unsupported join shape must remain native.
-SET lagodb.customscan_mode = 'off';
-SET lagodb.query_offload_mode = 'force';
-EXPLAIN (COSTS OFF)
-SELECT count(*)
-FROM query_offload_aggregate_basic AS lake
-JOIN (VALUES (1), (2)) AS ids(id) USING (id);
-                         QUERY PLAN                         
-------------------------------------------------------------
- Aggregate
-   ->  Hash Join
-         Hash Cond: (lake.id = "*VALUES*".column1)
-         ->  Seq Scan on query_offload_aggregate_basic lake
-         ->  Hash
-               ->  Values Scan on "*VALUES*"
-(6 rows)
-
-SELECT count(*)
-FROM query_offload_aggregate_basic AS lake
-JOIN (VALUES (1), (2)) AS ids(id) USING (id);
- count 
--------
-     2
-(1 row)
-
 -- ============================================================================
 -- Cleanup
 -- ============================================================================

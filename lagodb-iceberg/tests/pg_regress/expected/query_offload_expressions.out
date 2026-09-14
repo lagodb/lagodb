@@ -12,7 +12,7 @@ CREATE TABLE query_offload_expression_basic (
     value_f4 real,
     value_f8 double precision,
     value_bool boolean,
-    value_text text COLLATE "C",
+    value_text text,
     value_timestamp timestamp
 ) USING iceberg;
 INSERT INTO query_offload_expression_basic VALUES
@@ -37,22 +37,25 @@ SELECT count(*) AS rows
 FROM query_offload_expression_basic
 WHERE (id >= 2 AND lower(value_text) = 'alpha')
    OR (id <= 1 AND upper(value_text) = 'ALPHA');
-                                                       QUERY PLAN                                                       
-------------------------------------------------------------------------------------------------------------------------
+                                                                QUERY PLAN                                                                
+------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Output: (count(*))
    Engine: DataFusion
-   Offload: Serial Query
+   Execution Mode: Serial
    Maximum Batch Rows: 2
-   COUNT(*) Aggregates: 1
    PostgreSQL Expression Fallbacks: 2
-   Provider ID: 0
-   Scan ID: 0
-   Estimated Scan Rows: 5
-   Estimated Scan Bytes: 8192
-   Filter: (((id >= 2) AND (lower(value_text) = 'alpha'::text)) OR ((id <= 1) AND (upper(value_text) = 'ALPHA'::text)))
-   Pushed Filter Conservative: ((id >= 2) OR (id <= 1))
-(13 rows)
+   ->  Projection
+         Output: COUNT(*)
+         ->  Aggregate
+               Aggregates: COUNT(*)
+               ->  Table Scan on public.query_offload_expression_basic
+                     Access Method: iceberg
+                     Scan ID: 0
+                     Output: id, value_text
+                     Filter: (((id >= 2) AND (lower(value_text) = 'alpha'::text)) OR ((id <= 1) AND (upper(value_text) = 'ALPHA'::text)))
+                     Pushed Filter Conservative: ((id >= 2) OR (id <= 1))
+(16 rows)
 
 SELECT count(*) AS rows
 FROM query_offload_expression_basic
@@ -83,20 +86,18 @@ SELECT count(*) AS rows
 FROM query_offload_expression_basic
 WHERE (id >= 2 AND random() >= 0)
    OR id <= 1;
-                                  QUERY PLAN                                  
-------------------------------------------------------------------------------
+                                        QUERY PLAN                                        
+------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Offload: Serial Query
-   Maximum Batch Rows: 2
-   COUNT(*) Aggregates: 1
+   Execution Mode: Serial
    PostgreSQL Expression Fallbacks: 1
-   Provider ID: 0
-   Scan ID: 0
-   Estimated Scan Rows: 5
-   Estimated Scan Bytes: 8192
-   Filter: (((id >= 2) AND (random() >= '0'::double precision)) OR (id <= 1))
-(11 rows)
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on query_offload_expression_basic
+               Access Method: iceberg
+               Filter: (((id >= 2) AND (random() >= '0'::double precision)) OR (id <= 1))
+(9 rows)
 
 SELECT count(*) AS rows
 FROM query_offload_expression_basic
@@ -125,20 +126,18 @@ EXPLAIN (COSTS OFF)
 SELECT count(*) AS rows
 FROM query_offload_expression_basic
 WHERE lower(value_text) = 'alpha';
-                  QUERY PLAN                   
------------------------------------------------
+                        QUERY PLAN                         
+-----------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Offload: Serial Query
-   Maximum Batch Rows: 2
-   COUNT(*) Aggregates: 1
+   Execution Mode: Serial
    PostgreSQL Expression Fallbacks: 1
-   Provider ID: 0
-   Scan ID: 0
-   Estimated Scan Rows: 5
-   Estimated Scan Bytes: 8192
-   Filter: (lower(value_text) = 'alpha'::text)
-(11 rows)
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on query_offload_expression_basic
+               Access Method: iceberg
+               Filter: (lower(value_text) = 'alpha'::text)
+(9 rows)
 
 SELECT count(*) AS rows
 FROM query_offload_expression_basic
@@ -195,22 +194,17 @@ SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
        sum(abs(value_i8)) AS abs_i8_sum,
        sum(abs(value_f8)) AS abs_f8_sum
 FROM query_offload_expression_basic;
-              QUERY PLAN              
---------------------------------------
+                                                                                                                                                                                                                                             QUERY PLAN                                                                                                                                                                                                                                             
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Offload: Serial Query
-   Maximum Batch Rows: 2
-   COUNT(*) Aggregates: 5
-   COUNT(expr) Aggregates: 1
-   SUM Aggregates: 3
-   Aggregate FILTERs: 5
+   Execution Mode: Serial
    PostgreSQL Expression Fallbacks: 1
-   Provider ID: 0
-   Scan ID: 0
-   Estimated Scan Rows: 5
-   Estimated Scan Bytes: 8192
-(13 rows)
+   ->  Aggregate
+         Aggregates: COUNT(*) FILTER (WHERE (value_bool IS NOT FALSE)), COUNT(*) FILTER (WHERE CASE WHEN (id <= runtime value) THEN runtime value ELSE runtime value END), SUM(coalesce(value_i4, runtime value)), COUNT(*) FILTER (WHERE (nullif(id, runtime value) IS NOT NULL)), COUNT(*) FILTER (WHERE PostgreSQL expression), COUNT(*) FILTER (WHERE starts_with(value_text, runtime value)), COUNT(replace(value_text, runtime value, runtime value)), SUM(abs(value_i8)), SUM(abs(value_f8))
+         ->  Table Scan on query_offload_expression_basic
+               Access Method: iceberg
+(8 rows)
 
 SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
        count(*) FILTER (
@@ -261,20 +255,17 @@ SELECT count(*) FILTER (WHERE id > ANY (ARRAY[2, 5]::integer[])) AS any_gt_rows,
            WHERE CASE id WHEN 1 THEN true WHEN 2 THEN false ELSE true END
        ) AS simple_case_rows
 FROM query_offload_expression_basic;
-              QUERY PLAN              
---------------------------------------
+                                                    QUERY PLAN                                                    
+------------------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Offload: Serial Query
-   Maximum Batch Rows: 2
-   COUNT(*) Aggregates: 2
-   Aggregate FILTERs: 2
+   Execution Mode: Serial
    PostgreSQL Expression Fallbacks: 2
-   Provider ID: 0
-   Scan ID: 0
-   Estimated Scan Rows: 5
-   Estimated Scan Bytes: 8192
-(11 rows)
+   ->  Aggregate
+         Aggregates: COUNT(*) FILTER (WHERE PostgreSQL expression), COUNT(*) FILTER (WHERE PostgreSQL expression)
+         ->  Table Scan on query_offload_expression_basic
+               Access Method: iceberg
+(8 rows)
 
 SELECT count(*) FILTER (WHERE id > ANY (ARRAY[2, 5]::integer[])) AS any_gt_rows,
        count(*) FILTER (
@@ -308,23 +299,19 @@ SELECT count(*) FILTER (
        sum(coalesce(value_i4, 1 / (id - id))) AS lazy_coalesce_sum
 FROM query_offload_expression_basic
 WHERE value_i4 IS NOT NULL;
-               QUERY PLAN                
------------------------------------------
+                                                                                           QUERY PLAN                                                                                            
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Offload: Serial Query
-   Maximum Batch Rows: 2
-   COUNT(*) Aggregates: 1
-   SUM Aggregates: 1
-   Aggregate FILTERs: 1
+   Execution Mode: Serial
    PostgreSQL Expression Fallbacks: 2
-   Provider ID: 0
-   Scan ID: 0
-   Estimated Scan Rows: 5
-   Estimated Scan Bytes: 8192
-   Filter: (value_i4 IS NOT NULL)
-   Pushed Filter: (value_i4 IS NOT NULL)
-(14 rows)
+   ->  Aggregate
+         Aggregates: COUNT(*) FILTER (WHERE CASE WHEN (id >= runtime value) THEN runtime value ELSE (PostgreSQL expression > runtime value) END), SUM(coalesce(value_i4, PostgreSQL expression))
+         ->  Table Scan on query_offload_expression_basic
+               Access Method: iceberg
+               Filter: (value_i4 IS NOT NULL)
+               Pushed Filter: (value_i4 IS NOT NULL)
+(10 rows)
 
 SELECT count(*) FILTER (
            WHERE CASE WHEN id >= 0 THEN true ELSE 1 / (id - id) > 0 END
@@ -364,23 +351,17 @@ SELECT sum((-value_i2)::smallint) AS udf_i2,
        count(lower(value_text)::varchar) AS udf_varchar,
        count(lower(value_text)::name) AS udf_name
 FROM query_offload_expression_basic;
-              QUERY PLAN              
---------------------------------------
+                                                                                                                                                                       QUERY PLAN                                                                                                                                                                        
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Offload: Serial Query
-   Maximum Batch Rows: 2
-   COUNT(expr) Aggregates: 2
-   SUM Aggregates: 5
-   Boolean Aggregates: 1
-   STRING_AGG Aggregates: 1
-   Ordered Aggregates: 1
+   Execution Mode: Serial
    PostgreSQL Expression Fallbacks: 8
-   Provider ID: 0
-   Scan ID: 0
-   Estimated Scan Rows: 5
-   Estimated Scan Bytes: 8192
-(14 rows)
+   ->  Aggregate
+         Aggregates: SUM(PostgreSQL expression), SUM(PostgreSQL expression), SUM(PostgreSQL expression), SUM(PostgreSQL expression), SUM(PostgreSQL expression), BOOL_AND((value_bool IS NOT FALSE)), STRING_AGG(PostgreSQL expression, ',' ORDER BY id ASC NULLS LAST), COUNT((PostgreSQL expression)::character varying), COUNT(PostgreSQL expression)
+         ->  Table Scan on query_offload_expression_basic
+               Access Method: iceberg
+(8 rows)
 
 SELECT sum((-value_i2)::smallint) AS udf_i2,
        sum(mod(value_i4, 7)) AS udf_i4,
@@ -430,6 +411,30 @@ FROM query_offload_expression_basic;
    ->  Seq Scan on query_offload_expression_basic
 (2 rows)
 
+SELECT count(date_trunc('day', value_timestamp))
+FROM query_offload_expression_basic;
+ count 
+-------
+     4
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT count(date_trunc('day', value_timestamp))
+FROM query_offload_expression_basic;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on query_offload_expression_basic
+(2 rows)
+
+SELECT count(date_trunc('day', value_timestamp))
+FROM query_offload_expression_basic;
+ count 
+-------
+     4
+(1 row)
+
 -- PostgreSQL integer ABS raises 22003 at the declared int2 minimum. This one
 -- case locks the widening adapter without repeating the same negative for all
 -- integer widths in SQL regression.
@@ -439,6 +444,20 @@ CREATE TABLE query_offload_expression_abs_edge (
 INSERT INTO query_offload_expression_abs_edge VALUES ('-32768'::smallint);
 SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*) FILTER (WHERE abs(value_i2) >= 0::smallint)
+FROM query_offload_expression_abs_edge;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Aggregate
+         Aggregates: COUNT(*) FILTER (WHERE (abs(value_i2) >= runtime value))
+         ->  Table Scan on query_offload_expression_abs_edge
+               Access Method: iceberg
+(7 rows)
+
 SELECT count(*) FILTER (WHERE abs(value_i2) >= 0::smallint)
 FROM query_offload_expression_abs_edge;
 ERROR:  smallint out of range

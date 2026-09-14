@@ -12,7 +12,7 @@ CREATE TABLE query_offload_distinct_basic (
     value_i4 integer,
     value_f8 double precision,
     value_numeric numeric(12, 2),
-    value_text text COLLATE "C",
+    value_text text,
     value_date date,
     value_time time,
     value_timestamp timestamp,
@@ -75,30 +75,16 @@ SELECT count(DISTINCT value_bool) AS bool_values,
            FILTER (WHERE id <= 4) AS filtered_ordered_i4,
        string_agg(DISTINCT value_text, ',' ORDER BY value_text) AS ordered_text
 FROM query_offload_distinct_basic;
-              QUERY PLAN              
---------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                       QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                        
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Offload: Serial Query
-   Maximum Batch Rows: 2
-   COUNT(expr) Aggregates: 11
-   MIN Aggregates: 1
-   MAX Aggregates: 1
-   SUM Aggregates: 1
-   AVG Aggregates: 1
-   VARIANCE Aggregates: 1
-   Boolean Aggregates: 2
-   ARRAY_AGG Aggregates: 2
-   STRING_AGG Aggregates: 1
-   DISTINCT Aggregates: 21
-   Ordered Aggregates: 3
-   Aggregate FILTERs: 1
-   PostgreSQL Expression Fallbacks: 0
-   Provider ID: 0
-   Scan ID: 0
-   Estimated Scan Rows: 5
-   Estimated Scan Bytes: 8192
-(21 rows)
+   Execution Mode: Serial
+   ->  Aggregate
+         Aggregates: COUNT(DISTINCT value_bool), COUNT(DISTINCT value_i4), COUNT(DISTINCT value_f8), COUNT(DISTINCT value_numeric), COUNT(DISTINCT value_text), COUNT(DISTINCT value_date), COUNT(DISTINCT value_time), COUNT(DISTINCT value_timestamp), COUNT(DISTINCT value_timestamptz), COUNT(DISTINCT value_uuid), COUNT(DISTINCT value_bytea), MIN(DISTINCT value_i4), MAX(DISTINCT value_i4), SUM(DISTINCT value_i4), AVG(DISTINCT value_i4), VAR_POP(DISTINCT value_i4), BOOL_AND(DISTINCT value_bool), BOOL_OR(DISTINCT value_bool), ARRAY_AGG(DISTINCT value_i4 ORDER BY value_i4 ASC NULLS LAST), ARRAY_AGG(DISTINCT value_i4 ORDER BY value_i4 ASC NULLS LAST) FILTER (WHERE (id <= runtime value)), STRING_AGG(DISTINCT value_text, ',' ORDER BY value_text ASC NULLS LAST)
+         ->  Table Scan on query_offload_distinct_basic
+               Access Method: iceberg
+(7 rows)
 
 SELECT count(DISTINCT value_bool) AS bool_values,
        count(DISTINCT value_i4) AS i4_values,
@@ -178,21 +164,18 @@ ORDER BY value_bool NULLS LAST,
          value_i4 NULLS LAST,
          value_f8 NULLS LAST,
          value_numeric NULLS LAST;
-                        QUERY PLAN                         
------------------------------------------------------------
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
  Sort
    Sort Key: value_bool, value_i4, value_f8, value_numeric
    ->  Custom Scan (LagoDB Query Offload)
          Engine: DataFusion
-         Offload: Serial Query
-         Maximum Batch Rows: 2
-         DISTINCT Keys: 4
-         PostgreSQL Expression Fallbacks: 0
-         Provider ID: 0
-         Scan ID: 0
-         Estimated Scan Rows: 5
-         Estimated Scan Bytes: 8192
-(12 rows)
+         Execution Mode: Serial
+         ->  Distinct
+               Distinct Key: value_bool, value_i4, value_f8, value_numeric
+               ->  Table Scan on query_offload_distinct_basic
+                     Access Method: iceberg
+(9 rows)
 
 SELECT DISTINCT value_bool,
                 value_i4,
@@ -250,21 +233,18 @@ ORDER BY value_text NULLS LAST,
          value_timestamptz NULLS LAST,
          value_uuid NULLS LAST,
          value_bytea NULLS LAST;
-                                                       QUERY PLAN                                                        
--------------------------------------------------------------------------------------------------------------------------
+                                                         QUERY PLAN                                                          
+-----------------------------------------------------------------------------------------------------------------------------
  Sort
-   Sort Key: value_text COLLATE "C", value_date, value_time, value_timestamp, value_timestamptz, value_uuid, value_bytea
+   Sort Key: value_text, value_date, value_time, value_timestamp, value_timestamptz, value_uuid, value_bytea
    ->  Custom Scan (LagoDB Query Offload)
          Engine: DataFusion
-         Offload: Serial Query
-         Maximum Batch Rows: 2
-         DISTINCT Keys: 7
-         PostgreSQL Expression Fallbacks: 0
-         Provider ID: 0
-         Scan ID: 0
-         Estimated Scan Rows: 5
-         Estimated Scan Bytes: 8192
-(12 rows)
+         Execution Mode: Serial
+         ->  Distinct
+               Distinct Key: value_text, value_date, value_time, value_timestamp, value_timestamptz, value_uuid, value_bytea
+               ->  Table Scan on query_offload_distinct_basic
+                     Access Method: iceberg
+(9 rows)
 
 SELECT DISTINCT value_text,
                 value_date,
@@ -326,25 +306,27 @@ SELECT DISTINCT value_i4
 FROM query_offload_distinct_basic
 WHERE id <= 4 AND lower(value_text) = 'alpha'
 ORDER BY value_i4 NULLS LAST;
-                            QUERY PLAN                             
--------------------------------------------------------------------
- Sort
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
    Output: value_i4
-   Sort Key: query_offload_distinct_basic.value_i4
-   ->  Custom Scan (LagoDB Query Offload)
-         Output: value_i4
-         Engine: DataFusion
-         Offload: Serial Query
-         Maximum Batch Rows: 2
-         DISTINCT Keys: 1
-         PostgreSQL Expression Fallbacks: 1
-         Provider ID: 0
-         Scan ID: 0
-         Estimated Scan Rows: 5
-         Estimated Scan Bytes: 8192
-         Filter: (id <= 4) AND (lower(value_text) = 'alpha'::text)
-         Pushed Filter Conservative: (id <= 4)
-(16 rows)
+   Engine: DataFusion
+   Execution Mode: Serial
+   Maximum Batch Rows: 2
+   PostgreSQL Expression Fallbacks: 1
+   ->  Sort
+         Sort Key: value_i4 ASC NULLS LAST
+         ->  Projection
+               Output: value_i4
+               ->  Distinct
+                     Distinct Key: value_i4
+                     ->  Table Scan on public.query_offload_distinct_basic
+                           Access Method: iceberg
+                           Scan ID: 0
+                           Output: id, value_i4, value_text
+                           Filter: (id <= 4) AND (lower(value_text) = 'alpha'::text)
+                           Pushed Filter Conservative: (id <= 4)
+(18 rows)
 
 SELECT DISTINCT value_i4
 FROM query_offload_distinct_basic
@@ -380,6 +362,40 @@ ORDER BY value_i4 NULLS LAST, id;
          Sort Key: value_i4, id
          ->  Seq Scan on query_offload_distinct_basic
 (4 rows)
+
+SELECT DISTINCT ON (value_i4) value_i4, id
+FROM query_offload_distinct_basic
+ORDER BY value_i4 NULLS LAST, id;
+ value_i4 | id 
+----------+----
+       10 |  1
+       20 |  3
+          |  4
+(3 rows)
+
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT ON (value_i4) value_i4, id
+FROM query_offload_distinct_basic
+ORDER BY value_i4 NULLS LAST, id;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: value_i4, id
+         ->  Seq Scan on query_offload_distinct_basic
+(4 rows)
+
+SELECT DISTINCT ON (value_i4) value_i4, id
+FROM query_offload_distinct_basic
+ORDER BY value_i4 NULLS LAST, id;
+ value_i4 | id 
+----------+----
+       10 |  1
+       20 |  3
+          |  4
+(3 rows)
 
 -- ============================================================================
 -- Cleanup

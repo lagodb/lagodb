@@ -575,38 +575,16 @@ FROM customscan_exact_pushdown_int8
 WHERE id = 25::bigint;
 
 -- ============================================================================
--- Block E: Collation / text comparisons are not Exact-promoted
--- The Exact allowlist is restricted to collation-agnostic integer triples.
--- These text predicates provide negative coverage for operator identity
---: the provider planner must NOT promote text/collation
--- triples to `Exact` even though the structural shape (`column op literal`)
--- matches the Exact template.
--- We assert this under `lagodb.customscan_mode = 'force'` deliberately:
--- `force` biases CustomPaths the framework deems legal and selects them
--- regardless of cost. So the EXPLAIN under `force` directly reveals the
--- provider planner's decision for text:
---   - `Seq Scan` ⇒ planning returned `Unsupported`, no CustomPath emitted
---     for text equality at all (the strongest negative case).
---   - `Custom Scan` whose text clause was classified
---     `ConservativePruning` ⇒ planning emitted a CustomPath. This is
---     also acceptable: the ConservativePruning clause is pushed (it appears
---     on the `Pushed Filter:` line, and under VERBOSE on the
---     `Pushed Filter Conservative:` labeled line) but the original clause is
---     ALSO retained as a local residual `Filter:` line — importantly it is
---     NOT classified `Exact` (which would strip it from `plan.qual` and,
---     under VERBOSE, label it `Pushed Filter Exact:`), which is what
---     the Exact-pushdown soundness rule (recheckable clauses must never
---     be classified Exact) forbids.
--- Either outcome — but never an Exact classification of the text clause —
--- proves the negative assertion. Using `force` here is consistent with the
--- rest of this file and gives stronger diagnostic output than `auto`, where
--- a SeqScan plan
--- would conflate "no path emitted" with "path emitted but cost-lost".
+-- Block E: exact text equality under resolved deterministic collations.
+-- PostgreSQL text equality is byte equality for deterministic collations, so
+-- the provider can remove the executor residual after resolving the catalog
+-- collation semantics during planning.  The table itself uses the database
+-- default collation; no storage schema in this test hard-codes C/POSIX.
 -- ============================================================================
 
 CREATE TABLE customscan_exact_pushdown_text (
     id integer,
-    label text COLLATE "C"
+    label text
 ) USING iceberg;
 
 INSERT INTO customscan_exact_pushdown_text VALUES
@@ -616,10 +594,7 @@ INSERT INTO customscan_exact_pushdown_text VALUES
     (4, 'Cherry'),
     (5, 'cherry');
 
--- E.1 text equality under the column collation. Under `force`, this must
--- not classify the text clause as Exact (it must NOT appear on a VERBOSE
--- `Pushed Filter Exact:` line) — text/collation triples are not allowlisted
---.
+-- E.1 equality under the column's default deterministic collation is Exact.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -644,8 +619,8 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_text
 WHERE label = 'banana';
 
--- E.2 explicit COLLATE clause. This is also outside the Exact proof surface
---. Same negative assertion as E.1 under `force`.
+-- E.2 an explicit deterministic predicate collation is resolved by the same
+-- equality policy.  It does not alter the table column's default collation.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -1371,16 +1346,14 @@ SET lagodb.customscan_mode = 'off';
 SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
 
 -- ============================================================================
--- Part 3: text — safe collation (pushable) vs unsafe collation (residual-only)
+-- Part 3: default-collation text comparison capabilities
 -- ============================================================================
--- `label` carries an explicit C collation (deterministic, byte-ordered), so
--- `label = 'bravo'` (texteq, deterministic) and `label < 'delta'` (text_lt
--- under C) are both pushable ConservativePruning. `note` carries the default collation
--- OID, which the oracle treats as unsafe for ordered text, so `note < 'cherry'`
--- is NOT pushed. `<>` is `Unsupported` for every collation.
+-- Both text columns use the database's default collation. These cases protect
+-- the predicate policy for equality, ordering, and inequality without making
+-- the regression database depend on an explicit collation.
 CREATE TABLE rq_text (
     id integer,
-    label text COLLATE "C",
+    label text,
     note text
 ) USING iceberg;
 
@@ -1391,7 +1364,7 @@ INSERT INTO rq_text VALUES (4, 'delta', 'date'), (5, 'echo', 'elderberry'), (6, 
 
 SELECT COUNT(*) AS rq_text_rows FROM rq_text;
 
--- 3.1 SAFE: text equality under a deterministic (C) collation — pushable.
+-- 3.1 Text equality under the database's default collation.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
@@ -1402,7 +1375,7 @@ SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
 SET lagodb.customscan_mode = 'off';
 SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
 
--- 3.2 SAFE: ordered text comparison under the C collation — pushable.
+-- 3.2 Ordered text comparison under the database's default collation.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, label FROM rq_text WHERE label < 'delta' ORDER BY id;
@@ -1413,9 +1386,8 @@ SELECT id, label FROM rq_text WHERE label < 'delta' ORDER BY id;
 SET lagodb.customscan_mode = 'off';
 SELECT id, label FROM rq_text WHERE label < 'delta' ORDER BY id;
 
--- 3.3 UNSAFE: `<>` is Unsupported for every collation — not pushed, residual
--- decides. Under `force` there is no pushable clause, so the plan falls back
--- to SeqScan; the result must still equal the `off` baseline.
+-- 3.3 Inequality has the same byte-equality semantics as equality under a
+-- deterministic default collation and is therefore Exact-pushable.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
@@ -1426,9 +1398,7 @@ SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
 SET lagodb.customscan_mode = 'off';
 SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
 
--- 3.4 UNSAFE: ordered text under the DEFAULT collation OID — the oracle treats
--- the default collation as unsafe for ordered text (only the explicit C/POSIX
--- OID is safe), so `note < 'cherry'` is NOT pushed. Residual decides; parity.
+-- 3.4 The same ordered-text policy on a second default-collated column.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, note FROM rq_text WHERE note < 'cherry' ORDER BY id;
@@ -1447,14 +1417,12 @@ RESET timezone;
 DROP TABLE rq_numeric;
 DROP TABLE rq_temporal;
 DROP TABLE rq_text;
--- Section: Unsupported predicate fallback
--- Unsupported-only quals emit no CustomPath; results unchanged.
+-- Section: Default-collation text inequality pushdown
 
 
 -- ============================================================================
--- Setup: an Iceberg table with an integer column (which the oracle marks
--- Exact-pushable) and a text column (whose `<>` comparison the oracle marks
--- Unsupported). Three rows give non-trivial result-set parity.
+-- Setup: an Iceberg table with Exact-pushable integer and deterministic-text
+-- comparisons. Three rows give non-trivial result-set parity.
 -- ============================================================================
 CREATE TABLE customscan_unsupported_only_t (
     id integer,
@@ -1468,27 +1436,19 @@ INSERT INTO customscan_unsupported_only_t VALUES (3, 'charlie');
 SELECT COUNT(*) AS total_rows FROM customscan_unsupported_only_t;
 
 -- ============================================================================
--- Test 1: an `Unsupported`-only variant yields NO discounted CustomPath
---.
--- `WHERE label <> 'bravo'`:
---   - The sole candidate clause is `text <>`. The oracle returns
---     `Unsupported`, so the clause stays in residual and the path summary has
---     no planned filter.
---   - `create_path` sees an empty planned-filter summary and returns
---     `None`. No CustomPath is emitted, so even under `force` the plan
---     falls back to SeqScan with the `<>` clause as the Filter.
+-- Test 1: `text <>` under the database's deterministic default collation is
+-- Exact-pushable. The force plan must select CustomScan and remove the local
+-- residual; the off plan and both result sets provide the PostgreSQL oracle.
 -- ============================================================================
 
--- Under `force`: no pushable clause ⇒ no CustomPath to bias toward ⇒
--- SeqScan. The `<>` clause appears verbatim as the SeqScan Filter; there
--- is NO `Custom Scan (lagodb-iceberg)` node and NO `Pushed Filter:` line.
+-- Under `force`, the text inequality appears as a pushed filter.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, label FROM customscan_unsupported_only_t
 WHERE label <> 'bravo'
 ORDER BY id, label;
 
--- SeqScan baseline: same filter shape.
+-- SeqScan baseline.
 SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT id, label FROM customscan_unsupported_only_t
@@ -1507,12 +1467,8 @@ WHERE label <> 'bravo'
 ORDER BY id, label;
 
 -- ============================================================================
--- Test 2: positive control — a translatable clause DOES yield a CustomPath.
--- This proves the Test 1 SeqScan fallback is genuinely the capability gate
--- declining the variant, not an artifact of the harness. `WHERE id = 2` is
--- `int4 =` (opno 96), which the provider planner plans as `Exact`: the path
--- summary is non-empty, so `create_path` emits a CustomPath,
--- and under `force` the plan is a Custom Scan carrying the pushed predicate.
+-- Test 2: integer Exact-pushdown control on the same table. `WHERE id = 2` is
+-- `int4 =` (opno 96), so force selects CustomScan and removes the residual.
 -- ============================================================================
 
 -- Under `force`: the Exact integer clause is pushable, so a CustomPath

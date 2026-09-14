@@ -9,25 +9,12 @@
 
 LagoDB brings PostgreSQL's SQL interface, transaction model, and ecosystem to open lakehouse table formats and cloud object storage.
 
-With LagoDB, you can:
-- **Manage native Iceberg tables** directly within PostgreSQL (`USING iceberg`) with ACID transactions and local or object storage.
-- **Directly query and write external Iceberg tables** in an Iceberg REST catalog as foreign tables without migrating data.
-- **Query and exchange object storage files** (Parquet, CSV, JSON, Avro, Text) directly via foreign tables and high-performance object-URI `COPY` commands.
-
-The long-term vision includes first-class support for the
-[Apache Iceberg](https://iceberg.apache.org/),
+The long-term vision includes first-class support for open lakehouse table
+formats such as [Apache Iceberg](https://iceberg.apache.org/),
 [Delta Lake](https://delta.io/), and
-[Apache Hudi](https://hudi.apache.org/) lakehouse table formats.
-
-Beyond table formats, one future goal is to add time-series database
-capabilities to LagoDB, using lake tables as the storage foundation for
-ingesting, managing, and analyzing time-series data at scale. Another future
-goal is to support vector data and exact and approximate nearest-neighbor
-search through the PostgreSQL SQL interface, with lake tables in object storage
-as the durable data layer. Neither the time-series nor vector capabilities are
-implemented today.
-
-Apache Iceberg and LagoDB object storage connectors are currently implemented. The other formats and capabilities are planned product directions, not current capabilities.
+[Apache Hudi](https://hudi.apache.org/). Currently, Apache Iceberg and LagoDB
+object storage connectors are implemented; other formats and future capabilities
+are planned product directions.
 
 > [!WARNING]
 > This project is under active development and is not recommended for
@@ -40,6 +27,10 @@ Apache Iceberg and LagoDB object storage connectors are currently implemented. T
 - **PostgreSQL as the database interface.** Use ordinary PostgreSQL SQL,
   transactions, drivers, and tools instead of adopting a separate interface
   for lakehouse data.
+- **Vectorized query execution with Apache DataFusion.** Accelerate analytical
+  queries by offloading eligible operations—such as aggregations, joins, and
+  filters—to an embedded Apache DataFusion vectorized engine for high-throughput
+  Arrow-native processing.
 - **Managed and foreign Iceberg tables.** Work with PostgreSQL-managed Iceberg
   tables (`USING iceberg`) with ACID DML and transaction control, or directly
   query external tables in an Iceberg REST catalog as foreign tables without
@@ -52,9 +43,9 @@ Apache Iceberg and LagoDB object storage connectors are currently implemented. T
   local filesystem for simple deployments, or place object-backed tables in
   S3-compatible object storage through storage volumes while using the same
   PostgreSQL SQL interface. GCS and Azure providers are experimental.
-- **A unified database direction.** Build from the current Iceberg and object
-  connector support toward additional open lakehouse formats, time-series
-  capabilities, and vector search with lake tables in object storage.
+- **A unified database direction.** Build from the current Iceberg, object
+  connector, and query offload support toward additional open lakehouse formats,
+  time-series capabilities, and vector search with lake tables in object storage.
 
 ## Current capabilities
 
@@ -255,9 +246,9 @@ WHERE id >= 100;
 
 ## Roadmap
 
-### Current — Reliable Iceberg tables and object storage connectors
+### Current — Reliable Iceberg tables, object storage connectors, and query offload
 
-Make writable Iceberg tables and LagoDB object storage connectors reliable, interoperable, and straightforward to deploy from PostgreSQL, with strong format coverage, object-storage reliability, compatibility testing, packaging, and performance validation.
+Make writable Iceberg tables, LagoDB object storage connectors, and DataFusion query offload reliable, interoperable, and straightforward to deploy from PostgreSQL, with strong format coverage, object-storage reliability, compatibility testing, packaging, and performance validation.
 
 ### Next — Broader lakehouse format support
 

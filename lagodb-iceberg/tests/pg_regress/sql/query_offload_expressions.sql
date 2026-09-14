@@ -15,7 +15,7 @@ CREATE TABLE query_offload_expression_basic (
     value_f4 real,
     value_f8 double precision,
     value_bool boolean,
-    value_text text COLLATE "C",
+    value_text text,
     value_timestamp timestamp
 ) USING iceberg;
 
@@ -263,6 +263,17 @@ EXPLAIN (COSTS OFF)
 SELECT count(date_trunc('day', value_timestamp))
 FROM query_offload_expression_basic;
 
+SELECT count(date_trunc('day', value_timestamp))
+FROM query_offload_expression_basic;
+
+SET lagodb.query_offload_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT count(date_trunc('day', value_timestamp))
+FROM query_offload_expression_basic;
+
+SELECT count(date_trunc('day', value_timestamp))
+FROM query_offload_expression_basic;
+
 -- PostgreSQL integer ABS raises 22003 at the declared int2 minimum. This one
 -- case locks the widening adapter without repeating the same negative for all
 -- integer widths in SQL regression.
@@ -274,6 +285,10 @@ INSERT INTO query_offload_expression_abs_edge VALUES ('-32768'::smallint);
 
 SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*) FILTER (WHERE abs(value_i2) >= 0::smallint)
+FROM query_offload_expression_abs_edge;
+
 SELECT count(*) FILTER (WHERE abs(value_i2) >= 0::smallint)
 FROM query_offload_expression_abs_edge;
 

@@ -1,0 +1,775 @@
+-- query_offload_composition.sql
+-- Cross-operator coverage. Individual aggregate and join capability matrices
+-- remain in their focused suites; this file protects their composition.
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
+SET lagodb.query_batch_rows = 2;
+CREATE TABLE query_offload_comp_left (
+    id integer,
+    key integer,
+    measure integer
+) USING iceberg;
+CREATE TABLE query_offload_comp_right (
+    id integer,
+    key integer,
+    measure integer,
+    label text
+) USING iceberg;
+CREATE TABLE query_offload_comp_aux (
+    key integer,
+    label text,
+    label_varchar varchar(8),
+    label_bpchar character(8),
+    label_name name
+) USING iceberg;
+CREATE TABLE query_offload_comp_empty (
+    key integer,
+    measure integer
+) USING iceberg;
+INSERT INTO query_offload_comp_left VALUES
+    (1, 1, 10),
+    (2, 2, 20),
+    (3, 2, NULL),
+    (4, 3, 40),
+    (5, NULL, 50),
+    (6, 6, 60);
+INSERT INTO query_offload_comp_right VALUES
+    (101, 1, 100, 'r1'),
+    (102, 2, 200, 'r2a'),
+    (103, 2, 300, 'r2b'),
+    (104, 4, 400, 'r4'),
+    (105, NULL, 500, 'rnull');
+INSERT INTO query_offload_comp_aux VALUES
+    (1, 'shared', 'shared', 'shared', 'shared'),
+    (2, 'shared', 'shared', 'shared ', 'shared'),
+    (4, 'four', 'four', 'four', 'four');
+-- Duplicate fanout, NULL aggregate input, FILTER, and HAVING in one fragment.
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT l.key,
+       count(*) AS joined_rows,
+       count(l.measure) AS nonnull_left,
+       min(l.measure) AS min_left,
+       max(r.measure) AS max_right,
+       sum(l.measure) AS sum_left,
+       avg(r.measure)::numeric(20, 2) AS avg_right,
+       count(*) FILTER (WHERE r.measure >= 300) AS large_right
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r USING (key)
+GROUP BY l.key
+HAVING count(*) >= 2
+ORDER BY l.key;
+                                                                                    QUERY PLAN                                                                                    
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Sort
+         Sort Key: l.key ASC NULLS LAST
+         ->  Filter
+               Filter: ((COUNT(*) >= runtime value))
+               ->  Aggregate
+                     Group Key: l.key
+                     Aggregates: COUNT(*), COUNT(l.measure), MIN(l.measure), MAX(r.measure), SUM(l.measure), AVG(r.measure), COUNT(*) FILTER (WHERE (r.measure >= runtime value))
+                     ->  Hash Join
+                           Join Type: Inner
+                           Hash Cond: l.key = r.key
+                           ->  Table Scan on query_offload_comp_left l
+                                 Access Method: iceberg
+                           ->  Table Scan on query_offload_comp_right r
+                                 Access Method: iceberg
+(17 rows)
+
+SELECT l.key,
+       count(*) AS joined_rows,
+       count(l.measure) AS nonnull_left,
+       min(l.measure) AS min_left,
+       max(r.measure) AS max_right,
+       sum(l.measure) AS sum_left,
+       avg(r.measure)::numeric(20, 2) AS avg_right,
+       count(*) FILTER (WHERE r.measure >= 300) AS large_right
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r USING (key)
+GROUP BY l.key
+HAVING count(*) >= 2
+ORDER BY l.key;
+ key | joined_rows | nonnull_left | min_left | max_right | sum_left | avg_right | large_right 
+-----+-------------+--------------+----------+-----------+----------+-----------+-------------
+   2 |           4 |            2 |       20 |       300 |       40 |    250.00 |           2
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT l.key,
+       count(*) AS joined_rows,
+       count(l.measure) AS nonnull_left,
+       min(l.measure) AS min_left,
+       max(r.measure) AS max_right,
+       sum(l.measure) AS sum_left,
+       avg(r.measure)::numeric(20, 2) AS avg_right,
+       count(*) FILTER (WHERE r.measure >= 300) AS large_right
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r USING (key)
+GROUP BY l.key
+HAVING count(*) >= 2
+ORDER BY l.key;
+ key | joined_rows | nonnull_left | min_left | max_right | sum_left | avg_right | large_right 
+-----+-------------+--------------+----------+-----------+----------+-----------+-------------
+   2 |           4 |            2 |       20 |       300 |       40 |    250.00 |           2
+(1 row)
+
+-- Scalar aggregate over an empty join input preserves COUNT versus nullable
+-- aggregate semantics.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS rows,
+       count(e.measure) AS values,
+       min(e.measure) AS minimum,
+       sum(e.measure) AS total
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_empty AS e USING (key);
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Aggregate
+         Aggregates: COUNT(*), COUNT(e.measure), MIN(e.measure), SUM(e.measure)
+         ->  Hash Join
+               Join Type: Inner
+               Hash Cond: l.key = e.key
+               ->  Table Scan on query_offload_comp_left l
+                     Access Method: iceberg
+               ->  Table Scan on query_offload_comp_empty e
+                     Access Method: iceberg
+(12 rows)
+
+SELECT count(*) AS rows,
+       count(e.measure) AS values,
+       min(e.measure) AS minimum,
+       sum(e.measure) AS total
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_empty AS e USING (key);
+ rows | values | minimum | total 
+------+--------+---------+-------
+    0 |      0 |         |      
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT count(*) AS rows,
+       count(e.measure) AS values,
+       min(e.measure) AS minimum,
+       sum(e.measure) AS total
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_empty AS e USING (key);
+ rows | values | minimum | total 
+------+--------+---------+-------
+    0 |      0 |         |      
+(1 row)
+
+-- Outer-join null extension must distinguish joined rows from right values.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT l.key, count(*) AS rows, count(r.id) AS matched_right
+FROM query_offload_comp_left AS l
+LEFT JOIN query_offload_comp_right AS r
+  ON l.key = r.key AND r.measure >= 200
+WHERE r.id IS NULL OR l.id <> 2
+GROUP BY l.key
+ORDER BY l.key NULLS LAST;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Sort
+         Sort Key: l.key ASC NULLS LAST
+         ->  Aggregate
+               Group Key: l.key
+               Aggregates: COUNT(*), COUNT(r.id)
+               ->  Filter
+                     Filter: ((r.id IS NULL) OR (l.id <> runtime value))
+                     ->  Hash Join
+                           Join Type: Left
+                           Hash Cond: l.key = r.key
+                           ->  Table Scan on query_offload_comp_left l
+                                 Access Method: iceberg
+                           ->  Table Scan on query_offload_comp_right r
+                                 Access Method: iceberg
+                                 Filter: (measure >= 200)
+                                 Pushed Filter: (measure >= 200)
+(19 rows)
+
+SELECT l.key, count(*) AS rows, count(r.id) AS matched_right
+FROM query_offload_comp_left AS l
+LEFT JOIN query_offload_comp_right AS r
+  ON l.key = r.key AND r.measure >= 200
+WHERE r.id IS NULL OR l.id <> 2
+GROUP BY l.key
+ORDER BY l.key NULLS LAST;
+ key | rows | matched_right 
+-----+------+---------------
+   1 |    1 |             0
+   2 |    2 |             2
+   3 |    1 |             0
+   6 |    1 |             0
+     |    1 |             0
+(5 rows)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT l.key, count(*) AS rows, count(r.id) AS matched_right
+FROM query_offload_comp_left AS l
+LEFT JOIN query_offload_comp_right AS r
+  ON l.key = r.key AND r.measure >= 200
+WHERE r.id IS NULL OR l.id <> 2
+GROUP BY l.key
+ORDER BY l.key NULLS LAST;
+ key | rows | matched_right 
+-----+------+---------------
+   1 |    1 |             0
+   2 |    2 |             2
+   3 |    1 |             0
+   6 |    1 |             0
+     |    1 |             0
+(5 rows)
+
+-- Semi and anti joins remain inside the fragment when consumed by an
+-- aggregate. Duplicate and NULL keys on the inner side must not multiply or
+-- suppress outer rows beyond PostgreSQL's EXISTS/NOT EXISTS semantics.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS matching_left, sum(l.measure) AS matching_total
+FROM query_offload_comp_left AS l
+WHERE EXISTS (
+    SELECT 1
+    FROM query_offload_comp_right AS r
+    WHERE r.key = l.key
+);
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Aggregate
+         Aggregates: COUNT(*), SUM(l.measure)
+         ->  Hash Join
+               Join Type: Left Semi
+               Hash Cond: l.key = r.key
+               ->  Table Scan on query_offload_comp_left l
+                     Access Method: iceberg
+               ->  Table Scan on query_offload_comp_right r
+                     Access Method: iceberg
+(12 rows)
+
+SELECT count(*) AS matching_left, sum(l.measure) AS matching_total
+FROM query_offload_comp_left AS l
+WHERE EXISTS (
+    SELECT 1
+    FROM query_offload_comp_right AS r
+    WHERE r.key = l.key
+);
+ matching_left | matching_total 
+---------------+----------------
+             3 |             30
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT count(*) AS matching_left, sum(l.measure) AS matching_total
+FROM query_offload_comp_left AS l
+WHERE EXISTS (
+    SELECT 1
+    FROM query_offload_comp_right AS r
+    WHERE r.key = l.key
+);
+ matching_left | matching_total 
+---------------+----------------
+             3 |             30
+(1 row)
+
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS missing_left, sum(l.measure) AS missing_total
+FROM query_offload_comp_left AS l
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM query_offload_comp_right AS r
+    WHERE r.key = l.key
+);
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Aggregate
+         Aggregates: COUNT(*), SUM(l.measure)
+         ->  Hash Join
+               Join Type: Left Anti
+               Hash Cond: l.key = r.key
+               ->  Table Scan on query_offload_comp_left l
+                     Access Method: iceberg
+               ->  Table Scan on query_offload_comp_right r
+                     Access Method: iceberg
+(12 rows)
+
+SELECT count(*) AS missing_left, sum(l.measure) AS missing_total
+FROM query_offload_comp_left AS l
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM query_offload_comp_right AS r
+    WHERE r.key = l.key
+);
+ missing_left | missing_total 
+--------------+---------------
+            3 |           150
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT count(*) AS missing_left, sum(l.measure) AS missing_total
+FROM query_offload_comp_left AS l
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM query_offload_comp_right AS r
+    WHERE r.key = l.key
+);
+ missing_left | missing_total 
+--------------+---------------
+            3 |           150
+(1 row)
+
+-- NOT IN needs both controls missing from the join-only fixture: an inner
+-- relation containing no NULLs and an empty inner relation.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS not_in_nonnull
+FROM query_offload_comp_left AS l
+WHERE l.key NOT IN (
+    SELECT a.key FROM query_offload_comp_aux AS a
+);
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Hash Join
+               Join Type: Left Anti
+               Hash Cond: l.key = a.key
+               Null Aware: true
+               ->  Table Scan on query_offload_comp_left l
+                     Access Method: iceberg
+               ->  Table Scan on query_offload_comp_aux a
+                     Access Method: iceberg
+(13 rows)
+
+SELECT count(*) AS not_in_nonnull
+FROM query_offload_comp_left AS l
+WHERE l.key NOT IN (
+    SELECT a.key FROM query_offload_comp_aux AS a
+);
+ not_in_nonnull 
+----------------
+              2
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT count(*) AS not_in_nonnull
+FROM query_offload_comp_left AS l
+WHERE l.key NOT IN (
+    SELECT a.key FROM query_offload_comp_aux AS a
+);
+ not_in_nonnull 
+----------------
+              2
+(1 row)
+
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS not_in_empty
+FROM query_offload_comp_left AS l
+WHERE l.key NOT IN (
+    SELECT e.key FROM query_offload_comp_empty AS e
+);
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Hash Join
+               Join Type: Left Anti
+               Hash Cond: l.key = e.key
+               Null Aware: true
+               ->  Table Scan on query_offload_comp_left l
+                     Access Method: iceberg
+               ->  Table Scan on query_offload_comp_empty e
+                     Access Method: iceberg
+(13 rows)
+
+SELECT count(*) AS not_in_empty
+FROM query_offload_comp_left AS l
+WHERE l.key NOT IN (
+    SELECT e.key FROM query_offload_comp_empty AS e
+);
+ not_in_empty 
+--------------
+            6
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT count(*) AS not_in_empty
+FROM query_offload_comp_left AS l
+WHERE l.key NOT IN (
+    SELECT e.key FROM query_offload_comp_empty AS e
+);
+ not_in_empty 
+--------------
+            6
+(1 row)
+
+-- A self join proves that source identity is query-local rather than keyed by
+-- relation OID or display name.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT a.key, count(*) AS pairs, sum(b.measure) AS peer_total
+FROM query_offload_comp_left AS a
+JOIN query_offload_comp_left AS b
+  ON a.key = b.key AND a.id < b.id
+GROUP BY a.key
+ORDER BY a.key;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   Execution Mode: Serial
+   ->  Sort
+         Sort Key: a.key ASC NULLS LAST
+         ->  Aggregate
+               Group Key: a.key
+               Aggregates: COUNT(*), SUM(b.measure)
+               ->  Hash Join
+                     Join Type: Inner
+                     Hash Cond: a.key = b.key
+                     Join Filter: (a.id < b.id)
+                     ->  Table Scan on query_offload_comp_left a
+                           Access Method: iceberg
+                     ->  Table Scan on query_offload_comp_left b
+                           Access Method: iceberg
+(16 rows)
+
+SELECT a.key, count(*) AS pairs, sum(b.measure) AS peer_total
+FROM query_offload_comp_left AS a
+JOIN query_offload_comp_left AS b
+  ON a.key = b.key AND a.id < b.id
+GROUP BY a.key
+ORDER BY a.key;
+ key | pairs | peer_total 
+-----+-------+------------
+   2 |     1 |           
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT a.key, count(*) AS pairs, sum(b.measure) AS peer_total
+FROM query_offload_comp_left AS a
+JOIN query_offload_comp_left AS b
+  ON a.key = b.key AND a.id < b.id
+GROUP BY a.key
+ORDER BY a.key;
+ key | pairs | peer_total 
+-----+-------+------------
+   2 |     1 |           
+(1 row)
+
+-- A three-source tree protects recursive join-to-aggregate composition. TEXT
+-- and VARCHAR group keys also protect deterministic-collation byte equality.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT a.label,
+       a.label_varchar,
+       count(*) AS rows,
+       sum(r.measure) AS total
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r USING (key)
+JOIN query_offload_comp_aux AS a USING (key)
+GROUP BY a.label, a.label_varchar
+ORDER BY a.label, a.label_varchar;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Sort
+   Sort Key: a.label, a.label_varchar
+   ->  Custom Scan (LagoDB Query Offload)
+         Engine: DataFusion
+         Execution Mode: Serial
+         ->  Aggregate
+               Group Key: a.label, a.label_varchar
+               Aggregates: COUNT(*), SUM(r.measure)
+               ->  Hash Join
+                     Join Type: Inner
+                     Hash Cond: l.key = r.key
+                     ->  Hash Join
+                           Join Type: Inner
+                           Hash Cond: l.key = a.key
+                           ->  Table Scan on query_offload_comp_left l
+                                 Access Method: iceberg
+                           ->  Table Scan on query_offload_comp_aux a
+                                 Access Method: iceberg
+                     ->  Table Scan on query_offload_comp_right r
+                           Access Method: iceberg
+(20 rows)
+
+SELECT a.label,
+       a.label_varchar,
+       count(*) AS rows,
+       sum(r.measure) AS total
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r USING (key)
+JOIN query_offload_comp_aux AS a USING (key)
+GROUP BY a.label, a.label_varchar
+ORDER BY a.label, a.label_varchar;
+ label  | label_varchar | rows | total 
+--------+---------------+------+-------
+ shared | shared        |    5 |  1100
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT a.label,
+       a.label_varchar,
+       count(*) AS rows,
+       sum(r.measure) AS total
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r USING (key)
+JOIN query_offload_comp_aux AS a USING (key)
+GROUP BY a.label, a.label_varchar
+ORDER BY a.label, a.label_varchar;
+ label  | label_varchar | rows | total 
+--------+---------------+------+-------
+ shared | shared        |    5 |  1100
+(1 row)
+
+-- BPCHAR and NAME have PostgreSQL-specific equality semantics that are not part
+-- of the provider-neutral hash-grouping contract. The joins may still offload,
+-- but PostgreSQL must retain each Aggregate node.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT a.label_bpchar, count(*) AS rows
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r USING (key)
+JOIN query_offload_comp_aux AS a USING (key)
+GROUP BY a.label_bpchar;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ GroupAggregate
+   Group Key: a.label_bpchar
+   ->  Sort
+         Sort Key: a.label_bpchar
+         ->  Hash Join
+               Hash Cond: (l.key = r.key)
+               ->  Hash Join
+                     Hash Cond: (l.key = a.key)
+                     ->  Seq Scan on query_offload_comp_left l
+                     ->  Hash
+                           ->  Seq Scan on query_offload_comp_aux a
+               ->  Hash
+                     ->  Seq Scan on query_offload_comp_right r
+(13 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT a.label_name, count(*) AS rows
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r USING (key)
+JOIN query_offload_comp_aux AS a USING (key)
+GROUP BY a.label_name;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ GroupAggregate
+   Group Key: a.label_name
+   ->  Sort
+         Sort Key: a.label_name
+         ->  Hash Join
+               Hash Cond: (l.key = r.key)
+               ->  Hash Join
+                     Hash Cond: (l.key = a.key)
+                     ->  Seq Scan on query_offload_comp_left l
+                     ->  Hash
+                           ->  Seq Scan on query_offload_comp_aux a
+               ->  Hash
+                     ->  Seq Scan on query_offload_comp_right r
+(13 rows)
+
+-- DISTINCT aggregate followed by ORDER BY and LIMIT/OFFSET.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT l.key,
+       count(DISTINCT r.measure) AS distinct_values,
+       max(r.measure) AS maximum,
+       string_agg(r.label, ',' ORDER BY r.id) AS ordered_labels
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r USING (key)
+WHERE l.id >= 1
+GROUP BY l.key
+ORDER BY maximum DESC, l.key
+LIMIT 1 OFFSET 1;
+                                                            QUERY PLAN                                                            
+----------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload) (actual rows=1 loops=1)
+   Engine: DataFusion
+   Execution Mode: Serial
+   Engine Peak Memory Bytes: 7576
+   ->  Limit
+         ->  Sort
+               Sort Key: MAX(r.measure) DESC NULLS FIRST, l.key ASC NULLS LAST
+               ->  Aggregate
+                     Group Key: l.key
+                     Aggregates: COUNT(DISTINCT r.measure), MAX(r.measure), STRING_AGG(r.label, ',' ORDER BY r.id ASC NULLS LAST)
+                     ->  Hash Join
+                           Join Type: Inner
+                           Hash Cond: r.key = l.key
+                           ->  Table Scan on query_offload_comp_right r
+                                 Access Method: iceberg
+                                 Actual Input Batches: 3
+                                 Actual Input Rows: 5
+                                 Scan Tasks: 1
+                                 Data Files Selected: 1
+                                 Selected File Bytes: 1705
+                           ->  Table Scan on query_offload_comp_left l
+                                 Access Method: iceberg
+                                 Filter: (id >= 1)
+                                 Pushed Filter: (id >= 1)
+                                 Actual Input Batches: 2
+                                 Actual Input Rows: 4
+                                 Scan Tasks: 1
+                                 Data Files Selected: 1
+                                 Selected File Bytes: 1329
+(29 rows)
+
+SELECT l.key,
+       count(DISTINCT r.measure) AS distinct_values,
+       max(r.measure) AS maximum,
+       string_agg(r.label, ',' ORDER BY r.id) AS ordered_labels
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r USING (key)
+WHERE l.id >= 1
+GROUP BY l.key
+ORDER BY maximum DESC, l.key
+LIMIT 1 OFFSET 1;
+ key | distinct_values | maximum | ordered_labels 
+-----+-----------------+---------+----------------
+   1 |               1 |     100 | r1
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT l.key,
+       count(DISTINCT r.measure) AS distinct_values,
+       max(r.measure) AS maximum,
+       string_agg(r.label, ',' ORDER BY r.id) AS ordered_labels
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r USING (key)
+WHERE l.id >= 1
+GROUP BY l.key
+ORDER BY maximum DESC, l.key
+LIMIT 1 OFFSET 1;
+ key | distinct_values | maximum | ordered_labels 
+-----+-----------------+---------+----------------
+   1 |               1 |     100 | r1
+(1 row)
+
+-- ORDER BY needs measure as a resjunk input while the final output contains
+-- only id. Since Sort cannot perform that target-list change, PG17 creates a
+-- real (dummypp=false) ProjectionPath above it. Query offload may still own the
+-- scan, but it must not absorb Sort or Limit through the PostgreSQL projection.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT id
+FROM query_offload_comp_left
+ORDER BY measure NULLS LAST, id
+LIMIT 3;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Limit
+   Output: id, measure
+   ->  Sort
+         Output: id, measure
+         Sort Key: query_offload_comp_left.measure, query_offload_comp_left.id
+         ->  Seq Scan on public.query_offload_comp_left
+               Output: id, measure
+(7 rows)
+
+SELECT id
+FROM query_offload_comp_left
+ORDER BY measure NULLS LAST, id
+LIMIT 3;
+ id 
+----
+  1
+  2
+  4
+(3 rows)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT id
+FROM query_offload_comp_left
+ORDER BY measure NULLS LAST, id
+LIMIT 3;
+ id 
+----
+  1
+  2
+  4
+(3 rows)
+
+-- An unsupported non-equi join must reject the complete aggregate
+-- composition instead of installing a partial query-offload fragment.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*)
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r ON l.key < r.key;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Aggregate
+   ->  Nested Loop
+         Join Filter: (l.key < r.key)
+         ->  Seq Scan on query_offload_comp_left l
+         ->  Materialize
+               ->  Seq Scan on query_offload_comp_right r
+(6 rows)
+
+SELECT count(*)
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r ON l.key < r.key;
+ count 
+-------
+     6
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT count(*)
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r ON l.key < r.key;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Aggregate
+   ->  Nested Loop
+         Join Filter: (l.key < r.key)
+         ->  Seq Scan on query_offload_comp_left l
+         ->  Materialize
+               ->  Seq Scan on query_offload_comp_right r
+(6 rows)
+
+SELECT count(*)
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r ON l.key < r.key;
+ count 
+-------
+     6
+(1 row)
+
+DROP TABLE query_offload_comp_empty;
+DROP TABLE query_offload_comp_aux;
+DROP TABLE query_offload_comp_right;
+DROP TABLE query_offload_comp_left;
+RESET lagodb.query_batch_rows;
+RESET lagodb.query_offload_mode;
+RESET lagodb.customscan_mode;
