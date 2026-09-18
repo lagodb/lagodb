@@ -154,10 +154,10 @@ SELECT COUNT(*) AS int8_null_rows
 FROM customscan_exact_pushdown_int8 WHERE id IS NULL;
 
 -- ============================================================================
--- Block A: int4 Exact-promoted operators (opnos 96, 518, 97, 523, 521, 525)
+-- int4 Exact-promoted operators (opnos 96, 518, 97, 523, 521, 525)
 -- ============================================================================
 
--- A.1 int4eq (=), opno 96
+-- int4eq (=), opno 96
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -182,7 +182,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id = 25;
 
--- A.2 int4ne (<>), opno 518. This also checks NULL semantics: the three
+-- int4ne (<>), opno 518. This also checks NULL semantics: the three
 -- NULL rows must not satisfy `NULL <> 25`.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -208,7 +208,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id <> 25;
 
--- A.3 int4lt (<), opno 97
+-- int4lt (<), opno 97
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -233,7 +233,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id < 120;
 
--- A.4 int4le (<=), opno 523
+-- int4le (<=), opno 523
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -258,7 +258,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id <= 120;
 
--- A.5 int4gt (>), opno 521
+-- int4gt (>), opno 521
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -283,7 +283,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id > 120;
 
--- A.6 int4ge (>=), opno 525
+-- int4ge (>=), opno 525
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -309,10 +309,10 @@ FROM customscan_exact_pushdown_int4
 WHERE id >= 120;
 
 -- ============================================================================
--- Block B: int8 Exact-promoted operators (opnos 410, 411, 412, 414, 413, 415)
+-- int8 Exact-promoted operators (opnos 410, 411, 412, 414, 413, 415)
 -- ============================================================================
 
--- B.1 int8eq (=), opno 410. The literal lives in the >2^32 file to exercise
+-- int8eq (=), opno 410. The literal lives in the >2^32 file to exercise
 -- the 64-bit comparison path specifically.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -338,7 +338,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int8
 WHERE id = 10000000025;
 
--- B.2 int8ne (<>), opno 411
+-- int8ne (<>), opno 411
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -363,7 +363,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int8
 WHERE id <> 25::bigint;
 
--- B.3 int8lt (<), opno 412
+-- int8lt (<), opno 412
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -388,7 +388,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int8
 WHERE id < 120::bigint;
 
--- B.4 int8le (<=), opno 414
+-- int8le (<=), opno 414
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -413,7 +413,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int8
 WHERE id <= 120::bigint;
 
--- B.5 int8gt (>), opno 413
+-- int8gt (>), opno 413
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -438,7 +438,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int8
 WHERE id > 9999999999::bigint;
 
--- B.6 int8ge (>=), opno 415
+-- int8ge (>=), opno 415
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -464,10 +464,10 @@ FROM customscan_exact_pushdown_int8
 WHERE id >= 10000000000::bigint;
 
 -- ============================================================================
--- Block C: NULL semantics and AND composition
+-- NULL semantics and AND composition
 -- ============================================================================
 
--- C.1 equality on the NULL-bearing int4 file.
+-- Equality on the NULL-bearing int4 file.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -492,7 +492,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id = 119;
 
--- C.2 inequality on the NULL-bearing int4 file. NULL ids must not satisfy
+-- Inequality on the NULL-bearing int4 file. NULL ids must not satisfy
 -- `NULL <> 119` on either path.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -518,7 +518,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id <> 119;
 
--- C.3 AND of two Exact range clauses. Both clauses should be pushed and
+-- AND of two Exact range clauses. Both clauses should be pushed and
 -- recorded for recheck; neither should remain residual.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -545,10 +545,10 @@ FROM customscan_exact_pushdown_int4
 WHERE id >= 100 AND id <= 150;
 
 -- ============================================================================
--- Block D: Type resolution through PG's resolved operator identity
+-- Type resolution through PG's resolved operator identity
 -- ============================================================================
 
--- D.1 explicit int8 literal against an int8 column. This is the same
+-- Explicit int8 literal against an int8 column. This is the same
 -- allowlisted operator reached without relying on unknown-literal coercion.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -575,7 +575,7 @@ FROM customscan_exact_pushdown_int8
 WHERE id = 25::bigint;
 
 -- ============================================================================
--- Block E: exact text equality under resolved deterministic collations.
+-- Exact text equality under resolved deterministic collations.
 -- PostgreSQL text equality is byte equality for deterministic collations, so
 -- the provider can remove the executor residual after resolving the catalog
 -- collation semantics during planning.  The table itself uses the database
@@ -594,7 +594,7 @@ INSERT INTO customscan_exact_pushdown_text VALUES
     (4, 'Cherry'),
     (5, 'cherry');
 
--- E.1 equality under the column's default deterministic collation is Exact.
+-- Equality under the column's default deterministic collation is Exact.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -619,7 +619,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_text
 WHERE label = 'banana';
 
--- E.2 an explicit deterministic predicate collation is resolved by the same
+-- An explicit deterministic predicate collation is resolved by the same
 -- equality policy.  It does not alter the table column's default collation.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -718,8 +718,8 @@ ORDER BY a, b;
 -- `(a = 1)`: the plan stores one pushed-expression provenance entry and
 -- derives the Exact recheck from its persisted contract. The
 -- `Pushed Filter Conservative:` class is
--- empty and its label line is omitted (
--- non-empty classes print labeled predicate lines); no numeric count
+-- empty and its label line is omitted because only non-empty classes print
+-- labeled predicate lines; no numeric count
 -- lines appear.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (VERBOSE, COSTS OFF)
@@ -730,8 +730,8 @@ WHERE a = 1 AND length(b) > 0;
 -- Test 2: OR-no-pushdown
 -- ============================================================================
 -- `a = 1 OR length(b) > 0`:
---   - The Unsupported child kills both the OR-Exact 
---     4.5) and the OR-ConservativePruning-widening branches.
+--   - The Unsupported child kills both the OR-Exact and the
+--     OR-ConservativePruning-widening branches.
 --   - The whole OR is Unsupported; `split.pushed` is empty;
 --     Iceberg's `create_path` declines the variant; PG plans a
 --     SeqScan with the OR clause as Filter.
@@ -854,7 +854,7 @@ SELECT COUNT(*) AS auto_cost_rows FROM customscan_auto_cost_t;
 -- self-documenting and independent of any prior section's GUC state.
 SET lagodb.customscan_mode = 'auto';
 
--- A.1 Pushable equality under 'auto': the CustomPath's scan cost (disk +
+-- Pushable equality under 'auto': the CustomPath's scan cost (disk +
 -- per-tuple CPU, scaled down by the costed-pruning selectivity) sits far below
 -- the full SeqScan, so the planner picks the Custom Scan on cost alone (no
 -- force bias). Default TEXT shows the `Pushed Filter: (id = 1500)` line; the
@@ -862,37 +862,37 @@ SET lagodb.customscan_mode = 'auto';
 EXPLAIN (COSTS OFF)
 SELECT id, payload FROM customscan_auto_cost_t WHERE id = 1500;
 
--- A.2 UncostedBestEffort under 'auto': the date equality emits a CustomPath,
+-- UncostedBestEffort under 'auto': the date equality emits a CustomPath,
 -- but contributes no pruning selectivity to its cost. The Seq Scan therefore
 -- remains selected.
 EXPLAIN (COSTS OFF)
 SELECT id, payload FROM customscan_auto_cost_t
 WHERE event_date = DATE '2024-01-01';
 
--- A.3 The same UncostedBestEffort predicate under 'force' selects the
+-- The same UncostedBestEffort predicate under 'force' selects the
 -- CustomPath and exposes both its Conservative pushed filter and mandatory
--- residual. Together with A.2 this distinguishes "uncosted" from "unsupported".
+-- residual. Together these plans distinguish "uncosted" from "unsupported".
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, payload FROM customscan_auto_cost_t
 WHERE event_date = DATE '2024-01-01';
 
--- A.4 No predicate under 'auto': `create_path` sees an empty pushed set and
+-- No predicate under 'auto': `create_path` sees an empty pushed set and
 -- returns `None`, so no CustomPath is emitted and the only candidate is the
 -- Seq Scan baseline.
 SET lagodb.customscan_mode = 'auto';
 EXPLAIN (COSTS OFF)
 SELECT id, payload FROM customscan_auto_cost_t;
 
--- A.5 The same predicate-free query under 'force' is STILL a Seq Scan: this
--- proves A.4's Seq Scan is "no CustomPath was emitted" (empty pushed set), not
+-- The same predicate-free query under 'force' is STILL a Seq Scan. This
+-- proves the auto-mode Seq Scan means "no CustomPath was emitted" (empty pushed set), not
 -- merely "a CustomPath lost on cost". `force` can only bias CustomPaths the
 -- framework already emitted, and here there is none to bias.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, payload FROM customscan_auto_cost_t;
 
--- A.6 Result-set parity: the cost-selected Custom Scan ('auto') returns the
+-- Result-set parity: the cost-selected Custom Scan ('auto') returns the
 -- same row as the SeqScan baseline ('off').
 SET lagodb.customscan_mode = 'auto';
 SELECT id, payload FROM customscan_auto_cost_t WHERE id = 1500 ORDER BY id, payload;

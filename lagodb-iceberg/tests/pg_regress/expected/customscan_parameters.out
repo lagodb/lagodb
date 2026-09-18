@@ -47,7 +47,7 @@ SELECT COUNT(*) AS lake_total_rows FROM customscan_ord_lake;
 -- The outer relation. A tiny heap table so the planner drives the
 -- nestloop from `outer` with the lake CustomScan on the parameterized
 -- inner side once the alternatives below are disabled. Four rows cover
--- every case.4 call out:
+-- every relevant execution case:
 --   - (1,     'one')      -> matches lake k=1     (matching key)
 --   - (2500,  'last')     -> matches lake k=2500  (matching key)
 --   - (999999,'no_match') -> no lake row          (non-matching key)
@@ -69,15 +69,13 @@ SET enable_nestloop = on;
 -- ============================================================================
 -- Under `force`, EXPLAIN must show:
 --   - A `Nested Loop` plan node.
---   - Inner: `Custom Scan (lagodb-iceberg) on customscan_ord_lake`
---     (
---     exercised).
+--   - Inner: `Custom Scan (lagodb-iceberg) on customscan_ord_lake`.
 --   - On the inner, in default TEXT, a `Pushed Filter: (k = o.id)` line
 --     — the ordinary join predicate `l.k = o.id` is the pushed (remote)
---     predicate realized at the CustomScan node (
---     8.1). It is Exact and stripped from `plan.qual`, so it does NOT
---     appear as a residual `Filter:` line above the scan
---, which is the structural evidence that the
+--     predicate realized at the CustomScan node. It is Exact and stripped
+--     from `plan.qual`, so it does NOT
+--     appear as a residual `Filter:` line above the scan, which is the
+--     structural evidence that the
 --     classifier accepted the outer `Var` and the runtime translator
 --     pushed the inner-side equality successfully. There is no
 --     old-style diagnostic title, no default-mode provider-identity
@@ -377,7 +375,7 @@ SET enable_mergejoin = off;
 SET enable_material = off;
 SET enable_nestloop = on;
 -- ============================================================================
--- Block A: NON-pushable join clause → unparameterized (Plain) variant wins
+-- NON-pushable join clause → unparameterized (Plain) variant wins
 -- ============================================================================
 -- The lateral subquery
 --   CROSS JOIN LATERAL (
@@ -417,7 +415,7 @@ SET enable_nestloop = on;
 -- (PG attaches it to the inner via the lateral parameterization
 -- chain, but the framework's plan-stage classifier rejects it
 -- and routes it to `plan.qual`).
--- A.1 plan guard.
+-- Plan guard.
 -- Under `force`, EXPLAIN must show:
 --   - A `Nested Loop` plan node.
 --   - Inner: `Custom Scan (lagodb-iceberg) on customscan_var_lake l`.
@@ -484,7 +482,7 @@ ORDER BY o.id, l.k, l.payload;
                Filter: ((k >= 0) AND ((k + 1) = o.id))
 (6 rows)
 
--- A.2 result-set parity. With outer.id ∈ {1, 5, 105} and the join
+-- Result-set parity. With outer.id ∈ {1, 5, 105} and the join
 -- predicate `l.k + 1 = o.id`:
 --   - o.id = 1   → l.k = 0   (no match — gap before file 1)
 --   - o.id = 5   → l.k = 4   → (4, 'lake_4')
@@ -528,7 +526,7 @@ ORDER BY o.id, l.k, l.payload;
 (2 rows)
 
 -- ============================================================================
--- Block B: PUSHABLE join clause → parameterized (JoinParameterized) variant wins
+-- PUSHABLE join clause → parameterized (JoinParameterized) variant wins
 -- ============================================================================
 -- An ordinary
 --   JOIN customscan_var_join_lake l ON l.k = o.id
@@ -538,11 +536,11 @@ ORDER BY o.id, l.k, l.payload;
 -- `enumerate_param_path_groups` recovers it via pass (b)
 -- (`generate_implied_equalities_for_column`) and emits a
 -- JoinParameterized variant on `lake` parameterized on `o.id`.
--- Block A's clause `(l.k + 1) = o.id` is NOT a bare mergejoinable
+-- The preceding non-pushable clause `(l.k + 1) = o.id` is NOT a bare mergejoinable
 -- equality (the LHS is a `FuncExpr`), so it is never absorbed into an
 -- EquivalenceClass and only survives as a join clause inside a LATERAL
--- subquery — Block A must keep the LATERAL shape to present that
--- clause at all. Block B's clause IS a bare equality, so the ordinary
+-- subquery, which must keep the LATERAL shape to present that clause at all.
+-- The pushable clause IS a bare equality, so the ordinary
 -- `JOIN ... ON ...` shape is both the realistic query shape and the
 -- one that exercises the EC-recovery enumeration path (pass (b)) that
 -- a lateral OFFSET-0 shape would bypass.
@@ -574,7 +572,7 @@ ORDER BY o.id, l.k, l.payload;
 -- use a dedicated large lake (`customscan_var_join_lake`, 5000 rows)
 -- so that — under `force` — driving from the tiny 3-row
 -- `customscan_var_outer` with the parameterized inner lake CustomScan
--- is the cheaper plan. (Block A keeps its own small
+-- is the cheaper plan. (The non-pushable case keeps its own small
 -- `customscan_var_lake`, untouched, because its `(l.k + 1) = o.id`
 -- clause requires the LATERAL shape.) The hash/merge/material GUCs
 -- pinned above apply equally to both `force` and `off`.
@@ -596,7 +594,7 @@ SELECT COUNT(*) AS join_lake_total_rows FROM customscan_var_join_lake;
                  5000
 (1 row)
 
--- B.1 plan guard.
+-- Plan guard.
 -- Under `force`, EXPLAIN must show:
 --   - A `Nested Loop` plan node WITHOUT a standard `Filter:` line on
 --     the inner scan (the equality is realized at the inner CustomScan
@@ -646,7 +644,7 @@ ORDER BY o.id, l.payload;
          ->  Seq Scan on customscan_var_join_lake l
 (6 rows)
 
--- B.2 result-set parity. Each outer.id matches exactly one lake
+-- Result-set parity. Each outer.id matches exactly one lake
 -- row (1 → lake_1, 5 → lake_5, 105 → lake_105). Three outer
 -- tuples drive three nestloop iterations through the inner
 -- parameterized CustomScan. The framework's
@@ -745,7 +743,7 @@ FROM customscan_rescan_lake WHERE id IS NULL;
 (1 row)
 
 -- ============================================================================
--- Block A: PARAM_EXTERN via PREPARE / EXECUTE
+-- PARAM_EXTERN via PREPARE / EXECUTE
 -- A `PREPARE p AS SELECT ... WHERE id = $1` plan goes through
 -- `PlanCustomPath` once (custom-plan path) or once per execution
 -- (generic-plan path; PG decides at runtime). Either way, every
@@ -777,7 +775,7 @@ FROM customscan_rescan_lake WHERE id IS NULL;
 -- separate prepared statements (rather than one) so each maintains
 -- its own plansource and its custom/generic plans are consistently
 -- planned under its intended mode, even after the generic-plan
--- switch in A.5 below.
+-- switch to a generic plan below.
 -- ============================================================================
 PREPARE customscan_rescan_p1 (int) AS
 SELECT id, payload
@@ -812,7 +810,7 @@ EXPLAIN (COSTS OFF) EXECUTE customscan_rescan_p1_baseline(25);
          Filter: (id = 25)
 (4 rows)
 
--- A.1: bound value lives in file 1.
+-- Bound value lives in file 1.
 SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_rescan_p1(25);
  id | payload 
@@ -827,7 +825,7 @@ EXECUTE customscan_rescan_p1_baseline(25);
  25 | a_25
 (1 row)
 
--- A.2: bound value lives in file 2 (NULL-bearing file). 105 is NOT
+-- Bound value lives in file 2 (NULL-bearing file). 105 is NOT
 -- one of the NULL ids (105 % 17 = 3 ≠ 0), so the lake row is real;
 -- the NULL rows must drop on both sides because `NULL = 105` is NULL
 -- and PG WHERE treats NULL as FALSE.
@@ -845,7 +843,7 @@ EXECUTE customscan_rescan_p1_baseline(105);
  105 | b_105
 (1 row)
 
--- A.2b: bound value matches one of the NULL ids of file 2 (119 IS one
+-- Bound value matches one of the NULL ids of file 2 (119 IS one
 -- of {102, 119, 136}). The literal `id = 119` returns zero rows (NULL
 -- never compares equal). The pushdown path's manifest pruning uses
 -- file 2's bounds [100, 150] (file 2 IS scanned), but residual
@@ -863,7 +861,7 @@ EXECUTE customscan_rescan_p1_baseline(119);
 ----+---------
 (0 rows)
 
--- A.3: bound value lives in file 3.
+-- Bound value lives in file 3.
 SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_rescan_p1(1025);
   id  | payload 
@@ -878,7 +876,7 @@ EXECUTE customscan_rescan_p1_baseline(1025);
  1025 | c_1025
 (1 row)
 
--- A.4: bound value matches NO row (gap between files 1 and 2).
+-- Bound value matches NO row (gap between files 1 and 2).
 SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_rescan_p1(75);
  id | payload 
@@ -891,7 +889,7 @@ EXECUTE customscan_rescan_p1_baseline(75);
 ----+---------
 (0 rows)
 
--- A.5: PG generic-plan path — PG normally switches to the generic
+-- PG generic-plan path — PG normally switches to the generic
 -- plan after five custom-plan executions of the same prepared
 -- statement (`plancache.c` heuristic). Run the same prepared
 -- statement enough times that PG considers using the generic plan,
@@ -991,7 +989,7 @@ EXECUTE customscan_rescan_p1_baseline(1050);
 DEALLOCATE customscan_rescan_p1;
 DEALLOCATE customscan_rescan_p1_baseline;
 -- ============================================================================
--- Block B: nestloop join with `lake.id = outer.id` on the inner side
+-- Nestloop join with `lake.id = outer.id` on the inner side
 -- An outer relation drives a nestloop whose inner side is the lake
 -- relation parameterized on `outer.id`. After
 -- `replace_nestloop_params` runs over the inner CustomScan plan, the
@@ -1040,9 +1038,7 @@ SET enable_nestloop = on;
 --     execute.
 --   - `enable_material = off` removes any Material node above the
 --     inner CustomScan that would cache its output across rescans
---     and defeat the per-tuple Param resolution we're verifying
---     (
---     tuple).
+--     and defeat the per-tuple Param resolution we're verifying.
 -- These GUCs apply equally to both `mode='force'` and `mode='off'`
 -- so the executor topology is identical on both sides; the only
 -- variable across the parity assertion is whether the inner plan
@@ -1102,7 +1098,7 @@ ORDER BY outer_rel.id;
                Filter: (id = "*VALUES*".column1)
 (6 rows)
 
--- B.1: 5-row outer, every outer.id matches a unique inner row.
+-- Five-row outer, every outer.id matches a unique inner row.
 SET lagodb.customscan_mode = 'force';
 WITH outer_rel(id) AS (
     VALUES (1), (25), (100), (1000), (1050)
@@ -1147,7 +1143,7 @@ ORDER BY outer_rel.id;
      1050 |    1050 | c_1050
 (5 rows)
 
--- B.2: outer tuple whose id has NO matching lake row — the inner
+-- Outer tuple whose id has NO matching lake row — the inner
 -- rescan must return zero rows for that outer tuple (which means
 -- the framework correctly re-resolved the new param value rather
 -- than reusing a stale predicate from the previous outer tuple).
@@ -1189,15 +1185,15 @@ ORDER BY outer_rel.id;
       100 |     100 | b_100
 (2 rows)
 
--- B.3: outer with repeated values — exercises rescan-with-same-value.
+-- Outer with repeated values — exercises rescan-with-same-value.
 -- Even when the outer emits the same id twice in a row, PG's nestloop
 -- still calls `ExecReScan(innerPlan)` for every outer tuple. The
 -- inner CustomScan must produce identical results for both
 -- iterations. This is what the framework's `cached_pushed_param_ids`
 -- bitmap and `chgParam` intersection logic guarantee per
--- state, and the framework never compares Datum values for equality
--- to short-circuit (
--- correctness-bearing trigger).
+-- state, and the framework never compares Datum values for equality to
+-- short-circuit; the executor's `chgParam` signal is the correctness-bearing
+-- trigger.
 SET lagodb.customscan_mode = 'force';
 WITH outer_rel(id) AS (
     VALUES (1), (1), (25), (25), (1000), (1000)
@@ -1244,7 +1240,7 @@ ORDER BY outer_rel.id, lake.payload;
      1000 |    1000 | c_1000
 (6 rows)
 
--- B.4: nestloop where the pushed inner predicate is a CONSTANT. The
+-- Nestloop where the pushed inner predicate is a CONSTANT. The
 -- extra outer-dependent residual predicate makes the inner CustomScan
 -- a rescanned parameterized path, but the pushed clause itself has no
 -- `Param` references. Therefore its binding parameter set is empty and
@@ -1252,17 +1248,17 @@ ORDER BY outer_rel.id, lake.payload;
 -- or rebuild pruning state; it only reopens the cursor. We cannot observe
 -- "didn't rebind" from SQL, but we can assert the
 -- result-set correctness still matches the baseline 
--- 11.4 — the chgParam gate is correctness-preserving regardless of
+-- The chgParam gate is correctness-preserving regardless of
 -- which path it picks).
--- This case complements B.1–B.3 (where the gate is always
+-- This case complements the changing-parameter rescans above, where the gate is always
 -- "overlapping") with the dual case (where the gate is always "not
 -- overlapping"), so the test exercises both branches of
 -- the correctness invariant.
--- B.4 plan guards: the predicate shape here differs from B.1–B.3
+-- Plan guards: this constant predicate differs from the changing-parameter cases
 -- (constant `lake.id = 25` is planned Exact and pushed; the
 -- outer-dependent `(lake.id + outer.unrelated) > 0` is the local
 -- residual). So the
--- Block-B plan guard above does not certify this planned-filter outcome — we
+-- The nestloop plan guard above does not certify this planned-filter outcome — we
 -- print fresh EXPLAIN blocks for both modes to verify:
 --   - `force`: `Custom Scan` whose default TEXT carries
 --     `Pushed Filter: (id = 25)` (the pushed/remote predicate) with the
@@ -1363,7 +1359,7 @@ ORDER BY outer_rel.unrelated, lake.id, lake.payload;
         30 | 25 | a_25
 (3 rows)
 
--- B.5: PARAM_EXEC changes from a representable ConservativePruning value to
+-- PARAM_EXEC changes from a representable ConservativePruning value to
 -- a value that cannot be encoded as an Iceberg Datum. The pushed predicate is
 -- a ConservativePruning OR, so `ValueNotRepresentable` must omit it from the
 -- current bound set, clearing the Iceberg row_filter and relying on the
@@ -1502,7 +1498,7 @@ SET enable_mergejoin = off;
 SET enable_material = off;
 SET enable_nestloop = on;
 -- ============================================================================
--- Block A: plan guards — the inner lake scan carries BOTH a PARAM_EXTERN
+-- Plan guards — the inner lake scan carries BOTH a PARAM_EXTERN
 -- ($1) and a PARAM_EXEC (outer.sel) reference in its pushed predicate.
 -- Under `force`, EXPLAIN must show a `Nested Loop` whose inner node is a
 -- `Custom Scan (lagodb-iceberg) on customscan_collide_lake`. In default
@@ -1554,7 +1550,7 @@ EXPLAIN (COSTS OFF) EXECUTE customscan_collide_plan(1);
 
 DEALLOCATE customscan_collide_plan;
 -- ============================================================================
--- Block B: row-set parity for the colliding-kind scan
+-- Row-set parity for the colliding-kind scan
 -- `$1 = 1` selects lake rows whose `tag = 1`; the correlated
 -- `l.sel = o.sel` selects the row whose `sel` equals each outer tuple's
 -- `sel`. The two predicates reference parameters of DIFFERENT kinds
@@ -1564,9 +1560,8 @@ DEALLOCATE customscan_collide_plan;
 -- against `$1`), changing the row set. The force/off parity below is
 -- exactly that regression guard.
 -- We run the whole join under a prepared statement so `$1` arrives as a
--- genuine `PARAM_EXTERN` at `BeginCustomScan` (
--- path), while each outer tuple drives a `ReScanCustomScan` that
--- re-resolves the `PARAM_EXEC` value (;
+-- genuine `PARAM_EXTERN` at `BeginCustomScan`, while each outer tuple drives
+-- a `ReScanCustomScan` that re-resolves the `PARAM_EXEC` value.
 -- ============================================================================
 PREPARE customscan_collide_q (int) AS
 SELECT o.sel AS outer_sel, l.sel AS lake_sel, l.tag, l.payload
@@ -1579,7 +1574,7 @@ CROSS JOIN LATERAL (
     OFFSET 0
 ) l
 ORDER BY o.sel, l.sel, l.payload;
--- B.1 $1 = 1: tag = 1 rows that also match a correlated outer.sel.
+-- `$1 = 1`: tag = 1 rows that also match a correlated outer.sel.
 SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_collide_q(1);
  outer_sel | lake_sel | tag | payload 
@@ -1596,9 +1591,9 @@ EXECUTE customscan_collide_q(1);
        105 |      105 |   1 | b_105
 (2 rows)
 
--- B.2 $1 = 0: a DIFFERENT EXTERN value selects a different `tag` class.
+-- `$1 = 0`: a DIFFERENT EXTERN value selects a different `tag` class.
 -- If the EXTERN value had been collapsed onto the EXEC slot (or vice
--- versa), B.1 and B.2 would not differ in the way the baseline says
+-- versa), the two EXTERN values would not differ in the way the baseline says
 -- they should. Running both EXTERN values against the same EXEC-driven
 -- correlation pins the independence of the two ParamKeys.
 SET lagodb.customscan_mode = 'force';
@@ -1613,7 +1608,7 @@ EXECUTE customscan_collide_q(0);
 -----------+----------+-----+---------
 (0 rows)
 
--- B.3 $1 = 2: third `tag` class, exercising file 1 (tag = g % 3) where
+-- `$1 = 2`: third `tag` class, exercising file 1 (tag = g % 3) where
 -- tag = 2 occurs and file 2 (tag = g % 2) where it does not.
 SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_collide_q(2);
@@ -1631,9 +1626,9 @@ EXECUTE customscan_collide_q(2);
 
 DEALLOCATE customscan_collide_q;
 -- ============================================================================
--- Block C: ReScan after the PARAM_EXEC value changes
+-- ReScan after the PARAM_EXEC value changes
 -- The nestloop above already rescans the inner CustomScan once per outer
--- tuple, so Block B exercises ReScan implicitly. Block C makes the
+-- tuple, so the parity case exercises ReScan implicitly. This case makes the
 -- "changed EXEC value re-resolves by ParamKey" assertion explicit and
 -- isolated: a multi-row outer whose `sel` values step through both data
 -- files, with `$1` held fixed. Each outer tuple changes ONLY the EXEC
@@ -1655,7 +1650,7 @@ CROSS JOIN LATERAL (
     OFFSET 0
 ) l
 ORDER BY o.sel, l.sel, l.payload;
--- C.1 $1 = 0: across the rescans, only rows whose tag = 0 AND whose sel
+-- `$1 = 0`: across the rescans, only rows whose tag = 0 AND whose sel
 -- matches the current outer tuple survive.
 SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_collide_rescan(0);
@@ -1669,7 +1664,7 @@ EXECUTE customscan_collide_rescan(0);
 -----------+----------+-----+---------
 (0 rows)
 
--- C.2 $1 = 1: same rescan sequence, different EXTERN value. Demonstrates
+-- `$1 = 1`: same rescan sequence, different EXTERN value. Demonstrates
 -- the EXTERN `$1` predicate re-applies unchanged on every rescan while
 -- the EXEC value steps per outer tuple.
 SET lagodb.customscan_mode = 'force';
@@ -1706,8 +1701,8 @@ DROP TABLE customscan_collide_outer;
 -- Setup: an Iceberg `lake` table with an `int4` `id` column. The classifier
 -- promotes `id = <int4 literal/param>` (opno 96, int4eq) to `Exact`
 -- (`EXACT_ALLOWLIST` in `lagodb-iceberg/src/customscan/classifier.rs`), so a
--- `WHERE id = $1` clause whose `$1` is `PARAM_EXTERN` (Block A) or
--- `PARAM_EXEC` after `replace_nestloop_params` (Block B) is pushed for
+-- `WHERE id = $1` clause whose `$1` is `PARAM_EXTERN`, or `PARAM_EXEC` after
+-- `replace_nestloop_params`, is pushed for
 -- pruning AND recheck-bound at `BeginCustomScan`.
 -- ============================================================================
 CREATE TABLE customscan_null_param_lake (
@@ -1723,19 +1718,19 @@ SELECT COUNT(*) AS lake_total_rows FROM customscan_null_param_lake;
               10
 (1 row)
 
--- The outer relation for Block B. Row (1, 'one') supplies a non-NULL match;
+-- The outer relation for the nestloop case. Row (1, 'one') supplies a non-NULL match;
 -- row (NULL, 'null_row') supplies a NULL into the inner `PARAM_EXEC` slot,
 -- which is the bug trigger. A tiny heap table so the
 -- planner drives the nestloop from `outer` with the (large) lake CustomScan
 -- on the rescanned inner side once the join alternatives are disabled in
--- Block B.
+-- that nestloop case.
 CREATE TABLE customscan_null_param_outer (
     id integer,
     label text
 );
 INSERT INTO customscan_null_param_outer VALUES (1, 'one'), (NULL, 'null_row');
 -- ============================================================================
--- Block A: PREPARE / EXECUTE p(NULL)
+-- PREPARE / EXECUTE p(NULL)
 -- ============================================================================
 -- Two prepared statements with identical text — one used under `force`
 -- (CustomScan), one under `off` (SeqScan baseline) — so each maintains its
@@ -1747,7 +1742,7 @@ PREPARE customscan_null_param_p1 (int) AS
 SELECT id, payload FROM customscan_null_param_lake WHERE id = $1 ORDER BY id, payload;
 PREPARE customscan_null_param_p1_baseline (int) AS
 SELECT id, payload FROM customscan_null_param_lake WHERE id = $1 ORDER BY id, payload;
--- A.1 plan guard: the `force` plan must be a CustomScan with Exact pushdown
+-- Plan guard: the `force` plan must be a CustomScan with Exact pushdown
 -- on `id`; the `off` plan must be a Seq Scan with `Filter: (id = $1)`. A
 -- non-NULL bound value is used here; EXPLAIN does not execute, so no NULL is
 -- resolved and the plan shape is value-independent (it is identical before
@@ -1772,9 +1767,9 @@ EXPLAIN (COSTS OFF) EXECUTE customscan_null_param_p1_baseline(1);
          Filter: (id = $1)
 (4 rows)
 
--- A.2 EXECUTE p(NULL): a strict `id = NULL` comparison is UNKNOWN, which a
+-- EXECUTE p(NULL): a strict `id = NULL` comparison is UNKNOWN, which a
 -- WHERE context filters out, so the correct result is 0 rows. The expected
--- `.out` encodes 0 rows. On UNFIXED code, the `force` block raises `ERROR`
+-- `.out` encodes 0 rows. Before the fix, the `force` block raised `ERROR`
 -- (NullLiteral escalated to ereport(ERROR)) — the bug-confirming diff.
 SET lagodb.customscan_mode = 'force';
 EXECUTE customscan_null_param_p1(NULL);
@@ -1792,7 +1787,7 @@ DEALLOCATE customscan_null_param_p1;
 DEALLOCATE customscan_null_param_p1_baseline;
 RESET plan_cache_mode;
 -- ============================================================================
--- Block B: nestloop whose outer side supplies NULL to a PARAM_EXEC param
+-- Nestloop whose outer side supplies NULL to a PARAM_EXEC param
 -- ============================================================================
 -- An ORDINARY `JOIN lake l ON l.id = o.id` with hash/merge/material
 -- disabled forces the outer relation to drive a nestloop with the lake
@@ -1816,7 +1811,7 @@ RESET plan_cache_mode;
 -- dedicated large lake (`customscan_null_param_join_lake`, 5000 rows)
 -- and keep `customscan_null_param_outer` tiny so that — under `force`
 -- — driving from the tiny outer with the parameterized inner lake
--- CustomScan is the cheaper plan. (Block A keeps its own small
+-- CustomScan is the cheaper plan. (The prepared-statement case keeps its own small
 -- `customscan_null_param_lake`, untouched.) Hash / merge joins scan
 -- the inner once and never drive `ReScanCustomScan`; a Materialize
 -- node caches the inner result across outer rows. These GUCs and
@@ -1843,7 +1838,7 @@ SET enable_hashjoin = off;
 SET enable_mergejoin = off;
 SET enable_material = off;
 SET enable_nestloop = on;
--- B.1 plan guard: `force` => Nested Loop with a parameterized CustomScan on
+-- Plan guard: `force` => Nested Loop with a parameterized CustomScan on
 -- the inner side (Exact pushdown realized at the scan node, recovered from
 -- the EquivalenceClass by enumeration pass (b)); `off` => Nested Loop whose
 -- join predicate is a `Join Filter:`.
@@ -1879,10 +1874,10 @@ ORDER BY o.id, l.payload;
          ->  Seq Scan on customscan_null_param_join_lake l
 (6 rows)
 
--- B.2 result parity: the outer NULL row contributes 0 rows (its inner
+-- Result parity: the outer NULL row contributes 0 rows (its inner
 -- `l.id = NULL` rescan is UNKNOWN), and the outer id=1 row matches lake_1,
 -- so the correct result is exactly one row. The expected `.out` encodes
--- that single row. On UNFIXED code, the `force` block raises `ERROR` when
+-- that single row. Before the fix, the `force` block raised `ERROR` when
 -- the NULL outer row's rescan reaches the translator — the bug-confirming
 -- diff.
 SET lagodb.customscan_mode = 'force';
@@ -1913,22 +1908,21 @@ RESET enable_nestloop;
 RESET lagodb.customscan_mode;
 DROP TABLE customscan_null_param_join_lake;
 -- ============================================================================
--- Block C: mixed conjunction `id = $1 AND amount > 0` with $1 NULL
--- — added by
+-- Mixed conjunction `id = $1 AND amount > 0` with $1 NULL
 -- ============================================================================
 -- A conjunction mixing a NULL strict comparison (`id = $1`, with `$1`
 -- resolving to NULL) and a non-NULL pushed comparison (`amount > 0`). The
 -- NULL comparison folds to `Predicate::AlwaysFalse`, and iceberg-lite's
 -- `Predicate::and` short-circuit (`AlwaysFalse AND x -> AlwaysFalse`) drags
 -- the whole conjunction to `AlwaysFalse` — so the query returns 0 rows with
--- no error (. On UNFIXED code the
+-- no error. On unfixed code the
 -- `force` block raised `ERROR` (the NULL operand was rejected at scalar
 -- decode and escalated as an `Exact`-clause failure).
 -- This case needs an `amount` column, so it uses a DEDICATED table
--- (`customscan_null_param_mixed`) to stay independent of the Block A/B
+-- (`customscan_null_param_mixed`) to stay independent of the other NULL-parameter
 -- `customscan_null_param_lake` schema. The table is created and dropped
 -- entirely within this self-contained block.
--- As in Block A, `plan_cache_mode = force_generic_plan` keeps `$1` a runtime
+-- As in the prepared-statement case, `plan_cache_mode = force_generic_plan` keeps `$1` a runtime
 -- `PARAM_EXTERN` (otherwise a custom plan would inline NULL as a `Const` and
 -- `eval_const_expressions` would const-fold the clause at plan time, never
 -- reaching the CustomScan). Two prepared statements (force / off) keep each
@@ -1952,7 +1946,7 @@ SELECT id, amount, payload
 FROM customscan_null_param_mixed
 WHERE id = $1 AND amount > 0
 ORDER BY id, payload;
--- C.1 EXECUTE with `$1` NULL: `id = NULL` is UNKNOWN, so the `AlwaysFalse`
+-- EXECUTE with `$1` NULL: `id = NULL` is UNKNOWN, so the `AlwaysFalse`
 -- fold drags the conjunction to false → 0 rows. Byte-identical between
 -- `force` (CustomScan) and `off` (SeqScan baseline).
 SET lagodb.customscan_mode = 'force';
@@ -1973,26 +1967,26 @@ RESET plan_cache_mode;
 RESET lagodb.customscan_mode;
 DROP TABLE customscan_null_param_mixed;
 -- ============================================================================
--- Block D: non-NULL parity regression guard — added by
+-- Non-NULL parity regression guard
 -- ============================================================================
--- Preservation guard: the SAME prepared `WHERE id = $1` shape as Block A, but
+-- Preservation guard: the SAME prepared `WHERE id = $1` shape as the NULL case, but
 -- with a NON-NULL `$1`, must CONTINUE to translate into an Iceberg
 -- `Predicate` and prune. The fix only inserts a `Null`
 -- early-return ahead of the unchanged non-NULL orientation path, so a
 -- non-NULL param must still match the expected row(s) and be byte-identical
 -- between `force` (CustomScan pushdown) and `off` (SeqScan baseline) — proving
 -- the non-NULL pruning behavior was preserved across the fix.
--- Reuses the Block A table `customscan_null_param_lake` (id + payload, rows
+-- Reuses the `customscan_null_param_lake` table (id + payload, rows
 -- 1..10), so this block is placed BEFORE the final Cleanup `DROP TABLE`.
 -- `plan_cache_mode = force_generic_plan` keeps `$1` a runtime `PARAM_EXTERN`
--- (the same shape Block A exercises with NULL), confirming the non-NULL path
+-- (the same shape exercised with NULL above), confirming the non-NULL path
 -- is preserved end-to-end.
 SET plan_cache_mode = force_generic_plan;
 PREPARE customscan_null_param_p_nonnull (int) AS
 SELECT id, payload FROM customscan_null_param_lake WHERE id = $1 ORDER BY id, payload;
 PREPARE customscan_null_param_p_nonnull_baseline (int) AS
 SELECT id, payload FROM customscan_null_param_lake WHERE id = $1 ORDER BY id, payload;
--- D.1 EXECUTE p(5): `id = 5` is a non-NULL strict comparison, pushed as an
+-- EXECUTE p(5): `id = 5` is a non-NULL strict comparison, pushed as an
 -- `Exact` predicate and used for pruning; it matches exactly row 5. The result
 -- is byte-identical between `force` (CustomScan pushdown) and `off` (SeqScan
 -- baseline) — the non-NULL pruning is preserved.

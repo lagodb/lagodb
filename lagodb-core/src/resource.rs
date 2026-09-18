@@ -36,6 +36,8 @@ use std::panic::AssertUnwindSafe;
 use pgrx::pg_sys;
 use pgrx::{PgTryBuilder, pg_guard};
 
+use crate::diag::{PgErrorReport, report_warning};
+
 /// A handle to a registered resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResourceHandle(u64);
@@ -207,9 +209,8 @@ unsafe extern "C-unwind" fn release_resource_callback(
 
     for (id, callback) in to_execute {
         if is_commit {
-            // Log warning as per C++ implementation ("pax resource leaks")
-            // This is useful to detect resources that weren't explicitly handled/forgotten on success.
-            crate::diag::report_warning(format_args!(
+            // Warn when a resource was not explicitly released on success.
+            report_warning(format_args!(
                 "resource leak detected for resource handle {:?} (owner={:?})",
                 id, current_owner
             ));
@@ -219,10 +220,10 @@ unsafe extern "C-unwind" fn release_resource_callback(
             callback();
         }))
         .catch_others(|err| {
-            crate::diag::report_warning(format_args!(
+            report_warning(format_args!(
                 "error during resource cleanup for handle {:?}: {}",
                 id,
-                crate::diag::PgErrorReport::from_caught(err)
+                PgErrorReport::from_caught(err)
             ));
         })
         .execute();

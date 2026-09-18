@@ -24,8 +24,8 @@ SET lagodb.query_offload_mode = 'off';
 -- Three rows so the supported-system-column queries below have
 -- something non-trivial to project.
 -- A heap `other` companion table for the
--- `UPDATE other ... FROM lake` cross-relation case from the task
--- brief — `other` is heap so the test's diagnostic value isolates
+-- `UPDATE other ... FROM lake` cross-relation case. `other` is heap so the
+-- test's diagnostic value isolates
 -- the rowmark gate that fires on the `lake` source-side rel; if
 -- `other` were also Iceberg the gate decision on `lake` would still
 -- be the same, but we'd be exercising two unrelated AM
@@ -51,7 +51,7 @@ INSERT INTO customscan_dml_other VALUES (2, 0);
 SELECT COUNT(*) AS lake_rows FROM customscan_dml_lake;
 
 -- ============================================================================
--- Block A: DML target gate
+-- DML target gate
 -- ============================================================================
 -- For `UPDATE lake` / `DELETE FROM lake` / `MERGE INTO lake ...`,
 -- PG sets `root->parse->commandType` to `CMD_UPDATE` /
@@ -61,7 +61,7 @@ SELECT COUNT(*) AS lake_rows FROM customscan_dml_lake;
 -- infrastructure, so both `force` and `off` select it; the GUC only controls
 -- Query-purpose scans. PG17 DML wraps the input with LagoDBModifyTable.
 
--- A.1 UPDATE lake
+-- UPDATE lake
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 UPDATE customscan_dml_lake SET v = v + 1 WHERE k = 1;
@@ -70,7 +70,7 @@ SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 UPDATE customscan_dml_lake SET v = v + 1 WHERE k = 1;
 
--- A.2 DELETE FROM lake
+-- DELETE FROM lake
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 DELETE FROM customscan_dml_lake WHERE k = 1;
@@ -79,7 +79,7 @@ SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 DELETE FROM customscan_dml_lake WHERE k = 1;
 
--- A.3 MERGE INTO lake
+-- MERGE INTO lake
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 MERGE INTO customscan_dml_lake AS t
@@ -95,7 +95,7 @@ ON t.k = s.k
 WHEN MATCHED THEN UPDATE SET v = s.v;
 
 -- ============================================================================
--- Block B: Rowmark gate triggered by sibling DML
+-- Rowmark gate triggered by sibling DML
 -- ============================================================================
 -- For `UPDATE other SET v = lake.v FROM lake WHERE other.k = lake.k`
 -- the `lake` rel is an `RTE_RELATION` *source*, not the result rel.
@@ -105,8 +105,8 @@ WHEN MATCHED THEN UPDATE SET v = s.v;
 -- (PG17 `planner.c:2295`) adds a `PlanRowMark` for every
 -- non-target base rel in any UPDATE/DELETE/MERGE plan, so
 -- `get_plan_rowmark(root->rowMarks, lake_rti) != NULL` and the
--- rowmark gate refuses the CustomPath. Block A verifies mandatory Modify
--- scans; this block independently verifies unsupported source-side rowmarks.
+-- rowmark gate refuses the CustomPath. The preceding target-DML cases verify
+-- mandatory Modify scans; this case verifies unsupported source-side rowmarks.
 
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -123,7 +123,7 @@ FROM customscan_dml_lake AS l
 WHERE o.k = l.k;
 
 -- ============================================================================
--- Block C: Rowmark gate triggered by FOR UPDATE / FOR SHARE
+-- Rowmark gate triggered by FOR UPDATE / FOR SHARE
 -- ============================================================================
 -- `SELECT ... FOR UPDATE` / `FOR SHARE` is a top-level SELECT
 -- (`commandType == CMD_SELECT`), so the scan purpose is Query. The active
@@ -135,7 +135,7 @@ WHERE o.k = l.k;
 -- `LockRows` / `Seq Scan` pair around `customscan_dml_lake`, never
 -- a CustomScan.
 
--- C.1 FOR UPDATE
+-- FOR UPDATE
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT k, v FROM customscan_dml_lake WHERE k = 1 FOR UPDATE;
@@ -144,7 +144,7 @@ SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT k, v FROM customscan_dml_lake WHERE k = 1 FOR UPDATE;
 
--- C.2 FOR SHARE
+-- FOR SHARE
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT k, v FROM customscan_dml_lake WHERE k = 1 FOR SHARE;
@@ -154,7 +154,7 @@ EXPLAIN (COSTS OFF)
 SELECT k, v FROM customscan_dml_lake WHERE k = 1 FOR SHARE;
 
 -- ============================================================================
--- Block D: System-column reference gate
+-- System-column reference gate
 -- ============================================================================
 -- `ctid`, `xmin`, `xmax`, `cmin`, `cmax` are the rejected system
 -- attno set in `is_rejected_system_attno`
@@ -167,9 +167,9 @@ SELECT k, v FROM customscan_dml_lake WHERE k = 1 FOR SHARE;
 -- and no MVCC visibility surface, so projecting these columns is
 -- only meaningful through PG's heap-shaped scan path — which is
 -- exactly what the gate forces.
--- `tableoid` is NOT in the rejected set: see Block F.
+-- `tableoid` is NOT in the rejected set; its supported path is covered below.
 
--- D.1 ctid
+-- ctid
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT ctid FROM customscan_dml_lake WHERE k = 1;
@@ -178,7 +178,7 @@ SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT ctid FROM customscan_dml_lake WHERE k = 1;
 
--- D.2 xmin / xmax
+-- xmin / xmax
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT xmin, xmax FROM customscan_dml_lake WHERE k = 1;
@@ -188,13 +188,13 @@ EXPLAIN (COSTS OFF)
 SELECT xmin, xmax FROM customscan_dml_lake WHERE k = 1;
 
 -- ============================================================================
--- Block E: tableoid IS supported — CustomScan SHALL plan
+-- tableoid IS supported — CustomScan SHALL plan
 -- ============================================================================
 -- `tableoid` (`TableOidAttributeNumber`) is explicitly excluded
 -- from `is_rejected_system_attno` because the next_slot wrapper
 -- sets `slot->tts_tableOid = RelationGetRelid(scan_rel)` on every
--- non-empty returned slot (
--- `lagodb-core/src/customscan/exec.rs::next_slot_wrapper`).
+-- non-empty returned slot in
+-- `lagodb-core/src/customscan/exec.rs::next_slot_wrapper`.
 -- PG's `ExecEvalSysVar` resolves `tableoid` straight out of
 -- `slot->tts_tableOid`, so projecting `tableoid` does not require
 -- any lake-AM-side support beyond the wrapper's tts_tableOid stamp.
@@ -237,7 +237,7 @@ WHERE k = 1
 ORDER BY k;
 
 -- ============================================================================
--- Block F: Whole-row Var IS supported — CustomScan SHALL plan
+-- Whole-row Var IS supported — CustomScan SHALL plan
 -- ============================================================================
 -- `SELECT lake FROM lake` produces a whole-row `Var` with
 -- `varattno == 0` against the lake rel. `PathStageGate::collect_usage`
@@ -350,7 +350,7 @@ INSERT INTO customscan_sm_other VALUES
     (5, 500);
 
 -- ============================================================================
--- Block A: security gate — non-leakproof clause at higher security_level
+-- Security gate — non-leakproof clause at higher security_level
 -- ============================================================================
 -- We layer the lake under a `security_barrier` view that contains a
 -- leakproof inner predicate (`k >= 0`, security_level 0) and apply
@@ -387,7 +387,7 @@ CREATE VIEW customscan_sm_secure_view
     WITH (security_barrier = true)
     AS SELECT k, payload FROM customscan_sm_lake WHERE k >= 0;
 
--- A.1 plan guard.
+-- Plan guard.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT k, payload FROM customscan_sm_secure_view
@@ -400,7 +400,7 @@ SELECT k, payload FROM customscan_sm_secure_view
 WHERE k === 1
 ORDER BY k, payload;
 
--- A.2 result-set parity. `k === 1` matches exactly one row (k = 1,
+-- Result-set parity. `k === 1` matches exactly one row (k = 1,
 -- payload = 'one'); `k >= 0` is satisfied by every row. Both modes
 -- must return the same single-row set. A regression where the
 -- security gate failed to reject `k === 1` and the framework pushed
@@ -419,7 +419,7 @@ WHERE k === 1
 ORDER BY k, payload;
 
 -- ============================================================================
--- Block B: movability gate — LEFT JOIN with lake on the non-nullable side
+-- Movability gate — LEFT JOIN with lake on the non-nullable side
 -- ============================================================================
 -- `lake LEFT JOIN other ON other.k = lake.k`:
 --   - `lake` is the LEFT (non-nullable) side.
@@ -449,7 +449,7 @@ ORDER BY k, payload;
 -- "the join clause does not appear inside any CustomScan's pushed
 -- list", which is invariant across join algorithms.
 
--- B.1 plan guard.
+-- Plan guard.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT lake.k AS lk, lake.payload, other.k AS ok, other.v
@@ -464,7 +464,7 @@ FROM customscan_sm_lake lake
 LEFT JOIN customscan_sm_other other ON other.k = lake.k
 ORDER BY lake.k, other.k;
 
--- B.2 result-set parity. lake has 5 rows (k = 1..5); other has
+-- Result-set parity. lake has 5 rows (k = 1..5); other has
 -- 3 rows (k ∈ {1, 3, 5}). The LEFT JOIN preserves every lake row
 -- and null-extends the unmatched ones (lake.k ∈ {2, 4}). A
 -- regression where the framework pushed the join clause as a
@@ -483,7 +483,7 @@ LEFT JOIN customscan_sm_other other ON other.k = lake.k
 ORDER BY lake.k, other.k;
 
 -- ============================================================================
--- Block C: movability gate — LATERAL back-reference into the lake rel
+-- Movability gate — LATERAL back-reference into the lake rel
 -- ============================================================================
 -- The lateral subquery
 --   FROM customscan_sm_lake l,
@@ -528,7 +528,7 @@ SET enable_mergejoin = off;
 SET enable_material = off;
 SET enable_nestloop = on;
 
--- C.1 plan guard.
+-- Plan guard.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT l.k, l.payload, sub.v
@@ -555,7 +555,7 @@ WHERE l.k >= 0
   AND l.k = sub.v
 ORDER BY l.k, sub.v;
 
--- C.2 result-set parity. With our seed data, no `(l.k, sub.v)`
+-- Result-set parity. With our seed data, no `(l.k, sub.v)`
 -- pair satisfies both `o.k = l.k` (the LATERAL inner equality) and
 -- `l.k = sub.v` (the outer equality) simultaneously, because
 -- `other.v` values (100, 300, 500) are all >= 100 while `lake.k`
@@ -643,7 +643,7 @@ FROM pg_attribute
 WHERE attrelid = 'customscan_proj_dropcol'::regclass AND attnum > 0
 ORDER BY attnum;
 
--- --- A.1 plan guard: a pushable predicate selects the CustomScan path ------
+-- --- Plan guard: a pushable predicate selects the CustomScan path ----------
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, label FROM customscan_proj_dropcol WHERE id >= 1;
@@ -652,7 +652,7 @@ SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT id, label FROM customscan_proj_dropcol WHERE id >= 1;
 
--- --- A.2 SELECT <subset> across a dropped column ---------------------------
+-- --- SELECT <subset> across a dropped column -------------------------------
 -- Projecting id (attno 1) + amount (attno 4) skips the dropped attno-2 gap
 -- AND the live label column. Each value must land at its own attno-1 slot.
 SET lagodb.customscan_mode = 'force';
@@ -661,14 +661,14 @@ SELECT id, amount FROM customscan_proj_dropcol WHERE id >= 1 ORDER BY id;
 SET lagodb.customscan_mode = 'off';
 SELECT id, amount FROM customscan_proj_dropcol WHERE id >= 1 ORDER BY id;
 
--- --- A.3 SELECT <subset>: a single column past the dropped gap -------------
+-- --- SELECT <subset>: a single column past the dropped gap -----------------
 SET lagodb.customscan_mode = 'force';
 SELECT label FROM customscan_proj_dropcol WHERE id >= 1 ORDER BY label;
 
 SET lagodb.customscan_mode = 'off';
 SELECT label FROM customscan_proj_dropcol WHERE id >= 1 ORDER BY label;
 
--- --- A.4 SELECT * over a dropped column ------------------------------------
+-- --- SELECT * over a dropped column ----------------------------------------
 -- The dropped column must NOT appear; surviving columns keep their values
 -- (no shift into the dropped position).
 SET lagodb.customscan_mode = 'force';
@@ -677,7 +677,7 @@ SELECT * FROM customscan_proj_dropcol WHERE id >= 1 ORDER BY id;
 SET lagodb.customscan_mode = 'off';
 SELECT * FROM customscan_proj_dropcol WHERE id >= 1 ORDER BY id;
 
--- --- A.5 SELECT count(*) ----------------------------------------------------
+-- --- SELECT count(*) --------------------------------------------------------
 -- count(*) references no user column. Core adds one live resjunk dependency
 -- so the projected scan tuple and storage request remain non-empty; the count
 -- must match the baseline.
@@ -687,7 +687,7 @@ SELECT count(*) FROM customscan_proj_dropcol WHERE id >= 1;
 SET lagodb.customscan_mode = 'off';
 SELECT count(*) FROM customscan_proj_dropcol WHERE id >= 1;
 
--- --- A.6 WHERE references a NON-projected column ----------------------------
+-- --- WHERE references a NON-projected column --------------------------------
 -- The output list is just `id`, but the qual filters on `label` (not in the
 -- select list). `label` is not pushable, so it stays a residual the executor
 -- applies above the scan — which means the scan must still decode `label`
@@ -700,14 +700,14 @@ SELECT id FROM customscan_proj_dropcol WHERE id >= 1 AND label = 'two' ORDER BY 
 SET lagodb.customscan_mode = 'off';
 SELECT id FROM customscan_proj_dropcol WHERE id >= 1 AND label = 'two' ORDER BY id;
 
--- --- A.7 WHERE on a non-projected column, exact-id pushdown -----------------
+-- --- WHERE on a non-projected column, exact-id pushdown ---------------------
 SET lagodb.customscan_mode = 'force';
 SELECT amount FROM customscan_proj_dropcol WHERE id = 3 ORDER BY amount;
 
 SET lagodb.customscan_mode = 'off';
 SELECT amount FROM customscan_proj_dropcol WHERE id = 3 ORDER BY amount;
 
--- --- A.8 targetlist expression references a non-filter column --------------
+-- --- targetlist expression references a non-filter column ------------------
 -- `label` is hidden under FuncExpr.  The pushable `id = 2` predicate selects
 -- the CustomScan path, so projection must still read `label` for the upper
 -- projection node.
@@ -717,7 +717,7 @@ SELECT lower(label) AS lowered FROM customscan_proj_dropcol WHERE id = 2 ORDER B
 SET lagodb.customscan_mode = 'off';
 SELECT lower(label) AS lowered FROM customscan_proj_dropcol WHERE id = 2 ORDER BY lowered;
 
--- --- A.9 residual qual expression references a non-projected column --------
+-- --- residual qual expression references a non-projected column ------------
 -- `lower(label)` is not pushable, but it remains a PG residual qual above the
 -- scan.  The scan must decode `label` even though the output list is just `id`.
 SET lagodb.customscan_mode = 'force';
@@ -743,42 +743,42 @@ INSERT INTO customscan_proj_clean VALUES (2, 'beta', 20);
 INSERT INTO customscan_proj_clean VALUES (3, 'gamma', 30);
 INSERT INTO customscan_proj_clean VALUES (4, 'delta', 40);
 
--- --- B.1 SELECT * (select-all equivalence) ---------------------------------
+-- --- SELECT * (select-all equivalence) -------------------------------------
 SET lagodb.customscan_mode = 'force';
 SELECT * FROM customscan_proj_clean WHERE id >= 1 ORDER BY id;
 
 SET lagodb.customscan_mode = 'off';
 SELECT * FROM customscan_proj_clean WHERE id >= 1 ORDER BY id;
 
--- --- B.2 SELECT <subset> ---------------------------------------------------
+-- --- SELECT <subset> -------------------------------------------------------
 SET lagodb.customscan_mode = 'force';
 SELECT amount, id FROM customscan_proj_clean WHERE id <= 3 ORDER BY id;
 
 SET lagodb.customscan_mode = 'off';
 SELECT amount, id FROM customscan_proj_clean WHERE id <= 3 ORDER BY id;
 
--- --- B.3 SELECT count(*) ---------------------------------------------------
+-- --- SELECT count(*) -------------------------------------------------------
 SET lagodb.customscan_mode = 'force';
 SELECT count(*) FROM customscan_proj_clean WHERE id >= 1;
 
 SET lagodb.customscan_mode = 'off';
 SELECT count(*) FROM customscan_proj_clean WHERE id >= 1;
 
--- --- B.4 WHERE references a non-projected column ----------------------------
+-- --- WHERE references a non-projected column --------------------------------
 SET lagodb.customscan_mode = 'force';
 SELECT id FROM customscan_proj_clean WHERE id >= 1 AND label = 'gamma' ORDER BY id;
 
 SET lagodb.customscan_mode = 'off';
 SELECT id FROM customscan_proj_clean WHERE id >= 1 AND label = 'gamma' ORDER BY id;
 
--- --- B.5 targetlist CoalesceExpr references a non-filter column ------------
+-- --- targetlist CoalesceExpr references a non-filter column ----------------
 SET lagodb.customscan_mode = 'force';
 SELECT coalesce(label, '') AS safe_label FROM customscan_proj_clean WHERE id = 4 ORDER BY safe_label;
 
 SET lagodb.customscan_mode = 'off';
 SELECT coalesce(label, '') AS safe_label FROM customscan_proj_clean WHERE id = 4 ORDER BY safe_label;
 
--- --- B.6 residual CaseExpr references a non-projected column ---------------
+-- --- residual CaseExpr references a non-projected column -------------------
 SET lagodb.customscan_mode = 'force';
 SELECT amount FROM customscan_proj_clean
 WHERE id >= 1
@@ -821,7 +821,7 @@ INSERT INTO customscan_proj_tableoid VALUES (1, 'alpha', 10, 'a', 100);
 INSERT INTO customscan_proj_tableoid VALUES (2, 'beta', 20, 'b', 200);
 INSERT INTO customscan_proj_tableoid VALUES (3, 'gamma', 30, 'c', 300);
 
--- C.1 plan guard: CustomScan must be chosen (tableoid is supported).
+-- Plan guard: CustomScan must be chosen (tableoid is supported).
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT tableoid::regclass AS tbl, id, amount
@@ -836,7 +836,7 @@ FROM customscan_proj_tableoid
 WHERE id >= 1
 ORDER BY id;
 
--- C.2 result-set parity: tableoid + column subset (id, amount).
+-- Result-set parity: tableoid + column subset (id, amount).
 -- `label`, `tag`, `score` are NOT in the select list or the qual,
 -- so the storage layer should prune them.
 SET lagodb.customscan_mode = 'force';
@@ -851,7 +851,7 @@ FROM customscan_proj_tableoid
 WHERE id >= 1
 ORDER BY id;
 
--- C.3 result-set parity: tableoid + single column.
+-- Result-set parity: tableoid + single column.
 SET lagodb.customscan_mode = 'force';
 SELECT tableoid::regclass AS tbl, label
 FROM customscan_proj_tableoid
@@ -864,7 +864,7 @@ FROM customscan_proj_tableoid
 WHERE id = 2
 ORDER BY label;
 
--- C.4 result-set parity: tableoid + non-projected qual column.
+-- Result-set parity: tableoid + non-projected qual column.
 -- The select list is (tableoid, id), but the qual references `amount`
 -- which is not in the output.  Storage must still read both `id` and
 -- `amount`.
@@ -899,7 +899,7 @@ CREATE TABLE customscan_proj_subplan_helper (
 INSERT INTO customscan_proj_subplan_helper VALUES (1);
 INSERT INTO customscan_proj_subplan_helper VALUES (3);
 
--- D.1 result-set parity: NOT IN generates a SubPlan in the qual.
+-- Result-set parity: NOT IN generates a SubPlan in the qual.
 -- Only `id` and `label` are referenced; `amount`, `tag`, `score` should
 -- be pruned from storage.
 SET lagodb.customscan_mode = 'force';
@@ -916,7 +916,7 @@ WHERE id >= 1
   AND id NOT IN (SELECT x FROM customscan_proj_subplan_helper)
 ORDER BY id;
 
--- D.2 result-set parity: SubPlan + pushable predicate + non-projected qual.
+-- Result-set parity: SubPlan + pushable predicate + non-projected qual.
 -- The pushable `id >= 1` selects the CustomScan path; the SubPlan qual
 -- `amount NOT IN (...)` references `amount` which is not in the select list.
 -- Storage must read both `id` and `amount`.
@@ -934,7 +934,7 @@ WHERE id >= 1
   AND amount NOT IN (SELECT x * 10 FROM customscan_proj_subplan_helper)
 ORDER BY id;
 
--- D.3 result-set parity: SubPlan + tableoid combined.
+-- Result-set parity: SubPlan + tableoid combined.
 -- Both SubPlan and tableoid are present; tuple shape is Relation but
 -- storage should still prune to only `id` and `label`.
 SET lagodb.customscan_mode = 'force';
@@ -998,7 +998,7 @@ FROM generate_series(100, 105) AS g;
 SELECT COUNT(*) AS lake_total_rows FROM customscan_rto_lake;
 
 -- ============================================================================
--- Block 0: baseline — `WHERE k = N` against the bare lake.
+-- Baseline — `WHERE k = N` against the bare lake.
 -- This is the row set the wrapped-query blocks below MUST also
 -- produce (modulo subquery-introduced columns). Pinning it here
 -- makes the diagnostic value of each wrapper concrete: a regression
@@ -1007,7 +1007,7 @@ SELECT COUNT(*) AS lake_total_rows FROM customscan_rto_lake;
 -- wrapped blocks while the bare baseline below still passes.
 -- ============================================================================
 
--- 0.1 plan guard.
+-- Plan guard.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT k, payload FROM customscan_rto_lake WHERE k = 3 ORDER BY k, payload;
@@ -1016,7 +1016,7 @@ SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT k, payload FROM customscan_rto_lake WHERE k = 3 ORDER BY k, payload;
 
--- 0.2 result-set parity.
+-- Result-set parity.
 SET lagodb.customscan_mode = 'force';
 SELECT k, payload FROM customscan_rto_lake WHERE k = 3 ORDER BY k, payload;
 
@@ -1024,7 +1024,7 @@ SET lagodb.customscan_mode = 'off';
 SELECT k, payload FROM customscan_rto_lake WHERE k = 3 ORDER BY k, payload;
 
 -- ============================================================================
--- Block A: subquery wrapper.
+-- Subquery wrapper.
 --   SELECT ... FROM (SELECT k, payload FROM lake WHERE k = N) sub;
 -- The subquery is NOT flattenable — it has its own `targetlist` that
 -- the parent SELECT projects on top of, so PG plans a `SubqueryScan`
@@ -1041,7 +1041,7 @@ SELECT k, payload FROM customscan_rto_lake WHERE k = 3 ORDER BY k, payload;
 -- would be empty, which would break parity below).
 -- Wrapping in a subquery does NOT introduce an outer-relation Var
 -- inside the lake's pushed predicate, so `column_refs[]` is still
--- `[Var(k)]`. The Block 0 baseline is the row set this block must
+-- `[Var(k)]`. The bare-lake baseline is the row set this wrapper must
 -- match.
 -- We disable subquery-flattening via `OFFSET 0` only when needed to
 -- block flattening; a plain trivial-subquery `SELECT k, payload
@@ -1050,12 +1050,11 @@ SELECT k, payload FROM customscan_rto_lake WHERE k = 3 ORDER BY k, payload;
 -- However, PG MAY still inline a single-rel trivial subquery via
 -- `pull_up_simple_subquery`. To guarantee an opaque subquery —
 -- and thus a non-zero `rtoffset` on the inner — we add an
--- `OFFSET 0` clause inside (matches
--- `customscan_planning.sql` Block C and
--- `customscan_planning.sql` Block A patterns).
+-- `OFFSET 0` clause inside, matching the opaque-wrapper pattern used by the
+-- other subquery-planning coverage in this file.
 -- ============================================================================
 
--- A.1 plan guard.
+-- Plan guard.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT sub.k, sub.payload
@@ -1078,7 +1077,7 @@ FROM (
 ) sub
 ORDER BY sub.k, sub.payload;
 
--- A.2 result-set parity. Must equal Block 0's row set.
+-- Result-set parity. Must equal the bare-lake baseline row set.
 SET lagodb.customscan_mode = 'force';
 SELECT sub.k, sub.payload
 FROM (
@@ -1099,7 +1098,7 @@ FROM (
 ) sub
 ORDER BY sub.k, sub.payload;
 
--- A.3 cross-file parity: same wrapper, value in the other data
+-- Cross-file parity: same wrapper, value in the other data
 -- file. Validates that pruning + Var resolution survive
 -- `rtoffset` regardless of which file the matching row lives in.
 SET lagodb.customscan_mode = 'force';
@@ -1123,7 +1122,7 @@ FROM (
 ORDER BY sub.k, sub.payload;
 
 -- ============================================================================
--- Block B: CTE wrapper (`WITH ... AS MATERIALIZED`).
+-- CTE wrapper (`WITH ... AS MATERIALIZED`).
 --   WITH lake_cte AS MATERIALIZED (SELECT ... FROM lake WHERE k = N)
 --   SELECT ... FROM lake_cte;
 -- The `MATERIALIZED` keyword (PG12+) opts the CTE out of inlining
@@ -1134,13 +1133,13 @@ ORDER BY sub.k, sub.payload;
 -- lake's `CustomScan.scan.scanrelid` reflects the post-`rtoffset`
 -- value, and the runtime walker MUST identify scan-relation Vars
 -- from that post-rtoffset value.
--- Like Block A, the CTE does not introduce an outer-relation Var
+-- Like the subquery wrapper, the CTE does not introduce an outer-relation Var
 -- into the lake's pushed predicate — it just flows the lake's
 -- output up through a `CteScan` node. The result-set parity
--- against Block 0 is the assertion.
+-- against the bare-lake baseline is the assertion.
 -- ============================================================================
 
--- B.1 plan guard.
+-- Plan guard.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 WITH lake_cte AS MATERIALIZED (
@@ -1155,7 +1154,7 @@ WITH lake_cte AS MATERIALIZED (
 )
 SELECT k, payload FROM lake_cte ORDER BY k, payload;
 
--- B.2 result-set parity. Must equal Block 0's row set.
+-- Result-set parity. Must equal the bare-lake baseline row set.
 SET lagodb.customscan_mode = 'force';
 WITH lake_cte AS MATERIALIZED (
     SELECT k, payload FROM customscan_rto_lake WHERE k = 3
@@ -1168,7 +1167,7 @@ WITH lake_cte AS MATERIALIZED (
 )
 SELECT k, payload FROM lake_cte ORDER BY k, payload;
 
--- B.3 cross-file parity from the CTE wrapper.
+-- Cross-file parity from the CTE wrapper.
 SET lagodb.customscan_mode = 'force';
 WITH lake_cte AS MATERIALIZED (
     SELECT k, payload FROM customscan_rto_lake WHERE k = 102
@@ -1182,7 +1181,7 @@ WITH lake_cte AS MATERIALIZED (
 SELECT k, payload FROM lake_cte ORDER BY k, payload;
 
 -- ============================================================================
--- Block C: LATERAL derived table wrapper, with an outer-relation
+-- LATERAL derived table wrapper, with an outer-relation
 -- reference inside the LATERAL.
 --   SELECT o.id, sub.k, sub.payload
 --   FROM customscan_rto_outer o,
@@ -1209,8 +1208,7 @@ SELECT k, payload FROM lake_cte ORDER BY k, payload;
 --      sides. A regression that uses a cached pre-rtoffset RTI or
 --      treats the rewritten Param as a column would break the rebuilt
 --      predicate, surfacing as wrong rows below.
--- We pin planner GUCs (matches `customscan_planning.sql`
--- Block C and `customscan_planning.sql` Block B) to force
+-- We pin the same planner GUCs used by the other LATERAL and nestloop cases to force
 -- a deterministic nestloop topology where the LATERAL subplan is
 -- the inner side of a `Nested Loop`. These GUCs apply equally to
 -- `force` and `off`, so the executor topology is identical on
@@ -1230,7 +1228,7 @@ SET enable_mergejoin = off;
 SET enable_material = off;
 SET enable_nestloop = on;
 
--- C.1 plan guard.
+-- Plan guard.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT o.id, sub.k, sub.payload
@@ -1255,16 +1253,15 @@ LATERAL (
 ) sub
 ORDER BY o.id, sub.k, sub.payload;
 
--- C.2 result-set parity. With outer.id ∈ {3, 50, 102}:
+-- Result-set parity. With outer.id ∈ {3, 50, 102}:
 --   - o.id = 3   → lake.k = 3   → (3, 'lake_3')
 --   - o.id = 50  → no match     → (no row)
 --   - o.id = 102 → lake.k = 102 → (102, 'lake_102')
--- The "modulo subquery-introduced Vars" disclaimer in the task
--- brief is concrete here: the wrapper introduces `o.id` into the
--- result rows alongside `sub.k` / `sub.payload`. Strip `o.id` and
+-- The wrapper introduces `o.id` into the result rows alongside
+-- `sub.k` / `sub.payload`. Strip `o.id` and
 -- the lake-side rows (`sub.k`, `sub.payload`) exactly equal the
--- union of Block 0 (k = 3) and Block A.3 / B.3 (k = 102) — which
--- is the sense in which Block C's row set "matches the same query
+-- union of the bare-lake results for k = 3 and k = 102 — which is the sense
+-- in which the LATERAL wrapper's row set "matches the same query
 -- without the enclosing subquery (modulo subquery-introduced
 -- Vars)".
 SET lagodb.customscan_mode = 'force';
@@ -1290,7 +1287,7 @@ LATERAL (
 ORDER BY o.id, sub.k, sub.payload;
 
 -- ============================================================================
--- Block D: nested wrapper — subquery containing a CTE containing the
+-- Nested wrapper — subquery containing a CTE containing the
 -- lake. Two `rtoffset` shifts compose, exercising the runtime
 -- walker's resilience under deeper plan-tree rewrites.
 --   SELECT outer_sub.k FROM (
@@ -1309,7 +1306,7 @@ ORDER BY o.id, sub.k, sub.payload;
 -- misidentify every scan-relation `Var`.
 -- ============================================================================
 
--- D.1 plan guard.
+-- Plan guard.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT outer_sub.k, outer_sub.payload
@@ -1334,7 +1331,7 @@ FROM (
 ) outer_sub
 ORDER BY outer_sub.k, outer_sub.payload;
 
--- D.2 result-set parity.
+-- Result-set parity.
 SET lagodb.customscan_mode = 'force';
 SELECT outer_sub.k, outer_sub.payload
 FROM (
