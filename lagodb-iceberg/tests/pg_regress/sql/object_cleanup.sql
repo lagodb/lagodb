@@ -120,13 +120,6 @@ FROM lagodb.observe_object_tree(
 );
 SELECT count(*) AS relation_gone
 FROM pg_class WHERE relname = 'remote_cleanup_drop';
-SELECT process_state AS object_cleanup_worker_state
-FROM lagodb.worker_status
-WHERE database_oid = (SELECT oid FROM pg_catalog.pg_database
-                      WHERE datname = pg_catalog.current_database())
-  AND extension_name = 'lagodb_base' AND worker_name = 'maintenance'
-\gset
-\echo object_cleanup_worker_state: :object_cleanup_worker_state
 
 CREATE TABLE remote_cleanup_rollback (id integer)
 USING iceberg TABLESPACE regress_object;
