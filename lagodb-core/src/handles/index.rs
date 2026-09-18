@@ -1,7 +1,7 @@
 use super::borrowed::{PgBorrowed, PgNullable};
 use super::relation::RelationHandle;
 use super::tuple::ValidItemPointer;
-use pgrx::pg_sys;
+use pgrx::pg_sys::{self, ffi::pg_guard_ffi_boundary};
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
@@ -145,18 +145,20 @@ impl<'a> IndexBuildCallbackHandle<'a> {
         tuple_is_alive: bool,
     ) {
         let mut tid = tid.to_pg_sys();
+        let callback = self.callback;
+        let index = self.index.as_ptr();
+        let values = values.as_mut_ptr();
+        let is_null = is_null.as_mut_ptr();
+        let state = self.state.as_ptr();
         // SAFETY: both fixed-size arrays and the local TID remain valid and
         // writable for the synchronous call. The handle owns the matching
-        // callback/state pair supplied by PostgreSQL.
+        // callback/state pair supplied by PostgreSQL. The guarded closure
+        // contains only the callback invocation and captures no value that
+        // requires drop, so a PostgreSQL ERROR can unwind through Rust safely.
         unsafe {
-            (self.callback)(
-                self.index.as_ptr(),
-                &mut tid,
-                values.as_mut_ptr(),
-                is_null.as_mut_ptr(),
-                tuple_is_alive,
-                self.state.as_ptr(),
-            );
+            pg_guard_ffi_boundary(|| {
+                callback(index, &mut tid, values, is_null, tuple_is_alive, state);
+            });
         }
     }
 }
