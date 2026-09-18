@@ -1,4 +1,4 @@
-//! Backend-local registry of provider table-scan capabilities indexed by
+//! Query-host registry of provider table-scan capabilities indexed by
 //! PostgreSQL storage routes.
 
 use std::ffi::{CStr, c_char, c_void};
@@ -14,13 +14,13 @@ use lagodb_core::runtime_api::{
 use lagodb_query::datafusion::SerialTableScanCallbacks;
 use pgrx::prelude::PgSqlErrorCode;
 
-use crate::descriptor_directory::{
-    DescriptorDirectory, DescriptorNode, DescriptorSnapshot,
+use crate::descriptor_registry::{
+    DescriptorNode, DescriptorRegistry, DescriptorSnapshot,
 };
 
 thread_local! {
-    static TABLE_SCANS: DescriptorDirectory<StoredTableScan> =
-        const { DescriptorDirectory::new() };
+    static TABLE_SCANS: DescriptorRegistry<StoredTableScan> =
+        const { DescriptorRegistry::new() };
 }
 
 #[derive(Clone, Copy)]
@@ -145,14 +145,14 @@ impl PendingTableScanRegistration {
 
 /// One immutable callback bundle selected by a PostgreSQL storage route.
 #[derive(Clone, Copy)]
-pub(crate) struct ResolvedTableScan {
+pub(super) struct ResolvedTableScan {
     route_kind: TableScanRouteKind,
     route_name: *const c_char,
     callbacks: TableScanCallbacks,
 }
 
 impl ResolvedTableScan {
-    pub(crate) fn route(self) -> TableScanRoute<'static> {
+    pub(super) fn route(self) -> TableScanRoute<'static> {
         // SAFETY: registration accepts only backend-lifetime route strings and
         // the selected kind always chooses a non-null registered route.
         TableScanRoute::new(self.route_kind, unsafe {
@@ -160,7 +160,7 @@ impl ResolvedTableScan {
         })
     }
 
-    pub(crate) fn plan(
+    pub(super) fn plan(
         self,
         request: &TableScanPlanningRequest,
         output: &mut PlannedTableScanResult,
@@ -179,7 +179,7 @@ impl ResolvedTableScan {
 }
 
 /// Backend-local owner of table-scan registration and exact route lookup.
-pub(crate) struct TableScanRegistry;
+pub(super) struct TableScanRegistry;
 
 impl TableScanRegistry {
     fn commit(entry: Option<Box<DescriptorNode<StoredTableScan>>>) {
@@ -194,7 +194,7 @@ impl TableScanRegistry {
         Self::resolve(route).is_some()
     }
 
-    pub(crate) fn resolve(route: TableScanRoute<'_>) -> Option<ResolvedTableScan> {
+    pub(super) fn resolve(route: TableScanRoute<'_>) -> Option<ResolvedTableScan> {
         let mut found = None;
         Self::snapshot().for_each_if(
             |descriptor| descriptor.matches(route),
@@ -203,7 +203,7 @@ impl TableScanRegistry {
         found
     }
 
-    pub(crate) fn resolve_serial_callbacks(
+    pub(super) fn resolve_serial_callbacks(
         route: TableScanRoute<'_>,
     ) -> Result<SerialTableScanCallbacks, PgReportError> {
         Self::resolve(route)

@@ -14,11 +14,10 @@ use lagodb_query::datafusion::{
 use lagodb_query::plan::SelectedQueryPlan;
 use pgrx::{PgMemoryContexts, pg_guard, pg_sys};
 
-use crate::runtime_api::table_scan_registry::TableScanRegistry;
-
 use super::error::QueryHostError;
 use super::explain::{ExplainOptions, QueryOffloadExplain};
 use super::methods;
+use super::table_scan_registry::TableScanRegistry;
 
 enum QueryPhase {
     Created,

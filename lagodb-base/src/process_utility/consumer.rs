@@ -1,12 +1,12 @@
-//! Runtime-owned registry for utility consumers.
+//! ProcessUtility-owned registry for utility consumers.
 //!
 //! The ProcessUtility hook owns parent fallback and command lifecycle; this
-//! module owns only the cold-path consumer directory and selection. The
+//! module owns only the cold-path consumer registry and selection. The
 //! selected callback still executes through the descriptor supplied by the
 //! runtime ABI.
 
-use crate::descriptor_directory::{
-    DescriptorDirectory, DescriptorNode, DescriptorSnapshot,
+use crate::descriptor_registry::{
+    DescriptorNode, DescriptorRegistry, DescriptorSnapshot,
 };
 use lagodb_core::hooks::HookError;
 use lagodb_core::runtime_api::{
@@ -14,13 +14,13 @@ use lagodb_core::runtime_api::{
 };
 use pgrx::pg_sys;
 
-use crate::process_utility::ProcessUtilityArgs;
+use super::ProcessUtilityArgs;
 
-type UtilityConsumerDirectory = DescriptorDirectory<UtilityConsumerDescriptor>;
+type UtilityConsumerRegistry = DescriptorRegistry<UtilityConsumerDescriptor>;
 
 pub(crate) struct PreparedUtilityConsumers {
     // Each node is allocated before the runtime registration transaction is
-    // committed. The box keeps its address stable while the directory stores
+    // committed. The box keeps its address stable while the registry stores
     // a raw backend-lifetime pointer; commit therefore cannot allocate or
     // publish only part of this prepared batch.
     #[allow(clippy::vec_box)]
@@ -33,7 +33,7 @@ struct UtilityConsumerSnapshot {
     tag: u32,
 }
 
-pub(crate) struct SelectedUtilityConsumer(UtilityConsumerDescriptor);
+pub(super) struct SelectedUtilityConsumer(UtilityConsumerDescriptor);
 
 impl UtilityConsumerSnapshot {
     fn new(
@@ -106,7 +106,7 @@ impl UtilityConsumerSnapshot {
 }
 
 impl SelectedUtilityConsumer {
-    pub(crate) unsafe fn consume(
+    pub(super) unsafe fn consume(
         self,
         args: ProcessUtilityArgs,
     ) -> Result<(), HookError> {
@@ -139,8 +139,8 @@ impl SelectedUtilityConsumer {
 }
 
 thread_local! {
-    static UTILITY_CONSUMERS: UtilityConsumerDirectory =
-        const { DescriptorDirectory::new() };
+    static UTILITY_CONSUMERS: UtilityConsumerRegistry =
+        const { DescriptorRegistry::new() };
 }
 
 fn valid_descriptor(descriptor: &UtilityConsumerDescriptor) -> bool {
@@ -151,22 +151,22 @@ fn valid_descriptor(descriptor: &UtilityConsumerDescriptor) -> bool {
         && descriptor.on_consume.is_some()
 }
 
-pub(crate) fn has_registered_consumer(tag: pg_sys::NodeTag) -> bool {
-    UTILITY_CONSUMERS.with(|directory| {
-        UtilityConsumerSnapshot::new(directory.snapshot(), tag)
+pub(super) fn has_registered_consumer(tag: pg_sys::NodeTag) -> bool {
+    UTILITY_CONSUMERS.with(|registry| {
+        UtilityConsumerSnapshot::new(registry.snapshot(), tag)
             .has_registered_consumer()
     })
 }
 
-pub(crate) fn select(
+pub(super) fn select(
     tag: pg_sys::NodeTag,
     args: ProcessUtilityArgs,
 ) -> Result<Option<SelectedUtilityConsumer>, HookError> {
     // SAFETY: callback arguments are owned by the current ProcessUtility
-    // invocation and directory nodes are backend-lifetime allocations.
+    // invocation and registry nodes are backend-lifetime allocations.
     unsafe {
-        UTILITY_CONSUMERS.with(|directory| {
-            UtilityConsumerSnapshot::new(directory.snapshot(), tag).select(args)
+        UTILITY_CONSUMERS.with(|registry| {
+            UtilityConsumerSnapshot::new(registry.snapshot(), tag).select(args)
         })
     }
 }
@@ -187,8 +187,8 @@ pub(crate) fn prepare_consumers(
 }
 
 pub(crate) fn commit_consumers(prepared: PreparedUtilityConsumers) {
-    UTILITY_CONSUMERS.with(|directory| {
-        let _ = directory.commit(prepared.nodes);
+    UTILITY_CONSUMERS.with(|registry| {
+        let _ = registry.commit(prepared.nodes);
     });
 }
 

@@ -1,4 +1,6 @@
-//! Runtime-owned maintenance-provider directory and callbacks.
+//! Maintenance-provider registry, runtime callbacks, and SQL boundary.
+
+mod sql_api;
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
@@ -13,8 +15,8 @@ use pgrx::{pg_guard, pg_sys};
 use crate::gucs;
 
 thread_local! {
-    static MAINTENANCE_PROVIDERS: RefCell<MaintenanceProviderDirectory> =
-        const { RefCell::new(MaintenanceProviderDirectory::new()) };
+    static MAINTENANCE_PROVIDERS: RefCell<MaintenanceProviderRegistry> =
+        const { RefCell::new(MaintenanceProviderRegistry::new()) };
 }
 
 struct StoredMaintenanceProvider {
@@ -42,11 +44,11 @@ impl StoredMaintenanceProvider {
     }
 }
 
-struct MaintenanceProviderDirectory {
+struct MaintenanceProviderRegistry {
     providers: Vec<StoredMaintenanceProvider>,
 }
 
-impl MaintenanceProviderDirectory {
+impl MaintenanceProviderRegistry {
     const fn new() -> Self {
         Self {
             providers: Vec::new(),
@@ -96,9 +98,9 @@ impl MaintenanceProviderDirectory {
                 return Err(REGISTER_DUPLICATE_ACCESS_METHOD);
             }
         }
-        // Reserve before any runtime directory is changed. The later commit is
+        // Reserve before any runtime registry is changed. The later commit is
         // therefore allocation-free and cannot leave provider and hook
-        // directories partially published.
+        // registries partially published.
         self.providers.reserve(1);
         Ok(Some(StoredMaintenanceProvider::new(
             descriptor,
@@ -123,7 +125,7 @@ impl MaintenanceProviderDirectory {
     }
 }
 
-pub(super) struct ValidatedProvider<'a> {
+pub(crate) struct ValidatedProvider<'a> {
     descriptor: &'a MaintenanceProvider,
     name: &'a CStr,
     access_method_name: &'a CStr,
@@ -136,7 +138,7 @@ impl<'a> ValidatedProvider<'a> {
     ///
     /// `descriptor` must satisfy the trusted internal ABI pointer contract
     /// documented by `lagodb_core::runtime_api`.
-    pub(super) unsafe fn from_raw(
+    pub(crate) unsafe fn from_raw(
         descriptor: *const MaintenanceProvider,
     ) -> Option<Self> {
         // SAFETY: callers uphold the module's trusted internal-ABI pointer and
@@ -178,12 +180,12 @@ impl<'a> ValidatedProvider<'a> {
     }
 }
 
-pub(super) struct PreparedRegistration {
+pub(crate) struct PreparedRegistration {
     provider: Option<StoredMaintenanceProvider>,
 }
 
 impl PreparedRegistration {
-    pub(super) fn prepare(
+    pub(crate) fn prepare(
         provider: Option<ValidatedProvider<'_>>,
     ) -> Result<Self, u32> {
         let provider = match provider {
@@ -199,28 +201,28 @@ impl PreparedRegistration {
         Ok(Self { provider })
     }
 
-    pub(super) fn commit(self) {
+    pub(crate) fn commit(self) {
         MAINTENANCE_PROVIDERS
             .with_borrow_mut(|providers| providers.commit(self.provider));
     }
 }
 
 #[pg_guard]
-pub(super) unsafe extern "C-unwind" fn has_providers() -> u8 {
+pub(crate) unsafe extern "C-unwind" fn has_providers() -> u8 {
     // Registration happens during shared preload, before database-local access
     // method OIDs necessarily exist. Resolve the callbacks only when routing a
     // command in a connected database, and never invoke provider code while a
     // RefCell borrow is live.
     let provider_count =
-        MAINTENANCE_PROVIDERS.with_borrow(MaintenanceProviderDirectory::len);
+        MAINTENANCE_PROVIDERS.with_borrow(MaintenanceProviderRegistry::len);
     for index in 0..provider_count {
         let descriptor = MAINTENANCE_PROVIDERS
             .with_borrow(|providers| providers.descriptor(index));
-        // SAFETY: directory entries own validated, backend-lifetime descriptor
+        // SAFETY: registry entries own validated, backend-lifetime descriptor
         // allocations, and the RefCell borrow was released before this access.
         let descriptor = unsafe { &*descriptor };
         // SAFETY: the callback was validated as part of the exact-build
-        // descriptor and executes after the directory borrow is released.
+        // descriptor and executes after the registry borrow is released.
         if unsafe { (descriptor.access_method_oid)() } != pg_sys::InvalidOid {
             return 1;
         }
@@ -229,23 +231,23 @@ pub(super) unsafe extern "C-unwind" fn has_providers() -> u8 {
 }
 
 #[pg_guard]
-pub(super) unsafe extern "C-unwind" fn provider_for_am(
+pub(crate) unsafe extern "C-unwind" fn provider_for_am(
     access_method_oid: pg_sys::Oid,
 ) -> *const MaintenanceProvider {
     // AM OIDs are database-local and do not exist yet during shared-preload
     // registration. Copy one stable descriptor pointer at a time, release the
     // RefCell borrow, and only then invoke catalog-reading provider callbacks.
     let provider_count =
-        MAINTENANCE_PROVIDERS.with_borrow(MaintenanceProviderDirectory::len);
+        MAINTENANCE_PROVIDERS.with_borrow(MaintenanceProviderRegistry::len);
     let mut matched: *const MaintenanceProvider = std::ptr::null();
     for index in 0..provider_count {
         let descriptor = MAINTENANCE_PROVIDERS
             .with_borrow(|providers| providers.descriptor(index));
-        // SAFETY: directory entries own validated, backend-lifetime descriptor
+        // SAFETY: registry entries own validated, backend-lifetime descriptor
         // allocations, and the RefCell borrow was released before this access.
         let descriptor = unsafe { &*descriptor };
         // SAFETY: the callback was validated as part of the exact-build
-        // descriptor and executes after the directory borrow is released.
+        // descriptor and executes after the registry borrow is released.
         if unsafe { (descriptor.access_method_oid)() } != access_method_oid {
             continue;
         }
@@ -260,7 +262,7 @@ pub(super) unsafe extern "C-unwind" fn provider_for_am(
 }
 
 #[pg_guard]
-pub(super) unsafe extern "C-unwind" fn maintenance_config(
+pub(crate) unsafe extern "C-unwind" fn maintenance_config(
     config: *mut RuntimeMaintenanceConfig,
 ) {
     // SAFETY: `as_mut` validates the permitted null input before the output is
@@ -312,16 +314,16 @@ mod tests {
 
     #[test]
     fn rejects_distinct_providers_for_the_same_access_method() {
-        let mut directory = MaintenanceProviderDirectory::new();
+        let mut registry = MaintenanceProviderRegistry::new();
         let iceberg = descriptor(c"iceberg", c"iceberg");
         let competing = descriptor(c"other", c"iceberg");
 
-        let prepared = directory
+        let prepared = registry
             .prepare(&iceberg, c"iceberg", c"iceberg")
             .expect("first provider is valid");
-        directory.commit(prepared);
+        registry.commit(prepared);
         assert_eq!(
-            directory.prepare(&competing, c"other", c"iceberg").err(),
+            registry.prepare(&competing, c"other", c"iceberg").err(),
             Some(REGISTER_DUPLICATE_ACCESS_METHOD)
         );
     }
@@ -336,33 +338,33 @@ mod tests {
 
     #[test]
     fn exact_registration_is_idempotent() {
-        let mut directory = MaintenanceProviderDirectory::new();
+        let mut registry = MaintenanceProviderRegistry::new();
         let iceberg = descriptor(c"iceberg", c"iceberg");
 
-        let prepared = directory
+        let prepared = registry
             .prepare(&iceberg, c"iceberg", c"iceberg")
             .expect("first provider is valid");
-        directory.commit(prepared);
-        let prepared = directory
+        registry.commit(prepared);
+        let prepared = registry
             .prepare(&iceberg, c"iceberg", c"iceberg")
             .expect("identical registration is valid");
         assert!(prepared.is_none());
-        directory.commit(prepared);
-        assert_eq!(directory.len(), 1);
+        registry.commit(prepared);
+        assert_eq!(registry.len(), 1);
     }
 
     #[test]
     fn rejects_one_provider_name_claiming_two_access_methods() {
-        let mut directory = MaintenanceProviderDirectory::new();
+        let mut registry = MaintenanceProviderRegistry::new();
         let iceberg = descriptor(c"shared", c"iceberg");
         let delta = descriptor(c"shared", c"delta");
 
-        let prepared = directory
+        let prepared = registry
             .prepare(&iceberg, c"shared", c"iceberg")
             .expect("first provider is valid");
-        directory.commit(prepared);
+        registry.commit(prepared);
         assert_eq!(
-            directory.prepare(&delta, c"shared", c"delta").err(),
+            registry.prepare(&delta, c"shared", c"delta").err(),
             Some(REGISTER_DUPLICATE_NAME)
         );
     }

@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::io::ErrorKind;
 use std::rc::Rc;
 
-use crate::worker::ensure_preloaded;
+use crate::runtime_is_preloaded;
 use lagodb_core::diag::{PgReportError, SqlStateError, report_warning};
 use lagodb_core::options::{TablespaceCacheError, get_tablespace};
 use lagodb_core::storage::volume::StorageVolumeId;
@@ -55,7 +55,7 @@ pub(crate) fn on_object_access(
     {
         return Ok(());
     }
-    if ensure_preloaded().is_err() {
+    if !runtime_is_preloaded() {
         return Ok(());
     }
 

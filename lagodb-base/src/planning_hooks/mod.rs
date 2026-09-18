@@ -1,8 +1,8 @@
 //! Sole owner and router of PostgreSQL planning hook pointers.
 
-mod directory;
 mod pathlist;
 mod planner;
+mod registry;
 
 use std::sync::OnceLock;
 
@@ -11,7 +11,7 @@ use lagodb_core::runtime_api::{CALLBACK_FAILED, CALLBACK_OK, CallbackErrorReport
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
-pub(crate) use directory::{PreparedPlanningHooks, commit, prepare};
+pub(crate) use registry::{PreparedPlanningHooks, commit, prepare};
 
 static PREV_PLANNER: OnceLock<pg_sys::planner_hook_type> = OnceLock::new();
 static PREV_SET_REL_PATHLIST: OnceLock<pg_sys::set_rel_pathlist_hook_type> =

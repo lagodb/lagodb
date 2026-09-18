@@ -11,6 +11,8 @@ use lagodb_core::storage::volume::StorageVolumeId;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
+use crate::ensure_runtime_preloaded;
+
 use super::control::StorageVolumeControl;
 use super::domain::StorageVolumeError;
 
@@ -124,7 +126,7 @@ unsafe fn prepare_create(
     else {
         return Ok(());
     };
-    crate::ensure_runtime_preloaded();
+    ensure_runtime_preloaded();
     // CREATE TABLESPACE already has this PostgreSQL restriction; call it here
     // before any config read or binding lock acquisition.
     unsafe {

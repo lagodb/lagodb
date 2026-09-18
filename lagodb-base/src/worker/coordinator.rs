@@ -5,10 +5,9 @@ use lagodb_core::extension_worker::WorkerTransaction;
 use pgrx::bgworkers::BackgroundWorker;
 use pgrx::prelude::*;
 
-use crate::registry;
-
 use super::bgworker::{DynamicWorkerRegistration, DynamicWorkerStartResult};
 use super::lock::DatabaseLifecycleLock;
+use super::registry;
 use super::state::CoordinatorStopDisposition;
 use super::store::{Store, WorkerLaunchRegistration};
 

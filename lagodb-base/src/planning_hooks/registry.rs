@@ -3,8 +3,8 @@
 use std::ffi::c_void;
 use std::mem::size_of;
 
-use crate::descriptor_directory::{
-    DescriptorDirectory, DescriptorNode, DescriptorSnapshot,
+use crate::descriptor_registry::{
+    DescriptorNode, DescriptorRegistry, DescriptorSnapshot,
 };
 use lagodb_core::runtime_api::{
     ModifyPlannerDescriptor, RelationScanPlannerDescriptor, RoutedModifyPlannerPost,
@@ -12,10 +12,10 @@ use lagodb_core::runtime_api::{
 };
 
 thread_local! {
-    static RELATION_SCAN: DescriptorDirectory<StoredRelationScanPlanner> =
-        const { DescriptorDirectory::new() };
-    static MODIFY: DescriptorDirectory<StoredModifyPlanner> =
-        const { DescriptorDirectory::new() };
+    static RELATION_SCAN: DescriptorRegistry<StoredRelationScanPlanner> =
+        const { DescriptorRegistry::new() };
+    static MODIFY: DescriptorRegistry<StoredModifyPlanner> =
+        const { DescriptorRegistry::new() };
 }
 
 #[derive(Clone, Copy)]
@@ -85,17 +85,17 @@ pub(crate) fn prepare(
 }
 
 pub(crate) fn commit(prepared: PreparedPlanningHooks) {
-    let _ = RELATION_SCAN.with(|directory| directory.commit(prepared.relation_scan));
-    let _ = MODIFY.with(|directory| directory.commit(prepared.modify));
+    let _ = RELATION_SCAN.with(|registry| registry.commit(prepared.relation_scan));
+    let _ = MODIFY.with(|registry| registry.commit(prepared.modify));
 }
 
 pub(super) fn relation_scan_snapshot() -> DescriptorSnapshot<StoredRelationScanPlanner>
 {
-    RELATION_SCAN.with(|directory| directory.snapshot())
+    RELATION_SCAN.with(|registry| registry.snapshot())
 }
 
 pub(super) fn modify_snapshot() -> DescriptorSnapshot<StoredModifyPlanner> {
-    MODIFY.with(|directory| directory.snapshot())
+    MODIFY.with(|registry| registry.snapshot())
 }
 
 #[cfg(test)]

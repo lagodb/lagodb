@@ -6,14 +6,13 @@ use lagodb_core::catalog::{
 use lagodb_core::diag::PgError;
 use pgrx::{FromDatum, PgTryBuilder, pg_sys};
 
-use crate::error::{
-    LagodbError, LagodbResult, WorkerCatalogOperation, WorkerCatalogResultExt,
-};
+use super::error::{WorkerCatalogOperation, WorkerCatalogResultExt};
+use super::{WorkerError, WorkerResult};
 
-use super::worker_row::WorkerTuple;
-pub(crate) use super::worker_row::{
-    CatalogName, NewWorkerRegistration, WorkerRegistrationRow,
-};
+mod row;
+
+use row::WorkerTuple;
+pub(crate) use row::{CatalogName, NewWorkerRegistration, WorkerRegistrationRow};
 
 const WORKERS_TABLE: &CStr = c"workers";
 const WORKER_ID_SEQUENCE: &CStr = c"worker_id_seq";
@@ -57,7 +56,7 @@ impl WorkerCatalog {
     /// This is used by the coordinator's lifecycle barrier transaction. OID
     /// lookup uses PostgreSQL syscaches and deliberately does not acquire a
     /// relation lock that could overlap the lifecycle lock.
-    pub(crate) fn exists() -> LagodbResult<bool> {
+    pub(crate) fn exists() -> WorkerResult<bool> {
         let schema_oid = catalog::get_namespace_oid(LAGODB_SCHEMA, true)
             .map_worker_catalog_err(WorkerCatalogOperation::ResolveSchema)?;
         if schema_oid == pg_sys::InvalidOid {
@@ -68,13 +67,13 @@ impl WorkerCatalog {
             .map_worker_catalog_err(WorkerCatalogOperation::ResolveRelation)
     }
 
-    pub(crate) fn open(lock_mode: pg_sys::LOCKMODE) -> LagodbResult<Self> {
+    pub(crate) fn open(lock_mode: pg_sys::LOCKMODE) -> WorkerResult<Self> {
         let schema_oid = catalog::get_namespace_oid(LAGODB_SCHEMA, false)
             .map_worker_catalog_err(WorkerCatalogOperation::ResolveSchema)?;
         let relation_oid = catalog::get_relation_oid(WORKERS_TABLE, schema_oid)
             .map_worker_catalog_err(WorkerCatalogOperation::ResolveRelation)?;
         if relation_oid == pg_sys::InvalidOid {
-            return Err(LagodbError::WorkersTableMissing);
+            return Err(WorkerError::WorkersTableMissing);
         }
         let relation = CatalogRelation::open_retain_lock(relation_oid, lock_mode)
             .map_worker_catalog_err(WorkerCatalogOperation::Open)?;
@@ -84,7 +83,7 @@ impl WorkerCatalog {
         })
     }
 
-    pub(crate) fn rows(&self) -> LagodbResult<Vec<WorkerRegistrationRow>> {
+    pub(crate) fn rows(&self) -> WorkerResult<Vec<WorkerRegistrationRow>> {
         let tuple_desc = self.relation.as_handle().tuple_desc();
         let mut scan = self
             .relation
@@ -105,7 +104,7 @@ impl WorkerCatalog {
     pub(crate) fn insert(
         &self,
         registration: NewWorkerRegistration<'_>,
-    ) -> LagodbResult<WorkerId> {
+    ) -> WorkerResult<WorkerId> {
         let worker_id = self.next_worker_id()?;
         // SAFETY: the descriptor belongs to the open lagodb.workers relation.
         let tuple = unsafe {
@@ -130,7 +129,7 @@ impl WorkerCatalog {
         &self,
         extension_name: &CStr,
         worker_name: &str,
-    ) -> LagodbResult<Option<WorkerId>> {
+    ) -> WorkerResult<Option<WorkerId>> {
         let tuple_desc = self.relation.as_handle().tuple_desc();
         let mut scan = self
             .relation
@@ -161,7 +160,7 @@ impl WorkerCatalog {
     pub(crate) fn row_by_id(
         &self,
         worker_id: WorkerId,
-    ) -> LagodbResult<Option<WorkerRegistrationRow>> {
+    ) -> WorkerResult<Option<WorkerRegistrationRow>> {
         let tuple_desc = self.relation.as_handle().tuple_desc();
         let mut scan = self
             .relation
@@ -195,7 +194,7 @@ impl WorkerCatalog {
     pub(crate) fn delete_by_name(
         &self,
         worker_name: &str,
-    ) -> LagodbResult<Option<WorkerId>> {
+    ) -> WorkerResult<Option<WorkerId>> {
         let tuple_desc = self.relation.as_handle().tuple_desc();
         let mut scan = self
             .relation
@@ -224,7 +223,7 @@ impl WorkerCatalog {
         Ok(Some(worker_id))
     }
 
-    pub(crate) fn delete_by_id(&self, worker_id: WorkerId) -> LagodbResult<bool> {
+    pub(crate) fn delete_by_id(&self, worker_id: WorkerId) -> WorkerResult<bool> {
         let mut scan = self
             .relation
             .begin_scan(
@@ -252,7 +251,7 @@ impl WorkerCatalog {
     pub(crate) fn contains_extension_name(
         &self,
         extension_name: &CStr,
-    ) -> LagodbResult<bool> {
+    ) -> WorkerResult<bool> {
         let tuple_desc = self.relation.as_handle().tuple_desc();
         let mut scan = self
             .relation
@@ -276,7 +275,7 @@ impl WorkerCatalog {
     pub(crate) fn delete_by_extension_name(
         &self,
         extension_name: &CStr,
-    ) -> LagodbResult<()> {
+    ) -> WorkerResult<()> {
         let tuple_desc = self.relation.as_handle().tuple_desc();
         let mut scan = self
             .relation
@@ -299,7 +298,7 @@ impl WorkerCatalog {
         Ok(())
     }
 
-    fn next_worker_id(&self) -> LagodbResult<WorkerId> {
+    fn next_worker_id(&self) -> WorkerResult<WorkerId> {
         let sequence_oid = self.sequence_oid()?;
         // SAFETY: nextval_oid is PostgreSQL's native sequence function. The
         // sequence OID resolves to lagodb.worker_id_seq, which is declared AS
@@ -324,33 +323,33 @@ impl WorkerCatalog {
         )))
     }
 
-    fn sequence_oid(&self) -> LagodbResult<pg_sys::Oid> {
+    fn sequence_oid(&self) -> WorkerResult<pg_sys::Oid> {
         let oid = self.object_oid(
             WORKER_ID_SEQUENCE,
             WorkerCatalogOperation::ResolveSequence,
         )?;
         if oid == pg_sys::InvalidOid {
-            Err(LagodbError::WorkerIdSequenceMissing)
+            Err(WorkerError::WorkerIdSequenceMissing)
         } else {
             Ok(oid)
         }
     }
 
-    fn primary_key_oid(&self) -> LagodbResult<pg_sys::Oid> {
+    fn primary_key_oid(&self) -> WorkerResult<pg_sys::Oid> {
         let oid = self
             .object_oid(WORKERS_PRIMARY_KEY, WorkerCatalogOperation::ResolveIndex)?;
         if oid == pg_sys::InvalidOid {
-            Err(LagodbError::WorkersPrimaryKeyMissing)
+            Err(WorkerError::WorkersPrimaryKeyMissing)
         } else {
             Ok(oid)
         }
     }
 
-    fn name_key_oid(&self) -> LagodbResult<pg_sys::Oid> {
+    fn name_key_oid(&self) -> WorkerResult<pg_sys::Oid> {
         let oid =
             self.object_oid(WORKERS_NAME_KEY, WorkerCatalogOperation::ResolveIndex)?;
         if oid == pg_sys::InvalidOid {
-            Err(LagodbError::WorkersNameIndexMissing)
+            Err(WorkerError::WorkersNameIndexMissing)
         } else {
             Ok(oid)
         }
@@ -360,7 +359,7 @@ impl WorkerCatalog {
         &self,
         name: &CStr,
         operation: WorkerCatalogOperation,
-    ) -> LagodbResult<pg_sys::Oid> {
+    ) -> WorkerResult<pg_sys::Oid> {
         catalog::get_relation_oid(name, self.schema_oid)
             .map_worker_catalog_err(operation)
     }

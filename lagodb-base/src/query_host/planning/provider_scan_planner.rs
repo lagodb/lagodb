@@ -12,7 +12,7 @@ use lagodb_core::runtime_api::{
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
-use crate::runtime_api::table_scan_registry::TableScanRegistry;
+use super::super::table_scan_registry::TableScanRegistry;
 
 pub(super) struct PlannedScanRecord {
     pub(super) route: TableScanRoute<'static>,

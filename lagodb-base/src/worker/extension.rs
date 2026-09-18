@@ -3,15 +3,15 @@ use std::ffi::CStr;
 use pgrx::bgworkers::BackgroundWorker;
 use pgrx::prelude::*;
 
-use crate::error::LagodbError;
-use crate::registry;
 use crate::worker::state::WorkerKey;
+
 use lagodb_core::diag::{PgReportError, log_info, report_warning};
 use lagodb_core::extension_worker::{
     WorkerContextRaw, WorkerSchedule, WorkerTransaction,
 };
 
 use super::store::{Store, WorkerStart};
+use super::{WorkerError, registry};
 
 pub(super) struct Worker;
 
@@ -72,7 +72,7 @@ impl Worker {
             }
             Spi::run("SELECT set_config('search_path', '', false)").map_err(
                 |source| {
-                    PgReportError::from(LagodbError::WorkerEntrypointPreparation {
+                    PgReportError::from(WorkerError::WorkerEntrypointPreparation {
                         source,
                     })
                 },

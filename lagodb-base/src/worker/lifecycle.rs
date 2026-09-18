@@ -1,11 +1,14 @@
-use std::cell::RefCell;
-use std::ffi::c_void;
+use std::cell::{Cell, RefCell};
+use std::ffi::{CStr, c_void};
 use std::mem;
 use std::ptr::null_mut;
 
 use pgrx::pg_sys;
 
-use crate::worker::{self, INVALID_OID, WorkerKey};
+use crate::runtime_is_preloaded;
+
+use super::lock::DatabaseLifecycleLock;
+use super::{INVALID_OID, WorkerError, WorkerKey, registry};
 
 #[derive(Clone, Debug)]
 enum PendingActionKind {
@@ -25,6 +28,7 @@ struct PendingAction {
 
 thread_local! {
     static ACTIONS: RefCell<PendingActions> = const { RefCell::new(PendingActions::new()) };
+    static PREFLIGHT_ENABLED: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(crate) fn init() {
@@ -34,6 +38,7 @@ pub(crate) fn init() {
         pg_sys::RegisterXactCallback(Some(xact_callback), null_mut());
         pg_sys::RegisterSubXactCallback(Some(subxact_callback), null_mut());
     }
+    PREFLIGHT_ENABLED.set(true);
 }
 
 pub(crate) fn request_wakeup(worker_id: i32) {
@@ -168,24 +173,24 @@ impl PendingAction {
     fn apply(self, committed: bool) -> bool {
         match self.kind {
             PendingActionKind::Wake(worker) if committed => {
-                worker::wake_worker(worker)
+                super::wake_worker(worker)
             }
             PendingActionKind::Wake(_) => false,
             PendingActionKind::ReconcileDatabase => {
-                worker::request_database_reconcile(self.database_oid)
+                super::request_database_reconcile(self.database_oid)
             }
             PendingActionKind::WakeDatabaseWorkers if committed => {
-                worker::wake_database_workers(self.database_oid)
+                super::wake_database_workers(self.database_oid)
             }
             PendingActionKind::WakeDatabaseWorkers => false,
             PendingActionKind::DropDatabase if committed => {
-                worker::request_full_rescan()
+                super::request_full_rescan()
             }
             PendingActionKind::DropDatabase => {
-                worker::request_database_reconcile(self.database_oid)
-                    | worker::request_full_rescan()
+                super::request_database_reconcile(self.database_oid)
+                    | super::request_full_rescan()
             }
-            PendingActionKind::RescanAll => worker::request_full_rescan(),
+            PendingActionKind::RescanAll => super::request_full_rescan(),
         }
     }
 }
@@ -220,7 +225,7 @@ unsafe extern "C-unwind" fn xact_callback(
         XACT_EVENT_PRE_PREPARE
             if !ACTIONS.with(|actions| actions.borrow().is_empty()) =>
         {
-            crate::error::LagodbError::PreparedTransactionWithRuntimeActions.report();
+            WorkerError::PreparedTransactionWithRuntimeActions.report();
         }
         _ => {}
     }
@@ -228,8 +233,74 @@ unsafe extern "C-unwind" fn xact_callback(
 
 fn apply(committed: bool) {
     if ACTIONS.with(|actions| actions.borrow_mut().apply(committed)) {
-        worker::signal_supervisor();
+        super::signal_supervisor();
     }
+}
+
+pub(crate) unsafe fn preflight(node: *mut pg_sys::Node) {
+    if !PREFLIGHT_ENABLED.get() {
+        return;
+    }
+    match unsafe { (*node).type_ } {
+        pg_sys::NodeTag::T_DropdbStmt => {
+            let statement = node.cast::<pg_sys::DropdbStmt>();
+            let database_oid =
+                unsafe { pg_sys::get_database_oid((*statement).dbname, true) };
+            if database_oid != pg_sys::InvalidOid {
+                DatabaseLifecycleLock::new(database_oid.to_u32()).acquire_drop();
+                request_database_drop(database_oid.to_u32());
+                super::prepare_database_drop(database_oid.to_u32());
+            }
+        }
+        pg_sys::NodeTag::T_CreatedbStmt => request_global_reconcile(),
+        pg_sys::NodeTag::T_AlterDatabaseSetStmt => {
+            let statement = unsafe { &*node.cast::<pg_sys::AlterDatabaseSetStmt>() };
+            let database_oid =
+                unsafe { pg_sys::get_database_oid(statement.dbname, false) };
+            request_database_workers_wakeup(database_oid.to_u32());
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn drop_extension_workers(
+    extension_oid: pg_sys::Oid,
+) -> Result<(), WorkerError> {
+    // SAFETY: PostgreSQL invokes OAT_DROP before deleting the pg_extension
+    // catalog tuple, so the extension OID is still resolvable here.
+    let extension_name = unsafe { pg_sys::get_extension_name(extension_oid) };
+    if extension_name.is_null() {
+        return Ok(());
+    }
+    // SAFETY: PostgreSQL returned a non-null NUL-terminated extension name.
+    let extension_name = unsafe { CStr::from_ptr(extension_name) };
+    let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
+    let runtime_oid =
+        unsafe { pg_sys::get_extension_oid(c"lagodb_base".as_ptr(), true) };
+    if runtime_oid == pg_sys::InvalidOid {
+        return Ok(());
+    }
+    let runtime_preloaded = runtime_is_preloaded();
+    if extension_oid == runtime_oid {
+        if runtime_preloaded {
+            DatabaseLifecycleLock::new(database_oid).acquire_drop();
+            request_database_reconcile();
+            super::prepare_database_drop(database_oid);
+        }
+    } else {
+        let has_registrations =
+            registry::extension_has_registrations(extension_name)?;
+        if !has_registrations {
+            return Ok(());
+        }
+        registry::delete_extension_registrations(extension_name)?;
+        if runtime_preloaded {
+            DatabaseLifecycleLock::new(database_oid).acquire_drop();
+            request_database_reconcile();
+            super::prepare_extension_drop(database_oid, extension_oid.to_u32());
+        }
+    }
+    Ok(())
 }
 
 #[pgrx::pg_guard]

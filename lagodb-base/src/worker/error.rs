@@ -2,17 +2,14 @@ use std::ffi::CString;
 use std::fmt;
 
 use lagodb_core::diag::{PgError, PgReportError, SqlStateError};
-use lagodb_core::object_cleanup::ObjectCleanupError;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
-
-pub(crate) type LagodbResult<T> = Result<T, LagodbError>;
 
 pub(crate) trait WorkerCatalogResultExt<T> {
     fn map_worker_catalog_err(
         self,
         operation: WorkerCatalogOperation,
-    ) -> LagodbResult<T>;
+    ) -> Result<T, WorkerError>;
 }
 
 impl<T> WorkerCatalogResultExt<T> for Result<T, PgError> {
@@ -20,8 +17,8 @@ impl<T> WorkerCatalogResultExt<T> for Result<T, PgError> {
     fn map_worker_catalog_err(
         self,
         operation: WorkerCatalogOperation,
-    ) -> LagodbResult<T> {
-        self.map_err(|source| LagodbError::WorkerCatalog { operation, source })
+    ) -> Result<T, WorkerError> {
+        self.map_err(|source| WorkerError::WorkerCatalog { operation, source })
     }
 }
 
@@ -57,12 +54,7 @@ impl fmt::Display for WorkerCatalogOperation {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum LagodbError {
-    #[error(
-        "lagodb_base must be loaded with shared_preload_libraries before use; add lagodb_base to shared_preload_libraries and restart PostgreSQL"
-    )]
-    RuntimeNotPreloaded,
-
+pub(crate) enum WorkerError {
     #[error("cannot PREPARE a transaction with pending LagoDB actions")]
     PreparedTransactionWithRuntimeActions,
 
@@ -122,15 +114,9 @@ pub(crate) enum LagodbError {
         #[source]
         source: pgrx::spi::Error,
     },
-
-    #[error("failed to retry maintenance item: {source}")]
-    RetryMaintenanceItem {
-        #[source]
-        source: ObjectCleanupError,
-    },
 }
 
-impl LagodbError {
+impl WorkerError {
     fn into_report(self) -> PgReportError {
         PgReportError::from_domain_error(self)
     }
@@ -140,11 +126,10 @@ impl LagodbError {
     }
 }
 
-impl SqlStateError for LagodbError {
+impl SqlStateError for WorkerError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
-            Self::RuntimeNotPreloaded
-            | Self::WorkerRegistrationRequiresExtensionScript
+            Self::WorkerRegistrationRequiresExtensionScript
             | Self::RegisteringExtensionMissing => {
                 PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
             }
@@ -182,14 +167,12 @@ impl SqlStateError for LagodbError {
             Self::WorkerEntrypointPreparation { .. } => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
             }
-
-            Self::RetryMaintenanceItem { source } => source.sql_error_code(),
         }
     }
 }
 
-impl From<LagodbError> for ErrorReport {
-    fn from(value: LagodbError) -> Self {
+impl From<WorkerError> for ErrorReport {
+    fn from(value: WorkerError) -> Self {
         value.into_report().into_report()
     }
 }

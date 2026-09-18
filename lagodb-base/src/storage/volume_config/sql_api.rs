@@ -8,6 +8,8 @@ use lagodb_core::storage::service::BackendStorageService;
 use pgrx::datum::JsonB;
 use pgrx::prelude::*;
 
+use crate::ensure_runtime_preloaded;
+
 use super::control::StorageVolumeControl;
 use super::credential::CredentialConfig;
 use super::domain::{StorageLocation, StorageVolumeError, StorageVolumeName};
@@ -46,7 +48,7 @@ fn ensure_admin_access() -> Result<(), StorageVolumeSqlError> {
     if !unsafe { pg_sys::superuser() } {
         return Err(StorageVolumeSqlError::RequiresSuperuser);
     }
-    crate::ensure_runtime_preloaded();
+    ensure_runtime_preloaded();
     Ok(())
 }
 

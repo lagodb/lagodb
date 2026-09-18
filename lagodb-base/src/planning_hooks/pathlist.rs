@@ -6,9 +6,11 @@ use lagodb_core::diag::{PgReportError, ReportableError};
 use lagodb_core::runtime_api::CallbackErrorReport;
 use pgrx::{pg_guard, pg_sys};
 
+use crate::query_host;
+
 use super::{
     PREV_CREATE_UPPER_PATHS, PREV_SET_JOIN_PATHLIST, PREV_SET_REL_PATHLIST,
-    callback_result, directory,
+    callback_result, registry,
 };
 
 #[pg_guard]
@@ -23,7 +25,7 @@ pub(super) unsafe extern "C-unwind" fn set_rel_pathlist(
         // current hook arguments remain live for the duration of the call.
         unsafe { previous(root, rel, rti, rte) };
     }
-    let result = directory::relation_scan_snapshot().try_for_each(|descriptor| {
+    let result = registry::relation_scan_snapshot().try_for_each(|descriptor| {
         let mut error = CallbackErrorReport::default();
         // SAFETY: registration validated this exact-build callback, and
         // all PostgreSQL pointers are forwarded only synchronously.
@@ -40,9 +42,7 @@ pub(super) unsafe extern "C-unwind" fn set_rel_pathlist(
         callback_result(status, &error, "relation planning callback")
     });
     result
-        .and_then(|()| unsafe {
-            crate::query_host::set_rel_pathlist(root, rel, rti, rte)
-        })
+        .and_then(|()| unsafe { query_host::set_rel_pathlist(root, rel, rti, rte) })
         .report_unwrap();
 }
 
@@ -59,7 +59,7 @@ pub(super) unsafe extern "C-unwind" fn set_join_pathlist(
         unsafe { previous(root, join_rel, outer_rel, inner_rel, join_type, extra) };
     }
     unsafe {
-        crate::query_host::set_join_pathlist(
+        query_host::set_join_pathlist(
             root, join_rel, outer_rel, inner_rel, join_type, extra,
         )
     }
@@ -90,7 +90,7 @@ unsafe fn route_upper_paths(
     output_rel: *mut pg_sys::RelOptInfo,
     extra: *mut c_void,
 ) -> Result<(), PgReportError> {
-    directory::modify_snapshot().try_for_each(|descriptor| {
+    registry::modify_snapshot().try_for_each(|descriptor| {
         let mut error = CallbackErrorReport::default();
         // SAFETY: registration validated this exact-build callback, and
         // all PostgreSQL pointers are forwarded only synchronously.
@@ -108,8 +108,6 @@ unsafe fn route_upper_paths(
         callback_result(status, &error, "modify upper-path callback")
     })?;
     unsafe {
-        crate::query_host::create_upper_paths(
-            root, stage, input_rel, output_rel, extra,
-        )
+        query_host::create_upper_paths(root, stage, input_rel, output_rel, extra)
     }
 }

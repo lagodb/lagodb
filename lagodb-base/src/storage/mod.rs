@@ -7,10 +7,11 @@
 
 mod catalog;
 mod config;
-pub(crate) mod gucs;
-pub(crate) mod logging;
+mod gucs;
+mod logging;
 mod reconciler;
 mod reload;
+mod sql_api;
 mod state;
 mod supervisor;
 pub(crate) mod volume_config;

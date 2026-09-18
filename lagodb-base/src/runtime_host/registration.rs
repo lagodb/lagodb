@@ -1,7 +1,7 @@
 //! Atomic provider-registration transaction.
 //!
-//! Every participating directory validates and allocates during prepare. No
-//! directory is published until the complete provider batch is ready to
+//! Every participating registry validates and allocates during prepare. No
+//! registry is published until the complete provider batch is ready to
 //! commit, preserving the runtime's all-or-nothing registration contract.
 
 use std::mem::size_of;
@@ -15,16 +15,14 @@ use lagodb_core::runtime_api::{
 };
 use pgrx::{pg_guard, pg_sys};
 
+use crate::maintenance;
 use crate::object_access::{self, PreparedObjectAccessHooks};
 use crate::planning_hooks::{self, PreparedPlanningHooks};
-use crate::process_utility::{self, PreparedUtilityHooks};
+use crate::process_utility::{self, PreparedUtilityConsumers, PreparedUtilityHooks};
 use crate::provider_bootstrap::{
     self, PreparedProviderIdentity, ValidatedProviderIdentity,
 };
-use crate::utility_consumer::{self, PreparedUtilityConsumers};
-
-use super::maintenance;
-use super::table_scan_registry::PendingTableScanRegistration;
+use crate::query_host::PendingTableScanRegistration;
 
 struct ProviderRegistrationRef<'a> {
     provider: ValidatedProviderIdentity<'a>,
@@ -135,14 +133,14 @@ impl PreparedProviderRegistration {
     fn prepare(registration: ProviderRegistrationRef<'_>) -> Result<Self, u32> {
         // Every module finishes validation and all heap allocation before this
         // value can be committed. Returning an error therefore leaves every
-        // logical runtime directory and PostgreSQL hook pointer unchanged.
+        // logical runtime registry and PostgreSQL hook pointer unchanged.
         let maintenance = maintenance::PreparedRegistration::prepare(
             registration.maintenance_provider,
         )?;
         let utility = process_utility::prepare_hooks(registration.utility)
             .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
         let utility_consumers =
-            utility_consumer::prepare_consumers(registration.utility_consumers)
+            process_utility::prepare_consumers(registration.utility_consumers)
                 .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
         let object_access = object_access::prepare_hooks(
             registration.object_access,
@@ -158,7 +156,7 @@ impl PreparedProviderRegistration {
             PendingTableScanRegistration::prepare(registration.table_scan)?;
         // Validate bootstrap ownership only after the complete batch has been
         // validated. This preserves the more specific duplicate-provider and
-        // invalid-descriptor results while still preventing every directory
+        // invalid-descriptor results while still preventing every registry
         // from being committed outside the bootstrap window.
         let provider = provider_bootstrap::prepare_identity(registration.provider)?;
         Ok(Self {
@@ -173,13 +171,13 @@ impl PreparedProviderRegistration {
     }
 
     fn commit(self) {
-        // Every directory has finished validation and allocation before any
+        // Every registry has finished validation and allocation before any
         // registration becomes visible.
         planning_hooks::commit(self.planning);
         self.table_scan.commit();
         self.maintenance.commit();
         process_utility::commit_hooks(self.utility);
-        utility_consumer::commit_consumers(self.utility_consumers);
+        process_utility::commit_consumers(self.utility_consumers);
         object_access::commit_hooks(self.object_access);
         provider_bootstrap::commit_identity(self.provider);
     }

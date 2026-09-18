@@ -4,7 +4,7 @@ use std::time::Duration;
 use lagodb_core::extension_worker::WorkerSchedule;
 use pgrx::prelude::*;
 
-use crate::registry::WorkerRegistration;
+use super::super::registry::WorkerRegistration;
 use crate::worker::CAPACITY_RETRY;
 use crate::worker::bgworker::{DynamicWorkerRegistration, timestamp_ms};
 use crate::worker::state::{

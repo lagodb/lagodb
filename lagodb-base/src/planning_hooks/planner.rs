@@ -13,7 +13,7 @@ use lagodb_core::diag::{PgReportError, ReportableError};
 use lagodb_core::runtime_api::CallbackErrorReport;
 use pgrx::{pg_guard, pg_sys};
 
-use super::{PREV_PLANNER, callback_result, directory};
+use super::{PREV_PLANNER, callback_result, registry};
 
 #[pg_guard]
 pub(super) unsafe extern "C-unwind" fn planner(
@@ -34,7 +34,7 @@ unsafe fn route(
     cursor_options: i32,
     bound_params: pg_sys::ParamListInfo,
 ) -> Result<*mut pg_sys::PlannedStmt, PgReportError> {
-    let snapshot = directory::modify_snapshot();
+    let snapshot = registry::modify_snapshot();
     snapshot.try_for_each(|descriptor| {
         let mut error = CallbackErrorReport::default();
         // SAFETY: registration validated this exact-build callback; `parse`

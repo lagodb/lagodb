@@ -4,7 +4,7 @@ use std::fmt;
 use lagodb_core::handles::{HeapTupleGuard, HeapTupleRef};
 use pgrx::{FromDatum, IntoDatum, pg_sys};
 
-use super::worker::WorkerId;
+use super::WorkerId;
 
 #[derive(Clone, Copy)]
 #[repr(i16)]

@@ -7,9 +7,12 @@ mod execution;
 mod explain;
 mod methods;
 mod planning;
+mod table_scan_registry;
 
 use lagodb_core::diag::PgReportError;
 use pgrx::pg_sys;
+
+pub(crate) use table_scan_registry::PendingTableScanRegistration;
 
 pub(crate) fn init() {
     methods::register();

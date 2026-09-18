@@ -109,3 +109,24 @@ impl Scheduler {
         Some(database_oid)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scheduler_rejects_databases_outside_the_candidate_snapshot() {
+        let mut scheduler = Scheduler::new();
+        scheduler.enqueue(10);
+        assert_eq!(scheduler.len(), 0);
+
+        let candidates = HashSet::from([10]);
+        assert_eq!(scheduler.reconcile_live(&candidates), vec![10]);
+        scheduler.enqueue(10);
+        assert_eq!(scheduler.pop_front(), Some(10));
+
+        scheduler.reconcile_live(&HashSet::new());
+        scheduler.enqueue(10);
+        assert_eq!(scheduler.len(), 0);
+    }
+}

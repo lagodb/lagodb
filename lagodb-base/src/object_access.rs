@@ -3,8 +3,8 @@
 use std::ffi::{c_char, c_void};
 use std::sync::OnceLock;
 
-use crate::descriptor_directory::{DescriptorDirectory, DescriptorNode};
-use crate::{hooks, storage::volume_config::on_object_access};
+use crate::descriptor_registry::{DescriptorNode, DescriptorRegistry};
+use crate::{storage::volume_config::on_object_access, worker};
 use lagodb_core::diag::PgReportError;
 use lagodb_core::runtime_api::{
     OBJECT_ACCESS_EVENTS_KNOWN, ObjectAccessHookDescriptor,
@@ -12,13 +12,12 @@ use lagodb_core::runtime_api::{
 };
 use pgrx::{pg_guard, pg_sys};
 
-type ObjectAccessHookDirectory = DescriptorDirectory<ObjectAccessHookDescriptor>;
-type ObjectAccessStrHookDirectory =
-    DescriptorDirectory<ObjectAccessStrHookDescriptor>;
+type ObjectAccessHookRegistry = DescriptorRegistry<ObjectAccessHookDescriptor>;
+type ObjectAccessStrHookRegistry = DescriptorRegistry<ObjectAccessStrHookDescriptor>;
 
 thread_local! {
-    static OBJECT_ACCESS_HOOKS: ObjectAccessHookDirectory = const { DescriptorDirectory::new() };
-    static OBJECT_ACCESS_STR_HOOKS: ObjectAccessStrHookDirectory = const { DescriptorDirectory::new() };
+    static OBJECT_ACCESS_HOOKS: ObjectAccessHookRegistry = const { DescriptorRegistry::new() };
+    static OBJECT_ACCESS_STR_HOOKS: ObjectAccessStrHookRegistry = const { DescriptorRegistry::new() };
 }
 
 static PREV_OBJECT_ACCESS_HOOK: OnceLock<pg_sys::object_access_hook_type> =
@@ -85,9 +84,9 @@ pub(crate) fn prepare_hooks(
 
 pub(crate) fn commit_hooks(prepared: PreparedObjectAccessHooks) {
     let install =
-        OBJECT_ACCESS_HOOKS.with(|directory| directory.commit(prepared.nodes));
-    let install_str = OBJECT_ACCESS_STR_HOOKS
-        .with(|directory| directory.commit(prepared.str_nodes));
+        OBJECT_ACCESS_HOOKS.with(|registry| registry.commit(prepared.nodes));
+    let install_str =
+        OBJECT_ACCESS_STR_HOOKS.with(|registry| registry.commit(prepared.str_nodes));
     if install {
         install_router();
     }
@@ -110,14 +109,14 @@ fn install_router() {
 
 #[cfg(test)]
 pub(crate) fn registered_hook_counts() -> (usize, usize) {
-    fn ordinary(directory: &ObjectAccessHookDirectory) -> usize {
+    fn ordinary(registry: &ObjectAccessHookRegistry) -> usize {
         let mut count = 0;
-        directory.snapshot().for_each(|_| count += 1);
+        registry.snapshot().for_each(|_| count += 1);
         count
     }
-    fn string(directory: &ObjectAccessStrHookDirectory) -> usize {
+    fn string(registry: &ObjectAccessStrHookRegistry) -> usize {
         let mut count = 0;
-        directory.snapshot().for_each(|_| count += 1);
+        registry.snapshot().for_each(|_| count += 1);
         count
     }
     (
@@ -166,7 +165,7 @@ unsafe extern "C-unwind" fn object_access_router(
 
         if access == pg_sys::ObjectAccessType::OAT_DROP
             && class_id == pg_sys::ExtensionRelationId
-            && let Err(error) = hooks::drop_extension_workers(object_id)
+            && let Err(error) = worker::drop_extension_workers(object_id)
         {
             PgReportError::from_domain_error(error).report();
         }
@@ -174,7 +173,7 @@ unsafe extern "C-unwind" fn object_access_router(
             PgReportError::from_domain_error(error).report();
         }
         if let Some(event) = object_access_event_mask(access) {
-            let hooks = OBJECT_ACCESS_HOOKS.with(|directory| directory.snapshot());
+            let hooks = OBJECT_ACCESS_HOOKS.with(|registry| registry.snapshot());
             hooks.for_each_if(
                 |descriptor| {
                     descriptor.event_mask & event != 0
@@ -212,8 +211,7 @@ unsafe extern "C-unwind" fn object_access_str_router(
         }
         let mut denied = namespace_result(access, arg) == Some(false);
         if let Some(event) = object_access_event_mask(access) {
-            let hooks =
-                OBJECT_ACCESS_STR_HOOKS.with(|directory| directory.snapshot());
+            let hooks = OBJECT_ACCESS_STR_HOOKS.with(|registry| registry.snapshot());
             hooks.for_each_if(
                 |descriptor| {
                     descriptor.event_mask & event != 0
@@ -320,27 +318,25 @@ mod tests {
     }
 
     #[test]
-    fn directories_request_installation_only_for_first_descriptor() {
+    fn registries_request_installation_only_for_first_descriptor() {
         let class_id = pg_sys::Oid::from(1259);
-        let directory = ObjectAccessHookDirectory::new();
-        assert!(directory.register(descriptor(OBJECT_ACCESS_DROP, class_id)));
-        assert!(!directory.register(descriptor(OBJECT_ACCESS_DROP, class_id)));
+        let registry = ObjectAccessHookRegistry::new();
+        assert!(registry.register(descriptor(OBJECT_ACCESS_DROP, class_id)));
+        assert!(!registry.register(descriptor(OBJECT_ACCESS_DROP, class_id)));
 
-        let str_directory = ObjectAccessStrHookDirectory::new();
-        assert!(str_directory.register(str_descriptor(OBJECT_ACCESS_DROP, class_id)));
-        assert!(
-            !str_directory.register(str_descriptor(OBJECT_ACCESS_DROP, class_id))
-        );
+        let str_registry = ObjectAccessStrHookRegistry::new();
+        assert!(str_registry.register(str_descriptor(OBJECT_ACCESS_DROP, class_id)));
+        assert!(!str_registry.register(str_descriptor(OBJECT_ACCESS_DROP, class_id)));
     }
 
     #[test]
     fn snapshot_filters_event_and_class() {
         let relation_class = pg_sys::Oid::from(1259);
         let procedure_class = pg_sys::Oid::from(1255);
-        let directory = ObjectAccessHookDirectory::new();
-        directory.append(descriptor(OBJECT_ACCESS_DROP, relation_class));
-        directory.append(descriptor(OBJECT_ACCESS_POST_CREATE, pg_sys::InvalidOid));
-        let snapshot = directory.snapshot();
+        let registry = ObjectAccessHookRegistry::new();
+        registry.append(descriptor(OBJECT_ACCESS_DROP, relation_class));
+        registry.append(descriptor(OBJECT_ACCESS_POST_CREATE, pg_sys::InvalidOid));
+        let snapshot = registry.snapshot();
 
         let mut matches = 0;
         let event = object_access_event_mask(pg_sys::ObjectAccessType::OAT_DROP)
@@ -368,10 +364,10 @@ mod tests {
     #[test]
     fn snapshot_excludes_recursive_append_for_both_hook_families() {
         let class_id = pg_sys::Oid::from(1259);
-        let directory = ObjectAccessHookDirectory::new();
-        directory.append(descriptor(OBJECT_ACCESS_DROP, class_id));
-        let snapshot = directory.snapshot();
-        directory.append(descriptor(OBJECT_ACCESS_DROP, class_id));
+        let registry = ObjectAccessHookRegistry::new();
+        registry.append(descriptor(OBJECT_ACCESS_DROP, class_id));
+        let snapshot = registry.snapshot();
+        registry.append(descriptor(OBJECT_ACCESS_DROP, class_id));
         let mut ordinary = 0;
         let event = object_access_event_mask(pg_sys::ObjectAccessType::OAT_DROP)
             .expect("known object-access event");
@@ -385,10 +381,10 @@ mod tests {
         );
         assert_eq!(ordinary, 1);
 
-        let str_directory = ObjectAccessStrHookDirectory::new();
-        str_directory.append(str_descriptor(OBJECT_ACCESS_DROP, class_id));
-        let str_snapshot = str_directory.snapshot();
-        str_directory.append(str_descriptor(OBJECT_ACCESS_DROP, class_id));
+        let str_registry = ObjectAccessStrHookRegistry::new();
+        str_registry.append(str_descriptor(OBJECT_ACCESS_DROP, class_id));
+        let str_snapshot = str_registry.snapshot();
+        str_registry.append(str_descriptor(OBJECT_ACCESS_DROP, class_id));
         let mut string = 0;
         str_snapshot.for_each_if(
             |descriptor| {
@@ -436,17 +432,17 @@ mod tests {
         let mut first_context = 1_u8;
         let mut second_context = 2_u8;
 
-        let directory = ObjectAccessHookDirectory::new();
+        let registry = ObjectAccessHookRegistry::new();
         let mut first = descriptor(OBJECT_ACCESS_DROP, class_id);
         first.context = std::ptr::from_mut(&mut first_context).cast();
         let mut second = descriptor(OBJECT_ACCESS_DROP, class_id);
         second.context = std::ptr::from_mut(&mut second_context).cast();
-        directory.append(first);
-        directory.append(second);
+        registry.append(first);
+        registry.append(second);
         let mut ordinary_order = Vec::new();
         let event = object_access_event_mask(pg_sys::ObjectAccessType::OAT_DROP)
             .expect("known object-access event");
-        directory.snapshot().for_each_if(
+        registry.snapshot().for_each_if(
             |descriptor| {
                 descriptor.event_mask & event != 0
                     && (descriptor.class_id == pg_sys::InvalidOid
@@ -456,15 +452,15 @@ mod tests {
         );
         assert_eq!(ordinary_order, vec![first.context, second.context]);
 
-        let str_directory = ObjectAccessStrHookDirectory::new();
+        let str_registry = ObjectAccessStrHookRegistry::new();
         let mut first = str_descriptor(OBJECT_ACCESS_DROP, class_id);
         first.context = std::ptr::from_mut(&mut first_context).cast();
         let mut second = str_descriptor(OBJECT_ACCESS_DROP, class_id);
         second.context = std::ptr::from_mut(&mut second_context).cast();
-        str_directory.append(first);
-        str_directory.append(second);
+        str_registry.append(first);
+        str_registry.append(second);
         let mut string_order = Vec::new();
-        str_directory.snapshot().for_each_if(
+        str_registry.snapshot().for_each_if(
             |descriptor| {
                 descriptor.event_mask & event != 0
                     && (descriptor.class_id == pg_sys::InvalidOid

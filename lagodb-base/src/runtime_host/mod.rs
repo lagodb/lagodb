@@ -1,25 +1,28 @@
-//! Publisher of the unified runtime API.
+//! Host implementation and publisher for `lagodb_core::runtime_api`.
 //!
-//! Registration transaction ownership and maintenance-provider storage live in
-//! focused submodules. This module only assembles the exact-build runtime
-//! function table and publishes it through PostgreSQL's rendezvous variable.
+//! Registration transaction ownership lives in a focused submodule. Capability
+//! registries remain with the subsystems that execute them; this module only
+//! assembles the exact-build runtime function table and publishes it through
+//! PostgreSQL's rendezvous variable.
 
-mod maintenance;
 mod registration;
-mod storage_volume;
-pub(crate) mod table_scan_registry;
 
 use std::ffi::{CStr, c_char, c_void};
+use std::mem::size_of;
 
 use lagodb_core::runtime_api::{
     RuntimeApi, STAGE_WORKER_WAKEUP_INVALID_REQUEST,
     STAGE_WORKER_WAKEUP_LOCATOR_NOT_FOUND, STAGE_WORKER_WAKEUP_OK,
-    STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED, rendezvous_slot,
+    STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED, StorageVolumeRouteOutput,
+    VOLUME_ROUTE_ERROR, VOLUME_ROUTE_INVALID_REQUEST, VOLUME_ROUTE_NOT_FOUND,
+    VOLUME_ROUTE_OK, rendezvous_slot,
 };
-use pgrx::{pg_guard, pg_sys};
+use lagodb_core::storage::volume::StorageVolumeId;
+use pgrx::{PgMemoryContexts, pg_guard, pg_sys};
 
-use crate::{gucs, lifecycle, object_access, process_utility, registry, worker};
-use storage_volume::resolve_storage_volume_route;
+use crate::maintenance;
+use crate::storage::volume_config::resolve_route;
+use crate::{gucs, object_access, process_utility, runtime_is_preloaded, worker};
 
 #[pg_guard]
 unsafe extern "C-unwind" fn customscan_mode() -> u32 {
@@ -31,7 +34,7 @@ unsafe extern "C-unwind" fn stage_worker_wakeup(
     extension_name: *const c_char,
     worker_name: *const c_char,
 ) -> u32 {
-    if worker::ensure_preloaded().is_err() {
+    if !runtime_is_preloaded() {
         return STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED;
     }
     if extension_name.is_null() || worker_name.is_null() {
@@ -51,17 +54,55 @@ unsafe extern "C-unwind" fn stage_worker_wakeup(
     let Ok(worker_name) = worker_name.to_str() else {
         return STAGE_WORKER_WAKEUP_INVALID_REQUEST;
     };
-    let Some(worker_id) = registry::resolve_worker_id(extension_name, worker_name)
+    let Some(worker_id) = worker::resolve_worker_id(extension_name, worker_name)
         .unwrap_or_else(|error| error.report())
     else {
         return STAGE_WORKER_WAKEUP_LOCATOR_NOT_FOUND;
     };
-    lifecycle::request_wakeup(worker_id);
+    worker::stage_worker_wakeup(worker_id);
     STAGE_WORKER_WAKEUP_OK
 }
 
+#[pg_guard]
+unsafe extern "C-unwind" fn resolve_storage_volume_route(
+    volume_id: u64,
+    output: *mut StorageVolumeRouteOutput,
+) -> u32 {
+    let Some(output) = (unsafe { output.as_mut() }) else {
+        return VOLUME_ROUTE_INVALID_REQUEST;
+    };
+    *output = StorageVolumeRouteOutput::default();
+    let Ok(volume_id) = StorageVolumeId::new(volume_id) else {
+        output.error_message = unsafe {
+            PgMemoryContexts::CurrentMemoryContext
+                .pstrdup("storage volume id is outside the valid range")
+        };
+        return VOLUME_ROUTE_INVALID_REQUEST;
+    };
+    match resolve_route(volume_id) {
+        Ok(Some(route)) => {
+            output.object_namespace = unsafe {
+                PgMemoryContexts::CurrentMemoryContext
+                    .pstrdup(route.object_namespace())
+            };
+            output.effective_base_uri = unsafe {
+                PgMemoryContexts::CurrentMemoryContext
+                    .pstrdup(route.effective_base_uri())
+            };
+            VOLUME_ROUTE_OK
+        }
+        Ok(None) => VOLUME_ROUTE_NOT_FOUND,
+        Err(error) => {
+            let message = error.diagnostic_message();
+            output.error_message =
+                unsafe { PgMemoryContexts::CurrentMemoryContext.pstrdup(&message) };
+            VOLUME_ROUTE_ERROR
+        }
+    }
+}
+
 static RUNTIME_API: RuntimeApi = RuntimeApi {
-    struct_size: std::mem::size_of::<RuntimeApi>() as u32,
+    struct_size: size_of::<RuntimeApi>() as u32,
     register_provider: registration::register_provider,
     has_providers: maintenance::has_providers,
     provider_for_am: maintenance::provider_for_am,

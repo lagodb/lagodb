@@ -1,4 +1,4 @@
-//! Append-only backend-local directories for stable descriptor snapshots.
+//! Append-only backend-local registries for stable descriptor snapshots.
 
 use std::cell::Cell;
 use std::ops::ControlFlow;
@@ -18,12 +18,12 @@ impl<T: Copy> DescriptorNode<T> {
     }
 }
 
-pub(crate) struct DescriptorDirectory<T: Copy> {
+pub(crate) struct DescriptorRegistry<T: Copy> {
     head: Cell<*const DescriptorNode<T>>,
     tail: Cell<*const DescriptorNode<T>>,
 }
 
-impl<T: Copy> DescriptorDirectory<T> {
+impl<T: Copy> DescriptorRegistry<T> {
     pub(crate) const fn new() -> Self {
         Self {
             head: Cell::new(ptr::null()),
@@ -38,7 +38,7 @@ impl<T: Copy> DescriptorDirectory<T> {
             self.head.set(node);
         } else {
             // SAFETY: the tail is a backend-lifetime node published by this
-            // single-threaded directory.
+            // single-threaded registry.
             unsafe { (*tail).next.set(node) };
         }
     }

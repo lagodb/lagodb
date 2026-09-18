@@ -1,28 +1,33 @@
 //! Runtime-owned `ProcessUtility_hook` router.
 
+mod consumer;
 mod copy_route;
 mod full_router;
 
 use std::ffi::{c_char, c_void};
 use std::sync::OnceLock;
 
-use crate::descriptor_directory::{
-    DescriptorDirectory, DescriptorNode, DescriptorSnapshot,
+use crate::descriptor_registry::{
+    DescriptorNode, DescriptorRegistry, DescriptorSnapshot,
 };
 use lagodb_core::diag::ReportableError;
 use lagodb_core::runtime_api::UtilityHookDescriptor;
 use pgrx::{pg_guard, pg_sys};
 
-use crate::hooks;
+use crate::{storage::volume_config, worker};
+
+pub(crate) use consumer::{
+    PreparedUtilityConsumers, commit_consumers, prepare_consumers,
+};
 
 static PREV_PROCESS_UTILITY: OnceLock<pg_sys::ProcessUtility_hook_type> =
     OnceLock::new();
 
-type UtilityHookDirectory = DescriptorDirectory<UtilityHookDescriptor>;
+type UtilityHookRegistry = DescriptorRegistry<UtilityHookDescriptor>;
 
 pub(crate) struct PreparedUtilityHooks {
     // Each node is allocated before the runtime registration transaction is
-    // committed. The box keeps its address stable while the directory stores
+    // committed. The box keeps its address stable while the registry stores
     // a raw backend-lifetime pointer; commit therefore cannot allocate or
     // publish only part of this prepared batch.
     #[allow(clippy::vec_box)]
@@ -62,7 +67,7 @@ impl UtilityHookSnapshot {
 }
 
 thread_local! {
-    static UTILITY_HOOKS: UtilityHookDirectory = const { DescriptorDirectory::new() };
+    static UTILITY_HOOKS: UtilityHookRegistry = const { DescriptorRegistry::new() };
 }
 
 fn valid_descriptor(descriptor: &UtilityHookDescriptor) -> bool {
@@ -88,16 +93,16 @@ pub(crate) fn prepare_hooks(
 }
 
 pub(crate) fn commit_hooks(prepared: PreparedUtilityHooks) {
-    UTILITY_HOOKS.with(|directory| {
-        let _ = directory.commit(prepared.nodes);
+    UTILITY_HOOKS.with(|registry| {
+        let _ = registry.commit(prepared.nodes);
     });
 }
 
 #[cfg(test)]
 pub(crate) fn registered_hook_count() -> usize {
-    UTILITY_HOOKS.with(|directory| {
+    UTILITY_HOOKS.with(|registry| {
         let mut count = 0;
-        directory.snapshot().for_each(|_| count += 1);
+        registry.snapshot().for_each(|_| count += 1);
         count
     })
 }
@@ -145,13 +150,13 @@ mod tests {
 
     #[test]
     fn snapshot_excludes_descriptors_appended_later() {
-        let directory = UtilityHookDirectory::new();
-        directory.append(descriptor(pg_sys::NodeTag::T_CommentStmt));
+        let registry = UtilityHookRegistry::new();
+        registry.append(descriptor(pg_sys::NodeTag::T_CommentStmt));
         let snapshot = UtilityHookSnapshot::new(
-            directory.snapshot(),
+            registry.snapshot(),
             pg_sys::NodeTag::T_CommentStmt,
         );
-        directory.append(descriptor(pg_sys::NodeTag::T_CommentStmt));
+        registry.append(descriptor(pg_sys::NodeTag::T_CommentStmt));
 
         let mut count = 0;
         snapshot.for_each(|_| count += 1);
@@ -161,19 +166,19 @@ mod tests {
 
     #[test]
     fn snapshot_filters_by_node_tag() {
-        let directory = UtilityHookDirectory::new();
-        directory.append(descriptor(pg_sys::NodeTag::T_CommentStmt));
+        let registry = UtilityHookRegistry::new();
+        registry.append(descriptor(pg_sys::NodeTag::T_CommentStmt));
 
         assert!(
             UtilityHookSnapshot::new(
-                directory.snapshot(),
+                registry.snapshot(),
                 pg_sys::NodeTag::T_CommentStmt,
             )
             .has_matching_hooks()
         );
         assert!(
             !UtilityHookSnapshot::new(
-                directory.snapshot(),
+                registry.snapshot(),
                 pg_sys::NodeTag::T_CreateStmt,
             )
             .has_matching_hooks()
@@ -182,22 +187,19 @@ mod tests {
 
     #[test]
     fn snapshot_runs_matching_hooks_in_fifo_registration_order() {
-        let directory = UtilityHookDirectory::new();
+        let registry = UtilityHookRegistry::new();
         let mut first_context = 1_u8;
         let mut second_context = 2_u8;
         let mut first = descriptor(pg_sys::NodeTag::T_CommentStmt);
         first.context = std::ptr::from_mut(&mut first_context).cast();
         let mut second = descriptor(pg_sys::NodeTag::T_CommentStmt);
         second.context = std::ptr::from_mut(&mut second_context).cast();
-        directory.append(first);
-        directory.append(second);
+        registry.append(first);
+        registry.append(second);
 
         let mut order = Vec::new();
-        UtilityHookSnapshot::new(
-            directory.snapshot(),
-            pg_sys::NodeTag::T_CommentStmt,
-        )
-        .for_each(|descriptor| order.push(descriptor.context));
+        UtilityHookSnapshot::new(registry.snapshot(), pg_sys::NodeTag::T_CommentStmt)
+            .for_each(|descriptor| order.push(descriptor.context));
 
         assert_eq!(order, vec![first.context, second.context]);
     }
@@ -351,15 +353,14 @@ unsafe extern "C-unwind" fn process_utility_router(
 
         // Lifecycle preflight is deliberately first and is a no-op unless the
         // runtime was initialized from shared_preload_libraries.
-        hooks::preflight(target_node);
+        worker::preflight(target_node);
 
         let tag = (*target_node).type_;
         let hooks = UTILITY_HOOKS
-            .with(|directory| UtilityHookSnapshot::new(directory.snapshot(), tag));
+            .with(|registry| UtilityHookSnapshot::new(registry.snapshot(), tag));
         let has_matching_hooks = hooks.has_matching_hooks();
-        let has_matching_consumers =
-            crate::utility_consumer::has_registered_consumer(tag);
-        let runtime_handles = crate::storage::volume_config::handles_utility(tag);
+        let has_matching_consumers = consumer::has_registered_consumer(tag);
+        let runtime_handles = volume_config::handles_utility(tag);
         let copy_from_route = tag == pg_sys::NodeTag::T_CopyStmt
             && (*target_node.cast::<pg_sys::CopyStmt>()).is_from;
         let may_consume_vacuum = tag == pg_sys::NodeTag::T_VacuumStmt;
@@ -403,7 +404,7 @@ unsafe extern "C-unwind" fn process_utility_router(
         let target_node = args.target_node();
 
         if runtime_handles {
-            crate::storage::volume_config::utility_pre(
+            volume_config::utility_pre(
                 target_node,
                 context == pg_sys::ProcessUtilityContext::PROCESS_UTILITY_TOPLEVEL,
             );
@@ -423,8 +424,7 @@ unsafe extern "C-unwind" fn process_utility_router(
         let target_node = args.target_node();
         let final_tag = (*target_node).type_;
         let may_consume_vacuum = final_tag == pg_sys::NodeTag::T_VacuumStmt;
-        let selected_consumer =
-            crate::utility_consumer::select(final_tag, args).report_unwrap();
+        let selected_consumer = consumer::select(final_tag, args).report_unwrap();
         let consumer_consumed = selected_consumer.is_some();
         if final_tag == pg_sys::NodeTag::T_CopyStmt && !consumer_consumed {
             // SAFETY: `final_tag` proves that the current utility node is the
@@ -459,7 +459,7 @@ unsafe extern "C-unwind" fn process_utility_router(
                 );
             });
             if runtime_handles {
-                crate::storage::volume_config::utility_post(original_node);
+                volume_config::utility_post(original_node);
             }
         }
     }

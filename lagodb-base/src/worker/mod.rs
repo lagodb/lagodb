@@ -1,32 +1,40 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use pgrx::bgworkers::BackgroundWorkerBuilder;
 use pgrx::prelude::*;
 
-use crate::error::{LagodbError, LagodbResult};
-
 mod bgworker;
+mod catalog;
 mod control;
 mod coordinator;
+mod error;
 mod extension;
 mod injection;
+mod lifecycle;
 mod lock;
 #[cfg(feature = "pg_test")]
 mod pg_test;
+mod registry;
 mod scheduler;
 mod signals;
+mod sql_api;
 mod state;
 mod status;
 mod store;
 mod supervisor;
-#[cfg(test)]
-mod tests;
 
+pub(crate) use error::WorkerError;
+pub(crate) use lifecycle::{
+    drop_extension_workers, init as init_lifecycle, preflight,
+    request_wakeup as stage_worker_wakeup,
+};
 pub(crate) use lock::DatabaseLifecycleLock;
+pub(crate) use registry::resolve_worker_id;
 pub(crate) use state::{INVALID_OID, MAX_WORKER_NAME_BYTES, WorkerKey};
 pub(crate) use status::{ProcessStatus, WorkerStatus};
 use store::{COORDINATOR_TABLE, SHARED_STATE, Store, WORKER_TABLE};
+
+pub(crate) type WorkerResult<T> = Result<T, WorkerError>;
 
 const SUPERVISOR_FUNCTION: &str = "lagodb_base_supervisor_main";
 pub(super) const COORDINATOR_FUNCTION: &str = "lagodb_base_coordinator_main";
@@ -36,7 +44,6 @@ pub(super) const COORDINATOR_TYPE: &str = "lagodb coordinator";
 pub(super) const WORKER_TYPE: &str = "lagodb worker";
 pub(super) const CAPACITY_RETRY: Duration = Duration::from_millis(100);
 pub(super) const SUPERVISOR_ERROR_RETRY: Duration = Duration::from_secs(5);
-static PRELOADED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn init_shared_memory() {
     pgrx::pg_shmem_init!(SHARED_STATE);
@@ -49,8 +56,6 @@ pub(crate) fn init() {
         return;
     }
 
-    PRELOADED.store(true, Ordering::Release);
-
     let _keep_supervisor = supervisor_main as extern "C-unwind" fn(pg_sys::Datum);
     let _keep_coordinator = coordinator_main as extern "C-unwind" fn(pg_sys::Datum);
     let _keep_worker = worker_main as extern "C-unwind" fn(pg_sys::Datum);
@@ -62,18 +67,6 @@ pub(crate) fn init() {
         .enable_spi_access()
         .set_restart_time(Some(Duration::from_secs(5)))
         .load();
-}
-
-pub(crate) fn ensure_preloaded() -> LagodbResult<()> {
-    if is_preloaded() {
-        Ok(())
-    } else {
-        Err(LagodbError::RuntimeNotPreloaded)
-    }
-}
-
-pub(crate) fn is_preloaded() -> bool {
-    PRELOADED.load(Ordering::Acquire)
 }
 
 pub(crate) fn wake_worker(key: WorkerKey) -> bool {

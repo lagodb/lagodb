@@ -1,16 +1,18 @@
+//! Persistent worker registration and entrypoint resolution.
+
 use std::ffi::{CStr, c_char};
 
 use lagodb_core::catalog;
 use pgrx::{IntoDatum, pg_sys};
 
-use crate::catalog::worker::{
+use super::catalog::{
     CatalogName, NewWorkerRegistration, WorkerCatalog, WorkerId,
     WorkerRegistrationRow,
 };
-use crate::error::{
-    LagodbError, LagodbResult, WorkerCatalogOperation as CatalogOperation,
-    WorkerCatalogResultExt,
+use super::error::{
+    WorkerCatalogOperation as CatalogOperation, WorkerCatalogResultExt,
 };
+use super::{WorkerError, WorkerResult};
 
 struct WorkerEntrypointContract;
 
@@ -35,7 +37,7 @@ pub(crate) struct WorkerRegistration {
     pub(crate) function_oid: pg_sys::Oid,
 }
 
-pub(crate) fn load_all() -> LagodbResult<Vec<WorkerRegistration>> {
+pub(crate) fn load_all() -> WorkerResult<Vec<WorkerRegistration>> {
     let catalog = WorkerCatalog::open(pg_sys::AccessShareLock as _)?;
     let rows = catalog.rows()?;
     let mut registrations = Vec::with_capacity(rows.len());
@@ -48,7 +50,7 @@ pub(crate) fn load_all() -> LagodbResult<Vec<WorkerRegistration>> {
     Ok(registrations)
 }
 
-pub(crate) fn runtime_catalog_exists() -> LagodbResult<bool> {
+pub(crate) fn runtime_catalog_exists() -> WorkerResult<bool> {
     // SAFETY: called inside the coordinator's lifecycle transaction. The
     // missing-ok extension lookup and the worker-table OID lookup do not open
     // or lock the runtime worker relation.
@@ -86,7 +88,7 @@ pub(crate) fn database_is_template(database_oid: u32) -> bool {
 }
 
 pub(crate) fn load_if_runtime_installed()
--> LagodbResult<Option<Vec<WorkerRegistration>>> {
+-> WorkerResult<Option<Vec<WorkerRegistration>>> {
     // SAFETY: called inside the coordinator's database transaction. The
     // missing-ok lookup does not raise ERROR for databases where
     // lagodb_base is not installed.
@@ -99,7 +101,7 @@ pub(crate) fn load_if_runtime_installed()
     }
 }
 
-pub(crate) fn load_one(worker_id: i32) -> LagodbResult<Option<WorkerRegistration>> {
+pub(crate) fn load_one(worker_id: i32) -> WorkerResult<Option<WorkerRegistration>> {
     let catalog = WorkerCatalog::open(pg_sys::AccessShareLock as _)?;
     let Some(row) = catalog.row_by_id(WorkerId::new(worker_id))? else {
         return Ok(None);
@@ -110,7 +112,7 @@ pub(crate) fn load_one(worker_id: i32) -> LagodbResult<Option<WorkerRegistration
 pub(crate) fn resolve_worker_id(
     extension_name: &CStr,
     worker_name: &str,
-) -> LagodbResult<Option<i32>> {
+) -> WorkerResult<Option<i32>> {
     let catalog = WorkerCatalog::open(pg_sys::AccessShareLock as _)?;
     catalog
         .worker_id_by_locator(extension_name, worker_name)
@@ -119,14 +121,14 @@ pub(crate) fn resolve_worker_id(
 
 pub(crate) fn delete_extension_registrations(
     extension_name: &CStr,
-) -> LagodbResult<()> {
+) -> WorkerResult<()> {
     WorkerCatalog::open(pg_sys::RowExclusiveLock as _)?
         .delete_by_extension_name(extension_name)
 }
 
 pub(crate) fn extension_has_registrations(
     extension_name: &CStr,
-) -> LagodbResult<bool> {
+) -> WorkerResult<bool> {
     WorkerCatalog::open(pg_sys::AccessShareLock as _)?
         .contains_extension_name(extension_name)
 }
@@ -134,12 +136,12 @@ pub(crate) fn extension_has_registrations(
 pub(crate) fn register(
     worker_name: &str,
     function_oid: pg_sys::Oid,
-) -> LagodbResult<i32> {
+) -> WorkerResult<i32> {
     if !unsafe { pg_sys::creating_extension } {
-        return Err(LagodbError::WorkerRegistrationRequiresExtensionScript);
+        return Err(WorkerError::WorkerRegistrationRequiresExtensionScript);
     }
     if worker_name.is_empty() || worker_name.len() > 255 {
-        return Err(LagodbError::InvalidWorkerName);
+        return Err(WorkerError::InvalidWorkerName);
     }
 
     let extension_oid = unsafe { pg_sys::CurrentExtensionObject };
@@ -155,31 +157,31 @@ pub(crate) fn register(
     Ok(worker_id.as_i32())
 }
 
-pub(crate) fn deregister(worker_name: &str) -> LagodbResult<Option<i32>> {
+pub(crate) fn deregister(worker_name: &str) -> WorkerResult<Option<i32>> {
     let catalog = WorkerCatalog::open(pg_sys::RowExclusiveLock as _)?;
     catalog
         .delete_by_name(worker_name)
         .map(|worker_id| worker_id.map(WorkerId::as_i32))
 }
 
-pub(crate) fn deregister_by_id(worker_id: i32) -> LagodbResult<bool> {
+pub(crate) fn deregister_by_id(worker_id: i32) -> WorkerResult<bool> {
     WorkerCatalog::open(pg_sys::RowExclusiveLock as _)?
         .delete_by_id(WorkerId::new(worker_id))
 }
 
-pub(crate) fn deregister_self(worker_id: i32) -> LagodbResult<()> {
+pub(crate) fn deregister_self(worker_id: i32) -> WorkerResult<()> {
     let deleted = WorkerCatalog::open(pg_sys::RowExclusiveLock as _)?
         .delete_by_id(WorkerId::new(worker_id))?;
     if deleted {
         Ok(())
     } else {
-        Err(LagodbError::WorkerIdNotRegistered { worker_id })
+        Err(WorkerError::WorkerIdNotRegistered { worker_id })
     }
 }
 
 fn resolve_registration(
     row: WorkerRegistrationRow,
-) -> LagodbResult<Option<WorkerRegistration>> {
+) -> WorkerResult<Option<WorkerRegistration>> {
     let Some(extension_oid) = extension_oid_by_name(row.extension_name.as_c_str())?
     else {
         return Ok(None);
@@ -199,7 +201,7 @@ fn resolve_registration(
     }))
 }
 
-fn extension_oid_by_name(extension_name: &CStr) -> LagodbResult<Option<pg_sys::Oid>> {
+fn extension_oid_by_name(extension_name: &CStr) -> WorkerResult<Option<pg_sys::Oid>> {
     // SAFETY: extension_name is a live, NUL-terminated catalog name for this
     // synchronous lookup; missing_ok prevents an absent extension from ERROR.
     let oid = unsafe { pg_sys::get_extension_oid(extension_name.as_ptr(), true) };
@@ -209,7 +211,7 @@ fn extension_oid_by_name(extension_name: &CStr) -> LagodbResult<Option<pg_sys::O
 fn resolve_entrypoint(
     schema_name: &CStr,
     function_name: &CStr,
-) -> LagodbResult<Option<pg_sys::Oid>> {
+) -> WorkerResult<Option<pg_sys::Oid>> {
     let schema_oid = catalog::get_namespace_oid(schema_name, true)
         .map_worker_catalog_err(CatalogOperation::ResolveEntrypoint)?;
     if schema_oid == pg_sys::InvalidOid {
@@ -245,7 +247,7 @@ fn resolve_entrypoint(
 
 fn validate_entrypoint(
     function_oid: pg_sys::Oid,
-) -> LagodbResult<(CatalogName, CatalogName)> {
+) -> WorkerResult<(CatalogName, CatalogName)> {
     let tuple = unsafe {
         pg_sys::SearchSysCache1(
             pg_sys::SysCacheIdentifier::PROCOID as i32,
@@ -255,7 +257,7 @@ fn validate_entrypoint(
         )
     };
     if tuple.is_null() {
-        return Err(LagodbError::EntryPointMissing);
+        return Err(WorkerError::EntryPointMissing);
     }
     // SAFETY: PROCOID returned a pinned pg_proc tuple that remains live until
     // ReleaseSysCache below.
@@ -263,7 +265,7 @@ fn validate_entrypoint(
     if !WorkerEntrypointContract::accepts(procedure) {
         // SAFETY: tuple is the pinned syscache tuple returned above.
         unsafe { pg_sys::ReleaseSysCache(tuple) };
-        return Err(LagodbError::InvalidEntryPointSignature);
+        return Err(WorkerError::InvalidEntryPointSignature);
     }
     // SAFETY: procedure is a live pg_proc tuple and pronamespace is its valid
     // namespace OID. PostgreSQL returns a palloc'd copy or NULL.
@@ -271,7 +273,7 @@ fn validate_entrypoint(
     if namespace.is_null() {
         // SAFETY: tuple is the pinned syscache tuple returned above.
         unsafe { pg_sys::ReleaseSysCache(tuple) };
-        return Err(LagodbError::EntryPointSchemaMissing);
+        return Err(WorkerError::EntryPointSchemaMissing);
     }
     // SAFETY: namespace is the live, NUL-terminated result from
     // get_namespace_name and is copied before being freed.
@@ -287,12 +289,12 @@ fn validate_entrypoint(
     Ok((schema_name, function_name))
 }
 
-fn current_extension_name(extension_oid: pg_sys::Oid) -> LagodbResult<CatalogName> {
+fn current_extension_name(extension_oid: pg_sys::Oid) -> WorkerResult<CatalogName> {
     // SAFETY: extension_oid is CurrentExtensionObject during registration;
     // PostgreSQL returns a palloc'd copy or NULL.
     let name_ptr = unsafe { pg_sys::get_extension_name(extension_oid) };
     if name_ptr.is_null() {
-        Err(LagodbError::RegisteringExtensionMissing)
+        Err(WorkerError::RegisteringExtensionMissing)
     } else {
         // SAFETY: get_extension_name returned a live palloc'd C string.
         let name = CatalogName::from_c_str(unsafe { CStr::from_ptr(name_ptr) });
