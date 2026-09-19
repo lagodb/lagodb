@@ -277,7 +277,7 @@ pub trait AmScan {
         Self: Sized,
     {
         let _ = rel;
-        Ok(0)
+        unsupported_callback("parallel table scan")
     }
 
     fn parallelscan_initialize(
@@ -288,7 +288,7 @@ pub trait AmScan {
         Self: Sized,
     {
         let _ = (rel, pscan);
-        Ok(0)
+        unsupported_callback("parallel table scan")
     }
 
     fn parallelscan_reinitialize(
@@ -299,7 +299,7 @@ pub trait AmScan {
         Self: Sized,
     {
         let _ = (rel, pscan);
-        Ok(())
+        unsupported_callback("parallel table scan")
     }
 }
 

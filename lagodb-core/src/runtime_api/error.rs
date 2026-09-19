@@ -129,6 +129,26 @@ impl CallbackErrorReport {
         // Preserve the caller's context across a caught PostgreSQL ERROR;
         // error handling may temporarily switch CurrentMemoryContext.
         let memory_context = unsafe { pg_sys::CurrentMemoryContext };
+        // There are two materially different panic paths here:
+        //
+        // * `pgrx::error!` starts as an ErrorReport panic. If caught here, it
+        //   has not yet entered PostgreSQL's ERROR handler.
+        // * An ERROR raised by a pgrx-wrapped `pg_sys` call first passes
+        //   through PostgreSQL's error handler, which resets
+        //   InterruptHoldoffCount, and is then resumed by pgrx as
+        //   CaughtError::PostgresError.
+        //
+        // This is the provider callback's C ABI error boundary. PgTryBuilder
+        // catches both as Rust panics, performs pgrx's PostgreSQL error-state
+        // cleanup, and lets this function return the error as data. Downstream
+        // query code therefore receives a PgReportError through Result and
+        // must not add another PgTryBuilder merely to propagate it.
+        //
+        // Callers must not span this boundary with a RAII interrupt hold whose
+        // Drop blindly performs RESUME_INTERRUPTS; the owner of such a hold
+        // must also own restoration after the second path. Rust unwinding does
+        // run Drop—the subtlety is that PostgreSQL has already changed the
+        // underlying counter before unwinding begins.
         let result = PgTryBuilder::new(AssertUnwindSafe(operation))
             .catch_others(|error| Err(PgReportError::from_caught(error)))
             .execute();

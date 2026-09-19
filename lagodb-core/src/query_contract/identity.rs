@@ -31,7 +31,9 @@ impl TableScanRouteKind {
     }
 }
 
-/// Stable identity of the PostgreSQL storage object routed to a table scan.
+/// Stable internal provider route retained after planning. For a foreign
+/// table, the name identifies the registered provider callback bundle; it is
+/// not the mutable `pg_foreign_data_wrapper.fdwname` catalog value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TableScanRoute<'a> {
     kind: TableScanRouteKind,

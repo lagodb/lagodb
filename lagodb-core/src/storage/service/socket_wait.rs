@@ -56,6 +56,23 @@ impl SocketWait for PostgresSocketWait {
                 unsafe {
                     pg_sys::ResetLatch(latch.as_ptr());
                 }
+                // Parallel execution holds PostgreSQL interrupts while a
+                // current-thread runtime is live. Return a non-retryable I/O
+                // error so ClientIo poisons the partial protocol exchange and
+                // the worker can unwind to the safe interrupt-service point.
+                // Without the holdoff, preserve PostgreSQL's normal ERROR path.
+                // SAFETY: these backend-local signal flags and holdoff counter
+                // are read on the owning PostgreSQL backend thread.
+                if unsafe {
+                    pg_sys::InterruptHoldoffCount != 0
+                        && (pg_sys::QueryCancelPending != 0
+                            || pg_sys::ProcDiePending != 0)
+                } {
+                    return Err(io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        "storage socket wait deferred a PostgreSQL interrupt",
+                    ));
+                }
                 // A latch can signal either a canceling or a benign PostgreSQL
                 // interrupt. Canceling interrupts unwind through ClientIo::Drop,
                 // which poisons the in-flight protocol connection. Benign

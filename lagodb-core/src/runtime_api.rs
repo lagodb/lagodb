@@ -33,6 +33,7 @@ mod registration;
 mod storage_volume;
 mod table_scan;
 mod table_scan_predicate;
+mod table_scan_worker;
 
 pub use error::*;
 pub use planning::*;
@@ -44,6 +45,7 @@ pub use storage_volume::{
 };
 pub use table_scan::*;
 pub use table_scan_predicate::*;
+pub use table_scan_worker::*;
 
 pub const RUNTIME_API_RENDEZVOUS: &CStr = c"lagodb.runtime_api";
 // The provider descriptor includes capability flags so the router can reject

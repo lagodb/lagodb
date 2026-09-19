@@ -5,12 +5,14 @@ use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use lagodb_core::diag::{PgReportError, SqlStateError};
 use lagodb_core::expr::ExpressionCodecError;
-use lagodb_core::expr::pushdown::{FilterPushdown, PredicatePlan};
+use lagodb_core::expr::pushdown::{
+    FilterPlanningContext, FilterPushdown, PredicatePlan,
+};
 use lagodb_core::plan_data::{PlanDataError, PlanDataReader, PlanDataWriter};
 use lagodb_core::query_contract::{ScanCost, ScanId};
 use lagodb_core::runtime_api::{
     RuntimePredicateCodecError, RuntimePredicateUpdateAction,
-    RuntimePruningPredicate, TABLE_SCAN_PROJECTION_COLUMNS,
+    RuntimePruningPredicate, SourceWorkId, TABLE_SCAN_PROJECTION_COLUMNS,
     TABLE_SCAN_PROJECTION_ROW_COUNT, TableScanPlanningRequest, TableScanRoutes,
     TableScanRuntimePredicate, TableScanStreamRequest, TableScanTaskMetrics,
     TableScanTaskPlanningRequest,
@@ -135,8 +137,20 @@ impl<'a> ScanPlanningContext<'a> {
     }
 
     #[inline]
-    pub const fn effective_user_id(&self) -> pg_sys::Oid {
-        self.request.effective_user_id
+    pub const fn check_as_user_id(&self) -> pg_sys::Oid {
+        self.request.check_as_user_id
+    }
+
+    #[inline]
+    pub fn effective_user_id(&self) -> pg_sys::Oid {
+        let check_as_user_id = self.check_as_user_id();
+        if check_as_user_id == pg_sys::InvalidOid {
+            // SAFETY: planning callbacks run in a PostgreSQL backend with an
+            // established effective user.
+            unsafe { pg_sys::GetUserId() }
+        } else {
+            check_as_user_id
+        }
     }
 
     #[inline]
@@ -148,6 +162,12 @@ impl<'a> ScanPlanningContext<'a> {
     pub fn relation_oid(&self) -> pg_sys::Oid {
         // SAFETY: request borrows PostgreSQL's live RangeTblEntry.
         unsafe { (*self.request.range_table_entry).relid }
+    }
+
+    #[inline]
+    pub fn relation_kind(&self) -> u8 {
+        // SAFETY: request borrows PostgreSQL's live RangeTblEntry.
+        unsafe { (*self.request.range_table_entry).relkind as u8 }
     }
 
     #[inline]
@@ -167,6 +187,14 @@ impl<'a> ScanPlanningContext<'a> {
         // SAFETY: same live RelOptInfo invariant as relation_rows.
         let pages = unsafe { (*self.request.relation).pages } as f64;
         pages * pg_sys::BLCKSZ as f64
+    }
+
+    /// Live PostgreSQL relation-planning state for this synchronous callback.
+    #[inline]
+    pub fn relation(&self) -> &pg_sys::RelOptInfo {
+        // SAFETY: the request borrows the live relation supplied by the
+        // PostgreSQL planning hook for the duration of this callback.
+        unsafe { &*self.request.relation }
     }
 }
 
@@ -432,6 +460,25 @@ pub trait TableScanProvider: Send + Sync + 'static {
         + From<RuntimePredicateCodecError>
         + From<<Self::Filter as FilterPushdown>::Error>;
 
+    /// Return whether this provider owns the supplied valid foreign server.
+    /// The runtime calls this only during foreign-table path planning and only
+    /// for providers that advertise a foreign-data-wrapper route. The server
+    /// may belong to a different provider.
+    fn owns_foreign_server(&self, _server_oid: pg_sys::Oid) -> bool {
+        false
+    }
+
+    /// Construct the predicate planner for this table-scan planning attempt.
+    /// Providers may override this to supply relation-scoped metadata while
+    /// keeping the shared filter contract independent of storage adapters.
+    fn begin_filter_planning(
+        &self,
+        _scan: &ScanPlanningContext<'_>,
+        context: &FilterPlanningContext,
+    ) -> Result<<Self::Filter as FilterPushdown>::Planner, Self::Error> {
+        Self::Filter::begin_filter_planning(context).map_err(Into::into)
+    }
+
     fn plan_scan(
         &self,
         context: &ScanPlanningContext<'_>,
@@ -487,4 +534,101 @@ pub trait TableScanProvider: Send + Sync + 'static {
         planned: &Self::PlannedTasks,
         options: ScanStreamOptions,
     ) -> Result<Self::SerialStream, Self::Error>;
+}
+
+/// Immutable provider payload copied into the parallel query protocol.
+pub struct WorkerSourcePayload {
+    bytes: Box<[u8]>,
+    work_count: u32,
+    task_metrics: TableScanTaskMetrics,
+}
+
+impl WorkerSourcePayload {
+    /// Construct a payload whose work identifiers are exactly
+    /// `0..work_count`. Empty inventories are not parallel-capable.
+    pub fn new(
+        bytes: Box<[u8]>,
+        work_count: u32,
+        task_metrics: TableScanTaskMetrics,
+    ) -> Result<Self, &'static str> {
+        if bytes.is_empty() {
+            return Err("worker source payload is empty");
+        }
+        if work_count == 0 {
+            return Err("worker source has no work units");
+        }
+        Ok(Self {
+            bytes,
+            work_count,
+            task_metrics,
+        })
+    }
+
+    #[inline]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    #[inline]
+    pub const fn work_count(&self) -> u32 {
+        self.work_count
+    }
+
+    pub const fn task_metrics(&self) -> TableScanTaskMetrics {
+        self.task_metrics
+    }
+}
+
+/// Worker-local stream limits. Parallel execution intentionally has no
+/// evolving provider predicate slot: worker payloads are immutable for one
+/// isolated run.
+#[derive(Clone, Copy)]
+pub struct WorkerStreamOptions {
+    maximum_batch_rows: u64,
+}
+
+impl WorkerStreamOptions {
+    pub(super) const fn new(maximum_batch_rows: u64) -> Self {
+        Self { maximum_batch_rows }
+    }
+
+    #[inline]
+    pub const fn maximum_batch_rows(self) -> u64 {
+        self.maximum_batch_rows
+    }
+}
+
+/// Optional worker reconstruction capability for a [`TableScanProvider`].
+///
+/// The leader invokes `prepare_worker_source` only after normal provider task
+/// planning. A worker decodes those exact tasks and opens assigned work IDs;
+/// neither method may choose a snapshot or traverse manifests.
+pub trait TableScanWorkerProvider: TableScanProvider {
+    type WorkerSource: Send + Sync + 'static;
+    type WorkerStream: TableScanStream<Error = Self::Error> + Send + 'static;
+
+    fn prepare_worker_source(
+        &self,
+        bound: &Self::BoundScan,
+        planned: &Self::PlannedTasks,
+    ) -> Result<ScanSupport<WorkerSourcePayload>, Self::Error>;
+
+    /// Reconstruct a worker source over an immutable shared payload.
+    ///
+    /// # Safety
+    ///
+    /// The payload may be retained by `WorkerSource`. The engine guarantees
+    /// that its DSM mapping remains attached until the returned source and all
+    /// streams borrowing it have been released.
+    unsafe fn decode_worker_source(
+        &self,
+        payload: &[u8],
+    ) -> Result<Self::WorkerSource, Self::Error>;
+
+    fn open_worker_stream(
+        &self,
+        source: &Self::WorkerSource,
+        work_ids: &[SourceWorkId],
+        options: WorkerStreamOptions,
+    ) -> Result<Self::WorkerStream, Self::Error>;
 }

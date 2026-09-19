@@ -33,7 +33,9 @@ pub struct TableScanPlanningRequest {
     /// provider-aware conservative negotiation; exact execution remains owned
     /// by the query engine.
     pub predicate_expression: *mut pg_sys::Node,
-    pub effective_user_id: pg_sys::Oid,
+    /// PostgreSQL `checkAsUser` identity. `InvalidOid` means use the current
+    /// effective user; plans must retain that sentinel until execution bind.
+    pub check_as_user_id: pg_sys::Oid,
     pub scan_index: usize,
     pub root: *mut pg_sys::PlannerInfo,
     pub relation: *mut pg_sys::RelOptInfo,
@@ -186,6 +188,16 @@ pub type PlanTableScan = unsafe extern "C-unwind" fn(
     error: *mut CallbackErrorReport,
 ) -> u32;
 
+/// Decide whether an arbitrary valid PostgreSQL foreign server belongs to this
+/// provider. `owned` is written only when the callback returns
+/// [`super::CALLBACK_OK`].
+pub type OwnsForeignServer = unsafe extern "C-unwind" fn(
+    context: *mut c_void,
+    server_oid: pg_sys::Oid,
+    owned: *mut bool,
+    error: *mut CallbackErrorReport,
+) -> u32;
+
 pub type BindTableScan = unsafe extern "C-unwind" fn(
     context: *mut c_void,
     request: *const TableScanBindRequest,
@@ -248,7 +260,9 @@ pub type ReleaseBoundTableScan = unsafe extern "C-unwind" fn(
     error: *mut CallbackErrorReport,
 ) -> u32;
 
-/// PostgreSQL storage objects served by one table-scan callback bundle.
+/// Stable internal routes served by one table-scan callback bundle. A foreign
+/// route name identifies the callback bundle after planning; catalog ownership
+/// is established separately by [`OwnsForeignServer`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TableScanRoutes {
     AccessMethod(&'static CStr),
@@ -282,7 +296,7 @@ impl TableScanRoutes {
     }
 
     #[inline]
-    const fn access_method_name(self) -> *const c_char {
+    pub(crate) const fn access_method_name(self) -> *const c_char {
         match self {
             Self::AccessMethod(name)
             | Self::AccessMethodAndForeignDataWrapper {
@@ -294,7 +308,7 @@ impl TableScanRoutes {
     }
 
     #[inline]
-    const fn foreign_data_wrapper_name(self) -> *const c_char {
+    pub(crate) const fn foreign_data_wrapper_name(self) -> *const c_char {
         match self {
             Self::ForeignDataWrapper(name)
             | Self::AccessMethodAndForeignDataWrapper {
@@ -306,7 +320,7 @@ impl TableScanRoutes {
     }
 }
 
-/// One provider's serial table-scan capability and PostgreSQL storage routes.
+/// One provider's serial table-scan capability and stable internal routes.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TableScanDescriptor {
@@ -314,6 +328,7 @@ pub struct TableScanDescriptor {
     access_method_name: *const c_char,
     foreign_data_wrapper_name: *const c_char,
     context: *mut c_void,
+    owns_foreign_server: Option<OwnsForeignServer>,
     plan_scan: Option<PlanTableScan>,
     bind_scan: Option<BindTableScan>,
     get_bound_schema: Option<GetBoundTableScanSchema>,
@@ -336,7 +351,7 @@ impl TableScanPlanningRequest {
     pub fn row_count(
         scan_index: usize,
         predicate_expression: *mut pg_sys::Node,
-        effective_user_id: pg_sys::Oid,
+        check_as_user_id: pg_sys::Oid,
         root: *mut pg_sys::PlannerInfo,
         relation: *mut pg_sys::RelOptInfo,
         range_table_index: pg_sys::Index,
@@ -348,7 +363,7 @@ impl TableScanPlanningRequest {
             projected_attnos: ptr::null(),
             projected_attno_count: 0,
             predicate_expression,
-            effective_user_id,
+            check_as_user_id,
             scan_index,
             root,
             relation,
@@ -362,7 +377,7 @@ impl TableScanPlanningRequest {
         scan_index: usize,
         projected_attnos: &[pg_sys::AttrNumber],
         predicate_expression: *mut pg_sys::Node,
-        effective_user_id: pg_sys::Oid,
+        check_as_user_id: pg_sys::Oid,
         root: *mut pg_sys::PlannerInfo,
         relation: *mut pg_sys::RelOptInfo,
         range_table_index: pg_sys::Index,
@@ -374,7 +389,7 @@ impl TableScanPlanningRequest {
             projected_attnos: projected_attnos.as_ptr(),
             projected_attno_count: projected_attnos.len(),
             predicate_expression,
-            effective_user_id,
+            check_as_user_id,
             scan_index,
             root,
             relation,
@@ -442,6 +457,7 @@ impl TableScanDescriptor {
     pub const unsafe fn new(
         routes: TableScanRoutes,
         context: *mut c_void,
+        owns_foreign_server: OwnsForeignServer,
         plan_scan: PlanTableScan,
         bind_scan: BindTableScan,
         get_bound_schema: GetBoundTableScanSchema,
@@ -457,6 +473,7 @@ impl TableScanDescriptor {
             access_method_name: routes.access_method_name(),
             foreign_data_wrapper_name: routes.foreign_data_wrapper_name(),
             context,
+            owns_foreign_server: Some(owns_foreign_server),
             plan_scan: Some(plan_scan),
             bind_scan: Some(bind_scan),
             get_bound_schema: Some(get_bound_schema),
@@ -485,6 +502,7 @@ impl TableScanDescriptor {
         access_method_name: *const c_char,
         foreign_data_wrapper_name: *const c_char,
         context: *mut c_void,
+        owns_foreign_server: Option<OwnsForeignServer>,
         plan_scan: Option<PlanTableScan>,
         bind_scan: Option<BindTableScan>,
         get_bound_schema: Option<GetBoundTableScanSchema>,
@@ -500,6 +518,7 @@ impl TableScanDescriptor {
             access_method_name,
             foreign_data_wrapper_name,
             context,
+            owns_foreign_server,
             plan_scan,
             bind_scan,
             get_bound_schema,
@@ -530,6 +549,11 @@ impl TableScanDescriptor {
     #[inline]
     pub const fn context(&self) -> *mut c_void {
         self.context
+    }
+
+    #[inline]
+    pub const fn owns_foreign_server(&self) -> Option<OwnsForeignServer> {
+        self.owns_foreign_server
     }
 
     #[inline]

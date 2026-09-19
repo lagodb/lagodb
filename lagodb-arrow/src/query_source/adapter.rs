@@ -7,7 +7,7 @@ use arrow_array::ffi_stream::FFI_ArrowArrayStream;
 use arrow_schema::ffi::FFI_ArrowSchema;
 use lagodb_core::diag::PgReportError;
 use lagodb_core::expr::pushdown::{
-    FilterPlanningContext, FilterPushdown, PredicatePlan, QueryExpressionNormalizer,
+    FilterPlanningContext, PredicatePlan, QueryExpressionNormalizer,
     QueryExpressionScope, QueryPruningPlanner,
 };
 use lagodb_core::hooks::register_table_scan;
@@ -42,6 +42,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
             TableScanDescriptor::new(
                 P::ROUTES,
                 ptr::from_ref(provider).cast_mut().cast(),
+                Self::owns_foreign_server,
                 Self::plan_scan,
                 Self::bind_scan,
                 Self::get_bound_schema,
@@ -65,6 +66,26 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
         unsafe { &*context.cast::<P>() }
     }
 
+    unsafe extern "C-unwind" fn owns_foreign_server(
+        provider_context: *mut c_void,
+        server_oid: pg_sys::Oid,
+        owned: *mut bool,
+        error: *mut CallbackErrorReport,
+    ) -> u32 {
+        let operation = || {
+            // SAFETY: this adapter installed the backend-static context and
+            // the runtime supplies writable output storage.
+            unsafe {
+                *owned =
+                    Self::provider(provider_context).owns_foreign_server(server_oid);
+            }
+            Ok(())
+        };
+        // SAFETY: runtime supplies live output/error storage for this
+        // synchronous ownership lookup.
+        unsafe { (&mut *error).capture(operation) }
+    }
+
     unsafe extern "C-unwind" fn plan_scan(
         provider_context: *mut c_void,
         request: *const TableScanPlanningRequest,
@@ -77,7 +98,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
             let mut planning = ScanPlanningContext::try_new(unsafe { &*request })?;
             // SAFETY: this adapter installed the backend-static context.
             let provider = unsafe { Self::provider(provider_context) };
-            let pruning = Self::negotiate_pruning(&mut planning)?;
+            let pruning = Self::negotiate_pruning(provider, &mut planning)?;
             match provider
                 .plan_scan(&planning)
                 .map_err(PgReportError::from_domain_error)?
@@ -117,6 +138,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
     }
 
     fn negotiate_pruning(
+        provider: &P,
         planning: &mut ScanPlanningContext<'_>,
     ) -> Result<Option<AdapterPruning>, PgReportError> {
         let Some(expression) = planning.predicate_expression() else {
@@ -128,7 +150,8 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
             planning.tablespace_oid(),
             planning.effective_user_id(),
         );
-        let mut filter_planner = P::Filter::begin_filter_planning(&filter_context)
+        let mut filter_planner = provider
+            .begin_filter_planning(planning, &filter_context)
             .map_err(PgReportError::from_domain_error)?;
         let normalizer =
             QueryExpressionNormalizer::new(QueryExpressionScope::for_relation(

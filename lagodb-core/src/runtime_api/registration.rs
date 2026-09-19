@@ -7,7 +7,7 @@ use pgrx::pg_sys;
 
 use super::{
     MaintenanceProvider, ModifyPlannerDescriptor, RelationScanPlannerDescriptor,
-    TableScanDescriptor,
+    TableScanDescriptor, TableScanWorkerDescriptor,
 };
 
 pub const PROVIDER_KIND_ACCESS_METHOD: u32 = 1;
@@ -201,4 +201,7 @@ pub struct ProviderRegistration {
     pub modify_planner: *const ModifyPlannerDescriptor,
     /// Optional table-scan facet. Null means none.
     pub table_scan: *const TableScanDescriptor,
+    /// Optional worker reconstruction facet for `table_scan`. Null means the
+    /// registered routes are serial-only.
+    pub table_scan_worker: *const TableScanWorkerDescriptor,
 }
