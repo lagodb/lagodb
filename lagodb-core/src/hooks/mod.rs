@@ -18,6 +18,7 @@ use std::ptr;
 use crate::runtime_api::{
     MaintenanceProvider, ProviderIdentity, ProviderRegistration, RuntimeApiError,
     RuntimeClient, RuntimeRegistrationError, TableScanDescriptor,
+    TableScanWorkerDescriptor,
 };
 
 pub use crate::runtime_api::{
@@ -57,6 +58,18 @@ pub(crate) use planning::{register_modify, register_relation_scan};
 #[doc(hidden)]
 pub unsafe fn register_table_scan(descriptor: TableScanDescriptor) {
     table_scan::register(descriptor);
+}
+
+/// Stage this provider DSO's optional worker table-scan facet in the same
+/// atomic registration transaction as its serial table scan.
+///
+/// # Safety
+///
+/// The descriptor must satisfy the contracts documented by
+/// [`TableScanWorkerDescriptor::new`].
+#[doc(hidden)]
+pub unsafe fn register_table_scan_worker(descriptor: TableScanWorkerDescriptor) {
+    table_scan::register_worker(descriptor);
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -139,6 +152,7 @@ pub(crate) fn freeze_hooks_with_provider(
     );
     let planning = planning::descriptors();
     let table_scan = table_scan::descriptor();
+    let table_scan_worker = table_scan::worker_descriptor();
 
     let counts = (
         u32::try_from(utility.descriptors().len()),
@@ -204,6 +218,10 @@ pub(crate) fn freeze_hooks_with_provider(
             .map(ptr::from_ref)
             .unwrap_or(ptr::null()),
         table_scan: table_scan
+            .as_ref()
+            .map(ptr::from_ref)
+            .unwrap_or(ptr::null()),
+        table_scan_worker: table_scan_worker
             .as_ref()
             .map(ptr::from_ref)
             .unwrap_or(ptr::null()),

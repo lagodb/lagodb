@@ -1,6 +1,7 @@
 //! Optional scan capability implemented by an FDW provider.
 
-use crate::expr::pushdown::FilterPushdown;
+use crate::expr::pushdown::{FilterPlanningContext, FilterPushdown};
+use pgrx::pg_sys;
 
 use super::super::provider::ForeignDataWrapper;
 use super::context::{
@@ -22,9 +23,41 @@ pub trait FdwScan: ForeignDataWrapper + FilterPushdown + 'static {
     type PrivateData: super::context::ForeignPlanPrivate;
     type State: 'static;
 
+    /// Whether this FDW supplies the native-parallel DSM callback family and
+    /// may offer unparameterized partial paths. Individual complete paths must
+    /// independently opt into worker-local reconstruction through
+    /// [`ForeignPathSpec`].
+    const NATIVE_PARALLEL: bool = false;
+
     fn init_planner(
         ctx: &ForeignRelContext<'_>,
     ) -> Result<Self::PlannerState, ForeignScanError>;
+
+    /// Start relation-scoped filter planning with access to the matching
+    /// provider planner state. Providers that do not share planning metadata
+    /// retain the ordinary [`FilterPushdown`] construction path.
+    fn begin_scan_filter_planning(
+        _state: &mut Self::PlannerState,
+        context: &FilterPlanningContext,
+    ) -> Result<Self::Planner, Self::Error> {
+        <Self as FilterPushdown>::begin_filter_planning(context)
+    }
+
+    /// Borrow the provider state installed by this FDW's `GetForeignRelSize`.
+    ///
+    /// # Safety
+    ///
+    /// `relation` must be the live foreign base relation initialized by this
+    /// exact provider's `GetForeignRelSize` callback. The returned reference
+    /// may only be used synchronously while no mutable FDW callback is active.
+    unsafe fn planning_state(relation: &pg_sys::RelOptInfo) -> &Self::PlannerState
+    where
+        Self: Sized,
+    {
+        // SAFETY: the caller supplies the provider type witness and exclusive
+        // callback-phase invariant documented by this method.
+        unsafe { super::planning::PlannerState::<Self>::provider(relation) }
+    }
 
     fn estimate(
         state: &mut Self::PlannerState,
@@ -121,4 +154,54 @@ pub trait FdwScan: ForeignDataWrapper + FilterPushdown + 'static {
     ) -> Result<(), ForeignScanError>;
 
     fn end(state: &mut Self::State) -> Result<(), ForeignScanError>;
+
+    fn estimate_dsm(
+        _state: &mut Self::State,
+    ) -> Result<pg_sys::Size, ForeignScanError> {
+        Err(ForeignScanError::framework(
+            "FDW enabled native parallel scan without EstimateDSM support",
+        ))
+    }
+
+    /// # Safety
+    /// `coordinate` is PostgreSQL DSM storage sized by `estimate_dsm`.
+    unsafe fn initialize_dsm(
+        _state: &mut Self::State,
+        _coordinate: *mut core::ffi::c_void,
+    ) -> Result<(), ForeignScanError> {
+        Err(ForeignScanError::framework(
+            "FDW enabled native parallel scan without InitializeDSM support",
+        ))
+    }
+
+    /// # Safety
+    ///
+    /// `coordinate` must be the live PostgreSQL DSM storage previously
+    /// initialized for this scan and sized according to `estimate_dsm`.
+    unsafe fn reinitialize_dsm(
+        _state: &mut Self::State,
+        _coordinate: *mut core::ffi::c_void,
+    ) -> Result<(), ForeignScanError> {
+        Err(ForeignScanError::framework(
+            "FDW enabled native parallel scan without ReInitializeDSM support",
+        ))
+    }
+
+    /// # Safety
+    ///
+    /// `toc` and `coordinate` must be the live PostgreSQL DSM objects for the
+    /// current parallel scan and must remain valid until worker shutdown.
+    unsafe fn initialize_worker(
+        _state: &mut Self::State,
+        _toc: *mut pg_sys::shm_toc,
+        _coordinate: *mut core::ffi::c_void,
+    ) -> Result<(), ForeignScanError> {
+        Err(ForeignScanError::framework(
+            "FDW enabled native parallel scan without worker initialization support",
+        ))
+    }
+
+    fn shutdown_parallel(_state: &mut Self::State) -> Result<(), ForeignScanError> {
+        Ok(())
+    }
 }

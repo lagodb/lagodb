@@ -16,6 +16,8 @@ pub struct CustomPathBuilder<P: LagodbCustomScanProvider> {
     pub(crate) scanned_tuples: Option<f64>,
     pub(crate) extra_startup_cost: Option<f64>,
     pub(crate) extra_tuple_width: i32,
+    pub(crate) parallel_safe_complete: bool,
+    pub(crate) native_parallel_partial: bool,
     _marker: PhantomData<fn() -> P>,
 }
 
@@ -26,6 +28,8 @@ impl<P: LagodbCustomScanProvider> CustomPathBuilder<P> {
             scanned_tuples: None,
             extra_startup_cost: None,
             extra_tuple_width: 0,
+            parallel_safe_complete: false,
+            native_parallel_partial: true,
             _marker: PhantomData,
         }
     }
@@ -67,6 +71,26 @@ impl<P: LagodbCustomScanProvider> CustomPathBuilder<P> {
         self
     }
 
+    /// Allow the complete (non-partial) path to execute independently inside
+    /// a PostgreSQL parallel worker.
+    ///
+    /// This is separate from the provider's native-parallel capability: a
+    /// partial path reconstructs the leader's exact scan inventory from DSM,
+    /// whereas a complete path receives no provider DSM coordinate and must be
+    /// able to rebuild the same relation view using worker-local state alone.
+    pub fn parallel_safe_complete(mut self, safe: bool) -> Self {
+        self.parallel_safe_complete = safe;
+        self
+    }
+
+    /// Control whether this path variant may also produce a native
+    /// parallel-aware partial sibling. Providers use this when statement-local
+    /// state cannot be reconstructed from their DSM payload.
+    pub fn native_parallel_partial(mut self, enabled: bool) -> Self {
+        self.native_parallel_partial = enabled;
+        self
+    }
+
     /// Finish the path and attach the provider's typed plan data.
     pub fn build(self, private_data: P::PrivateData) -> CustomPathPlan<P> {
         CustomPathPlan {
@@ -74,6 +98,8 @@ impl<P: LagodbCustomScanProvider> CustomPathBuilder<P> {
             scanned_tuples: self.scanned_tuples,
             extra_startup_cost: self.extra_startup_cost,
             extra_tuple_width: self.extra_tuple_width,
+            parallel_safe_complete: self.parallel_safe_complete,
+            native_parallel_partial: self.native_parallel_partial,
             private_data,
             _marker: PhantomData,
         }
@@ -86,6 +112,8 @@ pub struct CustomPathPlan<P: LagodbCustomScanProvider> {
     pub(crate) scanned_tuples: Option<f64>,
     pub(crate) extra_startup_cost: Option<f64>,
     pub(crate) extra_tuple_width: i32,
+    pub(crate) parallel_safe_complete: bool,
+    pub(crate) native_parallel_partial: bool,
     pub(crate) private_data: P::PrivateData,
     _marker: PhantomData<fn() -> P>,
 }

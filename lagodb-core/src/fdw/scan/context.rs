@@ -130,6 +130,12 @@ impl<'a> ForeignRelContext<'a> {
         }
     }
 
+    /// Top-level PostgreSQL command being planned for this relation.
+    #[inline]
+    pub fn command_type(&self) -> pg_sys::CmdType::Type {
+        unsafe { (*(*self.root).parse).commandType }
+    }
+
     /// Base relation's range-table index.
     #[inline]
     pub fn scan_relid(&self) -> pg_sys::Index {
@@ -430,12 +436,19 @@ pub struct ForeignPathSpec<D> {
     /// Provider-owned total cost before the framework adds PostgreSQL-local
     /// residual-qual, target-list, and tuple-processing costs.
     pub provider_total_cost: f64,
+    /// Estimated physical pages read after provider-side pruning. The
+    /// provider uses the same estimate in `provider_total_cost`; the framework
+    /// uses it for PostgreSQL native-parallel admission and worker count.
+    /// Defaults to the relation's complete page estimate.
+    scanned_pages: Option<f64>,
     /// PostgreSQL pathkeys promised by this provider path. The framework
     /// validates the EC member and dependency contract before adding the path;
     /// the provider must use the same ordering in its remote plan. The value
     /// is private so a provider cannot submit an arbitrary pointer through a
     /// safe struct literal.
     pathkeys: *mut pg_sys::List,
+    parallel_safe_complete: bool,
+    native_parallel_partial: bool,
     pub private_data: D,
 }
 
@@ -452,7 +465,10 @@ impl<D> ForeignPathSpec<D> {
             retrieved_rows: rows,
             provider_startup_cost,
             provider_total_cost,
+            scanned_pages: None,
             pathkeys: ptr::null_mut(),
+            parallel_safe_complete: false,
+            native_parallel_partial: true,
             private_data,
         }
     }
@@ -474,9 +490,46 @@ impl<D> ForeignPathSpec<D> {
         self.pathkeys = pathkeys;
     }
 
+    /// Allow this complete path to be rebuilt independently in a PostgreSQL
+    /// parallel worker. Native partial paths use the provider DSM callbacks
+    /// and do not depend on this setting.
+    pub fn set_parallel_safe_complete(&mut self, safe: bool) {
+        self.parallel_safe_complete = safe;
+    }
+
+    /// Control whether this alternative may produce a native
+    /// parallel-aware partial sibling.
+    pub fn set_native_parallel_partial(&mut self, enabled: bool) {
+        self.native_parallel_partial = enabled;
+    }
+
+    /// Set the estimated physical pages read after provider-side pruning.
+    ///
+    /// The provider must use this same estimate when constructing
+    /// `provider_total_cost`, so scan costing and PostgreSQL native-parallel
+    /// worker sizing describe the same physical work.
+    pub fn set_scanned_pages(&mut self, pages: f64) {
+        self.scanned_pages = Some(pages);
+    }
+
     #[inline]
     pub(crate) fn pathkeys_ptr(&self) -> *mut pg_sys::List {
         self.pathkeys
+    }
+
+    #[inline]
+    pub(crate) fn parallel_safe_complete(&self) -> bool {
+        self.parallel_safe_complete
+    }
+
+    #[inline]
+    pub(crate) fn native_parallel_partial(&self) -> bool {
+        self.native_parallel_partial
+    }
+
+    #[inline]
+    pub(crate) fn scanned_pages(&self) -> Option<f64> {
+        self.scanned_pages
     }
 }
 

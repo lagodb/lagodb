@@ -1,7 +1,7 @@
 //! Provider path alternatives and framework path validation.
 
 use core::ffi::c_void;
-use core::ptr;
+use core::ptr::{self, NonNull};
 
 use pgrx::pg_sys;
 
@@ -13,6 +13,7 @@ use super::context::{
 use super::contract::FdwScan;
 use super::error::ForeignScanError;
 use super::pathkeys::ForeignPathKeys;
+use super::pending_paths::PendingForeignPaths;
 use super::pg;
 use super::private::encode_path_private;
 
@@ -162,6 +163,9 @@ unsafe fn add_path_spec<P: FdwScan>(
     };
     let (startup_cost, total_cost) =
         finalize_path_spec(root, baserel, filters, &spec)?;
+    let scanned_pages = spec
+        .scanned_pages()
+        .unwrap_or_else(|| unsafe { (*baserel).pages as f64 });
     let private = encode_path_private::<P>(P::NAME, kind, &spec.private_data)?;
     let path = unsafe {
         pg::create_foreign_path(
@@ -180,7 +184,41 @@ unsafe fn add_path_spec<P: FdwScan>(
             "PostgreSQL returned NULL from create_foreignscan_path",
         ));
     }
-    unsafe { pg_sys::add_path(baserel, path.cast()) };
+    // SAFETY: NULL was rejected above.
+    let path = unsafe { NonNull::new_unchecked(path) };
+    let native_parallel_capable = P::NATIVE_PARALLEL
+        && unsafe { (*baserel).consider_parallel }
+        && relation.command_type() == pg_sys::CmdType::CMD_SELECT;
+    unsafe {
+        (*path.as_ptr()).path.parallel_safe =
+            native_parallel_capable && spec.parallel_safe_complete();
+        (*path.as_ptr()).path.parallel_aware = false;
+        (*path.as_ptr()).path.parallel_workers = 0;
+    }
+    let mut pending = PendingForeignPaths::new(path);
+    let required_outer_is_empty = unsafe {
+        pg_sys::bms_membership(required_outer)
+            == pg_sys::BMS_Membership::BMS_EMPTY_SET
+    };
+    if native_parallel_capable
+        && spec.native_parallel_partial()
+        && kind == PathVariantKind::Plain
+        && required_outer_is_empty
+        && pathkeys.is_empty()
+    {
+        let workers = unsafe {
+            pg_sys::compute_parallel_worker(
+                baserel,
+                scanned_pages,
+                -1.0,
+                pg_sys::max_parallel_workers_per_gather,
+            )
+        };
+        if workers > 0 {
+            unsafe { pending.add_parallel_sibling(workers) };
+        }
+    }
+    unsafe { pending.publish(baserel) };
     Ok(true)
 }
 
@@ -198,9 +236,12 @@ fn finalize_path_spec<D>(
         || spec.provider_startup_cost < 0.0
         || !spec.provider_total_cost.is_finite()
         || spec.provider_total_cost < 0.0
+        || spec
+            .scanned_pages()
+            .is_some_and(|pages| !pages.is_finite() || pages < 0.0)
     {
         return Err(ForeignScanError::framework(
-            "FDW path estimate contains invalid rows or costs",
+            "FDW path estimate contains invalid rows, pages, or costs",
         ));
     }
     // PostgreSQL clamps output row estimates to at least one row, while a

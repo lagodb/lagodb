@@ -4,9 +4,11 @@ use core::any::TypeId;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::customscan::execution::{exec, explain, state};
+use crate::customscan::execution::{exec, explain, parallel, state};
 use crate::customscan::planning::{builder, final_plan};
-use crate::customscan::{CustomScanMethodTables, SerialCustomScanCallbacks};
+use crate::customscan::{
+    CustomScanMethodTables, ParallelCustomScanCallbacks, SerialCustomScanCallbacks,
+};
 
 use super::LagodbCustomScanProvider;
 
@@ -29,21 +31,33 @@ pub fn method_tables_for<P: LagodbCustomScanProvider>()
         return tables.0;
     }
 
-    let tables = ProviderMethodTables::serial(
-        P::NAME,
-        SerialCustomScanCallbacks {
-            plan: final_plan::plan_custom_path_trampoline::<P>,
-            reparameterize: Some(
-                builder::reparameterize_custom_path_by_child_trampoline::<P>,
-            ),
-            create_state: state::create_custom_scan_state_trampoline::<P>,
-            begin: exec::begin_custom_scan_trampoline::<P>,
-            execute: exec::exec_custom_scan_trampoline::<P>,
-            end: exec::end_custom_scan_trampoline::<P>,
-            rescan: exec::rescan_custom_scan_trampoline::<P>,
-            explain: explain::explain_custom_scan_trampoline::<P>,
-        },
-    );
+    let callbacks = SerialCustomScanCallbacks {
+        plan: final_plan::plan_custom_path_trampoline::<P>,
+        reparameterize: Some(
+            builder::reparameterize_custom_path_by_child_trampoline::<P>,
+        ),
+        create_state: state::create_custom_scan_state_trampoline::<P>,
+        begin: exec::begin_custom_scan_trampoline::<P>,
+        execute: exec::exec_custom_scan_trampoline::<P>,
+        end: exec::end_custom_scan_trampoline::<P>,
+        rescan: exec::rescan_custom_scan_trampoline::<P>,
+        explain: explain::explain_custom_scan_trampoline::<P>,
+    };
+    let tables = if P::NATIVE_PARALLEL {
+        ProviderMethodTables::parallel(
+            P::NAME,
+            callbacks,
+            ParallelCustomScanCallbacks {
+                estimate_dsm: parallel::estimate_dsm::<P>,
+                initialize_dsm: parallel::initialize_dsm::<P>,
+                reinitialize_dsm: parallel::reinitialize_dsm::<P>,
+                initialize_worker: parallel::initialize_worker::<P>,
+                shutdown: parallel::shutdown::<P>,
+            },
+        )
+    } else {
+        ProviderMethodTables::serial(P::NAME, callbacks)
+    };
 
     let leaked = Box::leak(Box::new(tables));
     METHOD_TABLES.with_borrow_mut(|cache| {

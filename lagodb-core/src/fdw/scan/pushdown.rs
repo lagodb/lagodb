@@ -187,6 +187,7 @@ pub struct BeginForeignScanContext<'a, P: FdwScan + ?Sized> {
     pub filters: BoundFilterSet<'a, P::BoundPredicate>,
     pub estate: *mut pg_sys::EState,
     pub eflags: c_int,
+    pub parallel_aware: bool,
     pub(crate) effective_user_id: pg_sys::Oid,
 }
 

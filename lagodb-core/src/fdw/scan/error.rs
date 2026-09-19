@@ -24,6 +24,11 @@ pub enum ForeignScanPhase {
     ReScan,
     End,
     Explain,
+    EstimateDsm,
+    InitializeDsm,
+    ReInitializeDsm,
+    InitializeWorker,
+    Shutdown,
 }
 
 impl ForeignScanPhase {
@@ -37,6 +42,11 @@ impl ForeignScanPhase {
             Self::ReScan => "ReScanForeignScan",
             Self::End => "EndForeignScan",
             Self::Explain => "ExplainForeignScan",
+            Self::EstimateDsm => "EstimateDSMForeignScan",
+            Self::InitializeDsm => "InitializeDSMForeignScan",
+            Self::ReInitializeDsm => "ReInitializeDSMForeignScan",
+            Self::InitializeWorker => "InitializeWorkerForeignScan",
+            Self::Shutdown => "ShutdownForeignScan",
         }
     }
 }

@@ -25,39 +25,23 @@ pub(crate) unsafe fn create_foreign_path(
     required_outer: pg_sys::Relids,
     fdw_private: *mut pg_sys::List,
 ) -> *mut pg_sys::ForeignPath {
-    let path = {
-        // SAFETY: the current planner callback owns all pointer arguments;
-        // PostgreSQL retains them in the planner memory context.
-        unsafe {
-            pg_sys::create_foreignscan_path(
-                root,
-                baserel,
-                ptr::null_mut(),
-                rows,
-                startup_cost,
-                total_cost,
-                pathkeys,
-                required_outer,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                fdw_private,
-            )
-        }
-    };
-
-    // The base-scan facet deliberately does not implement PostgreSQL's
-    // parallel worker callbacks.  PG's constructor copies rel->consider_parallel
-    // into ForeignPath.path.parallel_safe, so clear that inherited capability
-    // before the path becomes visible to add_path().
-    if !path.is_null() {
-        // SAFETY: the constructor returned a live ForeignPath in the current
-        // planner context, and the null check guards its field access.
-        unsafe {
-            (*path).path.parallel_safe = false;
-            (*path).path.parallel_aware = false;
-        }
+    // SAFETY: the current planner callback owns all pointer arguments;
+    // PostgreSQL retains them in the planner memory context.
+    unsafe {
+        pg_sys::create_foreignscan_path(
+            root,
+            baserel,
+            ptr::null_mut(),
+            rows,
+            startup_cost,
+            total_cost,
+            pathkeys,
+            required_outer,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            fdw_private,
+        )
     }
-    path
 }
 
 /// Estimate PostgreSQL-local tuple processing performed by the ForeignScan.

@@ -18,8 +18,8 @@ use provider::RelationContext;
 
 pub use methods::{
     BeginCustomScan, CreateCustomScanState, CustomScanMethodTables, EndCustomScan,
-    ExecCustomScan, ExplainCustomScan, PlanCustomPath, ReScanCustomScan,
-    ReparameterizeCustomPath, SerialCustomScanCallbacks,
+    ExecCustomScan, ExplainCustomScan, ParallelCustomScanCallbacks, PlanCustomPath,
+    ReScanCustomScan, ReparameterizeCustomPath, SerialCustomScanCallbacks,
 };
 pub use plan_data::ScanPurpose;
 

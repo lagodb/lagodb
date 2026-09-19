@@ -41,6 +41,23 @@ pub type ExplainCustomScan = unsafe extern "C-unwind" fn(
     *mut pg_sys::List,
     *mut pg_sys::ExplainState,
 );
+pub type EstimateDSMCustomScan = unsafe extern "C-unwind" fn(
+    *mut pg_sys::CustomScanState,
+    *mut pg_sys::ParallelContext,
+) -> pg_sys::Size;
+pub type InitializeDSMCustomScan = unsafe extern "C-unwind" fn(
+    *mut pg_sys::CustomScanState,
+    *mut pg_sys::ParallelContext,
+    *mut core::ffi::c_void,
+);
+pub type ReInitializeDSMCustomScan = InitializeDSMCustomScan;
+pub type InitializeWorkerCustomScan = unsafe extern "C-unwind" fn(
+    *mut pg_sys::CustomScanState,
+    *mut pg_sys::shm_toc,
+    *mut core::ffi::c_void,
+);
+pub type ShutdownCustomScan =
+    unsafe extern "C-unwind" fn(*mut pg_sys::CustomScanState);
 
 /// Callback family implemented by one serial CustomScan consumer.
 pub struct SerialCustomScanCallbacks {
@@ -52,6 +69,14 @@ pub struct SerialCustomScanCallbacks {
     pub end: EndCustomScan,
     pub rescan: ReScanCustomScan,
     pub explain: ExplainCustomScan,
+}
+
+pub struct ParallelCustomScanCallbacks {
+    pub estimate_dsm: EstimateDSMCustomScan,
+    pub initialize_dsm: InitializeDSMCustomScan,
+    pub reinitialize_dsm: ReInitializeDSMCustomScan,
+    pub initialize_worker: InitializeWorkerCustomScan,
+    pub shutdown: ShutdownCustomScan,
 }
 
 /// The three immutable PostgreSQL callback tables for one CustomScan consumer.
@@ -71,6 +96,37 @@ unsafe impl Sync for CustomScanMethodTables {}
 impl CustomScanMethodTables {
     /// Construct one complete method-table set for a serial CustomScan.
     pub fn serial(name: &'static CStr, callbacks: SerialCustomScanCallbacks) -> Self {
+        Self::new(name, callbacks, None)
+    }
+
+    pub fn parallel(
+        name: &'static CStr,
+        callbacks: SerialCustomScanCallbacks,
+        parallel: ParallelCustomScanCallbacks,
+    ) -> Self {
+        Self::new(name, callbacks, Some(parallel))
+    }
+
+    fn new(
+        name: &'static CStr,
+        callbacks: SerialCustomScanCallbacks,
+        parallel: Option<ParallelCustomScanCallbacks>,
+    ) -> Self {
+        let (
+            estimate_dsm,
+            initialize_dsm,
+            reinitialize_dsm,
+            initialize_worker,
+            shutdown,
+        ) = parallel.map_or((None, None, None, None, None), |callbacks| {
+            (
+                Some(callbacks.estimate_dsm),
+                Some(callbacks.initialize_dsm),
+                Some(callbacks.reinitialize_dsm),
+                Some(callbacks.initialize_worker),
+                Some(callbacks.shutdown),
+            )
+        });
         Self {
             path: pg_sys::CustomPathMethods {
                 CustomName: name.as_ptr(),
@@ -89,11 +145,11 @@ impl CustomScanMethodTables {
                 ReScanCustomScan: Some(callbacks.rescan),
                 MarkPosCustomScan: None,
                 RestrPosCustomScan: None,
-                EstimateDSMCustomScan: None,
-                InitializeDSMCustomScan: None,
-                ReInitializeDSMCustomScan: None,
-                InitializeWorkerCustomScan: None,
-                ShutdownCustomScan: None,
+                EstimateDSMCustomScan: estimate_dsm,
+                InitializeDSMCustomScan: initialize_dsm,
+                ReInitializeDSMCustomScan: reinitialize_dsm,
+                InitializeWorkerCustomScan: initialize_worker,
+                ShutdownCustomScan: shutdown,
                 ExplainCustomScan: Some(callbacks.explain),
             },
         }

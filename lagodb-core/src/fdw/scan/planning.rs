@@ -28,10 +28,23 @@ use super::projection::{ScanProjectionPolicy, plan_projection};
 
 use super::parameterized::ParameterizedCandidates;
 
-struct PlannerState<P: FdwScan> {
+pub(super) struct PlannerState<P: FdwScan> {
     provider_state: P::PlannerState,
     filter_planner: P::Planner,
     base_filters: PathFilterSet,
+}
+
+impl<P: FdwScan> PlannerState<P> {
+    /// # Safety
+    ///
+    /// The relation must have been initialized by `get_foreign_rel_size::<P>`
+    /// and no mutable callback borrow of this state may be active.
+    pub(super) unsafe fn provider(relation: &pg_sys::RelOptInfo) -> &P::PlannerState {
+        // SAFETY: the caller supplies the exact provider type witness for the
+        // live planner-owned allocation stored in `fdw_private`.
+        let state = unsafe { &*relation.fdw_private.cast::<Self>() };
+        &state.provider_state
+    }
 }
 
 /// # Safety
@@ -66,8 +79,9 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_rel_size<P: FdwScan>(
             unsafe { pg_sys::get_rel_tablespace(relation.relation_oid()) },
             relation.effective_user_id(),
         );
-        let mut filter_planner = P::begin_filter_planning(&filter_context)
-            .map_err(ForeignScanError::provider)?;
+        let mut filter_planner =
+            P::begin_scan_filter_planning(&mut provider_state, &filter_context)
+                .map_err(ForeignScanError::provider)?;
         let base_filters = unsafe {
             negotiate_clauses::<P>(
                 &mut filter_planner,

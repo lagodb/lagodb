@@ -27,6 +27,19 @@ pub trait LagodbCustomScanProvider: FilterPushdown {
     /// Per-scan runtime state inside `CustomScanStateWrapper`.
     type State;
 
+    /// Whether query scans provide PostgreSQL native-parallel DSM lifecycle
+    /// support. The framework can install an unparameterized parallel-aware
+    /// partial path for this capability. A complete path is marked
+    /// parallel-safe separately by [`CustomPathBuilder`],
+    /// because it receives no provider DSM coordinate in a worker.
+    const NATIVE_PARALLEL: bool = false;
+
+    /// Whether the underlying table AM lacks its own parallel task-distribution
+    /// contract and standard partial SeqScan paths must therefore be removed.
+    /// This is independent of CustomScan parallel capability: retaining such a
+    /// path would call unsupported table-AM callbacks or duplicate the scan.
+    const SUPPRESS_TABLE_AM_PARALLEL_SCAN: bool = false;
+
     /// Whether this provider claims the relation after framework path gates.
     fn supports_relation(ctx: &RelationContext<'_>) -> bool;
 
@@ -53,6 +66,53 @@ pub trait LagodbCustomScanProvider: FilterPushdown {
 
     /// Close the cursor and release provider-owned runtime resources.
     fn end(ctx: EndContext<'_, Self>) -> Result<(), CustomScanError>;
+
+    fn estimate_dsm(
+        _state: &mut Self::State,
+    ) -> Result<pg_sys::Size, CustomScanError> {
+        Err(CustomScanError::internal(std::io::Error::other(
+            "provider enabled native parallel scan without EstimateDSM support",
+        )))
+    }
+
+    /// # Safety
+    /// `coordinate` is the provider coordinate allocated by PostgreSQL using
+    /// the size returned from [`Self::estimate_dsm`].
+    unsafe fn initialize_dsm(
+        _state: &mut Self::State,
+        _coordinate: *mut core::ffi::c_void,
+    ) -> Result<(), CustomScanError> {
+        Err(CustomScanError::internal(std::io::Error::other(
+            "provider enabled native parallel scan without InitializeDSM support",
+        )))
+    }
+
+    /// # Safety
+    /// `coordinate` is the live provider coordinate for this scan.
+    unsafe fn reinitialize_dsm(
+        _state: &mut Self::State,
+        _coordinate: *mut core::ffi::c_void,
+    ) -> Result<(), CustomScanError> {
+        Err(CustomScanError::internal(std::io::Error::other(
+            "provider enabled native parallel scan without ReInitializeDSM support",
+        )))
+    }
+
+    /// # Safety
+    /// `toc` and `coordinate` are the live DSM objects supplied by PostgreSQL.
+    unsafe fn initialize_worker(
+        _state: &mut Self::State,
+        _toc: *mut pg_sys::shm_toc,
+        _coordinate: *mut core::ffi::c_void,
+    ) -> Result<(), CustomScanError> {
+        Err(CustomScanError::internal(std::io::Error::other(
+            "provider enabled native parallel scan without worker initialization support",
+        )))
+    }
+
+    fn shutdown_parallel(_state: &mut Self::State) -> Result<(), CustomScanError> {
+        Ok(())
+    }
 
     /// Reparameterize `PrivateData` for an appendrel child; default no-op.
     ///

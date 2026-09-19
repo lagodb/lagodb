@@ -57,9 +57,6 @@ unsafe fn plan_relation_paths(
         Ok(candidate) => candidate,
         Err(_) => return Ok(()),
     };
-    if candidate.purpose() == ScanPurpose::Query && !gucs::enabled() {
-        return Ok(());
-    }
     // SAFETY: `candidate` was just validated from the same live planner
     // structures and no pointer is retained beyond this callback.
     let ctx = unsafe { candidate.relation_context() };
@@ -68,6 +65,13 @@ unsafe fn plan_relation_paths(
         Some(provider) => provider,
         None => return Ok(()),
     };
+
+    if candidate.purpose() == ScanPurpose::Query && !gucs::enabled() {
+        if provider.suppress_table_am_parallel_scan() {
+            unsafe { suppress_tableam_partial_seqscans(candidate.rel()) };
+        }
+        return Ok(());
+    }
 
     if candidate.purpose() == ScanPurpose::Modify {
         if !has_modify_provider_for(&ctx) {
@@ -104,8 +108,34 @@ unsafe fn plan_relation_paths(
 
     // SAFETY: the validated candidate and registered provider remain live for
     // the synchronous planner operation.
+    let rel = candidate.rel();
     let mut planner = unsafe { CustomScanPathPlanner::new(candidate, provider) }?;
+    if provider.suppress_table_am_parallel_scan() {
+        unsafe { suppress_tableam_partial_seqscans(rel) };
+    }
     // SAFETY: the planner was constructed for the current live relation.
     let _ = unsafe { planner.emit() }?;
     Ok(())
+}
+
+/// Remove only standard partial SeqScan paths, which would invoke the table
+/// AM's parallel callbacks. Other partial alternatives (for example parallel
+/// index scans) remain available to PostgreSQL.
+///
+/// # Safety
+///
+/// `rel` must be the live base relation currently being populated by the
+/// set-rel-pathlist hook.
+unsafe fn suppress_tableam_partial_seqscans(rel: *mut pg_sys::RelOptInfo) {
+    let paths = unsafe { (*rel).partial_pathlist };
+    let count = unsafe { pg_sys::list_length(paths) };
+    let mut retained: *mut pg_sys::List = ptr::null_mut();
+    for index in 0..count {
+        let path = unsafe { pg_sys::list_nth(paths, index) }.cast::<pg_sys::Path>();
+        if unsafe { (*path).pathtype } == pg_sys::NodeTag::T_SeqScan {
+            continue;
+        }
+        retained = unsafe { pg_sys::lappend(retained, path.cast()) };
+    }
+    unsafe { (*rel).partial_pathlist = retained };
 }

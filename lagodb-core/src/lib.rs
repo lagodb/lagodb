@@ -93,6 +93,9 @@ pub mod plan_data;
 /// Shared contracts for provider-neutral query planning and source execution.
 pub mod query_contract;
 
+/// Provider-neutral DSM work claiming for native PostgreSQL parallel scans.
+pub mod parallel_scan;
+
 /// Internal wrapper for PostgreSQL functions
 mod wrapper;
 

@@ -30,6 +30,8 @@ pub(crate) trait ErasedProvider: Sync {
     /// Provider name (`P::NAME`).
     fn name(&self) -> &'static CStr;
 
+    fn suppress_table_am_parallel_scan(&self) -> bool;
+
     /// Forwards to `P::supports_relation` (framework path-stage gates already applied).
     fn supports_relation(&self, ctx: &RelationContext<'_>) -> bool;
 
@@ -92,6 +94,10 @@ unsafe impl<P: LagodbCustomScanProvider> Sync for ProviderEntry<P> {}
 impl<P: LagodbCustomScanProvider> ErasedProvider for ProviderEntry<P> {
     fn name(&self) -> &'static CStr {
         P::NAME
+    }
+
+    fn suppress_table_am_parallel_scan(&self) -> bool {
+        P::SUPPRESS_TABLE_AM_PARALLEL_SCAN
     }
 
     fn supports_relation(&self, ctx: &RelationContext<'_>) -> bool {

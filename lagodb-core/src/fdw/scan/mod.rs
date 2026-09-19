@@ -7,9 +7,11 @@ mod error;
 mod executor;
 mod explain;
 mod filter;
+mod parallel;
 mod parameterized;
 mod path_builder;
 mod pathkeys;
+mod pending_paths;
 mod pg;
 mod plan_filter;
 mod planning;
@@ -43,6 +45,10 @@ pub(crate) use callbacks::{
     begin_foreign_scan, end_foreign_scan, iterate_foreign_scan, rescan_foreign_scan,
 };
 pub(crate) use explain::explain_foreign_scan;
+pub(crate) use parallel::{
+    estimate_dsm, initialize_dsm, initialize_worker, is_parallel_safe,
+    reinitialize_dsm, shutdown_parallel,
+};
 pub(crate) use planning::{
     get_foreign_paths, get_foreign_plan, get_foreign_rel_size,
 };

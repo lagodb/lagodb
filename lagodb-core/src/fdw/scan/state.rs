@@ -138,6 +138,7 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
                     .bound(),
                 estate,
                 eflags: self.eflags,
+                parallel_aware: unsafe { (*plan).scan.plan.parallel_aware },
                 effective_user_id,
             };
             unsafe { pg_sys::MemoryContextSwitchTo(query_context) };
@@ -281,6 +282,17 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
         self.row_identity_requirement = ForeignRowIdentityRequirement::None;
         self.required_columns = ColumnRequirements::default();
         self.write_layout = SlotWriteLayout::default();
+    }
+
+    pub(crate) fn parallel_state(
+        &mut self,
+    ) -> Result<&mut P::State, ForeignScanError> {
+        if !self.payload.provider_state_initialized() {
+            return Err(ForeignScanError::framework(
+                "parallel FDW callback ran before provider state initialization",
+            ));
+        }
+        Ok(unsafe { &mut *self.payload.provider_state_ptr_unchecked() })
     }
 }
 

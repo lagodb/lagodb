@@ -36,6 +36,14 @@ pub fn register_scan<P: FdwScan>(routine: &mut FdwRoutine) {
     routine.ReScanForeignScan = Some(scan::rescan_foreign_scan::<P>);
     routine.EndForeignScan = Some(scan::end_foreign_scan::<P>);
     routine.ExplainForeignScan = Some(scan::explain_foreign_scan::<P>);
+    if P::NATIVE_PARALLEL {
+        routine.IsForeignScanParallelSafe = Some(scan::is_parallel_safe::<P>);
+        routine.EstimateDSMForeignScan = Some(scan::estimate_dsm::<P>);
+        routine.InitializeDSMForeignScan = Some(scan::initialize_dsm::<P>);
+        routine.ReInitializeDSMForeignScan = Some(scan::reinitialize_dsm::<P>);
+        routine.InitializeWorkerForeignScan = Some(scan::initialize_worker::<P>);
+        routine.ShutdownForeignScan = Some(scan::shutdown_parallel::<P>);
+    }
 }
 
 /// Install the `IMPORT FOREIGN SCHEMA` callback for `P`.

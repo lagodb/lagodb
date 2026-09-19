@@ -46,6 +46,8 @@ pub struct BeginContext<'a, P: LagodbCustomScanProvider + ?Sized> {
     pub relation: RelationHandle<'a>,
     /// Executor snapshot handle.
     pub snapshot: SnapshotHandle<'a>,
+    /// True only for the partial path executed under PostgreSQL Gather.
+    pub parallel_aware: bool,
     _marker: PhantomData<&'a ()>,
 }
 
@@ -59,6 +61,7 @@ impl<'a, P: LagodbCustomScanProvider> BeginContext<'a, P> {
         tuple_layout: &'a ScanTupleLayout,
         relation: RelationHandle<'a>,
         snapshot: SnapshotHandle<'a>,
+        parallel_aware: bool,
     ) -> Self {
         Self {
             state,
@@ -69,6 +72,7 @@ impl<'a, P: LagodbCustomScanProvider> BeginContext<'a, P> {
             tuple_layout,
             relation,
             snapshot,
+            parallel_aware,
             _marker: PhantomData,
         }
     }

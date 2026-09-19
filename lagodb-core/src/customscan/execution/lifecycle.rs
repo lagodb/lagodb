@@ -174,6 +174,7 @@ unsafe fn begin_custom_scan<P: LagodbCustomScanProvider>(
         &envelope.tuple_layout,
         unsafe { RelationHandle::from_raw(scan_rel) },
         unsafe { SnapshotHandle::from_raw(snapshot) },
+        unsafe { (*cscan).scan.plan.parallel_aware },
     );
     P::begin(begin_ctx)?;
     wrapper.provider_began = true;

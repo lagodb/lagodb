@@ -152,8 +152,11 @@ pub(crate) unsafe fn emit_custom_path<P: LagodbCustomScanProvider>(
             path.pathtarget = widened;
         }
         path.param_info = param_info;
+        let native_parallel_capable = P::NATIVE_PARALLEL
+            && (*ctx.baserel).consider_parallel
+            && ctx.purpose == ScanPurpose::Query;
         path.parallel_aware = false;
-        path.parallel_safe = false;
+        path.parallel_safe = native_parallel_capable && plan.parallel_safe_complete;
         path.parallel_workers = 0;
         path.rows = if param_info.is_null() {
             (*ctx.baserel).rows
@@ -197,7 +200,48 @@ pub(crate) unsafe fn emit_custom_path<P: LagodbCustomScanProvider>(
 
         (*cpath_ptr).methods = method_tables_for::<P>().path();
 
+        let partial = if native_parallel_capable
+            && plan.native_parallel_partial
+            && required_outer_is_empty
+        {
+            let workers = pg_sys::compute_parallel_worker(
+                ctx.baserel,
+                plan.scanned_pages
+                    .unwrap_or_else(|| (*ctx.baserel).pages as f64),
+                -1.0,
+                pg_sys::max_parallel_workers_per_gather,
+            );
+            if workers > 0 {
+                let partial =
+                    pg_sys::palloc0(core::mem::size_of::<pg_sys::CustomPath>())
+                        .cast::<pg_sys::CustomPath>();
+                core::ptr::copy_nonoverlapping(cpath_ptr, partial, 1);
+                let path = &mut (*partial).path;
+                path.parallel_aware = true;
+                path.parallel_safe = true;
+                path.parallel_workers = workers;
+                let mut divisor = workers as f64;
+                if pg_sys::parallel_leader_participation {
+                    divisor += (1.0 - 0.3 * workers as f64).max(0.0);
+                }
+                path.rows /= divisor;
+                path.total_cost = path.startup_cost
+                    + (path.total_cost - path.startup_cost) / divisor;
+                Some(partial)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Both variants must be fully constructed before ownership of either
+        // path is transferred. PostgreSQL may free a dominated path inside
+        // add_path/add_partial_path.
         pg_sys::add_path(ctx.baserel, &mut (*cpath_ptr).path as *mut pg_sys::Path);
+        if let Some(partial) = partial {
+            pg_sys::add_partial_path(ctx.baserel, &mut (*partial).path);
+        }
     }
     Ok(true)
 }

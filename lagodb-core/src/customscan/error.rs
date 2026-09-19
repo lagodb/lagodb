@@ -19,6 +19,11 @@ pub(crate) enum CustomScanPhase {
     Begin,
     ReScan,
     NextSlot,
+    EstimateDsm,
+    InitializeDsm,
+    ReInitializeDsm,
+    InitializeWorker,
+    Shutdown,
 }
 
 impl CustomScanPhase {
@@ -28,6 +33,11 @@ impl CustomScanPhase {
             Self::Begin => "BeginCustomScan",
             Self::ReScan => "ReScanCustomScan",
             Self::NextSlot => "ExecCustomScan access",
+            Self::EstimateDsm => "EstimateDSMCustomScan",
+            Self::InitializeDsm => "InitializeDSMCustomScan",
+            Self::ReInitializeDsm => "ReInitializeDSMCustomScan",
+            Self::InitializeWorker => "InitializeWorkerCustomScan",
+            Self::Shutdown => "ShutdownCustomScan",
         }
     }
 }
