@@ -6,8 +6,8 @@ use iceberg_lite::transaction::{IsolationLevel, RowLevelCommand};
 use pgrx::pg_sys;
 
 use super::row_identity::IcebergModifyScanContext;
-use crate::engine::write::PgTransactionIsolation;
 use crate::error::{IcebergError, IcebergResult};
+use crate::write::PgTransactionIsolation;
 
 #[derive(Debug)]
 pub(super) enum ConflictValidationScope {
@@ -159,7 +159,7 @@ mod tests {
 
     use super::super::IcebergModifyScanContext;
     use super::{ModifyCommand, TargetDependency};
-    use crate::engine::write::PlannedMutationTasks;
+    use crate::write::PlannedMutationTasks;
 
     #[test]
     fn commands_read_their_own_isolation_property() {

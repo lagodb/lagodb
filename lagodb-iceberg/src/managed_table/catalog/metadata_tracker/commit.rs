@@ -13,7 +13,6 @@ use iceberg_lite::transaction::Transaction;
 use lagodb_core::diag;
 use pgrx::pg_sys;
 
-use crate::engine::write::TxTableCommitPlan;
 use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::catalog::bridge::{IcebergTableId, StagedCatalog};
 use crate::managed_table::catalog::metadata_table::{
@@ -26,6 +25,7 @@ use crate::managed_table::maintenance::{
 use crate::storage::transaction_resources::{
     MetadataMaterializationAttempt, register_canceled_files_for_commit,
 };
+use crate::write::TxTableCommitPlan;
 
 use super::{TableCommitInput, TxMetadata};
 

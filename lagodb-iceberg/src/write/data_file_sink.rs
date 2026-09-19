@@ -18,9 +18,9 @@ use iceberg_lite::writer::{IcebergWriter, IcebergWriterBuilder};
 use lagodb_core::prelude::TupleSlotRow;
 use parquet::file::properties::WriterProperties;
 
-use crate::engine::schema::column_mapping::WriteColumns;
-use crate::engine::schema::relation::RelationShape;
 use crate::error::{IcebergError, IcebergResult};
+use crate::schema::column_mapping::WriteColumns;
+use crate::schema::relation::RelationShape;
 
 type ParquetDataFileWriter = DataFileWriter<
     ParquetWriterBuilder,
@@ -174,6 +174,11 @@ impl DataFileSink {
 
         let data_file_writer_builder =
             DataFileWriterBuilder::new(rolling_writer_builder);
+        // TODO: Support partitioned Iceberg writes by splitting each batch by
+        // the table's partition spec and passing the corresponding PartitionKey
+        // to each writer. `None` is correct only for unpartitioned tables; using
+        // this sink for a partitioned table produces staged data files without
+        // the partition tuple required by overlay scans and commits.
         Ok(data_file_writer_builder.build(None)?)
     }
 }

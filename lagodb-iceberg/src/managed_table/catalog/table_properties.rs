@@ -2,11 +2,11 @@
 
 use lagodb_core::handles::RelationHandle;
 
-use crate::engine::write::PreparedTablePropertyUpdate;
 use crate::error::IcebergResult;
 use crate::managed_table::catalog::metadata_tracker::TxMetadata;
 use crate::managed_table::options::ResolvedIcebergOptions;
 use crate::managed_table::storage::StorageContext;
+use crate::write::PreparedTablePropertyUpdate;
 
 pub(crate) struct ManagedTablePropertyUpdate {
     update: PreparedTablePropertyUpdate,

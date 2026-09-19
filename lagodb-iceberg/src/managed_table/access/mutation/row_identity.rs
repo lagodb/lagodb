@@ -7,10 +7,10 @@ use iceberg_lite::expr::Predicate;
 use lagodb_core::prelude::{AmModifyQueryState, AmResult, ItemPointer};
 use pgrx::pg_sys;
 
-use crate::engine::write::{
+use crate::managed_table::catalog::metadata_tracker::TxMetadata;
+use crate::write::{
     IcebergFileId, IcebergRowIdentity, PlannedMutationTasks, RelationRowRegistry,
 };
-use crate::managed_table::catalog::metadata_tracker::TxMetadata;
 
 /// Iceberg metadata captured once by a Modify-purpose target scan and consumed
 /// when the corresponding relation-local modify state is opened.

@@ -2,7 +2,7 @@
 //!
 //! The module facade exposes the provider's modify/query state. Runtime
 //! callbacks live in [`state`], immutable command decisions in [`plan`], and
-//! shared write sinks in [`crate::engine::write`].
+//! shared write sinks in [`crate::write`].
 
 mod plan;
 mod row_identity;

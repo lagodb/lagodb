@@ -489,7 +489,7 @@ mod tests {
     /// Guards the consistency of the two halves of the PG↔Iceberg type
     /// correspondence, which live in different layers: PG→Iceberg here
     /// ([`PgType::primitive_type`]) and Iceberg→PG in
-    /// [`crate::engine::schema::type_mapping`] ([`IcebergTypeExt::pg_column_type`]).
+    /// [`crate::schema::type_mapping`] ([`IcebergTypeExt::pg_column_type`]).
     /// They are coarse logical companions and must agree on the canonical
     /// target type, but nothing structural forces it — so this round-trips
     /// every supported scalar built-in and asserts it lands back on the
@@ -505,7 +505,7 @@ mod tests {
     /// the original OID.
     #[test]
     fn pg_to_iceberg_to_pg_column_type_round_trips() {
-        use crate::engine::schema::type_mapping::IcebergTypeExt;
+        use crate::schema::type_mapping::IcebergTypeExt;
         use lagodb_arrow::PgColumnType;
 
         let cases = [

@@ -12,11 +12,11 @@ use iceberg_lite::spec::{DataFile, FormatVersion, TableMetadata};
 use parquet::file::properties::WriterProperties;
 use pgrx::pg_sys;
 
-use crate::engine::write::{
+use crate::error::{IcebergError, IcebergResult};
+use crate::write::{
     IcebergFileId, ModifyStateId, OwnedRowPositions, PlannedMutationTasks,
     RelationRowRegistry, RowMutationClaim,
 };
-use crate::error::{IcebergError, IcebergResult};
 
 pub(crate) struct RowDeleteOutput {
     pub(crate) delete_file: DataFile,

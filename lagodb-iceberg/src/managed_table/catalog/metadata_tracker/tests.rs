@@ -5,10 +5,8 @@ use iceberg_lite::spec::{
     DataContentType, DataFile, DataFileBuilder, DataFileFormat, Struct,
 };
 
-use crate::engine::write::{
-    EffectiveCommitAction, TxTableActionLog as SharedActionLog,
-};
 use crate::managed_table::maintenance::PreparedVacuum;
+use crate::write::{EffectiveCommitAction, TxTableActionLog as SharedActionLog};
 
 type TxTableActionLog = SharedActionLog<PreparedVacuum, String>;
 

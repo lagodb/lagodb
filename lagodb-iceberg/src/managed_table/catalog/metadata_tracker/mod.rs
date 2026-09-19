@@ -33,14 +33,14 @@ use lagodb_core::transaction::{self, TransactionResource, TransactionResult};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
-use crate::engine::write::{
-    PreparedTablePropertyUpdate, RelationRowRegistry, TableTransactionState,
-    TxTableActionLog as SharedActionLog,
-};
 use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::catalog::metadata_table::IcebergMetadata;
 use crate::managed_table::maintenance::{
     AutomaticMaintenanceNotifier, PreparedVacuum,
+};
+use crate::write::{
+    PreparedTablePropertyUpdate, RelationRowRegistry, TableTransactionState,
+    TxTableActionLog as SharedActionLog,
 };
 
 pub use self::loaded_metadata::LoadedTableMetadata;
@@ -99,6 +99,22 @@ thread_local! {
 }
 
 impl TxMetadata {
+    /// Whether this backend has transaction-local actions whose relation view
+    /// cannot be reconstructed independently by a PostgreSQL parallel worker.
+    pub(crate) fn has_local_actions(relid: pg_sys::Oid) -> bool {
+        CURRENT.with(|slot| {
+            let slot = slot.borrow();
+            slot.as_ref().is_some_and(|tracker| {
+                tracker
+                    .inner
+                    .borrow()
+                    .tables
+                    .get(&relid)
+                    .is_some_and(|state| !state.transaction.actions.is_empty())
+            })
+        })
+    }
+
     /// Get (or lazily install) the `TxMetadata` for the current transaction.
     ///
     /// The first call inside a transaction also registers the instance with

@@ -13,16 +13,16 @@ use pgrx::pg_sys;
 use super::plan::{ModifyCommand, TargetDependency, ValidationPlan};
 use super::row_identity::{IcebergModifyQueryState, IcebergModifyScanContext};
 use crate::config::mutation_buffer_flush_bytes;
-use crate::engine::schema::relation::RelationShape;
-use crate::engine::write::PgTransactionIsolation;
-use crate::engine::write::{
-    DataFileSink, IcebergRowIdentity, MutationSinks, RowDeleteClaim, RowDeleteOutput,
-    RowDeleteState,
-};
 use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::catalog::metadata_tracker::TxMetadata;
 use crate::managed_table::options::IcebergTableOptions;
 use crate::managed_table::storage::StorageContext;
+use crate::schema::relation::RelationShape;
+use crate::write::PgTransactionIsolation;
+use crate::write::{
+    DataFileSink, IcebergRowIdentity, MutationSinks, RowDeleteClaim, RowDeleteOutput,
+    RowDeleteState,
+};
 
 /// Final output of one relation-local PostgreSQL ModifyTable session.
 struct StatementOutcome {

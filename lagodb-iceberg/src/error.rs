@@ -234,8 +234,8 @@ pub enum IcebergError {
     #[error("SPI error: {0}")]
     SpiError(String),
 
-    #[error("json error: {0}")]
-    JsonError(#[from] serde_json::Error),
+    #[error("binary codec error: {0}")]
+    BinaryCodecError(#[from] bincode::Error),
 
     /// Iceberg integration-internal invariant violation. Used for branches
     /// where a runtime guard remains because the type system does not yet
@@ -352,7 +352,9 @@ impl SqlStateError for IcebergError {
 
             IcebergError::ArrowError(_)
             | IcebergError::ArrowTypeMismatch(_)
-            | IcebergError::JsonError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            | IcebergError::BinaryCodecError(_) => {
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+            }
 
             IcebergError::SpiError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
 

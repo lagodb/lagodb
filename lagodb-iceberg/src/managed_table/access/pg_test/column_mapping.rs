@@ -13,12 +13,10 @@ mod tests {
     };
     use pgrx::pg_sys;
 
-    use crate::engine::scan::projection::{ProjectedField, Projection};
-    use crate::engine::schema::column_mapping::ColumnMapping;
-    use crate::engine::schema::relation::{
-        LiveColumn, RelationFieldMap, RelationShape,
-    };
     use crate::error::IcebergError;
+    use crate::scan::projection::{ProjectedField, Projection};
+    use crate::schema::column_mapping::ColumnMapping;
+    use crate::schema::relation::{LiveColumn, RelationFieldMap, RelationShape};
 
     fn int_schema(names: &[&str]) -> IcebergSchema {
         let fields: Vec<_> = names

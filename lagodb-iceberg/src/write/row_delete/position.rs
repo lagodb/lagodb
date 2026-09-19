@@ -23,8 +23,8 @@ use iceberg_lite::writer::{IcebergWriter, IcebergWriterBuilder};
 use parquet::file::properties::WriterProperties;
 
 use super::{PositionDeleteAccumulator, RowDeleteOutput};
-use crate::engine::write::RelationRowRegistry;
 use crate::error::{IcebergError, IcebergResult};
+use crate::write::RelationRowRegistry;
 
 type ParquetPositionDeleteFileWriter = PositionDeleteFileWriter<
     ParquetWriterBuilder,

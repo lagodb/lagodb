@@ -5,10 +5,10 @@ mod tests {
     use lagodb_core::prelude::*;
     use pgrx::pg_sys;
 
-    use crate::engine::write::RelationRowRegistry;
     use crate::managed_table::access::mutation::{
         IcebergFileSource, IcebergModifyQueryState,
     };
+    use crate::write::RelationRowRegistry;
 
     #[pgrx::pg_test(schema = "tests")]
     fn independent_query_states_share_transaction_file_ids_despite_scan_order() {

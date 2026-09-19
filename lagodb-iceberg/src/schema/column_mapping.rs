@@ -38,8 +38,8 @@ use pgrx::pg_sys;
 
 use super::relation::{RelationFieldBinding, RelationFieldMap, RelationShape};
 use super::type_mapping::{IcebergFieldExt, IcebergSchemaExt, IcebergTypeExt};
-use crate::engine::scan::projection::Projection;
 use crate::error::{IcebergError, IcebergResult};
+use crate::scan::projection::Projection;
 
 // ---------------------------------------------------------------------------
 // ColumnMapping: the single owner of scan position arithmetic
@@ -217,7 +217,7 @@ impl ScanColumns {
     /// semantics; reader-owned predicate/delete dependencies remain internal.
     /// Only requested output columns and PostgreSQL datum decoding are omitted.
     /// The empty decoder remains confined to the short-lived
-    /// [`ScanSpec`](crate::engine::scan::ScanSpec) preparation object and is
+    /// [`ScanSpec`](crate::scan::ScanSpec) preparation object and is
     /// not carried into DataFusion state.
     pub(crate) fn row_only(schema: Arc<IcebergSchema>) -> Self {
         Self {

@@ -8,12 +8,12 @@ use lagodb_core::table_maintenance::{
     TableMaintenanceMode, TableMaintenanceReport,
 };
 
-use crate::engine::write::ExclusiveTransactionAction;
 use crate::error::{IcebergError, IcebergResult, IcebergVacuumError};
 use crate::managed_table::catalog::metadata_table::MaintenanceCompletionToken;
 use crate::managed_table::gucs::{
     vacuum_compact_data_files, vacuum_orphan_retention_ms,
 };
+use crate::write::ExclusiveTransactionAction;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ManagedTableRoot {

@@ -15,8 +15,8 @@ use iceberg_lite::writer::file_writer::location_generator::{
 };
 
 use super::{PositionDeleteAccumulator, RowDeleteOutput};
-use crate::engine::write::{PlannedMutationTasks, RelationRowRegistry};
 use crate::error::{IcebergError, IcebergResult};
+use crate::write::{PlannedMutationTasks, RelationRowRegistry};
 
 struct PlannedDataFile {
     target: ReferencedDataFile,

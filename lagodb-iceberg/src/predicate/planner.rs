@@ -13,10 +13,8 @@ use std::sync::Arc;
 
 use iceberg_lite::spec::Schema as IcebergSchema;
 
-use crate::engine::schema::relation::{
-    RelationFieldIndex, RelationFieldMap, RelationShape,
-};
 use crate::error::IcebergError;
+use crate::schema::relation::{RelationFieldIndex, RelationFieldMap, RelationShape};
 
 use super::error::IcebergFilterError;
 use super::plan::{

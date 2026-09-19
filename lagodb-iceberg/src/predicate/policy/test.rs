@@ -5,7 +5,7 @@ pub(crate) mod host_matrix {
     use lagodb_core::expr::PgComparisonSignature;
     use pgrx::pg_sys;
 
-    use crate::engine::predicate::policy::ComparisonOpClass;
+    use crate::predicate::policy::ComparisonOpClass;
 
     pub(crate) const CLASS_BY_COLUMN: [ComparisonOpClass; 6] = [
         ComparisonOpClass::Equal,
@@ -67,7 +67,7 @@ use super::{
     ComparisonOpClass, PgPredicatePushdownPolicy, PredicatePushdownPolicy,
     SupportedPredicateCapability,
 };
-use crate::engine::predicate::plan::PlannedValueType;
+use crate::predicate::plan::PlannedValueType;
 
 fn op_class(opno: pg_sys::Oid) -> Option<ComparisonOpClass> {
     PredicatePushdownPolicy::op_class(opno)
