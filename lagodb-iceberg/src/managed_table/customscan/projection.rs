@@ -5,7 +5,7 @@ use lagodb_core::customscan::provider::{
 };
 use pgrx::pg_sys;
 
-use crate::engine::scan::projection::{ProjectedField, Projection};
+use crate::scan::projection::{ProjectedField, Projection};
 
 /// Resolves core's referenced-column set into the Iceberg scan projection.
 pub(super) struct ProjectionResolver;

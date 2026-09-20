@@ -25,16 +25,17 @@ use lagodb_core::expr::pushdown::{
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 use pgrx::pg_sys;
 
-use crate::engine::predicate::{
-    BoundIcebergPredicate, IcebergFilterError, IcebergFilterPlanner,
-    PlannedIcebergPredicate,
-};
+use crate::config::scan_fraction;
 use crate::error::IcebergError;
 use crate::managed_table::IcebergTableAm;
 use crate::managed_table::access::mutation::IcebergModifyScanContext;
 use crate::managed_table::access::scan::LoadedScanMetadata;
 use crate::managed_table::catalog::IcebergAccessMethod;
-use crate::managed_table::gucs::scan_fraction;
+use crate::managed_table::catalog::metadata_tracker::TxMetadata;
+use crate::predicate::{
+    BoundIcebergPredicate, IcebergFilterError, IcebergFilterPlanner,
+    PlannedIcebergPredicate,
+};
 
 use scan_state::IcebergScanState;
 
@@ -86,8 +87,16 @@ impl From<IcebergError> for CustomScanError {
     }
 }
 
+impl From<crate::scan::ScanError> for CustomScanError {
+    fn from(err: crate::scan::ScanError) -> Self {
+        CustomScanError::provider(err)
+    }
+}
+
 impl LagodbCustomScanProvider for IcebergCustomScanProvider {
     const NAME: &'static CStr = c"lagodb-iceberg";
+    const NATIVE_PARALLEL: bool = true;
+    const SUPPRESS_TABLE_AM_PARALLEL_SCAN: bool = true;
 
     type PrivateData = NoPrivateData;
     type State = IcebergScanState;
@@ -97,27 +106,25 @@ impl LagodbCustomScanProvider for IcebergCustomScanProvider {
         IcebergAccessMethod::matches_oid(ctx.access_method_oid())
     }
 
-    /// Query paths require either provider-planned filters or an empty path
-    /// target. The latter covers row-only scans such as `COUNT(*)` without
-    /// adding a fake storage-column dependency. Modify paths remain eligible
-    /// with an empty planned set for their existing storage-pruning contract.
+    /// Query paths remain eligible without a pushed filter so PostgreSQL can
+    /// build native-parallel partial scans for ordinary relation reads. Any
+    /// unsupported predicate remains a PostgreSQL residual on the CustomScan.
     fn create_path(
         ctx: &PathContext<'_>,
         variant: &PathVariant<'_>,
         builder: CustomPathBuilder<Self>,
     ) -> Option<CustomPathPlan<Self>> {
-        if !variant.purpose.is_modify()
-            && !variant.pushdown.has_planned_filters()
-            && !ctx.has_empty_path_target()
-        {
-            return None;
-        }
-
         let fraction = scan_fraction(variant.pushdown.pruning_selectivity);
 
+        let worker_reconstructible = !TxMetadata::has_local_actions(ctx.rel_oid());
         let builder = builder
             .scanned_pages(ctx.baserel_pages() * fraction)
-            .scanned_tuples(ctx.baserel_tuples() * fraction);
+            .scanned_tuples(ctx.baserel_tuples() * fraction)
+            // A complete path has no DSM callback. It is safe in a PG worker
+            // only when that worker can reconstruct the committed view without
+            // losing this backend's transaction-local Iceberg actions.
+            .parallel_safe_complete(worker_reconstructible)
+            .native_parallel_partial(worker_reconstructible);
         Some(builder.build(NoPrivateData))
     }
 
@@ -139,6 +146,39 @@ impl LagodbCustomScanProvider for IcebergCustomScanProvider {
 
     fn end(ctx: EndContext<'_, Self>) -> Result<(), CustomScanError> {
         IcebergScanState::end(ctx)
+    }
+
+    fn estimate_dsm(
+        state: &mut Self::State,
+    ) -> Result<pg_sys::Size, CustomScanError> {
+        state.estimate_dsm()
+    }
+
+    unsafe fn initialize_dsm(
+        state: &mut Self::State,
+        coordinate: *mut core::ffi::c_void,
+    ) -> Result<(), CustomScanError> {
+        unsafe { state.initialize_dsm(coordinate) }
+    }
+
+    unsafe fn reinitialize_dsm(
+        state: &mut Self::State,
+        coordinate: *mut core::ffi::c_void,
+    ) -> Result<(), CustomScanError> {
+        unsafe { state.reinitialize_dsm(coordinate) }
+    }
+
+    unsafe fn initialize_worker(
+        state: &mut Self::State,
+        _toc: *mut pg_sys::shm_toc,
+        coordinate: *mut core::ffi::c_void,
+    ) -> Result<(), CustomScanError> {
+        unsafe { state.initialize_worker(coordinate) }
+    }
+
+    fn shutdown_parallel(state: &mut Self::State) -> Result<(), CustomScanError> {
+        state.shutdown_parallel();
+        Ok(())
     }
 }
 

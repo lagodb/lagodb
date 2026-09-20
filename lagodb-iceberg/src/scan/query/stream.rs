@@ -13,17 +13,18 @@ use lagodb_arrow::query_source::{
 };
 
 use crate::error::IcebergError;
+use crate::scan::ScanError;
 
-use super::{IcebergTableScanError, lifecycle::BoundIcebergScan};
+use super::lifecycle::StatementScan;
 
-enum IcebergBatchCursor {
+enum BatchCursor {
     Pending,
     OpenAll(ArrowRecordBatchIterator),
     OpenTask(ArrowRecordBatchIterator),
     Finished,
 }
 
-enum IcebergReaderMode {
+enum ReaderMode {
     Static {
         tasks: Arc<[FileScanTask]>,
         row_filter: Option<Predicate>,
@@ -31,27 +32,27 @@ enum IcebergReaderMode {
     Evolving(SharedTaskArrowReader),
 }
 
-pub(super) struct IcebergArrowStream {
+pub(crate) struct ArrowStream {
     schema: SchemaRef,
-    bound: Arc<BoundIcebergScan>,
+    bound: Arc<StatementScan>,
     options: ScanStreamOptions,
     batch_size: usize,
-    reader: IcebergReaderMode,
+    reader: ReaderMode,
     predicate_generation: u64,
-    cursor: IcebergBatchCursor,
+    cursor: BatchCursor,
 }
 
-impl IcebergArrowStream {
+impl ArrowStream {
     pub(super) fn new(
-        bound: Arc<BoundIcebergScan>,
+        bound: Arc<StatementScan>,
         tasks: Arc<[FileScanTask]>,
         row_filter: Option<Predicate>,
         schema: SchemaRef,
         batch_size: usize,
         options: ScanStreamOptions,
-    ) -> Result<Self, IcebergTableScanError> {
+    ) -> Result<Self, ScanError> {
         let reader = if options.has_evolving_predicate() {
-            IcebergReaderMode::Evolving(
+            ReaderMode::Evolving(
                 bound
                     .scan
                     .shared_task_arrow_reader(
@@ -60,10 +61,10 @@ impl IcebergArrowStream {
                         row_filter,
                     )
                     .map_err(IcebergError::from)
-                    .map_err(IcebergTableScanError::from)?,
+                    .map_err(ScanError::from)?,
             )
         } else {
-            IcebergReaderMode::Static { tasks, row_filter }
+            ReaderMode::Static { tasks, row_filter }
         };
         Ok(Self {
             schema,
@@ -72,25 +73,25 @@ impl IcebergArrowStream {
             batch_size,
             reader,
             predicate_generation: 0,
-            cursor: IcebergBatchCursor::Pending,
+            cursor: BatchCursor::Pending,
         })
     }
 
-    fn open_all(&mut self) -> Result<(), IcebergTableScanError> {
-        let IcebergReaderMode::Static { tasks, row_filter } = &self.reader else {
+    fn open_all(&mut self) -> Result<(), ScanError> {
+        let ReaderMode::Static { tasks, row_filter } = &self.reader else {
             unreachable!("static cursor opening requires the static reader mode")
         };
         let cursor = self
             .bound
             .open_batches(Arc::clone(tasks), row_filter.clone(), self.batch_size)
             .map_err(IcebergError::from)
-            .map_err(IcebergTableScanError::from)?;
-        self.cursor = IcebergBatchCursor::OpenAll(cursor);
+            .map_err(ScanError::from)?;
+        self.cursor = BatchCursor::OpenAll(cursor);
         Ok(())
     }
 
-    fn open_next_task(&mut self) -> Result<(), IcebergTableScanError> {
-        let IcebergReaderMode::Evolving(reader) = &mut self.reader else {
+    fn open_next_task(&mut self) -> Result<(), ScanError> {
+        let ReaderMode::Evolving(reader) = &mut self.reader else {
             unreachable!("task cursor opening requires the evolving reader mode")
         };
         if let Some(update) = self
@@ -112,27 +113,27 @@ impl IcebergArrowStream {
         let cursor = match reader
             .read_next_task()
             .map_err(IcebergError::from)
-            .map_err(IcebergTableScanError::from)
+            .map_err(ScanError::from)
         {
             Ok(Some(cursor)) => cursor,
             Ok(None) => {
-                self.cursor = IcebergBatchCursor::Finished;
+                self.cursor = BatchCursor::Finished;
                 return Ok(());
             }
             Err(error) => {
-                self.cursor = IcebergBatchCursor::Finished;
+                self.cursor = BatchCursor::Finished;
                 return Err(error);
             }
         };
-        self.cursor = IcebergBatchCursor::OpenTask(cursor);
+        self.cursor = BatchCursor::OpenTask(cursor);
         Ok(())
     }
 
-    fn open_if_needed(&mut self) -> Result<(), IcebergTableScanError> {
-        if !matches!(&self.cursor, IcebergBatchCursor::Pending) {
+    fn open_if_needed(&mut self) -> Result<(), ScanError> {
+        if !matches!(&self.cursor, BatchCursor::Pending) {
             return Ok(());
         }
-        if matches!(&self.reader, IcebergReaderMode::Evolving(_)) {
+        if matches!(&self.reader, ReaderMode::Evolving(_)) {
             self.open_next_task()
         } else {
             self.open_all()
@@ -140,8 +141,8 @@ impl IcebergArrowStream {
     }
 }
 
-impl TableScanStream for IcebergArrowStream {
-    type Error = IcebergTableScanError;
+impl TableScanStream for ArrowStream {
+    type Error = ScanError;
 
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
@@ -151,26 +152,25 @@ impl TableScanStream for IcebergArrowStream {
         loop {
             self.open_if_needed()?;
             let next = match &mut self.cursor {
-                IcebergBatchCursor::OpenAll(cursor)
-                | IcebergBatchCursor::OpenTask(cursor) => cursor.next(),
-                IcebergBatchCursor::Finished => return Ok(None),
-                IcebergBatchCursor::Pending => {
+                BatchCursor::OpenAll(cursor) | BatchCursor::OpenTask(cursor) => {
+                    cursor.next()
+                }
+                BatchCursor::Finished => return Ok(None),
+                BatchCursor::Pending => {
                     unreachable!("open_if_needed resolves the pending state")
                 }
             };
             match next {
                 Some(Ok(batch)) => return Ok(Some(batch)),
                 Some(Err(error)) => {
-                    self.cursor = IcebergBatchCursor::Finished;
-                    return Err(IcebergTableScanError::from(IcebergError::from(
-                        error,
-                    )));
+                    self.cursor = BatchCursor::Finished;
+                    return Err(ScanError::from(IcebergError::from(error)));
                 }
-                None if matches!(&self.cursor, IcebergBatchCursor::OpenTask(_)) => {
-                    self.cursor = IcebergBatchCursor::Pending;
+                None if matches!(&self.cursor, BatchCursor::OpenTask(_)) => {
+                    self.cursor = BatchCursor::Pending;
                 }
                 None => {
-                    self.cursor = IcebergBatchCursor::Finished;
+                    self.cursor = BatchCursor::Finished;
                     return Ok(None);
                 }
             }

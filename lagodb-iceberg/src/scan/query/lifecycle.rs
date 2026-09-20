@@ -1,4 +1,4 @@
-//! Statement binding and run-local task plans for managed-Iceberg scans.
+//! Statement binding and run-local task plans for Iceberg scans.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -11,25 +11,23 @@ use lagodb_arrow::query_source::ScanStreamOptions;
 use lagodb_core::expr::pushdown::PredicatePlan;
 use lagodb_core::runtime_api::{RuntimePruningPredicate, TableScanTaskMetrics};
 
-use super::{
-    IcebergArrowStream, IcebergTableScanError,
-    runtime_predicate::IcebergPredicatePlanner,
-};
-use crate::engine::scan::{BoundQueryScanInput, QueryTaskPlanner};
+use super::{ArrowStream, runtime_predicate::IcebergPredicatePlanner};
 use crate::error::{IcebergError, IcebergResult};
+use crate::scan::parallel::{TaskGrouping, TaskGroupingConfig};
+use crate::scan::{BoundQueryScanInput, QueryTaskPlanner, ScanError};
 
 /// Immutable statement snapshot and schema binding. Physical tasks are
 /// deliberately absent and are planned only after DataFusion optimization.
 #[derive(Debug)]
-pub(super) struct BoundIcebergScan {
+pub(super) struct StatementScan {
     pub(super) scan: TableScan,
     pub(super) arrow_schema: SchemaRef,
     pub(super) row_filter: Option<Predicate>,
     task_planner: QueryTaskPlanner,
-    planned_tasks: Mutex<Option<CachedIcebergTaskSet>>,
+    planned_tasks: Mutex<Option<CachedTaskSet>>,
 }
 
-impl BoundIcebergScan {
+impl StatementScan {
     pub(super) fn open_batches(
         &self,
         tasks: Arc<[FileScanTask]>,
@@ -64,13 +62,17 @@ impl BoundIcebergScan {
 /// independently thread-safe capability even though the upstream trait bounds
 /// require it to be `Send + Sync`.
 #[derive(Debug)]
-pub(crate) struct BoundIcebergTableScan {
-    scan: Arc<BoundIcebergScan>,
+pub(crate) struct BoundScan {
+    scan: Arc<StatementScan>,
+    task_grouping: TaskGroupingConfig,
 }
 
-impl BoundIcebergTableScan {
-    pub(super) fn new(input: BoundQueryScanInput) -> Self {
-        let scan = BoundIcebergScan {
+impl BoundScan {
+    pub(crate) fn new(
+        input: BoundQueryScanInput,
+        task_grouping: TaskGroupingConfig,
+    ) -> Self {
+        let scan = StatementScan {
             scan: input.scan,
             arrow_schema: input.arrow_schema,
             row_filter: input.row_filter,
@@ -79,15 +81,16 @@ impl BoundIcebergTableScan {
         };
         Self {
             scan: Arc::new(scan),
+            task_grouping,
         }
     }
 
-    pub(super) fn plan_tasks(
+    pub(crate) fn plan_tasks(
         &self,
         projection: &[usize],
         static_filter: Option<Predicate>,
         runtime_filter: Option<Predicate>,
-    ) -> IcebergResult<PlannedIcebergTableScan> {
+    ) -> IcebergResult<PlannedScan> {
         let projected_field_ids = projection
             .iter()
             .map(|position| {
@@ -118,8 +121,8 @@ impl BoundIcebergTableScan {
                     .plan_files(&projected_field_ids, additional_filter.as_ref())?
                     .into_boxed_slice(),
             );
-            return Ok(PlannedIcebergTableScan {
-                task_set: Arc::new(IcebergTaskSet::new(tasks)),
+            return Ok(PlannedScan {
+                task_set: Arc::new(TaskSet::new(tasks)),
                 row_filter: self.row_filter(additional_filter),
                 schema: projected_schema,
             });
@@ -145,8 +148,8 @@ impl BoundIcebergTableScan {
                         .plan_files(&projected_field_ids, static_filter.as_ref())?
                         .into_boxed_slice(),
                 );
-                let task_set = Arc::new(IcebergTaskSet::new(tasks));
-                *cached = Some(CachedIcebergTaskSet {
+                let task_set = Arc::new(TaskSet::new(tasks));
+                *cached = Some(CachedTaskSet {
                     projection: projection.into(),
                     static_filter: static_filter.clone(),
                     task_set: Arc::clone(&task_set),
@@ -154,14 +157,14 @@ impl BoundIcebergTableScan {
                 task_set
             }
         };
-        Ok(PlannedIcebergTableScan {
+        Ok(PlannedScan {
             task_set,
             row_filter: self.row_filter(static_filter),
             schema: projected_schema,
         })
     }
 
-    pub(super) fn plan_predicate(
+    pub(crate) fn plan_predicate(
         &self,
         predicate: &RuntimePruningPredicate<'_>,
     ) -> IcebergResult<PredicatePlan<Predicate>> {
@@ -178,13 +181,13 @@ impl BoundIcebergTableScan {
         }
     }
 
-    pub(super) fn open_stream(
+    pub(crate) fn open_stream(
         &self,
-        planned: &PlannedIcebergTableScan,
+        planned: &PlannedScan,
         batch_size: usize,
         options: ScanStreamOptions,
-    ) -> Result<IcebergArrowStream, IcebergTableScanError> {
-        IcebergArrowStream::new(
+    ) -> Result<ArrowStream, ScanError> {
+        ArrowStream::new(
             Arc::clone(&self.scan),
             Arc::clone(&planned.task_set.tasks),
             planned.row_filter.clone(),
@@ -194,33 +197,37 @@ impl BoundIcebergTableScan {
         )
     }
 
-    pub(super) fn schema(&self) -> SchemaRef {
+    pub(crate) fn schema(&self) -> SchemaRef {
         Arc::clone(&self.scan.arrow_schema)
+    }
+
+    pub(crate) fn task_grouping(&self) -> Result<TaskGrouping, ScanError> {
+        self.task_grouping.resolve()
     }
 }
 
 /// Run-local handle retaining either the shared statement-stable inventory or
 /// a QueryRun-owned inventory narrowed by a complete runtime predicate.
-pub(crate) struct PlannedIcebergTableScan {
-    task_set: Arc<IcebergTaskSet>,
+pub(crate) struct PlannedScan {
+    task_set: Arc<TaskSet>,
     row_filter: Option<Predicate>,
     schema: SchemaRef,
 }
 
 #[derive(Debug)]
-struct CachedIcebergTaskSet {
+struct CachedTaskSet {
     projection: Box<[usize]>,
     static_filter: Option<Predicate>,
-    task_set: Arc<IcebergTaskSet>,
+    task_set: Arc<TaskSet>,
 }
 
 #[derive(Debug)]
-struct IcebergTaskSet {
+struct TaskSet {
     tasks: Arc<[FileScanTask]>,
     metrics: TableScanTaskMetrics,
 }
 
-impl IcebergTaskSet {
+impl TaskSet {
     fn new(tasks: Arc<[FileScanTask]>) -> Self {
         let planned_files = tasks
             .iter()
@@ -239,8 +246,16 @@ impl IcebergTaskSet {
     }
 }
 
-impl PlannedIcebergTableScan {
-    pub(super) fn metrics(&self) -> TableScanTaskMetrics {
+impl PlannedScan {
+    pub(crate) fn metrics(&self) -> TableScanTaskMetrics {
         self.task_set.metrics
+    }
+
+    pub(crate) fn tasks(&self) -> &Arc<[FileScanTask]> {
+        &self.task_set.tasks
+    }
+
+    pub(crate) fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }

@@ -4,20 +4,17 @@ use lagodb_arrow::{ArrowColumnDecoder, BoundBatch};
 use lagodb_core::batch::{AmScanBatchSource, BatchRowDecoder};
 use lagodb_core::prelude::{AmResult, SlotColumns};
 
-use super::batch::IcebergArrowBatchSource;
+use super::batch::ScanBatchSource;
 
-pub(crate) struct IcebergQueryCursor {
-    source: IcebergArrowBatchSource,
+pub(crate) struct QueryCursor {
+    source: ScanBatchSource,
     decoder: ArrowColumnDecoder,
     current: Option<BoundBatch>,
     row_index: usize,
 }
 
-impl IcebergQueryCursor {
-    pub(crate) fn new(
-        source: IcebergArrowBatchSource,
-        decoder: ArrowColumnDecoder,
-    ) -> Self {
+impl QueryCursor {
+    pub(crate) fn new(source: ScanBatchSource, decoder: ArrowColumnDecoder) -> Self {
         Self {
             source,
             decoder,

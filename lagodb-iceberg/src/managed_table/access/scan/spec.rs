@@ -1,5 +1,6 @@
 //! AM catalog and executor adaptation for the shared scan engine.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use iceberg_lite::expr::Predicate;
@@ -10,19 +11,17 @@ use lagodb_core::access::mutation::ModifyScanBinding;
 use lagodb_core::prelude::OwnedScanKeys;
 use pgrx::pg_sys;
 
-use super::cursor::IcebergBatchCursor;
-use crate::engine::scan::projection::Projection;
-use crate::engine::scan::{
-    AnalyzeScanInput, MutationScanInput, ScanSource, ScanSpec,
-};
-use crate::engine::schema::relation::RelationShape;
-use crate::engine::write::PgTransactionIsolation;
+use super::cursor::BatchCursor;
 use crate::error::IcebergResult;
 use crate::managed_table::access::analyze::AnalyzePreparation;
 use crate::managed_table::access::mutation::IcebergModifyQueryState;
 use crate::managed_table::catalog::bridge::IcebergTableId;
 use crate::managed_table::catalog::metadata_tracker::TxMetadata;
 use crate::managed_table::storage::StorageContext;
+use crate::scan::projection::Projection;
+use crate::scan::{AnalyzeScanInput, MutationScanInput, ScanSource, ScanSpec};
+use crate::schema::relation::RelationShape;
+use crate::write::PgTransactionIsolation;
 
 #[derive(Clone, Copy)]
 enum ScanMetadataPurpose {
@@ -47,6 +46,10 @@ impl LoadedScanMetadata {
 
     pub(crate) fn schema(&self) -> &Arc<IcebergSchema> {
         &self.schema
+    }
+
+    pub(crate) fn properties(&self) -> &HashMap<String, String> {
+        self.table.metadata().properties()
     }
 
     fn load(
@@ -139,8 +142,17 @@ impl ScanSpec {
         )
     }
 
-    pub(crate) fn open_batch_cursor(&mut self) -> IcebergResult<IcebergBatchCursor> {
-        Ok(IcebergBatchCursor::query(self.open_query_cursor()?))
+    pub(crate) fn open_batch_cursor(&mut self) -> IcebergResult<BatchCursor> {
+        Ok(BatchCursor::query(self.open_query_cursor()?))
+    }
+
+    pub(crate) fn open_batch_cursor_with_tasks(
+        &self,
+        tasks: Arc<[iceberg_lite::scan::FileScanTask]>,
+    ) -> IcebergResult<BatchCursor> {
+        Ok(BatchCursor::query(
+            self.open_query_cursor_with_tasks(tasks)?,
+        ))
     }
 
     pub(crate) fn prepare_analyze(&self) -> IcebergResult<AnalyzePreparation> {
@@ -157,11 +169,9 @@ impl ScanSpec {
         &mut self,
         binding: ModifyScanBinding<IcebergModifyQueryState>,
         table_oid: pg_sys::Oid,
-    ) -> IcebergResult<IcebergBatchCursor> {
+    ) -> IcebergResult<BatchCursor> {
         let MutationScanInput { source, decoder } = self.mutation_input()?;
-        Ok(IcebergBatchCursor::mutation(
-            source, decoder, binding, table_oid,
-        ))
+        Ok(BatchCursor::mutation(source, decoder, binding, table_oid))
     }
 
     pub(super) fn refresh_filter(

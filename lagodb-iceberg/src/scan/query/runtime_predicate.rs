@@ -12,12 +12,12 @@ use lagodb_core::runtime_api::{
     RuntimePruningPredicate,
 };
 
-use crate::engine::predicate::IcebergPredicateBuilder;
-use crate::engine::predicate::policy::{
+use crate::error::{IcebergError, IcebergResult};
+use crate::predicate::IcebergPredicateBuilder;
+use crate::predicate::policy::{
     ComparisonOpClass, PredicatePushdownPolicy, PredicateValueKind,
     SupportedPredicateCapability,
 };
-use crate::error::{IcebergError, IcebergResult};
 
 pub(super) struct IcebergPredicatePlanner<'a> {
     arrow_schema: &'a Schema,

@@ -6,38 +6,36 @@ use lagodb_core::access::mutation::ModifyScanBinding;
 use lagodb_core::prelude::*;
 use pgrx::pg_sys;
 
-use crate::engine::scan::IcebergQueryCursor;
-use crate::engine::scan::batch::{
-    IcebergArrowBatchSource, RowLocationLayout, position_unchecked,
-};
-use crate::engine::write::IcebergFileId;
 use crate::managed_table::access::mutation::{
     IcebergFileSource, IcebergModifyQueryState,
 };
+use crate::scan::QueryCursor;
+use crate::scan::batch::{RowLocationLayout, ScanBatchSource, position_unchecked};
+use crate::write::IcebergFileId;
 
 /// Query and mutation scans have different valid bound-batch states.
 ///
 /// Keeping them as enum variants prevents query batches from carrying
 /// row-location state and prevents mutation batches from existing without a
 /// registered file identity.
-pub struct IcebergBatchCursor {
+pub struct BatchCursor {
     kind: CursorKind,
 }
 
 enum CursorKind {
-    Query(IcebergQueryCursor),
+    Query(QueryCursor),
     Mutation(MutationBatchCursor),
 }
 
-impl IcebergBatchCursor {
-    pub(super) fn query(cursor: IcebergQueryCursor) -> Self {
+impl BatchCursor {
+    pub(super) fn query(cursor: QueryCursor) -> Self {
         Self {
             kind: CursorKind::Query(cursor),
         }
     }
 
     pub(super) fn mutation(
-        source: IcebergArrowBatchSource,
+        source: ScanBatchSource,
         decoder: ArrowColumnDecoder,
         binding: ModifyScanBinding<IcebergModifyQueryState>,
         table_oid: pg_sys::Oid,
@@ -59,7 +57,7 @@ impl IcebergBatchCursor {
     }
 }
 
-impl ScanBatchDriver for IcebergBatchCursor {
+impl ScanBatchDriver for BatchCursor {
     fn next_into_slot(
         &mut self,
         direction: ScanDirection,
@@ -82,7 +80,7 @@ struct MutationBoundBatch {
 }
 
 struct MutationBatchCursor {
-    source: IcebergArrowBatchSource,
+    source: ScanBatchSource,
     decoder: ArrowColumnDecoder,
     current: Option<MutationBoundBatch>,
     row_location_layout: Option<RowLocationLayout>,

@@ -8,10 +8,10 @@ use lagodb_core::runtime_api::{
     RuntimeComparisonOperator, RuntimeIntegerWidening, RuntimePredicateValue,
 };
 
-use crate::engine::predicate::policy::{
+use crate::error::IcebergResult;
+use crate::predicate::policy::{
     Int32OutOfRange, PredicatePushdownPolicy, PredicateValueKind,
 };
-use crate::error::IcebergResult;
 
 use super::IcebergPredicatePlanner;
 

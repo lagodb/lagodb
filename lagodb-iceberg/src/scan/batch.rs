@@ -20,9 +20,9 @@ use crate::error::IcebergError;
 /// and PostgreSQL cancellation is checked once for every underlying batch.
 /// Empty batches are deliberately preserved so consumers retain the old
 /// batch-schema validation behavior.
-pub(crate) struct IcebergArrowBatches(pub(crate) ArrowRecordBatchIterator);
+pub(crate) struct ArrowBatches(pub(crate) ArrowRecordBatchIterator);
 
-impl Iterator for IcebergArrowBatches {
+impl Iterator for ArrowBatches {
     type Item = Result<RecordBatch, IcebergError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -31,8 +31,7 @@ impl Iterator for IcebergArrowBatches {
     }
 }
 
-pub(crate) type IcebergArrowBatchSource =
-    ArrowBatchSource<IcebergArrowBatches, IcebergError>;
+pub(crate) type ScanBatchSource = ArrowBatchSource<ArrowBatches, IcebergError>;
 
 /// Stable positions of Iceberg's row-location metadata columns.
 #[derive(Clone, Copy)]
@@ -80,7 +79,7 @@ impl RowLocationLayout {
     ///
     /// # Safety
     ///
-    /// `batch` must come from `IcebergArrowBatches` and have the same field
+    /// `batch` must come from `ArrowBatches` and have the same field
     /// order and types as the batch used to create this layout. Iceberg's
     /// reader produces `_file` as one required `RunArray<Int32Type>` constant
     /// for the current `FileReadRequest`, and `_pos` as a required,

@@ -12,13 +12,13 @@ use iceberg_lite::table::Table;
 use lagodb_arrow::{ArrowBatchSource, ArrowColumnDecoder};
 use pgrx::pg_sys;
 
-use crate::engine::schema::column_mapping::ScanColumns;
-use crate::engine::schema::relation::RelationShape;
-use crate::engine::write::PlannedMutationTasks;
 use crate::error::{IcebergError, IcebergResult};
+use crate::schema::column_mapping::ScanColumns;
+use crate::schema::relation::RelationShape;
+use crate::write::PlannedMutationTasks;
 
-use super::IcebergQueryCursor;
-use super::batch::{IcebergArrowBatchSource, IcebergArrowBatches};
+use super::QueryCursor;
+use super::batch::{ArrowBatches, ScanBatchSource};
 use super::projection::Projection;
 
 /// Statement-scoped scan state: snapshot, bound columns, predicates, and
@@ -163,7 +163,7 @@ impl CountRowsScanSpec {
 /// Shared mutation-scan reader input. The adapter binds it to its executor
 /// identity registry and synthetic-ctid callback surface.
 pub(crate) struct MutationScanInput {
-    pub(crate) source: IcebergArrowBatchSource,
+    pub(crate) source: ScanBatchSource,
     pub(crate) decoder: ArrowColumnDecoder,
 }
 
@@ -191,10 +191,10 @@ impl ScanSpec {
     /// Build a scan with a PostgreSQL output projection.
     ///
     /// `projection` drives both `select_field_ids` (read fewer columns) and a
-    /// projected [`ColumnMapping`](crate::engine::schema::column_mapping). The decoder
+    /// projected [`ColumnMapping`](crate::schema::column_mapping). The decoder
     /// writes only the projected `dest` slots; projected-away positions are
     /// left untouched, which is safe because they are never read (see
-    /// [`ColumnMapping`](crate::engine::schema::column_mapping)) — not because the
+    /// [`ColumnMapping`](crate::schema::column_mapping)) — not because the
     /// cleared slot reads them back as NULL.
     pub(crate) fn projected(
         source: ScanSource,
@@ -288,7 +288,9 @@ impl ScanSpec {
         self.planned_mutation_tasks().map(|_| ())
     }
 
-    fn planned_query_tasks(&mut self) -> IcebergResult<Arc<[FileScanTask]>> {
+    pub(crate) fn planned_query_tasks(
+        &mut self,
+    ) -> IcebergResult<Arc<[FileScanTask]>> {
         if let Some(tasks) = self.query_tasks.as_ref() {
             return Ok(Arc::clone(tasks));
         }
@@ -330,12 +332,38 @@ impl ScanSpec {
 
     /// Construct a query-only cursor without an AM/FDW discriminator in the
     /// per-row path.
-    pub(crate) fn open_query_cursor(&mut self) -> IcebergResult<IcebergQueryCursor> {
+    pub(crate) fn open_query_cursor(&mut self) -> IcebergResult<QueryCursor> {
         let tasks = self.planned_query_tasks()?;
-        let source = ArrowBatchSource::new(IcebergArrowBatches(
+        let source = ArrowBatchSource::new(ArrowBatches(
             self.read_planned_tasks(RowLocationProjection::Exclude, tasks)?,
         ));
-        Ok(IcebergQueryCursor::new(source, self.plan.decoder()))
+        Ok(QueryCursor::new(source, self.plan.decoder()))
+    }
+
+    pub(crate) fn open_query_cursor_with_tasks(
+        &self,
+        tasks: Arc<[FileScanTask]>,
+    ) -> IcebergResult<QueryCursor> {
+        let source = ArrowBatchSource::new(ArrowBatches(
+            self.read_planned_tasks(RowLocationProjection::Exclude, tasks)?,
+        ));
+        Ok(QueryCursor::new(source, self.plan.decoder()))
+    }
+
+    pub(crate) fn query_arrow_schema(
+        &self,
+    ) -> IcebergResult<arrow_schema::SchemaRef> {
+        Ok(Arc::new(self.plan.query_arrow_schema()?))
+    }
+
+    pub(crate) fn table_properties(
+        &self,
+    ) -> &std::collections::HashMap<String, String> {
+        self.table.metadata().properties()
+    }
+
+    pub(crate) fn file_io(&self) -> iceberg_lite::io::FileIO {
+        self.table.file_io().clone()
     }
 
     /// Plan the whole logical snapshot for an adapter's ANALYZE implementation.
@@ -358,11 +386,10 @@ impl ScanSpec {
     /// ctid registration and executor binding remain adapter responsibilities.
     pub(crate) fn mutation_input(&mut self) -> IcebergResult<MutationScanInput> {
         let tasks = self.planned_mutation_tasks()?;
-        let source =
-            ArrowBatchSource::new(IcebergArrowBatches(self.read_planned_tasks(
-                RowLocationProjection::Include,
-                tasks.shared_tasks(),
-            )?));
+        let source = ArrowBatchSource::new(ArrowBatches(self.read_planned_tasks(
+            RowLocationProjection::Include,
+            tasks.shared_tasks(),
+        )?));
         Ok(MutationScanInput {
             source,
             decoder: self.plan.decoder(),

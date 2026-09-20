@@ -7,7 +7,7 @@
 //!   preserved across `scan_rescan`, so the visible snapshot is frozen for the
 //!   scan's duration. This matches the Read Committed contract: every
 //!   `scan_rescan` comes from the same statement that issued `scan_begin`.
-//! - [`IcebergBatchCursor`] owns one traversal over the planned tasks;
+//! - [`BatchCursor`] owns one traversal over the planned tasks;
 //!   `scan_rescan` rebuilds only this traversal from the existing spec.
 //!
 //! ANALYZE has its own state after the shared statement metadata and decoder
@@ -19,8 +19,8 @@ use std::mem;
 mod cursor;
 mod spec;
 
-pub(crate) use crate::engine::scan::ScanSpec;
-pub use cursor::IcebergBatchCursor;
+pub(crate) use crate::scan::ScanSpec;
+pub use cursor::BatchCursor;
 pub(crate) use spec::LoadedScanMetadata;
 
 use lagodb_core::access::scan::virtual_slot_callbacks_with_tid;
@@ -28,10 +28,10 @@ use lagodb_core::handles::RelationHandle;
 use lagodb_core::prelude::*;
 use pgrx::pg_sys;
 
-use crate::engine::schema::relation::RelationShape;
 use crate::error::IcebergError;
 use crate::managed_table::IcebergTableAm;
 use crate::managed_table::access::analyze::AnalyzeScanState;
+use crate::schema::relation::RelationShape;
 
 /// PostgreSQL-facing scan session for the Iceberg table AM.
 pub struct IcebergScan {
@@ -89,7 +89,7 @@ impl ScanPurpose {
 
 struct QueryScanState {
     spec: ScanSpec,
-    cursor: IcebergBatchCursor,
+    cursor: BatchCursor,
 }
 
 impl QueryScanState {
@@ -129,7 +129,7 @@ impl AmScan for IcebergTableAm {
 }
 
 impl AmScanSession for IcebergScan {
-    type BatchDriver = IcebergBatchCursor;
+    type BatchDriver = BatchCursor;
 
     fn new(
         rel: &RelationHandle,

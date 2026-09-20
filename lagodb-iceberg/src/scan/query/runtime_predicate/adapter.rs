@@ -4,8 +4,8 @@ use iceberg_lite::expr::Predicate;
 use lagodb_core::expr::pushdown::{PredicatePlan, PredicatePlanner};
 use lagodb_core::runtime_api::{RuntimeComparisonOperator, RuntimePredicateScalar};
 
-use crate::engine::predicate::policy::PredicatePushdownPolicy;
 use crate::error::{IcebergError, IcebergResult};
+use crate::predicate::policy::PredicatePushdownPolicy;
 
 use super::IcebergPredicatePlanner;
 
