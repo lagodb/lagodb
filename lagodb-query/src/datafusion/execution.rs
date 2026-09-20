@@ -1,4 +1,4 @@
-//! Current-thread DataFusion lifecycle for serial query offload.
+//! Current-thread DataFusion lifecycle for query offload.
 
 mod resources;
 
@@ -11,7 +11,6 @@ use std::sync::Arc;
 use arrow_array::RecordBatch;
 use arrow_schema::{DataType, SchemaRef};
 use datafusion::common::DataFusionError;
-use datafusion::execution::memory_pool::PeakRecordingPool;
 use lagodb_arrow::{
     ArrowColumnDecoder, BoundBatch, ColumnRule, DatumCodec, DecodedColumn,
     PgColumnType, resolve_column_rule,
@@ -28,10 +27,12 @@ use crate::plan::{
     PlanExplainNode, PlannedTableScan, QueryFragment, QueryPlanData, QueryTupleLayout,
 };
 
-use super::SerialExecutionLimits;
-use super::metrics::{ExecutionMetrics, ExecutionMetricsSnapshot};
+use super::metrics::{
+    ExecutionMetrics, ExecutionMetricsSnapshot, QueryExecutionMode,
+};
 use super::plan_compiler::DataFusionPlanError;
 use super::scan_callbacks::SerialTableScanCallbacks;
+use super::{ParallelQueryOptions, QueryExecutionLimits};
 use resources::QueryExecutionResources;
 
 /// Whether LagoDB records counters and retains physical-plan metrics for
@@ -184,39 +185,36 @@ impl QueryOutputDecoder {
 }
 
 /// Begin-owned query state with statement resources and at most one lazy run.
-pub struct SerialQueryExecution {
+pub struct QueryExecution {
     output: QueryOutputDecoder,
     metrics: Option<Arc<ExecutionMetrics>>,
-    memory: Arc<PeakRecordingPool>,
     resources: Option<QueryExecutionResources>,
     backend_thread: PhantomData<Rc<()>>,
 }
 
-impl SerialQueryExecution {
+/// Begin-time inputs selected by the PG host for one complete query fragment.
+pub struct QueryExecutionRequest<'a> {
+    pub query: QueryPlanData,
+    pub scans: &'a [PlannedTableScan<'a>],
+    pub limits: QueryExecutionLimits,
+    pub metrics_mode: ExecutionMetricsMode,
+    pub callbacks: &'a [SerialTableScanCallbacks],
+    pub parallel: Option<ParallelQueryOptions>,
+    pub runtime_exprs: *mut pg_sys::List,
+    pub parent: *mut pg_sys::PlanState,
+}
+
+impl QueryExecution {
     pub fn try_new(
-        query: QueryPlanData,
-        scans: &[PlannedTableScan<'_>],
-        limits: SerialExecutionLimits,
-        metrics_mode: ExecutionMetricsMode,
-        callbacks: &[SerialTableScanCallbacks],
-        runtime_exprs: *mut pg_sys::List,
-        parent: *mut pg_sys::PlanState,
+        request: QueryExecutionRequest<'_>,
     ) -> Result<Self, QueryExecutionError> {
-        let metrics = (metrics_mode == ExecutionMetricsMode::Enabled)
-            .then(|| Arc::new(ExecutionMetrics::new(scans.len())));
-        let (resources, memory, output) = QueryExecutionResources::prepare(
-            query,
-            scans,
-            callbacks,
-            limits,
-            metrics.as_ref(),
-            runtime_exprs,
-            parent,
-        )?;
+        let metrics = (request.metrics_mode == ExecutionMetricsMode::Enabled)
+            .then(|| Arc::new(ExecutionMetrics::new(request.scans.len())));
+        let (resources, output) =
+            QueryExecutionResources::prepare(request, metrics.as_ref())?;
         Ok(Self {
             output,
             metrics,
-            memory,
             resources: Some(resources),
             backend_thread: PhantomData,
         })
@@ -272,9 +270,14 @@ impl SerialQueryExecution {
     }
 
     pub fn metrics(&self) -> Option<ExecutionMetricsSnapshot> {
-        self.metrics
-            .as_ref()
-            .map(|metrics| metrics.snapshot(self.memory.peak_reserved()))
+        self.metrics.as_ref().map(|metrics| {
+            metrics.snapshot(
+                self.resources
+                    .as_ref()
+                    .expect("active query execution owns its resources")
+                    .peak_reserved(),
+            )
+        })
     }
 
     pub fn physical_plan_analyze(
@@ -287,6 +290,26 @@ impl SerialQueryExecution {
             .physical_plan_analyze(include_timing)
     }
 
+    pub fn physical_plan_explain(&self) -> PlanExplainNode {
+        self.resources
+            .as_ref()
+            .expect("active query execution owns its resources")
+            .physical_plan_explain()
+    }
+
+    pub fn planned_mode(&self) -> QueryExecutionMode {
+        if self
+            .resources
+            .as_ref()
+            .expect("active query execution owns its resources")
+            .planned_parallel()
+        {
+            QueryExecutionMode::Parallel
+        } else {
+            QueryExecutionMode::Serial
+        }
+    }
+
     pub fn fragment(&self) -> &QueryFragment {
         self.resources
             .as_ref()
@@ -295,7 +318,7 @@ impl SerialQueryExecution {
     }
 }
 
-impl Drop for SerialQueryExecution {
+impl Drop for QueryExecution {
     fn drop(&mut self) {
         if let Some(resources) = self.resources.take() {
             let _ = resources.close();
@@ -305,7 +328,7 @@ impl Drop for SerialQueryExecution {
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryExecutionError {
-    #[error("serial query execution limits must all be non-zero")]
+    #[error("query execution limits must all be non-zero")]
     InvalidLimits,
     #[error("failed to create current-thread query runtime: {0}")]
     Runtime(#[source] io::Error),
@@ -329,6 +352,8 @@ pub enum QueryExecutionError {
     MissingScanMetadata { scan: usize },
     #[error("table scan release failed: {0}")]
     ScanRelease(#[source] PgReportError),
+    #[error("parallel query host failed: {0}")]
+    ParallelHost(#[source] PgReportError),
     #[error("query initialization failed: {primary}; cleanup failure: {cleanup:?}")]
     Initialization {
         #[source]
@@ -343,6 +368,7 @@ impl SqlStateError for QueryExecutionError {
             Self::DataFusion(error) => Self::datafusion_sqlstate(error),
             Self::ScanBind(error)
             | Self::ScanRelease(error)
+            | Self::ParallelHost(error)
             | Self::OutputConversion(error) => error.sql_error_code(),
             Self::Initialization { primary, .. } => primary.sql_error_code(),
             Self::InvalidQueryOutput { .. } => PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
@@ -381,6 +407,7 @@ impl QueryExecutionError {
             Self::DataFusion(error) => Self::datafusion_report(error),
             Self::ScanBind(error)
             | Self::OutputConversion(error)
+            | Self::ParallelHost(error)
             | Self::ScanRelease(error) => error,
             Self::Initialization { primary, cleanup } => {
                 let cleanup = cleanup.map(|error| {

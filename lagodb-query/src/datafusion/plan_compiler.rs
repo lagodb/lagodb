@@ -27,6 +27,7 @@ use crate::plan::{
 
 use super::expression_compiler::DataFusionExpressionCompiler;
 use super::numeric_aggregate;
+use super::parallel::ParallelTableProvider;
 use super::physical_plan::CompiledPhysicalPlan;
 use super::postgres_eval::PgExprRuntime;
 use super::scan_binding::ScanBindings;
@@ -128,7 +129,26 @@ impl<'session> DataFusionPlanCompiler<'session> {
         scans: &[Arc<ExternalTableProvider>],
         values: &[RuntimeValue],
     ) -> Result<CompiledPhysicalPlan, DataFusionPlanError> {
-        let scans = ScanBindings::new(scans);
+        self.compile_with_bindings(fragment, ScanBindings::new(scans), values)
+            .await
+    }
+
+    pub(super) async fn compile_parallel(
+        &self,
+        fragment: &QueryFragment,
+        scans: &[Arc<ParallelTableProvider>],
+        values: &[RuntimeValue],
+    ) -> Result<CompiledPhysicalPlan, DataFusionPlanError> {
+        self.compile_with_bindings(fragment, ScanBindings::parallel(scans), values)
+            .await
+    }
+
+    async fn compile_with_bindings(
+        &self,
+        fragment: &QueryFragment,
+        scans: ScanBindings,
+        values: &[RuntimeValue],
+    ) -> Result<CompiledPhysicalPlan, DataFusionPlanError> {
         if let QueryNode::Limit(limit) = fragment.root() {
             let window = LimitWindow::bind(limit, values)?;
             if !window.supports_bounded_top_k() {

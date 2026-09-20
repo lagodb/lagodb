@@ -2,6 +2,7 @@
 
 mod bound_scan;
 mod stream_reader;
+mod worker;
 
 use std::ffi::c_void;
 use std::marker::PhantomData;
@@ -18,12 +19,16 @@ use pgrx::prelude::PgSqlErrorCode;
 
 pub(super) use bound_scan::{BoundTableScanHandle, NegotiatedTableScanPredicate};
 pub(super) use stream_reader::ProviderStreamReader;
+pub use worker::WorkerTableScanCallbacks;
+pub(super) use worker::{
+    PreparedWorkerSource, WorkerProviderStreamReader, WorkerTableScanSource,
+};
 
 /// Backend-thread-bound callbacks for one validated provider table scan.
 ///
 /// This wrapper can cross the `lagodb-base`/`lagodb-query` crate boundary, but
 /// cannot cross a thread boundary. It exposes no opaque handle or stream;
-/// [`SerialQueryExecution`](super::SerialQueryExecution) consumes it while
+/// [`QueryExecution`](super::QueryExecution) consumes it while
 /// constructing the sole PostgreSQL-owned execution lifecycle.
 #[derive(Clone, Copy)]
 pub struct SerialTableScanCallbacks {

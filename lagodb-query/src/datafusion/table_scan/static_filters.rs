@@ -14,12 +14,12 @@ use crate::datafusion::scan_callbacks::{
 };
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct StaticFilterSet {
+pub(in crate::datafusion) struct StaticFilterSet {
     predicates: Arc<[NegotiatedTableScanPredicate]>,
 }
 
 impl StaticFilterSet {
-    pub(super) fn support(
+    pub(in crate::datafusion) fn support(
         filter: &Expr,
         source_schema: &Schema,
         bound: &BoundTableScanHandle,
@@ -48,7 +48,7 @@ impl StaticFilterSet {
         })
     }
 
-    pub(super) fn plan(
+    pub(in crate::datafusion) fn plan(
         filters: &[Expr],
         source_schema: &Schema,
         bound: &BoundTableScanHandle,
@@ -81,7 +81,7 @@ impl StaticFilterSet {
         })
     }
 
-    pub(super) fn handles(&self) -> Vec<*const c_void> {
+    pub(in crate::datafusion) fn handles(&self) -> Vec<*const c_void> {
         self.predicates
             .iter()
             .map(NegotiatedTableScanPredicate::as_ptr)

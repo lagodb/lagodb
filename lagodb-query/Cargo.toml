@@ -22,12 +22,16 @@ pg17 = ["pgrx/pg17", "lagodb-core/pg17", "lagodb-arrow/pg17"]
 
 [dependencies]
 datafusion = { workspace = true }
+datafusion-distributed = { workspace = true }
+datafusion-proto = { workspace = true }
 arrow-array = { workspace = true, features = ["ffi"] }
 arrow-buffer = { workspace = true }
 arrow-schema = { workspace = true }
 async-trait = "0.1"
 futures = "0.3"
-tokio = { version = "1", features = ["rt"], default-features = false }
+prost = { workspace = true }
+tokio = { version = "1", features = ["rt", "time", "macros", "sync"], default-features = false }
+tokio-util = { version = "0.7", features = ["rt"], default-features = false }
 lagodb-core = { path = "../lagodb-core", default-features = false }
 lagodb-arrow = { path = "../lagodb-arrow", default-features = false }
 pgrx = { workspace = true }

@@ -1,9 +1,10 @@
-//! Statement-owned DataFusion physical plan for serial query execution.
+//! DataFusion physical plan and execution-semantic metadata.
 
 mod metrics_accumulator;
 
 use std::sync::Arc;
 
+use crate::plan::PlanExplainNode;
 use arrow_schema::SchemaRef;
 use datafusion::common::DataFusionError;
 use datafusion::common::tree_node::TreeNodeRecursion;
@@ -14,6 +15,7 @@ use datafusion::physical_plan::{ExecutionPlan, execute_stream};
 pub(super) use metrics_accumulator::PhysicalPlanMetricsAccumulator;
 
 /// Statement-scoped executable plan and current-instance metrics source.
+#[derive(Clone)]
 pub(super) struct CompiledPhysicalPlan {
     plan: Arc<dyn ExecutionPlan>,
     contains_dynamic_filters: bool,
@@ -41,8 +43,16 @@ impl CompiledPhysicalPlan {
         self.plan.schema()
     }
 
+    pub(super) fn plan(&self) -> &Arc<dyn ExecutionPlan> {
+        &self.plan
+    }
+
     pub(super) const fn has_dynamic_filters(&self) -> bool {
         self.contains_dynamic_filters
+    }
+
+    pub(super) fn explain_tree(&self) -> PlanExplainNode {
+        PhysicalPlanMetricsAccumulator::plan_tree(self)
     }
 
     fn contains_dynamic_filters(

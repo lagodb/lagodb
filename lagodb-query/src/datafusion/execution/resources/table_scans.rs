@@ -2,23 +2,41 @@
 
 use std::sync::Arc;
 
+use lagodb_core::query_contract::ScanCost;
 use lagodb_core::query_contract::ScanId;
 use pgrx::pg_sys;
 
 use super::super::QueryExecutionError;
+use crate::datafusion::parallel::{
+    ParallelSourceCatalog, ParallelTableProvider, ParallelTableScanBinding,
+};
 use crate::datafusion::scan_callbacks::{
-    BoundTableScanHandle, SerialTableScanCallbacks,
+    BoundTableScanHandle, SerialTableScanCallbacks, WorkerTableScanCallbacks,
 };
 use crate::datafusion::table_scan::{
     ExternalTableProvider, ExternalTableScanLimits, ExternalTableStatistics,
 };
-use crate::datafusion::{SerialExecutionLimits, metrics::ExecutionMetrics};
+use crate::datafusion::{QueryExecutionLimits, metrics::ExecutionMetrics};
 use crate::plan::{PlannedTableScan, QueryFragment};
 
 struct BoundScan {
     scan: ScanId,
-    statistics: ExternalTableStatistics,
+    cost: ScanCost,
     handle: Arc<BoundTableScanHandle>,
+}
+
+impl BoundScan {
+    fn projected_attnos(
+        &self,
+        fragment: &QueryFragment,
+    ) -> Result<Box<[pg_sys::AttrNumber]>, QueryExecutionError> {
+        fragment
+            .scan(self.scan)
+            .map(|scan| scan.columns().iter().map(|column| column.attno).collect())
+            .ok_or(QueryExecutionError::MissingScanMetadata {
+                scan: self.scan.index(),
+            })
+    }
 }
 
 /// Dense provider handles corresponding to the fragment scan table.
@@ -64,9 +82,7 @@ impl BoundTableScans {
             };
             entries.push(BoundScan {
                 scan,
-                statistics: ExternalTableStatistics::from_scan_cost(
-                    planned_scan.cost(),
-                ),
+                cost: planned_scan.cost(),
                 handle: Arc::new(handle),
             });
         }
@@ -78,7 +94,7 @@ impl BoundTableScans {
     pub(super) fn providers(
         &self,
         fragment: &QueryFragment,
-        limits: SerialExecutionLimits,
+        limits: QueryExecutionLimits,
         metrics: Option<&Arc<ExecutionMetrics>>,
     ) -> Result<Box<[Arc<ExternalTableProvider>]>, QueryExecutionError> {
         self.entries
@@ -88,24 +104,55 @@ impl BoundTableScans {
                     .handle
                     .schema()
                     .map_err(QueryExecutionError::ScanBind)?;
-                let projected_attnos: Box<[pg_sys::AttrNumber]> = fragment
-                    .scan(entry.scan)
-                    .map(|scan| {
-                        scan.columns().iter().map(|column| column.attno).collect()
-                    })
-                    .ok_or(QueryExecutionError::MissingScanMetadata {
-                        scan: entry.scan.index(),
-                    })?;
+                let projected_attnos = entry.projected_attnos(fragment)?;
                 Ok(Arc::new(ExternalTableProvider::new(
                     entry.scan,
                     schema,
                     projected_attnos,
-                    entry.statistics,
+                    ExternalTableStatistics::from_scan_cost(entry.cost),
                     ExternalTableScanLimits {
                         maximum_batch_rows: limits.maximum_batch_rows() as u64,
                     },
                     Arc::clone(&entry.handle),
                     metrics.map(Arc::clone),
+                )?))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Vec::into_boxed_slice)
+    }
+
+    pub(super) fn parallel_providers(
+        &self,
+        fragment: &QueryFragment,
+        limits: QueryExecutionLimits,
+        callbacks: &[WorkerTableScanCallbacks],
+        sources: Arc<ParallelSourceCatalog>,
+    ) -> Result<Box<[Arc<ParallelTableProvider>]>, QueryExecutionError> {
+        if self.entries.len() != callbacks.len() {
+            return Err(QueryExecutionError::ScanCallbackCount {
+                scans: self.entries.len(),
+                callbacks: callbacks.len(),
+            });
+        }
+        self.entries
+            .iter()
+            .zip(callbacks)
+            .map(|(entry, worker)| {
+                let schema = entry
+                    .handle
+                    .schema()
+                    .map_err(QueryExecutionError::ScanBind)?;
+                Ok(Arc::new(ParallelTableProvider::new(
+                    ParallelTableScanBinding {
+                        scan: entry.scan,
+                        schema,
+                        projected_attnos: entry.projected_attnos(fragment)?,
+                        cost: entry.cost,
+                        bound: Arc::clone(&entry.handle),
+                        worker: *worker,
+                    },
+                    limits.maximum_batch_rows() as u64,
+                    Arc::clone(&sources),
                 )?))
             })
             .collect::<Result<Vec<_>, _>>()

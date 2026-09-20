@@ -3,7 +3,7 @@
 mod metrics;
 mod predicate;
 mod runtime_filters;
-mod static_filters;
+pub(super) mod static_filters;
 mod stream;
 
 use std::fmt;

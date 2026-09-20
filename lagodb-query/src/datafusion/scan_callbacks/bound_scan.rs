@@ -147,6 +147,10 @@ impl fmt::Debug for NegotiatedTableScanPredicate {
 }
 
 impl BoundTableScanHandle {
+    pub(super) fn as_ptr(&self) -> *mut c_void {
+        self.handle.expect("bound table scan is open").as_ptr()
+    }
+
     pub(in crate::datafusion) fn schema(&self) -> Result<SchemaRef, PgReportError> {
         let mut schema = FFI_ArrowSchema::empty();
         let mut error = CallbackErrorReport::default();
@@ -279,7 +283,7 @@ impl BoundTableScanHandle {
         }
     }
 
-    fn plan_tasks(
+    pub(in crate::datafusion) fn plan_tasks(
         &self,
         projection: &[usize],
         static_predicates: &[*const c_void],
@@ -435,10 +439,16 @@ impl BoundTableScanHandle {
     }
 }
 
-pub(super) struct PlannedTableScanHandle {
+pub(in crate::datafusion) struct PlannedTableScanHandle {
     callbacks: SerialTableScanCallbacks,
     handle: Option<NonNull<c_void>>,
     pub(super) stream_error: Arc<StreamErrorSlot>,
+}
+
+impl PlannedTableScanHandle {
+    pub(super) fn as_ptr(&self) -> *mut c_void {
+        self.handle.expect("planned table scan is open").as_ptr()
+    }
 }
 
 // SAFETY: the same exact-build type pairing and current-thread execution proof
@@ -449,7 +459,7 @@ unsafe impl Send for PlannedTableScanHandle {}
 unsafe impl Sync for PlannedTableScanHandle {}
 
 impl PlannedTableScanHandle {
-    fn close(mut self) -> Result<(), PgReportError> {
+    pub(in crate::datafusion) fn close(mut self) -> Result<(), PgReportError> {
         let stream_error = self.stream_error.take_error("table scan stream release");
         let Some(handle) = self.handle.take() else {
             return stream_error.map_or(Ok(()), Err);

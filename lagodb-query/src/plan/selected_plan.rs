@@ -91,6 +91,7 @@ impl<'plan> PlannedTableScan<'plan> {
 pub struct SelectedQueryPlan<'plan> {
     query: QueryPlanData,
     execution: ExecutionProfile,
+    parallel_safe: bool,
     scans: Box<[PlannedTableScan<'plan>]>,
     runtime_exprs: *mut pg_sys::List,
     scan_target_exprs: *mut pg_sys::List,
@@ -107,6 +108,7 @@ impl<'plan> SelectedQueryPlan<'plan> {
     pub unsafe fn encode_path(
         query: &QueryPlanData,
         execution: ExecutionProfile,
+        parallel_safe: bool,
         scans: &[PlannedTableScan<'plan>],
         runtime_exprs: &[*mut pg_sys::Expr],
         scan_target_exprs: &[*mut pg_sys::Expr],
@@ -122,6 +124,7 @@ impl<'plan> SelectedQueryPlan<'plan> {
                 PATH_PAYLOAD,
                 query,
                 execution,
+                parallel_safe,
                 scans,
                 Some((runtime_exprs, scan_target_exprs)),
             )
@@ -138,15 +141,26 @@ impl<'plan> SelectedQueryPlan<'plan> {
     pub unsafe fn encode_execution(
         query: &QueryPlanData,
         execution: ExecutionProfile,
+        parallel_safe: bool,
         scans: &[PlannedTableScan<'plan>],
     ) -> Result<*mut pg_sys::List, SelectedQueryPlanError> {
-        unsafe { Self::encode(EXECUTION_PAYLOAD, query, execution, scans, None) }
+        unsafe {
+            Self::encode(
+                EXECUTION_PAYLOAD,
+                query,
+                execution,
+                parallel_safe,
+                scans,
+                None,
+            )
+        }
     }
 
     unsafe fn encode(
         payload_kind: i32,
         query: &QueryPlanData,
         execution: ExecutionProfile,
+        parallel_safe: bool,
         scans: &[PlannedTableScan<'plan>],
         planner_exprs: Option<(&[*mut pg_sys::Expr], &[*mut pg_sys::Expr])>,
     ) -> Result<*mut pg_sys::List, SelectedQueryPlanError> {
@@ -155,6 +169,7 @@ impl<'plan> SelectedQueryPlan<'plan> {
         PlanDataWriter::encode_list(|writer| {
             writer
                 .append_i32(payload_kind)
+                .append_bool(parallel_safe)
                 .append_count(execution.maximum_batch_rows().get())
                 .append_count(scans.len());
             if let Some((runtime_exprs, scan_target_exprs)) = planner_exprs {
@@ -248,6 +263,7 @@ impl<'plan> SelectedQueryPlan<'plan> {
                     found: payload_kind,
                 });
             }
+            let parallel_safe = reader.read_bool()?;
             let execution = ExecutionProfile::try_new(reader.read_count()?)?;
             let scan_count = reader.read_count()?;
             let (runtime_expr_count, runtime_exprs, scan_target_exprs) =
@@ -349,6 +365,7 @@ impl<'plan> SelectedQueryPlan<'plan> {
             Ok(Self {
                 query,
                 execution,
+                parallel_safe,
                 scans,
                 runtime_exprs,
                 scan_target_exprs,
@@ -379,6 +396,21 @@ impl<'plan> SelectedQueryPlan<'plan> {
     #[inline]
     pub const fn execution_profile(&self) -> ExecutionProfile {
         self.execution
+    }
+
+    #[inline]
+    pub const fn parallel_safe(&self) -> bool {
+        self.parallel_safe
+    }
+
+    /// Largest provider estimate of rows examined by any table scan after
+    /// provider pruning. This is physical scan work, not table cardinality or
+    /// query output rows.
+    pub fn largest_scan_rows(&self) -> f64 {
+        self.scans
+            .iter()
+            .map(|scan| scan.cost().rows_read())
+            .fold(0.0, f64::max)
     }
 
     #[inline]
@@ -436,6 +468,7 @@ impl<'plan> SelectedQueryPlan<'plan> {
             Self::encode_path(
                 query,
                 self.execution,
+                self.parallel_safe,
                 &self.scans,
                 &runtime_exprs,
                 &scan_target_exprs,

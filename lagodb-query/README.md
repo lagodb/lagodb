@@ -97,7 +97,7 @@ Selected-Plan Preparation
 PostgreSQL Executor (ExecCustomScan)
   │
   ▼
-Current-Thread Execution Pipeline (SerialQueryExecution)
+Current-Thread Execution Pipeline (QueryExecution)
   │
   ├─ Execute compiled physical DataFusion plan on backend-local runtime
   │

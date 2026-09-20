@@ -6,6 +6,7 @@ mod memory;
 mod metrics;
 mod native_semantics;
 mod numeric_aggregate;
+mod parallel;
 mod physical_plan;
 mod plan_compiler;
 mod postgres_eval;
@@ -14,8 +15,14 @@ mod scan_callbacks;
 mod table_scan;
 
 pub use execution::{
-    ExecutionMetricsMode, QueryExecutionError, SerialQueryExecution,
+    ExecutionMetricsMode, QueryExecution, QueryExecutionError, QueryExecutionRequest,
 };
-pub use memory::SerialExecutionLimits;
-pub use metrics::{ExecutionMetricsSnapshot, ScanExecutionMetricsSnapshot};
-pub use scan_callbacks::SerialTableScanCallbacks;
+pub use memory::QueryExecutionLimits;
+pub use metrics::{
+    ExecutionMetricsSnapshot, QueryExecutionMode, ScanExecutionMetricsSnapshot,
+};
+pub use parallel::{
+    InterruptHoldState, ParallelExecutionHost, ParallelQueryOptions,
+    ParallelWorkerHost, ParallelWorkers, run_parallel_worker,
+};
+pub use scan_callbacks::{SerialTableScanCallbacks, WorkerTableScanCallbacks};

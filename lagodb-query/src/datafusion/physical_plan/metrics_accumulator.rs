@@ -23,6 +23,14 @@ pub(in crate::datafusion) struct PhysicalPlanMetricsAccumulator {
 }
 
 impl PhysicalPlanMetricsAccumulator {
+    /// Build the structural physical-plan tree used by plain EXPLAIN. Metrics
+    /// are omitted because no execution instance has run.
+    pub(in crate::datafusion) fn plan_tree(
+        current: &CompiledPhysicalPlan,
+    ) -> PlanExplainNode {
+        PhysicalPlanMetricsNode::capture(current.plan.as_ref()).into_plan_explain()
+    }
+
     /// Retain one executed plan before the execution owner replaces it.
     /// This runs only at a statement rescan/recompile boundary.
     pub(in crate::datafusion) fn record(&mut self, plan: &CompiledPhysicalPlan) {
@@ -218,6 +226,19 @@ impl PhysicalPlanMetricsNode {
             .children
             .into_iter()
             .map(|child| child.into_explain(instances, include_timing))
+            .collect();
+        PlanExplainNode::new(self.node_type, properties, children)
+    }
+
+    fn into_plan_explain(self) -> PlanExplainNode {
+        let properties = vec![PlanExplainNode::property(
+            "Details",
+            self.details.into_explain_value(1),
+        )];
+        let children = self
+            .children
+            .into_iter()
+            .map(Self::into_plan_explain)
             .collect();
         PlanExplainNode::new(self.node_type, properties, children)
     }

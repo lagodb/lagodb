@@ -48,6 +48,23 @@ impl PgIntegerKind {
             Self::BigInt => DataType::Int64,
         }
     }
+
+    const fn codec_tag(self) -> u8 {
+        match self {
+            Self::SmallInt => 1,
+            Self::Integer => 2,
+            Self::BigInt => 3,
+        }
+    }
+
+    const fn from_codec_tag(tag: u8) -> Option<Self> {
+        match tag {
+            1 => Some(Self::SmallInt),
+            2 => Some(Self::Integer),
+            3 => Some(Self::BigInt),
+            _ => None,
+        }
+    }
 }
 
 /// Integer ABS retaining DataFusion's batch execution while restoring the
@@ -62,6 +79,24 @@ pub(super) struct PgIntegerAbsUdf {
 impl PgIntegerAbsUdf {
     pub(super) fn for_type(type_oid: pg_sys::Oid) -> Option<ScalarUDF> {
         let kind = PgIntegerKind::from_oid(type_oid)?;
+        Some(ScalarUDF::from(Self {
+            kind,
+            signature: Signature::exact(
+                vec![kind.data_type()],
+                Volatility::Immutable,
+            ),
+            native: datafusion::functions::math::abs(),
+        }))
+    }
+
+    pub(super) fn codec_tag(udf: &ScalarUDF) -> Option<u8> {
+        udf.inner()
+            .downcast_ref::<Self>()
+            .map(|implementation| implementation.kind.codec_tag())
+    }
+
+    pub(super) fn from_codec_tag(tag: u8) -> Option<ScalarUDF> {
+        let kind = PgIntegerKind::from_codec_tag(tag)?;
         Some(ScalarUDF::from(Self {
             kind,
             signature: Signature::exact(
