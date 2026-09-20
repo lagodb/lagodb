@@ -20,8 +20,12 @@ impl ScannableRelation {
         let relation = unsafe { &*input_rel };
         let range_table_entry_ref = unsafe { &*range_table_entry };
         if relation.reloptkind != pg_sys::RelOptKind::RELOPT_BASEREL
+            || unsafe { pg_sys::is_dummy_rel(input_rel) }
             || range_table_entry_ref.rtekind != pg_sys::RTEKind::RTE_RELATION
-            || range_table_entry_ref.relkind as u8 != pg_sys::RELKIND_RELATION
+            || !matches!(
+                range_table_entry_ref.relkind as u8,
+                pg_sys::RELKIND_RELATION | pg_sys::RELKIND_FOREIGN_TABLE
+            )
             || range_table_entry_ref.inh
             || !unsafe {
                 Self::lateral_dependencies_are_available(
@@ -88,14 +92,15 @@ impl SingleRelationCandidate {
         _root: *mut pg_sys::PlannerInfo,
         expression: *mut pg_sys::Node,
     ) -> bool {
-        // The current query path is leader-only and serial, and PG fallback
-        // expressions retain their volatility classification in DataFusion.
+        // PG fallback expressions retain their volatility classification in
+        // DataFusion. Parallel admission is decided separately for the whole
+        // selected query with PostgreSQL's `is_parallel_safe`, so an unsafe or
+        // restricted expression keeps this offload path serial without making
+        // the query shape itself unsupported.
         // A raw SubPlan is rejected because it requires PostgreSQL executor
         // state that the query engine does not own. RelationTreePlanner first
         // removes the supported EXISTS/IN shapes and represents them as joins;
         // every other expression entry point retains this rejection gate.
-        // TODO(join/parallel-query): add a placement-aware parallel-hazard gate
-        // before enabling a parallel query path under this execution contract.
         expression.is_null() || !unsafe { pg_sys::contain_subplans(expression) }
     }
 

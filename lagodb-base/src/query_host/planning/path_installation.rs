@@ -62,6 +62,7 @@ impl QueryPathInstallation {
         if self.declines_auto_fallback() {
             return Ok(());
         }
+        let parallel_safe = self.parallel_safe();
         let inputs = mem::take(&mut self.planned.scans).into_vec();
         let mut scans = Vec::with_capacity(inputs.len());
         for input in inputs {
@@ -73,7 +74,13 @@ impl QueryPathInstallation {
         }
         let execution = query_execution_profile();
         let cost = self.cost(&scans, execution)?;
-        self.encode_and_install(scans, execution, cost)
+        self.encode_and_install(scans, execution, cost, parallel_safe)
+    }
+
+    fn parallel_safe(&self) -> bool {
+        self.planned.scans.first().is_some_and(|scan| unsafe {
+            pg_sys::is_parallel_safe(scan.root, (*scan.root).parse.cast())
+        })
     }
 
     fn declines_auto_fallback(&self) -> bool {
@@ -86,17 +93,12 @@ impl QueryPathInstallation {
             .table_scan_filter
             .as_ref()
             .map_or(ptr::null_mut(), |filter| filter.source_expression());
-        let relation_user = unsafe { (*input.input_rel).userid };
-        let effective_user = if relation_user == pg_sys::InvalidOid {
-            unsafe { pg_sys::GetUserId() }
-        } else {
-            relation_user
-        };
+        let check_as_user_id = unsafe { (*input.input_rel).userid };
         if input.projected_columns.is_empty() {
             TableScanPlanningRequest::row_count(
                 input.scan.index(),
                 predicate_expression,
-                effective_user,
+                check_as_user_id,
                 input.root,
                 input.input_rel,
                 input.range_table_index,
@@ -107,7 +109,7 @@ impl QueryPathInstallation {
                 input.scan.index(),
                 &input.projected_columns,
                 predicate_expression,
-                effective_user,
+                check_as_user_id,
                 input.root,
                 input.input_rel,
                 input.range_table_index,
@@ -159,6 +161,7 @@ impl QueryPathInstallation {
         scans: Vec<ProviderScanPlan>,
         execution: ExecutionProfile,
         cost: PlanCost,
+        parallel_safe: bool,
     ) -> Result<(), QueryHostError> {
         let filter_texts = scans
             .iter()
@@ -211,6 +214,7 @@ impl QueryPathInstallation {
             SelectedQueryPlan::encode_path(
                 &self.planned.query,
                 execution,
+                parallel_safe,
                 &planned_scans,
                 &runtime_exprs,
                 &self.planned.scan_target_exprs,

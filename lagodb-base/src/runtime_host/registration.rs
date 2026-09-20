@@ -11,7 +11,7 @@ use lagodb_core::runtime_api::{
     ModifyPlannerDescriptor, ObjectAccessHookDescriptor,
     ObjectAccessStrHookDescriptor, ProviderRegistration, REGISTER_INVALID_DESCRIPTOR,
     REGISTER_OK, RelationScanPlannerDescriptor, TableScanDescriptor,
-    UtilityConsumerDescriptor, UtilityHookDescriptor,
+    TableScanWorkerDescriptor, UtilityConsumerDescriptor, UtilityHookDescriptor,
 };
 use pgrx::{pg_guard, pg_sys};
 
@@ -34,6 +34,7 @@ struct ProviderRegistrationRef<'a> {
     relation_scan_planner: Option<&'a RelationScanPlannerDescriptor>,
     modify_planner: Option<&'a ModifyPlannerDescriptor>,
     table_scan: Option<&'a TableScanDescriptor>,
+    table_scan_worker: Option<&'a TableScanWorkerDescriptor>,
 }
 
 impl<'a> ProviderRegistrationRef<'a> {
@@ -115,6 +116,7 @@ impl<'a> ProviderRegistrationRef<'a> {
             modify_planner: unsafe { registration.modify_planner.as_ref() },
             // SAFETY: same optional exact-build facet contract as above.
             table_scan: unsafe { registration.table_scan.as_ref() },
+            table_scan_worker: unsafe { registration.table_scan_worker.as_ref() },
         })
     }
 }
@@ -152,8 +154,10 @@ impl PreparedProviderRegistration {
             registration.modify_planner,
         )
         .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
-        let table_scan =
-            PendingTableScanRegistration::prepare(registration.table_scan)?;
+        let table_scan = PendingTableScanRegistration::prepare(
+            registration.table_scan,
+            registration.table_scan_worker,
+        )?;
         // Validate bootstrap ownership only after the complete batch has been
         // validated. This preserves the more specific duplicate-provider and
         // invalid-descriptor results while still preventing every registry
@@ -331,6 +335,7 @@ mod tests {
             relation_scan_planner: ptr::null(),
             modify_planner: ptr::null(),
             table_scan: ptr::null(),
+            table_scan_worker: ptr::null(),
         };
 
         // SAFETY: all local descriptors and pointer/count pairs remain live
@@ -405,6 +410,7 @@ mod tests {
             relation_scan_planner: &invalid_planner,
             modify_planner: ptr::null(),
             table_scan: ptr::null(),
+            table_scan_worker: ptr::null(),
         };
         // SAFETY: every local descriptor remains live for synchronous prepare.
         let registration = unsafe {
@@ -455,6 +461,7 @@ mod tests {
             relation_scan_planner: ptr::null(),
             modify_planner: ptr::null(),
             table_scan: ptr::null(),
+            table_scan_worker: ptr::null(),
         };
 
         // SAFETY: the local identity and registration remain live for this
@@ -482,6 +489,7 @@ mod tests {
             relation_scan_planner: ptr::null(),
             modify_planner: ptr::null(),
             table_scan: ptr::null(),
+            table_scan_worker: ptr::null(),
         };
 
         // SAFETY: the local identity and registration remain live for both

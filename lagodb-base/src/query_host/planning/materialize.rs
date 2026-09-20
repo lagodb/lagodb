@@ -121,6 +121,7 @@ unsafe fn materialize_plan(
         SelectedQueryPlan::encode_execution(
             selected.query(),
             selected.execution_profile(),
+            selected.parallel_safe(),
             selected.scans(),
         )
     }

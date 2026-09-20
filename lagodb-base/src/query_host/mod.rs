@@ -6,6 +6,7 @@ mod error;
 mod execution;
 mod explain;
 mod methods;
+mod parallel;
 mod planning;
 mod table_scan_registry;
 

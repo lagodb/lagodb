@@ -7,12 +7,13 @@ use std::mem::size_of;
 use lagodb_core::diag::PgReportError;
 use lagodb_core::query_contract::{TableScanRoute, TableScanRouteKind};
 use lagodb_core::runtime_api::{
-    CallbackErrorReport, PlanTableScan, PlannedTableScanResult,
-    REGISTER_DUPLICATE_TABLE_SCAN_ROUTE, REGISTER_INVALID_DESCRIPTOR,
-    TableScanDescriptor, TableScanPlanningRequest,
+    CALLBACK_FAILED, CALLBACK_OK, CallbackErrorReport, OwnsForeignServer,
+    PlanTableScan, PlannedTableScanResult, REGISTER_DUPLICATE_TABLE_SCAN_ROUTE,
+    REGISTER_INVALID_DESCRIPTOR, TableScanDescriptor, TableScanPlanningRequest,
+    TableScanWorkerDescriptor,
 };
-use lagodb_query::datafusion::SerialTableScanCallbacks;
-use pgrx::prelude::PgSqlErrorCode;
+use lagodb_query::datafusion::{SerialTableScanCallbacks, WorkerTableScanCallbacks};
+use pgrx::{pg_sys, prelude::PgSqlErrorCode};
 
 use crate::descriptor_registry::{
     DescriptorNode, DescriptorRegistry, DescriptorSnapshot,
@@ -26,12 +27,17 @@ thread_local! {
 #[derive(Clone, Copy)]
 struct TableScanCallbacks {
     context: *mut c_void,
+    owns_foreign_server: OwnsForeignServer,
     plan_scan: PlanTableScan,
     serial: SerialTableScanCallbacks,
+    worker: Option<WorkerTableScanCallbacks>,
 }
 
 impl TableScanCallbacks {
-    fn from_descriptor(descriptor: &TableScanDescriptor) -> Option<Self> {
+    fn from_descriptors(
+        descriptor: &TableScanDescriptor,
+        worker: Option<&TableScanWorkerDescriptor>,
+    ) -> Option<Self> {
         let expected_size = u32::try_from(size_of::<TableScanDescriptor>()).ok()?;
         if descriptor.struct_size() != expected_size {
             return None;
@@ -41,10 +47,40 @@ impl TableScanCallbacks {
         let serial = unsafe {
             SerialTableScanCallbacks::from_validated_descriptor(descriptor)
         }?;
+        let worker = match worker {
+            Some(worker) => {
+                let expected_size =
+                    u32::try_from(size_of::<TableScanWorkerDescriptor>()).ok()?;
+                if worker.struct_size() != expected_size {
+                    return None;
+                }
+                for (serial, parallel) in [
+                    (descriptor.access_method_name(), worker.access_method_name()),
+                    (
+                        descriptor.foreign_data_wrapper_name(),
+                        worker.foreign_data_wrapper_name(),
+                    ),
+                ] {
+                    if serial.is_null() != parallel.is_null()
+                        || (!serial.is_null()
+                            && unsafe { CStr::from_ptr(serial) }
+                                != unsafe { CStr::from_ptr(parallel) })
+                    {
+                        return None;
+                    }
+                }
+                Some(unsafe {
+                    WorkerTableScanCallbacks::from_validated_descriptor(worker)
+                }?)
+            }
+            None => None,
+        };
         Some(Self {
             context: descriptor.context(),
+            owns_foreign_server: descriptor.owns_foreign_server()?,
             plan_scan: descriptor.plan_scan()?,
             serial,
+            worker,
         })
     }
 }
@@ -57,8 +93,11 @@ struct StoredTableScan {
 }
 
 impl StoredTableScan {
-    fn from_descriptor(descriptor: &TableScanDescriptor) -> Option<Self> {
-        let callbacks = TableScanCallbacks::from_descriptor(descriptor)?;
+    fn from_descriptors(
+        descriptor: &TableScanDescriptor,
+        worker: Option<&TableScanWorkerDescriptor>,
+    ) -> Option<Self> {
+        let callbacks = TableScanCallbacks::from_descriptors(descriptor, worker)?;
         let access_method_name = descriptor.access_method_name();
         let foreign_data_wrapper_name = descriptor.foreign_data_wrapper_name();
         if access_method_name.is_null() && foreign_data_wrapper_name.is_null() {
@@ -115,6 +154,37 @@ impl StoredTableScan {
             callbacks: self.callbacks,
         }
     }
+
+    fn owns_foreign_server(
+        self,
+        server_oid: pg_sys::Oid,
+    ) -> Result<bool, PgReportError> {
+        let mut owned = false;
+        let mut error = CallbackErrorReport::default();
+        // SAFETY: registration validated the callback table; output and error
+        // storage remain live for this synchronous planning-time call.
+        match unsafe {
+            (self.callbacks.owns_foreign_server)(
+                self.callbacks.context,
+                server_oid,
+                &mut owned,
+                &mut error,
+            )
+        } {
+            CALLBACK_OK => Ok(owned),
+            CALLBACK_FAILED => {
+                // SAFETY: FAILED requires the provider callback to populate
+                // the fixed-layout error record synchronously.
+                Err(unsafe { error.to_error("table scan foreign-server ownership") })
+            }
+            status => Err(PgReportError::from_message(
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                format!(
+                    "table-scan foreign-server ownership callback returned unknown status {status}"
+                ),
+            )),
+        }
+    }
 }
 
 pub(crate) struct PendingTableScanRegistration {
@@ -124,10 +194,14 @@ pub(crate) struct PendingTableScanRegistration {
 impl PendingTableScanRegistration {
     pub(crate) fn prepare(
         descriptor: Option<&TableScanDescriptor>,
+        worker: Option<&TableScanWorkerDescriptor>,
     ) -> Result<Self, u32> {
+        if descriptor.is_none() && worker.is_some() {
+            return Err(REGISTER_INVALID_DESCRIPTOR);
+        }
         let descriptor = descriptor
             .map(|descriptor| {
-                StoredTableScan::from_descriptor(descriptor)
+                StoredTableScan::from_descriptors(descriptor, worker)
                     .ok_or(REGISTER_INVALID_DESCRIPTOR)
             })
             .transpose()?;
@@ -176,6 +250,10 @@ impl ResolvedTableScan {
     fn serial_callbacks(self) -> SerialTableScanCallbacks {
         self.callbacks.serial
     }
+
+    fn worker_callbacks(self) -> Option<WorkerTableScanCallbacks> {
+        self.callbacks.worker
+    }
 }
 
 /// Backend-local owner of table-scan registration and exact route lookup.
@@ -203,11 +281,54 @@ impl TableScanRegistry {
         found
     }
 
+    pub(super) fn resolve_foreign_server(
+        server_oid: pg_sys::Oid,
+    ) -> Result<Option<ResolvedTableScan>, PgReportError> {
+        let mut found = None;
+        Self::snapshot().try_for_each(|descriptor| {
+            if descriptor.foreign_data_wrapper_name.is_null()
+                || !descriptor.owns_foreign_server(server_oid)?
+            {
+                return Ok(());
+            }
+            if found.is_some() {
+                return Err(PgReportError::from_message(
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    format!(
+                        "foreign server with OID {server_oid} is owned by multiple table-scan providers"
+                    ),
+                ));
+            }
+            found = Some(
+                descriptor.resolved(TableScanRouteKind::ForeignDataWrapper),
+            );
+            Ok(())
+        })?;
+        Ok(found)
+    }
+
     pub(super) fn resolve_serial_callbacks(
         route: TableScanRoute<'_>,
     ) -> Result<SerialTableScanCallbacks, PgReportError> {
         Self::resolve(route)
             .map(ResolvedTableScan::serial_callbacks)
+            .ok_or_else(|| {
+                PgReportError::from_message(
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    format!(
+                        "selected query plan references unregistered {:?} table-scan route {:?}",
+                        route.kind(),
+                        route.name(),
+                    ),
+                )
+            })
+    }
+
+    pub(super) fn resolve_worker_callbacks(
+        route: TableScanRoute<'_>,
+    ) -> Result<Option<WorkerTableScanCallbacks>, PgReportError> {
+        Self::resolve(route)
+            .map(ResolvedTableScan::worker_callbacks)
             .ok_or_else(|| {
                 PgReportError::from_message(
                     PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,

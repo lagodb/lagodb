@@ -1,4 +1,4 @@
-//! Executor lifecycle for the base-owned serial query-offload scan.
+//! Executor lifecycle for the base-owned query-offload scan.
 
 use std::cell::UnsafeCell;
 use std::ffi::c_int;
@@ -8,8 +8,8 @@ use std::{mem, ptr};
 use lagodb_core::resource::{ResourceHandle, forget_resource, remember_resource};
 use lagodb_query::ExecutionProfile;
 use lagodb_query::datafusion::{
-    ExecutionMetricsMode, QueryExecutionError, SerialExecutionLimits,
-    SerialQueryExecution,
+    ExecutionMetricsMode, ParallelExecutionHost, ParallelQueryOptions,
+    QueryExecution, QueryExecutionError, QueryExecutionLimits, QueryExecutionRequest,
 };
 use lagodb_query::plan::SelectedQueryPlan;
 use pgrx::{PgMemoryContexts, pg_guard, pg_sys};
@@ -17,6 +17,7 @@ use pgrx::{PgMemoryContexts, pg_guard, pg_sys};
 use super::error::QueryHostError;
 use super::explain::{ExplainOptions, QueryOffloadExplain};
 use super::methods;
+use super::parallel::PgParallelHost;
 use super::table_scan_registry::TableScanRegistry;
 
 enum QueryPhase {
@@ -39,11 +40,11 @@ enum QueryPhase {
 /// callback. Executor and cleanup callbacks are serialized on one backend
 /// thread, so accesses cannot overlap.
 struct QueryExecutionCell {
-    execution: UnsafeCell<Option<SerialQueryExecution>>,
+    execution: UnsafeCell<Option<QueryExecution>>,
 }
 
 impl QueryExecutionCell {
-    fn new(execution: SerialQueryExecution) -> Self {
+    fn new(execution: QueryExecution) -> Self {
         Self {
             execution: UnsafeCell::new(Some(execution)),
         }
@@ -55,7 +56,7 @@ impl QueryExecutionCell {
     /// CustomScan; no ResourceOwner cleanup callback may run concurrently.
     unsafe fn with_mut<R>(
         &self,
-        operation: impl FnOnce(&mut SerialQueryExecution) -> R,
+        operation: impl FnOnce(&mut QueryExecution) -> R,
     ) -> Option<R> {
         unsafe { (&mut *self.execution.get()).as_mut().map(operation) }
     }
@@ -66,7 +67,7 @@ impl QueryExecutionCell {
     /// [`Self::with_mut`].
     unsafe fn with_ref<R>(
         &self,
-        operation: impl FnOnce(&SerialQueryExecution) -> R,
+        operation: impl FnOnce(&QueryExecution) -> R,
     ) -> Option<R> {
         unsafe { (&*self.execution.get()).as_ref().map(operation) }
     }
@@ -75,7 +76,7 @@ impl QueryExecutionCell {
         // SAFETY: normal executor close and ResourceOwner cleanup are
         // serialized on the PostgreSQL backend thread.
         unsafe { (&mut *self.execution.get()).take() }
-            .map_or(Ok(()), SerialQueryExecution::close)
+            .map_or(Ok(()), QueryExecution::close)
     }
 
     fn abort(&self) {
@@ -123,10 +124,9 @@ impl QueryOffloadScanState {
     }
 
     fn abort(&mut self) {
-        if let QueryPhase::Running(execution) =
-            mem::replace(&mut self.phase, QueryPhase::Closed)
-        {
-            execution.abort();
+        match mem::replace(&mut self.phase, QueryPhase::Closed) {
+            QueryPhase::Running(execution) => execution.abort(),
+            QueryPhase::Created | QueryPhase::ExplainOnly | QueryPhase::Closed => {}
         }
         if let Some(resource) = self.resource.take() {
             let _ = forget_resource(resource);
@@ -150,18 +150,22 @@ struct WorkMemBudget;
 impl WorkMemBudget {
     fn execution_limits(
         execution: ExecutionProfile,
-    ) -> Result<SerialExecutionLimits, QueryHostError> {
+    ) -> Result<QueryExecutionLimits, QueryHostError> {
         // PostgreSQL defines work_mem in KiB and enforces its positive GUC
         // range before executor startup. The complete budget belongs to the
         // DataFusion execution pool; provider libraries are outside the
         // engine's memory-accounting contract.
         // SAFETY: `work_mem` is a backend-local PostgreSQL GUC read on the
         // backend main thread.
-        let total = usize::try_from(unsafe { pg_sys::work_mem })
+        let work_mem_bytes = usize::try_from(unsafe { pg_sys::work_mem })
             .ok()
             .and_then(|kib| kib.checked_mul(1_024))
             .ok_or(QueryHostError::MemoryBudgetOverflow)?;
-        SerialExecutionLimits::try_new(total, execution).map_err(QueryHostError::from)
+        // SAFETY: PostgreSQL derives this backend-local limit from work_mem and
+        // hash_mem_multiplier with the same size_t clamp used by its executor.
+        let hash_memory_bytes = unsafe { pg_sys::get_hash_memory_limit() };
+        QueryExecutionLimits::try_new(work_mem_bytes, hash_memory_bytes, execution)
+            .map_err(QueryHostError::from)
     }
 }
 
@@ -223,15 +227,15 @@ unsafe fn begin_scan(
             .map_err(QueryHostError::invalid_plan)?;
     if explain_only {
         unsafe {
-            state.explain.record_plan(&selected, true);
+            state.explain.record_plan(&selected);
         }
-    }
-    let (query, execution_profile, scans) = selected.into_parts();
-
-    if explain_only {
         state.phase = QueryPhase::ExplainOnly;
         return Ok(());
     }
+    let parallel_safe = selected.parallel_safe()
+        && selected.largest_scan_rows()
+            >= crate::gucs::query_offload_parallel_min_scan_rows();
+    let (query, execution_profile, scans) = selected.into_parts();
 
     let limits = WorkMemBudget::execution_limits(execution_profile)?;
     let metrics_mode = if instrumented {
@@ -243,14 +247,35 @@ unsafe fn begin_scan(
         .iter()
         .map(|scan| TableScanRegistry::resolve_serial_callbacks(scan.route()))
         .collect::<Result<Vec<_>, _>>()?;
-    let execution = Rc::new(QueryExecutionCell::new(SerialQueryExecution::try_new(
-        query,
-        &scans,
-        limits,
-        metrics_mode,
-        &callbacks,
-        unsafe { (*scan).custom_exprs },
-        unsafe { &mut (*node).ss.ps },
+    let host = PgParallelHost::leader();
+    let parallel = if parallel_safe && host.worker_cap() >= 2 {
+        let workers = scans
+            .iter()
+            .map(|scan| TableScanRegistry::resolve_worker_callbacks(scan.route()))
+            .collect::<Result<Option<Vec<_>>, _>>()?;
+        workers.map(|workers| {
+            ParallelQueryOptions::new(
+                host,
+                &scans,
+                workers,
+                crate::gucs::query_offload_parallel_queue_size(),
+                crate::gucs::query_offload_parallel_debug(),
+            )
+        })
+    } else {
+        None
+    };
+    let execution = Rc::new(QueryExecutionCell::new(QueryExecution::try_new(
+        QueryExecutionRequest {
+            query,
+            scans: &scans,
+            limits,
+            metrics_mode,
+            callbacks: &callbacks,
+            parallel,
+            runtime_exprs: unsafe { (*scan).custom_exprs },
+            parent: unsafe { &mut (*node).ss.ps },
+        },
     )?));
     let cleanup = Rc::clone(&execution);
     state.resource = Some(remember_resource(move || cleanup.abort()));
@@ -371,20 +396,23 @@ pub(super) unsafe extern "C-unwind" fn explain(
                 SelectedQueryPlan::decode_execution(&*(*scan).custom_private)
             }
             .map_err(QueryHostError::invalid_plan)?;
-            unsafe { state.explain.record_plan(&selected, false) };
+            unsafe { state.explain.record_plan(&selected) };
         }
 
         match &state.phase {
             QueryPhase::Running(execution) => unsafe {
                 execution.with_ref(|execution| {
                     let metrics = execution.metrics();
-                    let physical_plan = options
-                        .engine_diagnostics()
-                        .then(|| execution.physical_plan_analyze(options.timing))
-                        .flatten();
+                    let planned_mode = execution.planned_mode();
+                    let physical_plan = options.engine_diagnostics().then(|| {
+                        execution
+                            .physical_plan_analyze(options.timing)
+                            .unwrap_or_else(|| execution.physical_plan_explain())
+                    });
                     state.explain.emit(
                         Some(execution.fragment()),
                         metrics.as_ref(),
+                        Some(planned_mode),
                         physical_plan.as_ref(),
                         options,
                         explain,
@@ -392,10 +420,13 @@ pub(super) unsafe extern "C-unwind" fn explain(
                 })
             }
             .unwrap_or_else(|| unsafe {
-                state.explain.emit(None, None, None, options, explain)
+                state.explain.emit(None, None, None, None, options, explain)
             }),
-            QueryPhase::Created | QueryPhase::ExplainOnly | QueryPhase::Closed => unsafe {
-                state.explain.emit(None, None, None, options, explain)
+            QueryPhase::ExplainOnly => unsafe {
+                state.explain.emit(None, None, None, None, options, explain)
+            },
+            QueryPhase::Created | QueryPhase::Closed => unsafe {
+                state.explain.emit(None, None, None, None, options, explain)
             },
         }
     })();

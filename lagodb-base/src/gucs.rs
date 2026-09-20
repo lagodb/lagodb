@@ -37,6 +37,12 @@ static QUERY_OFFLOAD_MODE: GucSetting<QueryOffloadMode> =
     GucSetting::<QueryOffloadMode>::new(QueryOffloadMode::Off);
 static QUERY_BATCH_ROWS: GucSetting<i32> =
     GucSetting::<i32>::new(DEFAULT_MAXIMUM_BATCH_ROWS);
+static QUERY_OFFLOAD_PARALLEL_MIN_SCAN_ROWS: GucSetting<i32> =
+    GucSetting::<i32>::new(500_000);
+static QUERY_OFFLOAD_PARALLEL_QUEUE_SIZE: GucSetting<i32> =
+    GucSetting::<i32>::new(8 * 1_024 * 1_024);
+static QUERY_OFFLOAD_PARALLEL_DEBUG: GucSetting<bool> =
+    GucSetting::<bool>::new(false);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PostgresGucEnum)]
 enum CustomScanMode {
@@ -69,6 +75,19 @@ pub(crate) fn query_execution_profile() -> ExecutionProfile {
         .expect("query_batch_rows GUC enforces a positive i32 value");
     ExecutionProfile::try_new(maximum_batch_rows)
         .expect("query_batch_rows GUC range matches ExecutionProfile")
+}
+
+pub(crate) fn query_offload_parallel_min_scan_rows() -> f64 {
+    f64::from(QUERY_OFFLOAD_PARALLEL_MIN_SCAN_ROWS.get())
+}
+
+pub(crate) fn query_offload_parallel_queue_size() -> usize {
+    usize::try_from(QUERY_OFFLOAD_PARALLEL_QUEUE_SIZE.get())
+        .expect("query_offload_parallel_queue_size GUC enforces a positive i32 value")
+}
+
+pub(crate) fn query_offload_parallel_debug() -> bool {
+    QUERY_OFFLOAD_PARALLEL_DEBUG.get()
 }
 
 pub(crate) fn maintenance_config()
@@ -167,6 +186,34 @@ fn init_shared_framework_gucs() {
         &QUERY_BATCH_ROWS,
         1,
         MAXIMUM_BATCH_ROWS_LIMIT,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"lagodb.query_offload_parallel_min_scan_rows",
+        c"Minimum estimated table-scan row count for parallel query-offload execution",
+        c"Parallel query offload engages only when the largest table scan is estimated to examine at least this many rows after provider pruning; set to 0 to disable the size gate.",
+        &QUERY_OFFLOAD_PARALLEL_MIN_SCAN_ROWS,
+        0,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"lagodb.query_offload_parallel_queue_size",
+        c"Per-inbox ring size for parallel query-offload shuffles",
+        c"Each parallel query-offload run allocates one inbox per participant; frames larger than an inbox stream through it in chunks.",
+        &QUERY_OFFLOAD_PARALLEL_QUEUE_SIZE,
+        64 * 1_024,
+        1_024 * 1_024 * 1_024,
+        GucContext::Userset,
+        GucFlags::UNIT_BYTE,
+    );
+    GucRegistry::define_bool_guc(
+        c"lagodb.query_offload_parallel_debug",
+        c"Enable diagnostic safeguards for parallel query-offload execution",
+        c"Enables the 30-second worker fragment deadlock detector; intended for diagnosis, not normal query timeouts.",
+        &QUERY_OFFLOAD_PARALLEL_DEBUG,
         GucContext::Userset,
         GucFlags::default(),
     );

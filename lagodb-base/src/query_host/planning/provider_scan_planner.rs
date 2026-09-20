@@ -12,7 +12,7 @@ use lagodb_core::runtime_api::{
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
-use super::super::table_scan_registry::TableScanRegistry;
+use super::super::table_scan_registry::{ResolvedTableScan, TableScanRegistry};
 
 pub(super) struct PlannedScanRecord {
     pub(super) route: TableScanRoute<'static>,
@@ -31,24 +31,7 @@ impl ProviderScanPlanner {
     pub(super) fn plan(
         request: TableScanPlanningRequest,
     ) -> Result<Option<PlannedScanRecord>, PgReportError> {
-        // The candidate gate admits only a PostgreSQL base relation. Its RTE
-        // therefore supplies the relation OID and its catalog row supplies one
-        // valid table-AM OID.
-        let relation_oid = unsafe { (*request.range_table_entry).relid };
-        let access_method_oid = unsafe { pg_sys::get_rel_relam(relation_oid) };
-        // PostgreSQL returns a palloc-owned copy of the AM name.
-        let access_method_name = unsafe { pg_sys::get_am_name(access_method_oid) };
-        let registered = {
-            // SAFETY: `get_am_name` returned a live NUL-terminated name.
-            let route = TableScanRoute::access_method(unsafe {
-                CStr::from_ptr(access_method_name)
-            });
-            TableScanRegistry::resolve(route)
-        };
-        // SAFETY: `access_method_name` is the palloc-owned result above and no
-        // borrowed route escapes this block; the registry returns its own
-        // backend-lifetime route pointer.
-        unsafe { pg_sys::pfree(access_method_name.cast()) };
+        let registered = Self::resolve_provider(&request)?;
         let Some(registered) = registered else {
             return Ok(None);
         };
@@ -72,6 +55,36 @@ impl ProviderScanPlanner {
                     registered.route(),
                 ),
             )),
+        }
+    }
+
+    fn resolve_provider(
+        request: &TableScanPlanningRequest,
+    ) -> Result<Option<ResolvedTableScan>, PgReportError> {
+        let rte = unsafe { &*request.range_table_entry };
+        match rte.relkind as u8 {
+            pg_sys::RELKIND_RELATION => {
+                let access_method_oid = unsafe { pg_sys::get_rel_relam(rte.relid) };
+                // PostgreSQL returns a palloc-owned copy of the AM name.
+                let access_method_name =
+                    unsafe { pg_sys::get_am_name(access_method_oid) };
+                let registered =
+                    TableScanRegistry::resolve(TableScanRoute::access_method(
+                        unsafe { CStr::from_ptr(access_method_name) },
+                    ));
+                // SAFETY: no borrowed route escapes this block; the registry
+                // returns its own backend-lifetime descriptor.
+                unsafe { pg_sys::pfree(access_method_name.cast()) };
+                Ok(registered)
+            }
+            // PostgreSQL populated serverid for every foreign base relation in
+            // get_relation_info before invoking path planning.
+            pg_sys::RELKIND_FOREIGN_TABLE => {
+                TableScanRegistry::resolve_foreign_server(unsafe {
+                    (*request.relation).serverid
+                })
+            }
+            _ => Ok(None),
         }
     }
 

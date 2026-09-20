@@ -8,7 +8,7 @@ use std::ffi::CStr;
 use std::ptr;
 
 use lagodb_query::ExecutionProfile;
-use lagodb_query::datafusion::ExecutionMetricsSnapshot;
+use lagodb_query::datafusion::{ExecutionMetricsSnapshot, QueryExecutionMode};
 use lagodb_query::plan::{PlanExplainNode, QueryFragment, SelectedQueryPlan};
 use pgrx::pg_sys;
 
@@ -20,10 +20,17 @@ const PROP_ENGINE: &CStr = c"Engine";
 const PROP_MODE: &CStr = c"Execution Mode";
 const PROP_MAXIMUM_BATCH_ROWS: &CStr = c"Maximum Batch Rows";
 const PROP_POSTGRES_EXPR_FALLBACKS: &CStr = c"PostgreSQL Expression Fallbacks";
-const PROP_ENGINE_PEAK_MEMORY: &CStr = c"Engine Peak Memory Bytes";
+const PROP_LOCAL_ENGINE_PEAK_MEMORY: &CStr = c"Local Engine Peak Memory Bytes";
+const PROP_MAX_WORKER_FRAGMENT_PEAK_MEMORY: &CStr =
+    c"Maximum Worker Fragment Peak Memory Bytes";
+const PROP_MAX_WORKER_PARTICIPANT_PEAK_MEMORY: &CStr =
+    c"Maximum Worker Participant Peak Memory Bytes";
+const PROP_PARALLEL_WORKERS: &CStr = c"Maximum Launched Workers";
+const PROP_PARALLEL_RUNS: &CStr = c"Parallel Runs";
+const PROP_WORKER_METRIC_REPORTS: &CStr = c"Worker Metric Reports";
+const PROP_EXPECTED_WORKER_METRIC_REPORTS: &CStr = c"Expected Worker Metric Reports";
 const GROUP_ENGINE_PLAN: &CStr = c"Engine Plan";
 const ENGINE_NAME: &CStr = c"DataFusion";
-const MODE_NAME: &CStr = c"Serial";
 
 #[derive(Clone, Copy)]
 pub(super) struct ExplainOptions {
@@ -52,18 +59,18 @@ impl ExplainOptions {
 }
 
 pub(super) struct QueryOffloadExplain {
-    scans: Option<Box<[ScanExplainMetadata]>>,
-    execution: Option<ExecutionProfile>,
-    explain_only_fragment: Option<QueryFragment>,
+    plan: Option<ExplainPlanSnapshot>,
+}
+
+struct ExplainPlanSnapshot {
+    fragment: QueryFragment,
+    scans: Box<[ScanExplainMetadata]>,
+    execution: ExecutionProfile,
 }
 
 impl QueryOffloadExplain {
     pub(super) const fn new() -> Self {
-        Self {
-            scans: None,
-            execution: None,
-            explain_only_fragment: None,
-        }
+        Self { plan: None }
     }
 
     /// Capture plan metadata only after PostgreSQL requests EXPLAIN output.
@@ -72,20 +79,19 @@ impl QueryOffloadExplain {
     ///
     /// The selected plan's relation OIDs must retain the locks held by the
     /// current statement while PostgreSQL catalog names are copied.
-    pub(super) unsafe fn record_plan(
-        &mut self,
-        selected: &SelectedQueryPlan<'_>,
-        retain_fragment: bool,
-    ) {
+    pub(super) unsafe fn record_plan(&mut self, selected: &SelectedQueryPlan<'_>) {
         let fragment = selected.query().fragment();
-        self.scans =
-            Some(unsafe { ScanExplainMetadata::capture(selected.scans(), fragment) });
-        self.execution = Some(selected.execution_profile());
-        self.explain_only_fragment = retain_fragment.then(|| fragment.clone());
+        self.plan = Some(ExplainPlanSnapshot {
+            fragment: fragment.clone(),
+            scans: unsafe {
+                ScanExplainMetadata::capture(selected.scans(), fragment)
+            },
+            execution: selected.execution_profile(),
+        });
     }
 
     pub(super) const fn has_plan(&self) -> bool {
-        self.scans.is_some()
+        self.plan.is_some()
     }
 
     /// Render one primary logical plan and, only for ANALYZE VERBOSE, the
@@ -99,40 +105,56 @@ impl QueryOffloadExplain {
         &self,
         fragment: Option<&QueryFragment>,
         metrics: Option<&ExecutionMetricsSnapshot>,
+        planned_mode: Option<QueryExecutionMode>,
         physical_plan: Option<&PlanExplainNode>,
         options: ExplainOptions,
         explain: *mut pg_sys::ExplainState,
     ) -> Result<(), QueryHostError> {
-        let scans = self.scans.as_ref().ok_or(QueryHostError::ExecutorContract(
+        let plan = self.plan.as_ref().ok_or(QueryHostError::ExecutorContract(
             "ExplainCustomScan was invoked before query-offload Begin",
         ))?;
-        let execution = self.execution.ok_or(QueryHostError::ExecutorContract(
-            "ExplainCustomScan was invoked before query-offload Begin",
-        ))?;
-        let fragment = fragment.or(self.explain_only_fragment.as_ref()).ok_or(
-            QueryHostError::ExecutorContract(
-                "ExplainCustomScan was invoked before query-offload Begin",
-            ),
-        )?;
+        let fragment = fragment.unwrap_or(&plan.fragment);
         let logical_plan =
-            QueryExplainPlan::new(fragment, scans, options, metrics).build();
-
+            QueryExplainPlan::new(fragment, &plan.scans, options, metrics).build();
+        let mode = if options.analyze {
+            let mode = metrics
+                .map(ExecutionMetricsSnapshot::execution_mode)
+                .filter(|mode| *mode != QueryExecutionMode::NotStarted)
+                .or(planned_mode)
+                .ok_or(QueryHostError::ExecutorContract(
+                    "EXPLAIN ANALYZE has no query execution mode",
+                ))?;
+            Some(match mode {
+                QueryExecutionMode::Serial => c"Serial",
+                QueryExecutionMode::Parallel => c"Parallel",
+                QueryExecutionMode::Mixed => c"Serial and Parallel",
+                QueryExecutionMode::NotStarted => {
+                    return Err(QueryHostError::ExecutorContract(
+                        "EXPLAIN ANALYZE did not start query execution",
+                    ));
+                }
+            })
+        } else {
+            None
+        };
         unsafe {
             pg_sys::ExplainPropertyText(
                 PROP_ENGINE.as_ptr(),
                 ENGINE_NAME.as_ptr(),
                 explain,
             );
-            pg_sys::ExplainPropertyText(
-                PROP_MODE.as_ptr(),
-                MODE_NAME.as_ptr(),
-                explain,
-            );
+            if let Some(mode) = mode {
+                pg_sys::ExplainPropertyText(
+                    PROP_MODE.as_ptr(),
+                    mode.as_ptr(),
+                    explain,
+                );
+            }
             if options.verbose {
                 pg_sys::ExplainPropertyUInteger(
                     PROP_MAXIMUM_BATCH_ROWS.as_ptr(),
                     ptr::null(),
-                    u64::try_from(execution.maximum_batch_rows().get())
+                    u64::try_from(plan.execution.maximum_batch_rows().get())
                         .expect("validated batch-row limit fits u64"),
                     explain,
                 );
@@ -150,17 +172,53 @@ impl QueryOffloadExplain {
             if options.analyze
                 && let Some(metrics) = metrics
             {
+                if metrics.parallel_runs != 0 {
+                    pg_sys::ExplainPropertyUInteger(
+                        PROP_PARALLEL_WORKERS.as_ptr(),
+                        ptr::null(),
+                        metrics.maximum_workers,
+                        explain,
+                    );
+                    pg_sys::ExplainPropertyUInteger(
+                        PROP_PARALLEL_RUNS.as_ptr(),
+                        ptr::null(),
+                        metrics.parallel_runs,
+                        explain,
+                    );
+                    pg_sys::ExplainPropertyUInteger(
+                        PROP_WORKER_METRIC_REPORTS.as_ptr(),
+                        ptr::null(),
+                        metrics.worker_metric_reports,
+                        explain,
+                    );
+                    pg_sys::ExplainPropertyUInteger(
+                        PROP_EXPECTED_WORKER_METRIC_REPORTS.as_ptr(),
+                        ptr::null(),
+                        metrics.expected_worker_metric_reports,
+                        explain,
+                    );
+                    pg_sys::ExplainPropertyUInteger(
+                        PROP_MAX_WORKER_FRAGMENT_PEAK_MEMORY.as_ptr(),
+                        ptr::null(),
+                        metrics.maximum_worker_fragment_peak_memory_bytes,
+                        explain,
+                    );
+                    pg_sys::ExplainPropertyUInteger(
+                        PROP_MAX_WORKER_PARTICIPANT_PEAK_MEMORY.as_ptr(),
+                        ptr::null(),
+                        metrics.maximum_worker_participant_peak_memory_bytes,
+                        explain,
+                    );
+                }
                 pg_sys::ExplainPropertyUInteger(
-                    PROP_ENGINE_PEAK_MEMORY.as_ptr(),
+                    PROP_LOCAL_ENGINE_PEAK_MEMORY.as_ptr(),
                     ptr::null(),
-                    metrics.engine_peak_memory_bytes,
+                    metrics.local_peak_memory_bytes,
                     explain,
                 );
             }
             PgExplainTree::new(&logical_plan).emit_plan(explain)?;
-            if options.engine_diagnostics()
-                && let Some(physical_plan) = physical_plan
-            {
+            if let Some(physical_plan) = physical_plan {
                 PgExplainTree::new(physical_plan)
                     .emit_diagnostic(GROUP_ENGINE_PLAN, explain)?;
             }
