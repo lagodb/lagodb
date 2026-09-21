@@ -1,0 +1,365 @@
+-- query_offload_parallel.sql
+-- Leader-owned PostgreSQL-worker execution for query-offload plans. Operator
+-- semantics remain in the focused aggregate/join/composition suites; this file
+-- protects parallel admission, representative query shapes, and observability.
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'force';
+SET lagodb.query_batch_rows = 2;
+SET lagodb.query_offload_parallel_min_scan_rows = 0;
+SET max_parallel_workers_per_gather = 2;
+SELECT current_setting('lagodb.query_offload_parallel_min_scan_rows')::integer = 0
+           AS size_gate_disabled;
+ size_gate_disabled 
+--------------------
+ t
+(1 row)
+
+CREATE TABLE query_offload_parallel_left (
+    id integer,
+    key integer,
+    value integer
+) USING iceberg;
+CREATE TABLE query_offload_parallel_right (
+    id integer,
+    key integer,
+    value integer
+) USING iceberg;
+CREATE TABLE query_offload_parallel_small (
+    id integer,
+    key integer,
+    value integer
+) USING iceberg;
+-- Iceberg's default split weighting charges one 4 MiB open cost per data file
+-- and targets 128 MiB groups. Thirty-three separately written files therefore
+-- form at least two source work groups without creating a large data fixture.
+-- \gexec preserves those statement/file boundaries; one INSERT ... SELECT
+-- would put all rows through a single DML session.
+\set ECHO none
+INSERT INTO query_offload_parallel_right
+SELECT 100 + row_id, row_id % 4, row_id * 100
+FROM generate_series(1, 33) AS row_id;
+INSERT INTO query_offload_parallel_small VALUES (1, 1, 10);
+-- A one-file source has no distributable stage and negotiates serial execution
+-- before any worker starts.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT key, count(*)
+FROM query_offload_parallel_small
+GROUP BY key;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload) (actual rows=1 loops=1)
+   Engine: DataFusion
+   Execution Mode: Serial
+   Local Engine Peak Memory Bytes: 4160
+   ->  Aggregate
+         Group Key: key
+         Aggregates: COUNT(*)
+         ->  Table Scan on query_offload_parallel_small
+               Access Method: iceberg
+               Actual Input Batches: 1
+               Actual Input Rows: 1
+               Scan Tasks: 1
+               Data Files Selected: 1
+               Selected File Bytes: 1265
+(14 rows)
+
+-- The planner-row threshold is an admission gate, not an execution fallback.
+SET lagodb.query_offload_parallel_min_scan_rows = 2147483647;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT key, count(*)
+FROM query_offload_parallel_left
+GROUP BY key;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload) (actual rows=4 loops=1)
+   Engine: DataFusion
+   Execution Mode: Serial
+   Local Engine Peak Memory Bytes: 4160
+   ->  Aggregate
+         Group Key: key
+         Aggregates: COUNT(*)
+         ->  Table Scan on query_offload_parallel_left
+               Access Method: iceberg
+               Actual Input Batches: 33
+               Actual Input Rows: 33
+               Scan Tasks: 33
+               Data Files Selected: 33
+               Selected File Bytes: 41523
+(14 rows)
+
+SET lagodb.query_offload_parallel_min_scan_rows = 0;
+-- PostgreSQL worker budget below two producers also negotiates serial mode.
+SET max_parallel_workers_per_gather = 0;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT key, count(*)
+FROM query_offload_parallel_left
+GROUP BY key;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload) (actual rows=4 loops=1)
+   Engine: DataFusion
+   Execution Mode: Serial
+   Local Engine Peak Memory Bytes: 4160
+   ->  Aggregate
+         Group Key: key
+         Aggregates: COUNT(*)
+         ->  Table Scan on query_offload_parallel_left
+               Access Method: iceberg
+               Actual Input Batches: 33
+               Actual Input Rows: 33
+               Scan Tasks: 33
+               Data Files Selected: 33
+               Selected File Bytes: 41523
+(14 rows)
+
+SET max_parallel_workers_per_gather = 2;
+-- A filtered grouped aggregate consumes every source work group exactly
+-- once. ANALYZE metrics prove that a parallel run was launched and completely
+-- reported, while the result is compared with PostgreSQL's native execution.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT key,
+       count(*) AS rows,
+       count(value) AS nonnull_values,
+       sum(value) AS total
+FROM query_offload_parallel_left
+WHERE id >= 1
+GROUP BY key
+ORDER BY key;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload) (actual rows=4 loops=1)
+   Engine: DataFusion
+   Execution Mode: Parallel
+   Maximum Launched Workers: 2
+   Parallel Runs: 1
+   Worker Metric Reports: 4
+   Expected Worker Metric Reports: 4
+   Maximum Worker Fragment Peak Memory Bytes: 8448
+   Maximum Worker Participant Peak Memory Bytes: 8448
+   Local Engine Peak Memory Bytes: 3072
+   ->  Sort
+         Sort Key: key ASC NULLS LAST
+         ->  Aggregate
+               Group Key: key
+               Aggregates: COUNT(*), COUNT(value), SUM(value)
+               ->  Table Scan on query_offload_parallel_left
+                     Access Method: iceberg
+                     Filter: (id >= 1)
+                     Pushed Filter: (id >= 1)
+                     Actual Input Batches: 33
+                     Actual Input Rows: 33
+                     Scan Tasks: 33
+                     Data Files Selected: 33
+                     Selected File Bytes: 41523
+(24 rows)
+
+SELECT key,
+       count(*) AS rows,
+       count(value) AS nonnull_values,
+       sum(value) AS total
+FROM query_offload_parallel_left
+WHERE id >= 1
+GROUP BY key
+ORDER BY key;
+ key | rows | nonnull_values | total 
+-----+------+----------------+-------
+   0 |    8 |              7 |  1240
+   1 |    9 |              7 |  1230
+   2 |    8 |              6 |   880
+   3 |    8 |              7 |  1210
+(4 rows)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT key,
+       count(*) AS rows,
+       count(value) AS nonnull_values,
+       sum(value) AS total
+FROM query_offload_parallel_left
+WHERE id >= 1
+GROUP BY key
+ORDER BY key;
+ key | rows | nonnull_values | total 
+-----+------+----------------+-------
+   0 |    8 |              7 |  1240
+   1 |    9 |              7 |  1230
+   2 |    8 |              6 |   880
+   3 |    8 |              7 |  1210
+(4 rows)
+
+-- A limited ordered inner join exercises parallel join distribution and
+-- early output termination without routing through an aggregate.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT l.id AS left_id, r.id AS right_id, l.key
+FROM query_offload_parallel_left AS l
+JOIN query_offload_parallel_right AS r USING (key)
+ORDER BY left_id, right_id
+LIMIT 8;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Limit (actual rows=8 loops=1)
+   ->  Sort (actual rows=8 loops=1)
+         Sort Key: l.id, r.id
+         Sort Method: top-N heapsort  Memory: 25kB
+         ->  Result (actual rows=273 loops=1)
+               ->  Custom Scan (LagoDB Query Offload) (actual rows=273 loops=1)
+                     Engine: DataFusion
+                     Execution Mode: Parallel
+                     Maximum Launched Workers: 2
+                     Parallel Runs: 1
+                     Worker Metric Reports: 5
+                     Expected Worker Metric Reports: 5
+                     Maximum Worker Fragment Peak Memory Bytes: 1120
+                     Maximum Worker Participant Peak Memory Bytes: 2144
+                     Local Engine Peak Memory Bytes: 0
+                     ->  Projection
+                           ->  Hash Join
+                                 Join Type: Inner
+                                 Hash Cond: l.key = r.key
+                                 ->  Table Scan on query_offload_parallel_left l
+                                       Access Method: iceberg
+                                       Actual Input Batches: 33
+                                       Actual Input Rows: 33
+                                       Scan Tasks: 33
+                                       Data Files Selected: 33
+                                       Selected File Bytes: 41523
+                                 ->  Table Scan on query_offload_parallel_right r
+                                       Access Method: iceberg
+                                       Actual Input Batches: 17
+                                       Actual Input Rows: 33
+                                       Scan Tasks: 1
+                                       Data Files Selected: 1
+                                       Selected File Bytes: 1513
+(33 rows)
+
+SELECT l.id AS left_id, r.id AS right_id, l.key
+FROM query_offload_parallel_left AS l
+JOIN query_offload_parallel_right AS r USING (key)
+ORDER BY left_id, right_id
+LIMIT 8;
+ left_id | right_id | key 
+---------+----------+-----
+       1 |      101 |   1
+       1 |      105 |   1
+       1 |      109 |   1
+       1 |      113 |   1
+       1 |      117 |   1
+       1 |      121 |   1
+       1 |      125 |   1
+       1 |      129 |   1
+(8 rows)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT l.id AS left_id, r.id AS right_id, l.key
+FROM query_offload_parallel_left AS l
+JOIN query_offload_parallel_right AS r USING (key)
+ORDER BY left_id, right_id
+LIMIT 8;
+ left_id | right_id | key 
+---------+----------+-----
+       1 |      101 |   1
+       1 |      105 |   1
+       1 |      109 |   1
+       1 |      113 |   1
+       1 |      117 |   1
+       1 |      121 |   1
+       1 |      125 |   1
+       1 |      129 |   1
+(8 rows)
+
+-- Aggregate-over-inner-join reuses the same parallel execution framework
+-- and preserves duplicate fanout, NULL aggregate inputs, FILTER, and HAVING.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT l.key,
+       count(*) AS joined_rows,
+       count(l.value) AS nonnull_left,
+       sum(r.value) FILTER (WHERE r.id >= 120) AS filtered_total
+FROM query_offload_parallel_left AS l
+JOIN query_offload_parallel_right AS r USING (key)
+GROUP BY l.key
+HAVING count(*) > 60
+ORDER BY l.key;
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload) (actual rows=4 loops=1)
+   Engine: DataFusion
+   Execution Mode: Parallel
+   Maximum Launched Workers: 2
+   Parallel Runs: 1
+   Worker Metric Reports: 5
+   Expected Worker Metric Reports: 5
+   Maximum Worker Fragment Peak Memory Bytes: 5348
+   Maximum Worker Participant Peak Memory Bytes: 5348
+   Local Engine Peak Memory Bytes: 3072
+   ->  Sort
+         Sort Key: l.key ASC NULLS LAST
+         ->  Filter
+               Filter: ((COUNT(*) > runtime value))
+               ->  Aggregate
+                     Group Key: l.key
+                     Aggregates: COUNT(*), COUNT(l.value), SUM(r.value) FILTER (WHERE (r.id >= runtime value))
+                     ->  Hash Join
+                           Join Type: Inner
+                           Hash Cond: l.key = r.key
+                           ->  Table Scan on query_offload_parallel_left l
+                                 Access Method: iceberg
+                                 Actual Input Batches: 33
+                                 Actual Input Rows: 33
+                                 Scan Tasks: 33
+                                 Data Files Selected: 33
+                                 Selected File Bytes: 41523
+                           ->  Table Scan on query_offload_parallel_right r
+                                 Access Method: iceberg
+                                 Actual Input Batches: 17
+                                 Actual Input Rows: 33
+                                 Scan Tasks: 1
+                                 Data Files Selected: 1
+                                 Selected File Bytes: 1513
+(34 rows)
+
+SELECT l.key,
+       count(*) AS joined_rows,
+       count(l.value) AS nonnull_left,
+       sum(r.value) FILTER (WHERE r.id >= 120) AS filtered_total
+FROM query_offload_parallel_left AS l
+JOIN query_offload_parallel_right AS r USING (key)
+GROUP BY l.key
+HAVING count(*) > 60
+ORDER BY l.key;
+ key | joined_rows | nonnull_left | filtered_total 
+-----+-------------+--------------+----------------
+   0 |          64 |           56 |          83200
+   1 |          81 |           63 |          97200
+   2 |          64 |           48 |          62400
+   3 |          64 |           56 |          64800
+(4 rows)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT l.key,
+       count(*) AS joined_rows,
+       count(l.value) AS nonnull_left,
+       sum(r.value) FILTER (WHERE r.id >= 120) AS filtered_total
+FROM query_offload_parallel_left AS l
+JOIN query_offload_parallel_right AS r USING (key)
+GROUP BY l.key
+HAVING count(*) > 60
+ORDER BY l.key;
+ key | joined_rows | nonnull_left | filtered_total 
+-----+-------------+--------------+----------------
+   0 |          64 |           56 |          83200
+   1 |          81 |           63 |          97200
+   2 |          64 |           48 |          62400
+   3 |          64 |           56 |          64800
+(4 rows)
+
+DROP TABLE query_offload_parallel_small;
+DROP TABLE query_offload_parallel_right;
+DROP TABLE query_offload_parallel_left;
+RESET max_parallel_workers_per_gather;
+RESET lagodb.query_offload_parallel_min_scan_rows;
+RESET lagodb.query_batch_rows;
+RESET lagodb.query_offload_mode;
+RESET lagodb.customscan_mode;

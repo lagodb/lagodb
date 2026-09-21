@@ -64,7 +64,6 @@ ORDER BY l.key;
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Sort
          Sort Key: l.key ASC NULLS LAST
          ->  Filter
@@ -79,7 +78,7 @@ ORDER BY l.key;
                                  Access Method: iceberg
                            ->  Table Scan on query_offload_comp_right r
                                  Access Method: iceberg
-(17 rows)
+(16 rows)
 
 SELECT l.key,
        count(*) AS joined_rows,
@@ -132,7 +131,6 @@ JOIN query_offload_comp_empty AS e USING (key);
 --------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Aggregate
          Aggregates: COUNT(*), COUNT(e.measure), MIN(e.measure), SUM(e.measure)
          ->  Hash Join
@@ -142,7 +140,7 @@ JOIN query_offload_comp_empty AS e USING (key);
                      Access Method: iceberg
                ->  Table Scan on query_offload_comp_empty e
                      Access Method: iceberg
-(12 rows)
+(11 rows)
 
 SELECT count(*) AS rows,
        count(e.measure) AS values,
@@ -181,7 +179,6 @@ ORDER BY l.key NULLS LAST;
 -------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Sort
          Sort Key: l.key ASC NULLS LAST
          ->  Aggregate
@@ -198,7 +195,7 @@ ORDER BY l.key NULLS LAST;
                                  Access Method: iceberg
                                  Filter: (measure >= 200)
                                  Pushed Filter: (measure >= 200)
-(19 rows)
+(18 rows)
 
 SELECT l.key, count(*) AS rows, count(r.id) AS matched_right
 FROM query_offload_comp_left AS l
@@ -249,7 +246,6 @@ WHERE EXISTS (
 ------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Aggregate
          Aggregates: COUNT(*), SUM(l.measure)
          ->  Hash Join
@@ -259,7 +255,7 @@ WHERE EXISTS (
                      Access Method: iceberg
                ->  Table Scan on query_offload_comp_right r
                      Access Method: iceberg
-(12 rows)
+(11 rows)
 
 SELECT count(*) AS matching_left, sum(l.measure) AS matching_total
 FROM query_offload_comp_left AS l
@@ -299,7 +295,6 @@ WHERE NOT EXISTS (
 ------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Aggregate
          Aggregates: COUNT(*), SUM(l.measure)
          ->  Hash Join
@@ -309,7 +304,7 @@ WHERE NOT EXISTS (
                      Access Method: iceberg
                ->  Table Scan on query_offload_comp_right r
                      Access Method: iceberg
-(12 rows)
+(11 rows)
 
 SELECT count(*) AS missing_left, sum(l.measure) AS missing_total
 FROM query_offload_comp_left AS l
@@ -349,7 +344,6 @@ WHERE l.key NOT IN (
 -----------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Aggregate
          Aggregates: COUNT(*)
          ->  Hash Join
@@ -360,7 +354,7 @@ WHERE l.key NOT IN (
                      Access Method: iceberg
                ->  Table Scan on query_offload_comp_aux a
                      Access Method: iceberg
-(13 rows)
+(12 rows)
 
 SELECT count(*) AS not_in_nonnull
 FROM query_offload_comp_left AS l
@@ -394,7 +388,6 @@ WHERE l.key NOT IN (
 ------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Aggregate
          Aggregates: COUNT(*)
          ->  Hash Join
@@ -405,7 +398,7 @@ WHERE l.key NOT IN (
                      Access Method: iceberg
                ->  Table Scan on query_offload_comp_empty e
                      Access Method: iceberg
-(13 rows)
+(12 rows)
 
 SELECT count(*) AS not_in_empty
 FROM query_offload_comp_left AS l
@@ -442,7 +435,6 @@ ORDER BY a.key;
 -----------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Sort
          Sort Key: a.key ASC NULLS LAST
          ->  Aggregate
@@ -456,7 +448,7 @@ ORDER BY a.key;
                            Access Method: iceberg
                      ->  Table Scan on query_offload_comp_left b
                            Access Method: iceberg
-(16 rows)
+(15 rows)
 
 SELECT a.key, count(*) AS pairs, sum(b.measure) AS peer_total
 FROM query_offload_comp_left AS a
@@ -500,7 +492,6 @@ ORDER BY a.label, a.label_varchar;
    Sort Key: a.label, a.label_varchar
    ->  Custom Scan (LagoDB Query Offload)
          Engine: DataFusion
-         Execution Mode: Serial
          ->  Aggregate
                Group Key: a.label, a.label_varchar
                Aggregates: COUNT(*), SUM(r.measure)
@@ -516,7 +507,7 @@ ORDER BY a.label, a.label_varchar;
                                  Access Method: iceberg
                      ->  Table Scan on query_offload_comp_right r
                            Access Method: iceberg
-(20 rows)
+(19 rows)
 
 SELECT a.label,
        a.label_varchar,
@@ -615,7 +606,7 @@ LIMIT 1 OFFSET 1;
  Custom Scan (LagoDB Query Offload) (actual rows=1 loops=1)
    Engine: DataFusion
    Execution Mode: Serial
-   Engine Peak Memory Bytes: 7576
+   Local Engine Peak Memory Bytes: 7576
    ->  Limit
          ->  Sort
                Sort Key: MAX(r.measure) DESC NULLS FIRST, l.key ASC NULLS LAST

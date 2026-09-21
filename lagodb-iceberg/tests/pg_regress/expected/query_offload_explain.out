@@ -41,14 +41,13 @@ WHERE id = 1;
 ------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Aggregate
          Aggregates: COUNT(*)
          ->  Table Scan on query_offload_explain_left
                Access Method: iceberg
                Filter: (id = 1)
                Pushed Filter: (id = 1)
-(9 rows)
+(8 rows)
 
 -- Provider estimates are attached to the corresponding scan only when costs
 -- are requested. Provider cost components remain VERBOSE diagnostics.
@@ -60,7 +59,6 @@ WHERE id = 1;
 ----------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)  (cost=0.00..1.00 rows=1 width=8)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Aggregate
          Aggregates: COUNT(*)
          ->  Table Scan on query_offload_explain_left
@@ -69,7 +67,7 @@ WHERE id = 1;
                Estimated Bytes Read: 2731 bytes
                Filter: (id = 1)
                Pushed Filter: (id = 1)
-(11 rows)
+(10 rows)
 
 EXPLAIN (VERBOSE, COSTS ON)
 SELECT count(*)
@@ -80,7 +78,6 @@ WHERE id = 1;
  Custom Scan (LagoDB Query Offload)  (cost=0.00..1.00 rows=1 width=8)
    Output: (count(*))
    Engine: DataFusion
-   Execution Mode: Serial
    Maximum Batch Rows: 2
    ->  Projection
          Output: COUNT(*)
@@ -95,7 +92,7 @@ WHERE id = 1;
                      Provider Startup Cost: 0.00
                      Filter: (id = 1)
                      Pushed Filter Conservative: (id = 1)
-(18 rows)
+(17 rows)
 
 -- VERBOSE may expose stable runtime-binding slots, but never the IR's
 -- `$valueN` spelling or `#N` output identities.
@@ -110,7 +107,6 @@ LIMIT 1 OFFSET 1;
  Custom Scan (LagoDB Query Offload)
    Output: id, (count(*))
    Engine: DataFusion
-   Execution Mode: Serial
    Maximum Batch Rows: 2
    ->  Limit
          Offset: Runtime Binding 1
@@ -126,7 +122,7 @@ LIMIT 1 OFFSET 1;
                                  Access Method: iceberg
                                  Scan ID: 0
                                  Output: id
-(19 rows)
+(18 rows)
 
 -- Join children and their relation aliases occupy one PostgreSQL Plans tree.
 EXPLAIN (COSTS OFF)
@@ -139,7 +135,6 @@ ORDER BY l.key;
 ---------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Sort
          Sort Key: l.key ASC NULLS LAST
          ->  Aggregate
@@ -152,7 +147,7 @@ ORDER BY l.key;
                            Access Method: iceberg
                      ->  Table Scan on query_offload_explain_right r
                            Access Method: iceberg
-(15 rows)
+(14 rows)
 
 -- Text headings and expressions use PostgreSQL identifier quoting rather than
 -- concatenating raw relation aliases.
@@ -165,7 +160,6 @@ JOIN query_offload_explain_right AS "Right Side"
 --------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Aggregate
          Aggregates: COUNT(*)
          ->  Hash Join
@@ -175,7 +169,7 @@ JOIN query_offload_explain_right AS "Right Side"
                      Access Method: iceberg
                ->  Table Scan on query_offload_explain_right "Right Side"
                      Access Method: iceberg
-(12 rows)
+(11 rows)
 
 -- Actual metrics survive COSTS OFF, are associated with their scan leaves,
 -- and exclude timing when PostgreSQL requests TIMING OFF.
@@ -190,7 +184,7 @@ ORDER BY l.key;
  Custom Scan (LagoDB Query Offload) (actual rows=2 loops=1)
    Engine: DataFusion
    Execution Mode: Serial
-   Engine Peak Memory Bytes: 4192
+   Local Engine Peak Memory Bytes: 4192
    ->  Sort
          Sort Key: l.key ASC NULLS LAST
          ->  Aggregate
@@ -229,7 +223,7 @@ ORDER BY l.key;
    Engine: DataFusion
    Execution Mode: Serial
    Maximum Batch Rows: 2
-   Engine Peak Memory Bytes: 4192
+   Local Engine Peak Memory Bytes: 4192
    ->  Sort
          Sort Key: l.key ASC NULLS LAST
          ->  Projection
@@ -407,7 +401,6 @@ FROM query_offload_explain_left;
  Custom Scan (LagoDB Query Offload)
    Output: (count(*) FILTER (WHERE (random() >= '0'::double precision)))
    Engine: DataFusion
-   Execution Mode: Serial
    Maximum Batch Rows: 2
    PostgreSQL Expression Fallbacks: 1
    ->  Projection
@@ -417,7 +410,7 @@ FROM query_offload_explain_left;
                ->  Table Scan on public.query_offload_explain_left
                      Access Method: iceberg
                      Scan ID: 0
-(13 rows)
+(12 rows)
 
 DROP FUNCTION query_offload_explain_json(text, text);
 DROP TABLE query_offload_explain_right;

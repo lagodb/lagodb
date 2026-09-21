@@ -1,0 +1,525 @@
+-- query_offload_foreign_tables.sql
+-- Positive query-offload coverage for Iceberg foreign-table sources. The
+-- operator capability matrices live in the managed-table suites; this file
+-- verifies that each basic operator family accepts foreign scan providers and
+-- preserves PostgreSQL results.
+\set ECHO none
+CREATE FOREIGN TABLE query_offload_foreign.left_source (
+    id integer,
+    group_key integer,
+    measure integer,
+    payload text
+)
+SERVER query_offload_foreign_rest
+OPTIONS (
+    catalog_name 'regress',
+    catalog_namespace 'query_offload_regress',
+    catalog_table_name 'left_source',
+    mode 'read_only'
+);
+CREATE FOREIGN TABLE query_offload_foreign.right_source (
+    id integer,
+    group_key integer,
+    measure integer,
+    payload text
+)
+SERVER query_offload_foreign_rest
+OPTIONS (
+    catalog_name 'regress',
+    catalog_namespace 'query_offload_regress',
+    catalog_table_name 'right_source',
+    mode 'read_only'
+);
+CREATE FOREIGN TABLE query_offload_foreign.writable_source (
+    id integer,
+    group_key integer,
+    measure integer,
+    payload text
+)
+SERVER query_offload_foreign_rest
+OPTIONS (
+    catalog_name 'regress',
+    catalog_namespace 'query_offload_regress',
+    catalog_table_name 'left_source',
+    mode 'read_write'
+);
+CREATE FOREIGN TABLE query_offload_foreign.parallel_source (
+    id integer,
+    group_key integer,
+    measure integer,
+    file_group integer
+)
+SERVER query_offload_foreign_rest
+OPTIONS (
+    catalog_name 'regress',
+    catalog_namespace 'query_offload_regress',
+    catalog_table_name 'parallel_source',
+    mode 'read_write'
+);
+SET lagodb.query_batch_rows = 2;
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'force';
+SET max_parallel_workers_per_gather = 0;
+-- A column-free aggregate exercises the foreign CountRows scan projection.
+-- The corresponding native result protects the remote row count.
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS rows
+FROM query_offload_foreign.left_source;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on left_source
+               Foreign Data Wrapper: lagodb_iceberg
+(6 rows)
+
+SELECT count(*) AS rows
+FROM query_offload_foreign.left_source;
+ rows 
+------
+    5
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT count(*) AS rows
+FROM query_offload_foreign.left_source;
+ rows 
+------
+    5
+(1 row)
+
+-- A scalar aggregate makes the foreign scan a query-offload candidate while
+-- exercising projection, an exact provider filter, and scalar expressions.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS rows,
+       sum(abs(measure)) AS absolute_total,
+       count(*) FILTER (WHERE payload IS NOT NULL) AS payload_rows
+FROM query_offload_foreign.left_source
+WHERE id >= 2;
+                                           QUERY PLAN                                           
+------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*), SUM(abs(measure)), COUNT(*) FILTER (WHERE (payload IS NOT NULL))
+         ->  Table Scan on left_source
+               Foreign Data Wrapper: lagodb_iceberg
+               Filter: (id >= 2)
+               Pushed Filter: (id >= 2)
+(8 rows)
+
+SELECT count(*) AS rows,
+       sum(abs(measure)) AS absolute_total,
+       count(*) FILTER (WHERE payload IS NOT NULL) AS payload_rows
+FROM query_offload_foreign.left_source
+WHERE id >= 2;
+ rows | absolute_total | payload_rows 
+------+----------------+--------------
+    4 |            110 |            3
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT count(*) AS rows,
+       sum(abs(measure)) AS absolute_total,
+       count(*) FILTER (WHERE payload IS NOT NULL) AS payload_rows
+FROM query_offload_foreign.left_source
+WHERE id >= 2;
+ rows | absolute_total | payload_rows 
+------+----------------+--------------
+    4 |            110 |            3
+(1 row)
+
+-- A generic parameter is retained as a runtime binding and can execute with
+-- different values against the same planned foreign source.
+SET lagodb.query_offload_mode = 'force';
+SET plan_cache_mode = force_generic_plan;
+PREPARE query_offload_foreign_by_id(integer) AS
+SELECT count(*) AS rows, sum(measure) AS total
+FROM query_offload_foreign.left_source
+WHERE id >= $1;
+EXPLAIN (COSTS OFF) EXECUTE query_offload_foreign_by_id(3);
+                     QUERY PLAN                     
+----------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*), SUM(measure)
+         ->  Table Scan on left_source
+               Foreign Data Wrapper: lagodb_iceberg
+               Filter: (id >= $1)
+               Pushed Filter: (id >= $1)
+(8 rows)
+
+EXECUTE query_offload_foreign_by_id(3);
+ rows | total 
+------+-------
+    3 |    90
+(1 row)
+
+EXECUTE query_offload_foreign_by_id(5);
+ rows | total 
+------+-------
+    1 |    50
+(1 row)
+
+DEALLOCATE query_offload_foreign_by_id;
+SET lagodb.query_offload_mode = 'off';
+PREPARE query_offload_foreign_by_id(integer) AS
+SELECT count(*) AS rows, sum(measure) AS total
+FROM query_offload_foreign.left_source
+WHERE id >= $1;
+EXECUTE query_offload_foreign_by_id(3);
+ rows | total 
+------+-------
+    3 |    90
+(1 row)
+
+EXECUTE query_offload_foreign_by_id(5);
+ rows | total 
+------+-------
+    1 |    50
+(1 row)
+
+DEALLOCATE query_offload_foreign_by_id;
+RESET plan_cache_mode;
+-- Grouping, aggregate FILTER, NULL inputs, and HAVING consume the foreign
+-- source through the same provider contract as a managed Iceberg table.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT group_key,
+       count(*) AS rows,
+       count(measure) AS values,
+       sum(measure) FILTER (WHERE id >= 2) AS filtered_total
+FROM query_offload_foreign.left_source
+GROUP BY group_key
+HAVING count(*) >= 1
+ORDER BY group_key NULLS LAST
+LIMIT 2 OFFSET 1;
+                                                    QUERY PLAN                                                     
+-------------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Limit
+         ->  Sort
+               Sort Key: group_key ASC NULLS LAST
+               ->  Filter
+                     Filter: ((COUNT(*) >= runtime value))
+                     ->  Aggregate
+                           Group Key: group_key
+                           Aggregates: COUNT(*), COUNT(measure), SUM(measure) FILTER (WHERE (id >= runtime value))
+                           ->  Table Scan on left_source
+                                 Foreign Data Wrapper: lagodb_iceberg
+(12 rows)
+
+SELECT group_key,
+       count(*) AS rows,
+       count(measure) AS values,
+       sum(measure) FILTER (WHERE id >= 2) AS filtered_total
+FROM query_offload_foreign.left_source
+GROUP BY group_key
+HAVING count(*) >= 1
+ORDER BY group_key NULLS LAST
+LIMIT 2 OFFSET 1;
+ group_key | rows | values | filtered_total 
+-----------+------+--------+----------------
+         2 |    2 |      1 |             20
+         3 |    1 |      1 |             40
+(2 rows)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT group_key,
+       count(*) AS rows,
+       count(measure) AS values,
+       sum(measure) FILTER (WHERE id >= 2) AS filtered_total
+FROM query_offload_foreign.left_source
+GROUP BY group_key
+HAVING count(*) >= 1
+ORDER BY group_key NULLS LAST
+LIMIT 2 OFFSET 1;
+ group_key | rows | values | filtered_total 
+-----------+------+--------+----------------
+         2 |    2 |      1 |             20
+         3 |    1 |      1 |             40
+(2 rows)
+
+-- DISTINCT owns the foreign scan; PostgreSQL may retain sorting and pagination
+-- above that offloaded fragment according to its normal upper-path rules.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT payload
+FROM query_offload_foreign.left_source
+ORDER BY payload NULLS LAST
+LIMIT 3 OFFSET 1;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Limit
+   ->  Sort
+         Sort Key: payload
+         ->  Custom Scan (LagoDB Query Offload)
+               Engine: DataFusion
+               ->  Distinct
+                     Distinct Key: payload
+                     ->  Table Scan on left_source
+                           Foreign Data Wrapper: lagodb_iceberg
+(9 rows)
+
+SELECT DISTINCT payload
+FROM query_offload_foreign.left_source
+ORDER BY payload NULLS LAST
+LIMIT 3 OFFSET 1;
+ payload 
+---------
+ beta
+ orphan
+ 
+(3 rows)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT DISTINCT payload
+FROM query_offload_foreign.left_source
+ORDER BY payload NULLS LAST
+LIMIT 3 OFFSET 1;
+ payload 
+---------
+ beta
+ orphan
+ 
+(3 rows)
+
+-- Two foreign sources owned by the same provider participate in one offloaded
+-- join while preserving duplicate fanout and scan-local filters.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT l.id AS left_id,
+       r.id AS right_id,
+       l.measure + r.measure AS combined_measure
+FROM query_offload_foreign.left_source AS l
+JOIN query_offload_foreign.right_source AS r USING (group_key)
+WHERE l.id >= 2
+ORDER BY left_id, right_id;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Sort
+   Sort Key: l.id, r.id
+   ->  Result
+         ->  Custom Scan (LagoDB Query Offload)
+               Engine: DataFusion
+               ->  Projection
+                     ->  Hash Join
+                           Join Type: Inner
+                           Hash Cond: l.group_key = r.group_key
+                           ->  Table Scan on left_source l
+                                 Foreign Data Wrapper: lagodb_iceberg
+                                 Filter: (id >= 2)
+                                 Pushed Filter: (id >= 2)
+                           ->  Table Scan on right_source r
+                                 Foreign Data Wrapper: lagodb_iceberg
+(15 rows)
+
+SELECT l.id AS left_id,
+       r.id AS right_id,
+       l.measure + r.measure AS combined_measure
+FROM query_offload_foreign.left_source AS l
+JOIN query_offload_foreign.right_source AS r USING (group_key)
+WHERE l.id >= 2
+ORDER BY left_id, right_id;
+ left_id | right_id | combined_measure 
+---------+----------+------------------
+       2 |      102 |              220
+       2 |      103 |              320
+       3 |      102 |                 
+       3 |      103 |                 
+(4 rows)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT l.id AS left_id,
+       r.id AS right_id,
+       l.measure + r.measure AS combined_measure
+FROM query_offload_foreign.left_source AS l
+JOIN query_offload_foreign.right_source AS r USING (group_key)
+WHERE l.id >= 2
+ORDER BY left_id, right_id;
+ left_id | right_id | combined_measure 
+---------+----------+------------------
+       2 |      102 |              220
+       2 |      103 |              320
+       3 |      102 |                 
+       3 |      103 |                 
+(4 rows)
+
+-- A foreign source and a managed source must resolve independently rather
+-- than coupling either adapter to the other.
+CREATE TABLE query_offload_foreign_managed (
+    group_key integer,
+    label text
+) USING iceberg;
+INSERT INTO query_offload_foreign_managed VALUES
+    (1, 'managed-one'),
+    (2, 'managed-two'),
+    (4, 'managed-four');
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT f.id, m.label
+FROM query_offload_foreign.left_source AS f
+JOIN query_offload_foreign_managed AS m USING (group_key)
+ORDER BY f.id;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Sort
+         Sort Key: f.id ASC NULLS LAST
+         ->  Projection
+               ->  Hash Join
+                     Join Type: Inner
+                     Hash Cond: f.group_key = m.group_key
+                     ->  Table Scan on left_source f
+                           Foreign Data Wrapper: lagodb_iceberg
+                     ->  Table Scan on query_offload_foreign_managed m
+                           Access Method: iceberg
+(12 rows)
+
+SELECT f.id, m.label
+FROM query_offload_foreign.left_source AS f
+JOIN query_offload_foreign_managed AS m USING (group_key)
+ORDER BY f.id;
+ id |    label    
+----+-------------
+  1 | managed-one
+  2 | managed-two
+  3 | managed-two
+(3 rows)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT f.id, m.label
+FROM query_offload_foreign.left_source AS f
+JOIN query_offload_foreign_managed AS m USING (group_key)
+ORDER BY f.id;
+ id |    label    
+----+-------------
+  1 | managed-one
+  2 | managed-two
+  3 | managed-two
+(3 rows)
+
+-- A writable source binds through the transaction-local Iceberg view. The
+-- offloaded scan must observe the staged data file before PostgreSQL commits,
+-- and the native FDW path must expose the same statement-visible rows.
+BEGIN;
+INSERT INTO query_offload_foreign.writable_source
+VALUES (6, 4, 60, 'staged');
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS rows, sum(measure) AS total
+FROM query_offload_foreign.writable_source
+WHERE id >= 5;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*), SUM(measure)
+         ->  Table Scan on writable_source
+               Foreign Data Wrapper: lagodb_iceberg
+               Filter: (id >= 5)
+               Pushed Filter: (id >= 5)
+(8 rows)
+
+SELECT count(*) AS rows, sum(measure) AS total
+FROM query_offload_foreign.writable_source
+WHERE id >= 5;
+ rows | total 
+------+-------
+    2 |   110
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT count(*) AS rows, sum(measure) AS total
+FROM query_offload_foreign.writable_source
+WHERE id >= 5;
+ rows | total 
+------+-------
+    2 |   110
+(1 row)
+
+ROLLBACK;
+-- The writable source has enough independently written files for at least two
+-- Iceberg work groups. Worker reconstruction must preserve its read-write
+-- identity while executing every work group and reporting complete metrics.
+SET max_parallel_workers_per_gather = 2;
+SET lagodb.query_offload_parallel_min_scan_rows = 0;
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT group_key, count(*) AS rows, sum(measure) AS total
+FROM query_offload_foreign.parallel_source
+WHERE id >= 1
+GROUP BY group_key
+ORDER BY group_key;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload) (actual rows=4 loops=1)
+   Engine: DataFusion
+   Execution Mode: Parallel
+   Maximum Launched Workers: 2
+   Parallel Runs: 1
+   Worker Metric Reports: 4
+   Expected Worker Metric Reports: 4
+   Maximum Worker Fragment Peak Memory Bytes: 8384
+   Maximum Worker Participant Peak Memory Bytes: 8384
+   Local Engine Peak Memory Bytes: 2304
+   ->  Sort
+         Sort Key: group_key ASC NULLS LAST
+         ->  Aggregate
+               Group Key: group_key
+               Aggregates: COUNT(*), SUM(measure)
+               ->  Table Scan on parallel_source
+                     Foreign Data Wrapper: lagodb_iceberg
+                     Filter: (id >= 1)
+                     Pushed Filter: (id >= 1)
+                     Actual Input Batches: 33
+                     Actual Input Rows: 33
+                     Scan Tasks: 33
+                     Data Files Selected: 33
+                     Selected File Bytes: 36429
+(24 rows)
+
+SELECT group_key, count(*) AS rows, sum(measure) AS total
+FROM query_offload_foreign.parallel_source
+WHERE id >= 1
+GROUP BY group_key
+ORDER BY group_key;
+ group_key | rows | total 
+-----------+------+-------
+         0 |    8 |  1440
+         1 |    9 |  1530
+         2 |    8 |  1280
+         3 |    8 |  1360
+(4 rows)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT group_key, count(*) AS rows, sum(measure) AS total
+FROM query_offload_foreign.parallel_source
+WHERE id >= 1
+GROUP BY group_key
+ORDER BY group_key;
+ group_key | rows | total 
+-----------+------+-------
+         0 |    8 |  1440
+         1 |    9 |  1530
+         2 |    8 |  1280
+         3 |    8 |  1360
+(4 rows)
+
+DROP TABLE query_offload_foreign_managed;
+SET client_min_messages = warning;
+DROP SCHEMA query_offload_foreign CASCADE;
+DROP SERVER query_offload_foreign_rest CASCADE;
+RESET client_min_messages;
+RESET max_parallel_workers_per_gather;
+RESET lagodb.query_offload_parallel_min_scan_rows;
+RESET lagodb.query_offload_mode;
+RESET lagodb.customscan_mode;
+RESET lagodb.query_batch_rows;

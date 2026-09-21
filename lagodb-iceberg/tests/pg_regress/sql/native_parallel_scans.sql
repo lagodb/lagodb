@@ -1,0 +1,129 @@
+-- native_parallel_scans.sql
+-- PostgreSQL-native parallel relation scans for managed and foreign Iceberg
+-- tables. Query-offload execution has a separate lifecycle and test suite.
+
+\set ECHO none
+\setenv PGDATABASE :DBNAME
+
+SELECT rest_uri AS regress_rest_uri
+FROM lagodb_regress.object_storage_fixture
+\gset
+
+SET client_min_messages = warning;
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+CREATE EXTENSION lagodb_iceberg;
+RESET client_min_messages;
+
+\set ECHO all
+SET lagodb.query_offload_mode = 'off';
+SET lagodb.customscan_mode = 'force';
+SET max_parallel_workers_per_gather = 2;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET parallel_leader_participation = off;
+
+CREATE TABLE native_parallel_managed (
+    id integer,
+    payload text
+) USING iceberg;
+
+-- Require a two-worker partial path independently of this deliberately small
+-- lifecycle fixture.
+ALTER TABLE native_parallel_managed SET (parallel_workers = 2);
+
+INSERT INTO native_parallel_managed VALUES (1, 'one');
+INSERT INTO native_parallel_managed VALUES (2, 'two');
+INSERT INTO native_parallel_managed VALUES (3, 'three');
+
+-- This projected read has no pushed predicate. With leader participation
+-- disabled, a launched worker must attach DSM and execute the CustomScan.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT id, payload
+FROM native_parallel_managed
+ORDER BY id;
+
+SELECT id, payload
+FROM native_parallel_managed
+ORDER BY id;
+
+SET max_parallel_workers_per_gather = 0;
+SELECT id, payload
+FROM native_parallel_managed
+ORDER BY id;
+SET max_parallel_workers_per_gather = 2;
+
+-- A read-only foreign relation reconstructs its remote Iceberg reader in the
+-- launched worker. This query also protects pushed-filter transfer.
+SET min_parallel_table_scan_size = 0;
+
+CREATE SCHEMA native_parallel_fdw;
+CREATE SERVER native_parallel_rest
+TYPE 'rest'
+FOREIGN DATA WRAPPER lagodb_iceberg
+OPTIONS (uri :'regress_rest_uri');
+CREATE USER MAPPING FOR CURRENT_USER SERVER native_parallel_rest;
+
+CREATE FOREIGN TABLE native_parallel_fdw.filters (
+    id integer,
+    payload text,
+    event_date date
+)
+SERVER native_parallel_rest
+OPTIONS (
+    catalog_name 'regress',
+    catalog_namespace 'fdw_regress',
+    catalog_table_name 'read_filters',
+    mode 'read_only'
+);
+
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT id, payload
+FROM native_parallel_fdw.filters
+WHERE id >= 2
+ORDER BY id;
+
+SELECT id, payload
+FROM native_parallel_fdw.filters
+WHERE id >= 2
+ORDER BY id;
+
+SET max_parallel_workers_per_gather = 0;
+SELECT id, payload
+FROM native_parallel_fdw.filters
+WHERE id >= 2
+ORDER BY id;
+SET max_parallel_workers_per_gather = 2;
+
+-- A PostgreSQL-only expression remains a residual Filter on the parallel
+-- ForeignScan; no storage predicate is invented or lost in the worker.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT id, payload
+FROM native_parallel_fdw.filters
+WHERE length(payload) > 0
+ORDER BY id;
+
+SELECT id, payload
+FROM native_parallel_fdw.filters
+WHERE length(payload) > 0
+ORDER BY id;
+
+SET max_parallel_workers_per_gather = 0;
+SELECT id, payload
+FROM native_parallel_fdw.filters
+WHERE length(payload) > 0
+ORDER BY id;
+
+SET client_min_messages = warning;
+DROP SCHEMA native_parallel_fdw CASCADE;
+DROP SERVER native_parallel_rest CASCADE;
+RESET client_min_messages;
+
+DROP TABLE native_parallel_managed;
+
+RESET parallel_leader_participation;
+RESET parallel_tuple_cost;
+RESET parallel_setup_cost;
+RESET min_parallel_table_scan_size;
+RESET max_parallel_workers_per_gather;
+RESET lagodb.customscan_mode;
+RESET lagodb.query_offload_mode;

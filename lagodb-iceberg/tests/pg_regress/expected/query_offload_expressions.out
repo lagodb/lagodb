@@ -42,7 +42,6 @@ WHERE (id >= 2 AND lower(value_text) = 'alpha')
  Custom Scan (LagoDB Query Offload)
    Output: (count(*))
    Engine: DataFusion
-   Execution Mode: Serial
    Maximum Batch Rows: 2
    PostgreSQL Expression Fallbacks: 2
    ->  Projection
@@ -55,7 +54,7 @@ WHERE (id >= 2 AND lower(value_text) = 'alpha')
                      Output: id, value_text
                      Filter: (((id >= 2) AND (lower(value_text) = 'alpha'::text)) OR ((id <= 1) AND (upper(value_text) = 'ALPHA'::text)))
                      Pushed Filter Conservative: ((id >= 2) OR (id <= 1))
-(16 rows)
+(15 rows)
 
 SELECT count(*) AS rows
 FROM query_offload_expression_basic
@@ -90,14 +89,13 @@ WHERE (id >= 2 AND random() >= 0)
 ------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    PostgreSQL Expression Fallbacks: 1
    ->  Aggregate
          Aggregates: COUNT(*)
          ->  Table Scan on query_offload_expression_basic
                Access Method: iceberg
                Filter: (((id >= 2) AND (random() >= '0'::double precision)) OR (id <= 1))
-(9 rows)
+(8 rows)
 
 SELECT count(*) AS rows
 FROM query_offload_expression_basic
@@ -130,14 +128,13 @@ WHERE lower(value_text) = 'alpha';
 -----------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    PostgreSQL Expression Fallbacks: 1
    ->  Aggregate
          Aggregates: COUNT(*)
          ->  Table Scan on query_offload_expression_basic
                Access Method: iceberg
                Filter: (lower(value_text) = 'alpha'::text)
-(9 rows)
+(8 rows)
 
 SELECT count(*) AS rows
 FROM query_offload_expression_basic
@@ -198,13 +195,12 @@ FROM query_offload_expression_basic;
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    PostgreSQL Expression Fallbacks: 1
    ->  Aggregate
          Aggregates: COUNT(*) FILTER (WHERE (value_bool IS NOT FALSE)), COUNT(*) FILTER (WHERE CASE WHEN (id <= runtime value) THEN runtime value ELSE runtime value END), SUM(coalesce(value_i4, runtime value)), COUNT(*) FILTER (WHERE (nullif(id, runtime value) IS NOT NULL)), COUNT(*) FILTER (WHERE PostgreSQL expression), COUNT(*) FILTER (WHERE starts_with(value_text, runtime value)), COUNT(replace(value_text, runtime value, runtime value)), SUM(abs(value_i8)), SUM(abs(value_f8))
          ->  Table Scan on query_offload_expression_basic
                Access Method: iceberg
-(8 rows)
+(7 rows)
 
 SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
        count(*) FILTER (
@@ -259,13 +255,12 @@ FROM query_offload_expression_basic;
 ------------------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    PostgreSQL Expression Fallbacks: 2
    ->  Aggregate
          Aggregates: COUNT(*) FILTER (WHERE PostgreSQL expression), COUNT(*) FILTER (WHERE PostgreSQL expression)
          ->  Table Scan on query_offload_expression_basic
                Access Method: iceberg
-(8 rows)
+(7 rows)
 
 SELECT count(*) FILTER (WHERE id > ANY (ARRAY[2, 5]::integer[])) AS any_gt_rows,
        count(*) FILTER (
@@ -303,7 +298,6 @@ WHERE value_i4 IS NOT NULL;
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    PostgreSQL Expression Fallbacks: 2
    ->  Aggregate
          Aggregates: COUNT(*) FILTER (WHERE CASE WHEN (id >= runtime value) THEN runtime value ELSE (PostgreSQL expression > runtime value) END), SUM(coalesce(value_i4, PostgreSQL expression))
@@ -311,7 +305,7 @@ WHERE value_i4 IS NOT NULL;
                Access Method: iceberg
                Filter: (value_i4 IS NOT NULL)
                Pushed Filter: (value_i4 IS NOT NULL)
-(10 rows)
+(9 rows)
 
 SELECT count(*) FILTER (
            WHERE CASE WHEN id >= 0 THEN true ELSE 1 / (id - id) > 0 END
@@ -355,13 +349,12 @@ FROM query_offload_expression_basic;
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    PostgreSQL Expression Fallbacks: 8
    ->  Aggregate
          Aggregates: SUM(PostgreSQL expression), SUM(PostgreSQL expression), SUM(PostgreSQL expression), SUM(PostgreSQL expression), SUM(PostgreSQL expression), BOOL_AND((value_bool IS NOT FALSE)), STRING_AGG(PostgreSQL expression, ',' ORDER BY id ASC NULLS LAST), COUNT((PostgreSQL expression)::character varying), COUNT(PostgreSQL expression)
          ->  Table Scan on query_offload_expression_basic
                Access Method: iceberg
-(8 rows)
+(7 rows)
 
 SELECT sum((-value_i2)::smallint) AS udf_i2,
        sum(mod(value_i4, 7)) AS udf_i4,
@@ -451,12 +444,11 @@ FROM query_offload_expression_abs_edge;
 ------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Aggregate
          Aggregates: COUNT(*) FILTER (WHERE (abs(value_i2) >= runtime value))
          ->  Table Scan on query_offload_expression_abs_edge
                Access Method: iceberg
-(7 rows)
+(6 rows)
 
 SELECT count(*) FILTER (WHERE abs(value_i2) >= 0::smallint)
 FROM query_offload_expression_abs_edge;

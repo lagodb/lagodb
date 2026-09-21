@@ -733,13 +733,12 @@ WHERE a = 1 AND length(b) > 0;
 --   - The Unsupported child kills both the OR-Exact and the
 --     OR-ConservativePruning-widening branches.
 --   - The whole OR is Unsupported; `split.pushed` is empty;
---     Iceberg's `create_path` declines the variant; PG plans a
---     SeqScan with the OR clause as Filter.
+--     the CustomScan retains the complete OR clause as a local Filter.
 --   - Result set must equal the SeqScan baseline run with
 --     `customscan_mode = 'off'`.
 
--- "CustomScan" path under `force`. With no pushable clauses there
--- is no CustomPath to bias toward, so this plan must be SeqScan.
+-- Under `force`, the relation path is selected without inventing a pushed
+-- filter; PostgreSQL evaluates the complete residual OR.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT a, b FROM customscan_partial_pushdown_t
@@ -811,7 +810,7 @@ DROP TABLE customscan_partial_pushdown_t;
 --     (`seq_page_cost * scanned_pages`) and per-tuple-CPU costs. `fraction` is
 --     `clauselist_selectivity` of ONLY the costed-pruning pushed clauses
 --     (`split.costed_pruning_exprs()`), clamped from below by
---     `lagodb_iceberg.customscan_min_scan_fraction` (0.02). `id = 1500` is
+--     `lagodb_iceberg.scan_min_fraction` (0.02). `id = 1500` is
 --     int4eq → ExactRowFilter → CostedPruning, so it counts; an unANALYZEd
 --     table gives it PG's DEFAULT_EQ_SEL (0.005), which the floor lifts to
 --     0.02. Either way fraction << 1, so the scaled disk+CPU cost sits far
@@ -878,16 +877,15 @@ SELECT id, payload FROM customscan_auto_cost_t
 WHERE event_date = DATE '2024-01-01';
 
 -- No predicate under 'auto': `create_path` sees an empty pushed set and
--- returns `None`, so no CustomPath is emitted and the only candidate is the
--- Seq Scan baseline.
+-- gives the CustomPath no pruning discount, so the Seq Scan remains selected
+-- on cost.
 SET lagodb.customscan_mode = 'auto';
 EXPLAIN (COSTS OFF)
 SELECT id, payload FROM customscan_auto_cost_t;
 
--- The same predicate-free query under 'force' is STILL a Seq Scan. This
--- proves the auto-mode Seq Scan means "no CustomPath was emitted" (empty pushed set), not
--- merely "a CustomPath lost on cost". `force` can only bias CustomPaths the
--- framework already emitted, and here there is none to bias.
+-- The same predicate-free query under 'force' selects the ordinary relation
+-- CustomScan. Keeping this path available is required for native-parallel
+-- partial scans even when there is no storage predicate.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, payload FROM customscan_auto_cost_t;
@@ -1174,13 +1172,12 @@ ORDER BY id;
 -- under the DEFAULT database collation. The provider planner treats the default
 -- collation as unsafe for ordered text (only the explicit C/POSIX OID is
 -- safe), so the clause is `Unsupported`: the path summary has no planned
--- filter, `create_path` returns `None`, and
--- no CustomPath is emitted. Under `force` the plan therefore falls back to
--- SeqScan with the `<` clause as the verbatim Filter — there is NO
--- `Custom Scan (lagodb-iceberg)` node and NO `Pushed Filter:` line.
+-- filter or pruning discount. Under `force`, the ordinary relation CustomScan
+-- is still selected for native-parallel eligibility, while the `<` clause
+-- remains a verbatim PostgreSQL Filter and no `Pushed Filter:` line appears.
 -- ============================================================================
 
--- Under `force`: no pushable clause ⇒ no CustomPath to bias toward ⇒ SeqScan.
+-- Under `force`: CustomScan with a PostgreSQL residual and no pushed filter.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, descr FROM customscan_explain_split_t
@@ -1375,7 +1372,8 @@ SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
 SET lagodb.customscan_mode = 'off';
 SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
 
--- 3.2 Ordered text comparison under the database's default collation.
+-- 3.2 Ordered text comparison under the database's default collation remains
+-- a PostgreSQL residual on the forced relation CustomScan.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, label FROM rq_text WHERE label < 'delta' ORDER BY id;
@@ -1398,7 +1396,7 @@ SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
 SET lagodb.customscan_mode = 'off';
 SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
 
--- 3.4 The same ordered-text policy on a second default-collated column.
+-- 3.4 The same residual policy on a second default-collated column.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, note FROM rq_text WHERE note < 'cherry' ORDER BY id;

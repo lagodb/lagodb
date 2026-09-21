@@ -120,6 +120,7 @@ mod delta {
             relation_scan_planner: ptr::null(),
             modify_planner: ptr::null(),
             table_scan: ptr::null(),
+            table_scan_worker: ptr::null(),
         };
         // SAFETY: this test registration uses current ABI values backed by
         // local descriptors that remain live for the synchronous call. The

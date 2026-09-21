@@ -99,7 +99,6 @@ ORDER BY left_id, right_id;
  Custom Scan (LagoDB Query Offload)
    Output: l.id, r.id
    Engine: DataFusion
-   Execution Mode: Serial
    Maximum Batch Rows: 2
    PostgreSQL Expression Fallbacks: 1
    ->  Sort
@@ -120,7 +119,7 @@ ORDER BY left_id, right_id;
                            Access Method: iceberg
                            Scan ID: 1
                            Output: r.id, r.key_i4, r.key_i8, r.measure
-(24 rows)
+(23 rows)
 
 SELECT l.id AS left_id, r.id AS right_id
 FROM query_offload_join_left AS l
@@ -169,7 +168,6 @@ JOIN query_offload_join_right AS r
 ----------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Aggregate
          Aggregates: COUNT(*)
          ->  Hash Join
@@ -179,7 +177,7 @@ JOIN query_offload_join_right AS r
                      Access Method: iceberg
                ->  Table Scan on query_offload_join_right r
                      Access Method: iceberg
-(12 rows)
+(11 rows)
 
 SELECT count(*) AS matches
 FROM query_offload_join_left AS l
@@ -216,7 +214,6 @@ JOIN query_offload_join_right AS r
 ----------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Aggregate
          Aggregates: COUNT(*)
          ->  Hash Join
@@ -226,7 +223,7 @@ JOIN query_offload_join_right AS r
                      Access Method: iceberg
                ->  Table Scan on query_offload_join_right r
                      Access Method: iceberg
-(12 rows)
+(11 rows)
 
 SELECT count(*) AS matches
 FROM query_offload_join_left AS l
@@ -262,7 +259,6 @@ JOIN query_offload_join_right AS r
 ------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Aggregate
          Aggregates: COUNT(*)
          ->  Hash Join
@@ -272,7 +268,7 @@ JOIN query_offload_join_right AS r
                      Access Method: iceberg
                ->  Table Scan on query_offload_join_right r
                      Access Method: iceberg
-(12 rows)
+(11 rows)
 
 SELECT count(*) AS matches
 FROM query_offload_join_left AS l
@@ -365,7 +361,6 @@ ORDER BY left_id, right_id NULLS LAST;
 ------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Sort
          Sort Key: l.id ASC NULLS LAST, r.id ASC NULLS LAST
          ->  Projection
@@ -376,7 +371,7 @@ ORDER BY left_id, right_id NULLS LAST;
                            Access Method: iceberg
                      ->  Table Scan on query_offload_join_right r
                            Access Method: iceberg
-(13 rows)
+(12 rows)
 
 SELECT l.id AS left_id, r.id AS right_id
 FROM query_offload_join_left AS l
@@ -424,7 +419,6 @@ ORDER BY right_id, left_id NULLS LAST;
    ->  Result
          ->  Custom Scan (LagoDB Query Offload)
                Engine: DataFusion
-               Execution Mode: Serial
                ->  Projection
                      ->  Hash Join
                            Join Type: Left
@@ -433,7 +427,7 @@ ORDER BY right_id, left_id NULLS LAST;
                                  Access Method: iceberg
                            ->  Table Scan on query_offload_join_left l
                                  Access Method: iceberg
-(14 rows)
+(13 rows)
 
 SELECT l.id AS left_id, r.id AS right_id
 FROM query_offload_join_left AS l
@@ -476,7 +470,6 @@ ORDER BY left_id NULLS LAST, right_id NULLS LAST;
 ------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Sort
          Sort Key: l.id ASC NULLS LAST, r.id ASC NULLS LAST
          ->  Projection
@@ -487,7 +480,7 @@ ORDER BY left_id NULLS LAST, right_id NULLS LAST;
                            Access Method: iceberg
                      ->  Table Scan on query_offload_join_right r
                            Access Method: iceberg
-(13 rows)
+(12 rows)
 
 SELECT l.id AS left_id, r.id AS right_id
 FROM query_offload_join_left AS l
@@ -539,7 +532,6 @@ ORDER BY l.id;
 ------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Sort
          Sort Key: l.id ASC NULLS LAST
          ->  Projection
@@ -550,7 +542,7 @@ ORDER BY l.id;
                            Access Method: iceberg
                      ->  Table Scan on query_offload_join_right r
                            Access Method: iceberg
-(13 rows)
+(12 rows)
 
 SELECT l.id
 FROM query_offload_join_left AS l
@@ -594,7 +586,6 @@ ORDER BY l.id;
 ------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Sort
          Sort Key: l.id ASC NULLS LAST
          ->  Projection
@@ -605,7 +596,7 @@ ORDER BY l.id;
                            Access Method: iceberg
                      ->  Table Scan on query_offload_join_right r
                            Access Method: iceberg
-(13 rows)
+(12 rows)
 
 SELECT l.id
 FROM query_offload_join_left AS l
@@ -719,7 +710,6 @@ ORDER BY l.id;
 ------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Sort
          Sort Key: l.id ASC NULLS LAST
          ->  Projection
@@ -731,7 +721,7 @@ ORDER BY l.id;
                            Access Method: iceberg
                      ->  Table Scan on query_offload_join_right r
                            Access Method: iceberg
-(14 rows)
+(13 rows)
 
 SELECT l.id
 FROM query_offload_join_left AS l
@@ -772,7 +762,6 @@ ORDER BY l.id, nested.right_id;
 ------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
    ->  Sort
          Sort Key: l.id ASC NULLS LAST, r.id ASC NULLS LAST
          ->  Projection
@@ -788,7 +777,7 @@ ORDER BY l.id, nested.right_id;
                                  Access Method: iceberg
                      ->  Table Scan on query_offload_join_aux a
                            Access Method: iceberg
-(18 rows)
+(17 rows)
 
 SELECT l.id, nested.right_id, nested.label
 FROM query_offload_join_left AS l

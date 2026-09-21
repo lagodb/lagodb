@@ -438,12 +438,10 @@ ORDER BY k, payload;
 -- (rows that should be null-extended would be suppressed).
 -- The framework's `enumerate_param_path_groups` therefore does NOT
 -- enumerate a JoinParameterized variant on `other` carrying the
--- equality, and the Iceberg provider declines an empty Plain
--- variant on `other` (no pushable baserestrict). EXPLAIN under
--- `force` shows the join equality at the join-node level (a Hash
--- Cond / Merge Cond / Nested Loop join filter), not as a pushed
--- (remote) predicate on any inner CustomScan's `Pushed Filter:`
--- line. We don't pin
+-- equality. The provider still emits ordinary relation paths so they
+-- remain eligible for native parallel planning, but the join equality stays
+-- at the join-node level (a Hash Cond / Merge Cond / Nested Loop join filter),
+-- not in any inner CustomScan's `Pushed Filter:` line. We don't pin
 -- planner GUCs here — both modes are free to pick whichever join
 -- algorithm cost-dominates — because the structural assertion is
 -- "the join clause does not appear inside any CustomScan's pushed
