@@ -16,7 +16,7 @@ use super::provider::LagodbIceberg;
 use super::relation::RestForeignTable;
 use super::schema::ForeignSchemaBinding;
 use super::transaction::{ForeignTableView, ForeignTransaction};
-use crate::engine::scan::{ScanSource, ScanSpec};
+use crate::scan::{ScanSource, ScanSpec};
 
 const MAX_ANALYZE_PAGES: u64 = u32::MAX as u64 - 1;
 

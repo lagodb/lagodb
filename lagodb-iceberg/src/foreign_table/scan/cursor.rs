@@ -6,11 +6,9 @@ use lagodb_core::batch::{AmScanBatchSource, BatchRowDecoder};
 use lagodb_core::fdw::{ForeignScanError, ScanSlotWriter};
 use lagodb_core::handles::ValidItemPointer;
 
-use crate::engine::scan::MutationScanInput;
-use crate::engine::scan::batch::{
-    IcebergArrowBatchSource, RowLocationLayout, position_unchecked,
-};
-use crate::engine::write::{IcebergFileId, IcebergRowIdentity, RelationRowRegistry};
+use crate::scan::MutationScanInput;
+use crate::scan::batch::{RowLocationLayout, ScanBatchSource, position_unchecked};
+use crate::write::{IcebergFileId, IcebergRowIdentity, RelationRowRegistry};
 
 struct MutationBoundBatch {
     decoded: BoundBatch,
@@ -19,7 +17,7 @@ struct MutationBoundBatch {
 }
 
 pub(super) struct ForeignMutationCursor {
-    source: IcebergArrowBatchSource,
+    source: ScanBatchSource,
     decoder: ArrowColumnDecoder,
     registry: RelationRowRegistry,
     current: Option<MutationBoundBatch>,

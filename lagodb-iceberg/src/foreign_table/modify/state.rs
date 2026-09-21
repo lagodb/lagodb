@@ -17,12 +17,12 @@ use super::super::relation::RemoteTableKey;
 use super::super::scan::ForeignMutationScan;
 use super::super::transaction::ForeignTransaction;
 use crate::config::mutation_buffer_flush_bytes;
-use crate::engine::schema::relation::RelationShape;
-use crate::engine::write::{
+use crate::error::IcebergError;
+use crate::schema::relation::RelationShape;
+use crate::write::{
     DataFileSink, IcebergRowIdentity, MutationSinks, PgTransactionIsolation,
     RowDeleteClaim, RowDeleteState,
 };
-use crate::error::IcebergError;
 
 pub(crate) struct IcebergFdwModifyState {
     key: RemoteTableKey,

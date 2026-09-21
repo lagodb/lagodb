@@ -22,10 +22,10 @@ use pgrx::prelude::PgSqlErrorCode;
 use super::error::IcebergFdwError;
 use super::options::{CatalogBindingKey, CatalogRuntimeConfig, ServerBindingKey};
 use super::relation::{RemoteTableKey, ResolvedCatalogBinding, RestForeignTable};
-use crate::engine::write::{
+use crate::error::{IcebergError, IcebergResult};
+use crate::write::{
     ExclusiveTransactionAction, RelationRowRegistry, TableTransactionState,
 };
-use crate::error::{IcebergError, IcebergResult};
 
 type ForeignTableTransaction = TableTransactionState<NoExclusiveAction, ()>;
 

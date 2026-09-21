@@ -9,8 +9,8 @@ use lagodb_core::plan_data::PlanDataError;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
-use crate::engine::predicate::IcebergFilterError;
 use crate::error::IcebergError;
+use crate::predicate::IcebergFilterError;
 
 #[derive(Debug, Error)]
 pub(crate) enum IcebergFdwError {

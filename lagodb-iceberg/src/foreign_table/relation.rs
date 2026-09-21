@@ -3,7 +3,6 @@
 use iceberg_lite::catalog::rest::RestCatalog;
 use iceberg_lite::catalog::{Catalog, NamespaceIdent, TableIdent};
 use iceberg_lite::table::Table;
-use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 
 use super::error::IcebergFdwError;
@@ -88,8 +87,7 @@ impl RestForeignTable {
         // SAFETY: planner/executor contexts supply a live foreign-table OID;
         // the returned catalog object is consumed before this method returns.
         let foreign_table = unsafe { &*pg_sys::GetForeignTable(relation_oid) };
-        let options = unsafe { ForeignOptionView::from_raw(foreign_table.options) };
-        let identity = ForeignTableIdentity::from_view(options)?;
+        let identity = ForeignTableIdentity::from_foreign_table(foreign_table)?;
         Self::load(foreign_table.serverid, effective_user, identity)
     }
 

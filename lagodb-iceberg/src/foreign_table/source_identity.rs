@@ -38,4 +38,15 @@ impl PlanSourceIdentity {
             schema_id: reader.read_i32()?,
         })
     }
+
+    pub(crate) fn parts(&self) -> ([u8; 16], i32) {
+        (*self.table_uuid.as_bytes(), self.schema_id)
+    }
+
+    pub(crate) fn from_parts(table_uuid: [u8; 16], schema_id: i32) -> Self {
+        Self {
+            table_uuid: Uuid::from_bytes(table_uuid),
+            schema_id,
+        }
+    }
 }

@@ -2,8 +2,8 @@
 //!
 //! This layer owns PostgreSQL TableAM callbacks, the local metadata catalog,
 //! transaction tracking, maintenance, and AM-specific storage policy. It
-//! may depend on `crate::engine`; the shared engine must not depend on this
-//! module.
+//! may depend on the shared scan, predicate, schema, and write modules; those
+//! modules must not depend on this adapter.
 
 mod access;
 pub(crate) mod catalog;
@@ -15,7 +15,10 @@ mod maintenance;
 mod options;
 mod provider;
 pub(crate) mod storage;
-mod table_scan;
+
+pub(crate) use access::scan::LoadedScanMetadata;
+pub(crate) use constants::ICEBERG_AM_NAME;
+pub(crate) use storage::StorageContext;
 
 pub use provider::{IcebergTableAm, get_iceberg_am_routine_ptr};
 
@@ -26,12 +29,12 @@ pub(crate) fn initialize_configuration_and_hooks() {
     hooks::init_hooks();
 }
 
-pub(crate) fn register_providers() {
+pub(crate) fn register_scan_provider() {
     local_file_wal::init_wal_rmgr();
-
-    // Stage every planner facet before publishing the provider transaction.
     customscan::register();
-    table_scan::register();
+}
+
+pub(crate) fn register_maintenance_provider() {
     lagodb_core::table_maintenance::register_provider::<
         maintenance::IcebergTableMaintenanceProvider,
     >();

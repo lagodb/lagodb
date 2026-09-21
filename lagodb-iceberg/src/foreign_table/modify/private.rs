@@ -5,7 +5,7 @@ use lagodb_core::fdw::{
     ForeignPrivateWriter,
 };
 
-use super::super::options::{ForeignTableIdentity, ForeignTableMode};
+use super::super::options::ForeignTableIdentity;
 
 #[derive(Debug, Clone)]
 pub(crate) struct IcebergFdwModifyPrivate {
@@ -27,26 +27,13 @@ impl ForeignModifyPrivate for IcebergFdwModifyPrivate {
         &self,
         writer: &mut ForeignPrivateWriter,
     ) -> Result<(), ForeignModifyError> {
-        writer
-            .append_str(self.identity.catalog_name())
-            .append_str(self.identity.namespace())
-            .append_str(self.identity.table_name())
-            .append_str(self.identity.mode().as_str());
+        self.identity.encode(writer);
         Ok(())
     }
 
     unsafe fn decode(
         reader: &mut ForeignPrivateReader<'_>,
     ) -> Result<Self, ForeignModifyError> {
-        let catalog_name = reader.read_str()?;
-        let namespace = reader.read_str()?;
-        let table_name = reader.read_str()?;
-        let mode = ForeignTableMode::parse(&reader.read_str()?)?;
-        Ok(Self::new(ForeignTableIdentity::with_mode(
-            catalog_name,
-            namespace,
-            table_name,
-            mode,
-        )))
+        Ok(Self::new(ForeignTableIdentity::decode(reader)?))
     }
 }

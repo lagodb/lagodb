@@ -39,8 +39,11 @@ impl ForeignDataWrapper for LagodbIceberg {
 }
 
 impl LagodbIceberg {
-    /// Match the installed handler by its C entry-point identity. PostgreSQL
-    /// renames do not change `pg_proc.prosrc`; replacing the FDW handler does.
+    const HANDLER_MODULE: &'static CStr = c"$libdir/lagodb_iceberg";
+    const HANDLER_SYMBOL: &'static CStr = c"lagodb_iceberg_fdw_handler_wrapper";
+
+    /// Match the installed handler by the module and C entry point PostgreSQL
+    /// uses to load it. Renaming the FDW does not change either field.
     pub(crate) fn handles_server(server_oid: pg_sys::Oid) -> bool {
         let server = unsafe { &*pg_sys::GetForeignServer(server_oid) };
         let wrapper = unsafe { &*pg_sys::GetForeignDataWrapper(server.fdwid) };
@@ -53,30 +56,43 @@ impl LagodbIceberg {
                 pg_sys::Datum::from(wrapper.fdwhandler),
             )
         };
-        if tuple.is_null() {
-            return false;
-        }
-        let mut is_null = false;
-        let datum = unsafe {
+        let mut module_is_null = false;
+        let module_datum = unsafe {
             pg_sys::SysCacheGetAttr(
                 pg_sys::SysCacheIdentifier::PROCOID as i32,
                 tuple,
-                pg_sys::Anum_pg_proc_prosrc as i16,
-                &mut is_null,
+                pg_sys::Anum_pg_proc_probin as i16,
+                &mut module_is_null,
             )
         };
-        let matches = if is_null {
-            false
-        } else {
-            let source = unsafe {
-                pg_sys::text_to_cstring(
-                    pg_sys::DatumGetPointer(datum).cast::<pg_sys::text>(),
-                )
-            };
-            unsafe { CStr::from_ptr(source) }.to_bytes()
-                == b"lagodb_iceberg_fdw_handler_wrapper"
+        if module_is_null {
+            unsafe { pg_sys::ReleaseSysCache(tuple) };
+            return false;
+        }
+        let symbol_datum = unsafe {
+            pg_sys::SysCacheGetAttrNotNull(
+                pg_sys::SysCacheIdentifier::PROCOID as i32,
+                tuple,
+                pg_sys::Anum_pg_proc_prosrc as i16,
+            )
         };
-        unsafe { pg_sys::ReleaseSysCache(tuple) };
+        let module = unsafe {
+            pg_sys::text_to_cstring(
+                pg_sys::DatumGetPointer(module_datum).cast::<pg_sys::text>(),
+            )
+        };
+        let symbol = unsafe {
+            pg_sys::text_to_cstring(
+                pg_sys::DatumGetPointer(symbol_datum).cast::<pg_sys::text>(),
+            )
+        };
+        let matches = unsafe { CStr::from_ptr(module) } == Self::HANDLER_MODULE
+            && unsafe { CStr::from_ptr(symbol) } == Self::HANDLER_SYMBOL;
+        unsafe {
+            pg_sys::pfree(module.cast());
+            pg_sys::pfree(symbol.cast());
+            pg_sys::ReleaseSysCache(tuple);
+        }
         matches
     }
 }

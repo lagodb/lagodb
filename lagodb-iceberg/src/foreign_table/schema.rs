@@ -8,9 +8,9 @@ use lagodb_core::handles::RelationHandle;
 use pgrx::pg_sys;
 
 use super::error::IcebergFdwError;
-use crate::engine::schema::relation::RelationShape;
-use crate::engine::schema::type_mapping::{IcebergTypeExt, ValidateSupported};
 use crate::error::IcebergError;
+use crate::schema::relation::RelationShape;
+use crate::schema::type_mapping::{IcebergTypeExt, ValidateSupported};
 
 /// A strict, statement-lifetime contract between the local foreign relation
 /// and the current remote Iceberg schema.

@@ -6,8 +6,8 @@ use iceberg_lite::table::Table;
 
 use super::super::options::ForeignTableIdentity;
 use super::super::relation::RemoteTableKey;
-use crate::engine::schema::relation::RelationShape;
-use crate::engine::write::PlannedMutationTasks;
+use crate::schema::relation::RelationShape;
+use crate::write::PlannedMutationTasks;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ForeignMutationScan {

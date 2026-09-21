@@ -1,5 +1,7 @@
 //! Lazy FDW adapter over the shared Iceberg predicate implementation.
 
+use std::rc::Rc;
+
 use lagodb_core::expr::RuntimeValueBindings;
 use lagodb_core::expr::pushdown::{
     FilterBindResult, FilterPlan, FilterPlanningContext, FilterPushdown,
@@ -9,10 +11,10 @@ use lagodb_core::fdw::ForeignFilterExplainValues;
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 
 use super::error::IcebergFdwError;
+use super::planning_source::ForeignPlanningSource;
 use super::provider::LagodbIceberg;
-use super::relation::RestForeignTable;
 use super::source_identity::PlanSourceIdentity;
-use crate::engine::predicate::{
+use crate::predicate::{
     BoundIcebergPredicate, IcebergFilterPlanner, PlannedIcebergNode,
     PlannedIcebergPredicate,
 };
@@ -92,7 +94,10 @@ impl FdwPlannedPredicate {
 }
 
 enum IcebergFdwFilterPlannerState {
-    Pending(FilterPlanningContext),
+    Pending {
+        context: FilterPlanningContext,
+        source: Rc<ForeignPlanningSource>,
+    },
     Ready {
         source: PlanSourceIdentity,
         planner: IcebergFilterPlanner,
@@ -104,19 +109,30 @@ pub(crate) struct IcebergFdwFilterPlanner {
 }
 
 impl IcebergFdwFilterPlanner {
+    pub(super) fn new(
+        context: &FilterPlanningContext,
+        source: Rc<ForeignPlanningSource>,
+    ) -> Self {
+        Self {
+            state: IcebergFdwFilterPlannerState::Pending {
+                context: *context,
+                source,
+            },
+        }
+    }
+
     fn ready(
         &mut self,
     ) -> Result<(&PlanSourceIdentity, &mut IcebergFilterPlanner), IcebergFdwError>
     {
-        let context = match &self.state {
-            IcebergFdwFilterPlannerState::Pending(context) => Some(*context),
+        let pending = match &self.state {
+            IcebergFdwFilterPlannerState::Pending { context, source } => {
+                Some((*context, Rc::clone(source)))
+            }
             IcebergFdwFilterPlannerState::Ready { .. } => None,
         };
-        if let Some(context) = context {
-            let table = RestForeignTable::resolve(
-                context.relation_oid(),
-                context.effective_user_id(),
-            )?;
+        if let Some((context, planning_source)) = pending {
+            let table = planning_source.resolved()?;
             let source = PlanSourceIdentity::from_table(table.table());
             let planner = IcebergFilterPlanner::from_schema(
                 &context,
@@ -128,7 +144,7 @@ impl IcebergFdwFilterPlanner {
             IcebergFdwFilterPlannerState::Ready { source, planner } => {
                 Ok((source, planner))
             }
-            IcebergFdwFilterPlannerState::Pending(_) => {
+            IcebergFdwFilterPlannerState::Pending { .. } => {
                 unreachable!("pending filter planner was initialized above")
             }
         }
@@ -173,9 +189,11 @@ impl FilterPushdown for LagodbIceberg {
     fn begin_filter_planning(
         context: &FilterPlanningContext,
     ) -> Result<Self::Planner, Self::Error> {
-        Ok(IcebergFdwFilterPlanner {
-            state: IcebergFdwFilterPlannerState::Pending(*context),
-        })
+        let source = Rc::new(ForeignPlanningSource::new(
+            context.relation_oid(),
+            context.effective_user_id(),
+        )?);
+        Ok(IcebergFdwFilterPlanner::new(context, source))
     }
 
     fn encode_planned(

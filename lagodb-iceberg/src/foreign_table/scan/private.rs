@@ -4,7 +4,7 @@ use lagodb_core::fdw::{
     ForeignPlanPrivate, ForeignPrivateReader, ForeignPrivateWriter, ForeignScanError,
 };
 
-use super::super::options::{ForeignTableIdentity, ForeignTableMode};
+use super::super::options::ForeignTableIdentity;
 use super::super::source_identity::PlanSourceIdentity;
 
 #[derive(Debug, Clone)]
@@ -42,12 +42,8 @@ impl ForeignPlanPrivate for IcebergFdwScanPrivate {
         &self,
         writer: &mut ForeignPrivateWriter,
     ) -> Result<(), ForeignScanError> {
-        writer
-            .append_str(self.identity.catalog_name())
-            .append_str(self.identity.namespace())
-            .append_str(self.identity.table_name())
-            .append_str(self.identity.mode().as_str())
-            .append_bool(self.source.is_some());
+        self.identity.encode(writer);
+        writer.append_bool(self.source.is_some());
         if let Some(source) = &self.source {
             source.encode(writer);
         }
@@ -57,16 +53,7 @@ impl ForeignPlanPrivate for IcebergFdwScanPrivate {
     unsafe fn decode(
         reader: &mut ForeignPrivateReader<'_>,
     ) -> Result<Self, ForeignScanError> {
-        let catalog_name = reader.read_str()?;
-        let namespace = reader.read_str()?;
-        let table_name = reader.read_str()?;
-        let mode = ForeignTableMode::parse(&reader.read_str()?)?;
-        let identity = ForeignTableIdentity::with_mode(
-            catalog_name,
-            namespace,
-            table_name,
-            mode,
-        );
+        let identity = ForeignTableIdentity::decode(reader)?;
         let source = reader
             .read_bool()?
             .then(|| PlanSourceIdentity::decode(reader))

@@ -1,3 +1,4 @@
+use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 
@@ -48,6 +49,25 @@ pub(crate) struct ForeignTableIdentity {
 }
 
 impl ForeignTableIdentity {
+    pub(crate) fn encode(&self, writer: &mut PlanDataWriter) {
+        writer
+            .append_str(self.catalog_name())
+            .append_str(self.namespace())
+            .append_str(self.table_name())
+            .append_str(self.mode().as_str());
+    }
+
+    pub(crate) fn decode(
+        reader: &mut PlanDataReader<'_>,
+    ) -> Result<Self, IcebergFdwError> {
+        Ok(Self::with_mode(
+            reader.read_str()?,
+            reader.read_str()?,
+            reader.read_str()?,
+            ForeignTableMode::parse(&reader.read_str()?)?,
+        ))
+    }
+
     pub(crate) fn with_mode(
         catalog_name: String,
         namespace: String,
@@ -66,6 +86,12 @@ impl ForeignTableIdentity {
         relation_oid: pg_sys::Oid,
     ) -> Result<Self, IcebergFdwError> {
         let table = unsafe { &*pg_sys::GetForeignTable(relation_oid) };
+        Self::from_foreign_table(table)
+    }
+
+    pub(crate) fn from_foreign_table(
+        table: &pg_sys::ForeignTable,
+    ) -> Result<Self, IcebergFdwError> {
         let options = unsafe { ForeignOptionView::from_raw(table.options) };
         Self::from_view(options)
     }

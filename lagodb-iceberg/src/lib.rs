@@ -1,11 +1,15 @@
 use pgrx::prelude::*;
 
 mod config;
-mod engine;
 pub mod error;
 pub mod foreign_table;
 mod managed_table;
+pub(crate) mod predicate;
+mod query_offload;
+pub(crate) mod scan;
+pub(crate) mod schema;
 mod storage;
+pub(crate) mod write;
 
 pub use managed_table::{IcebergTableAm, get_iceberg_am_routine_ptr};
 
@@ -23,7 +27,11 @@ extern "C-unwind" fn _PG_init() {
     config::init();
     managed_table::initialize_configuration_and_hooks();
     foreign_table::register();
-    managed_table::register_providers();
+    // Stage both PostgreSQL scan adapters and the shared query-offload facet
+    // before maintenance registration atomically publishes this provider DSO.
+    managed_table::register_scan_provider();
+    query_offload::register();
+    managed_table::register_maintenance_provider();
 }
 
 #[cfg(test)]
