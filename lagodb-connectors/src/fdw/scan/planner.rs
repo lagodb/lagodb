@@ -4,7 +4,8 @@ use lagodb_core::fdw::{
     BeginForeignScanContext, FdwScan, ForeignFilterExplainValues, ForeignPathBuilder,
     ForeignPathContext, ForeignPathKeys, ForeignPlanContext, ForeignPlanSpec,
     ForeignRelContext, ForeignRelSize, ForeignRelSizeContext, ForeignScanError,
-    ReScanForeignScanContext, ScanSlotWriter, StartForeignScanContext,
+    ForeignScanResult, ReScanForeignScanContext, ScanSlotWriter,
+    StartForeignScanContext,
 };
 
 use crate::format::FormatScanPlanner;
@@ -77,11 +78,12 @@ impl FdwScan for LagodbConnectors {
         ConnectorScanState::begin(context)
     }
 
-    fn next_slot(
+    fn next_slot<'a>(
         state: &mut Self::State,
-        output: &mut ScanSlotWriter<'_>,
-    ) -> Result<bool, ForeignScanError> {
-        state.next_slot(output)
+        output: &'a mut ScanSlotWriter<'_>,
+    ) -> Result<ForeignScanResult<'a>, ForeignScanError> {
+        let produced = state.next_slot(output)?;
+        output.finish(produced)
     }
 
     fn start(

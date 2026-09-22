@@ -8,19 +8,20 @@
 //! - [`RelationShape`](super::relation::RelationShape) captures the
 //!   PostgreSQL tuple layout once and supplies the same descriptor-derived
 //!   inputs to both directions and to projected scan adapters.
-//! - [`ScanColumns`] (read): holds the bound `IcebergSchema`, projected field
-//!   ids, and the compiled slot-first decoder shared by cursors in this scan.
+//! - [`ReadProjection`] owns the storage-facing schema and selected field ids.
+//! - [`PgRowProjection`] adds the compiled PostgreSQL slot decoder used only by
+//!   row-producing adapters.
 //! - [`WriteColumns`] (write): binds Iceberg fields to the relation's source
 //!   slots and hands the resulting source/Arrow plan to the generic bound
 //!   columnar writer.
 //!
 //! ## Position arithmetic
 //!
-//! [`RelationFieldMap`] owns PostgreSQL position validation, while the
+//! [`RelationFieldMap`] owns relation-attribute resolution, while the
 //! CustomScan-only relation index owns direct `attno - 1` lookup.
-//! [`ColumnMapping`] consumes validated bindings and owns Arrow-column to
-//! tuple-slot conversion planning. Scan and provider lifecycle code perform no
-//! position arithmetic.
+//! [`ColumnMapping`] validates output-slot destinations and owns Arrow-column
+//! to tuple-slot conversion planning. Scan and provider lifecycle code perform
+//! no position arithmetic.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -104,6 +105,8 @@ impl ColumnMapping {
     pub(crate) fn from_field_map(
         schema: &IcebergSchema,
         field_map: &RelationFieldMap,
+        slot_width: usize,
+        attr_types: &[(pg_sys::Oid, i32)],
     ) -> IcebergResult<Self> {
         let mut entries = Vec::with_capacity(field_map.bindings().len());
         for (src_col, binding) in field_map.bindings().iter().enumerate() {
@@ -115,10 +118,10 @@ impl ColumnMapping {
                 })?;
             let dest = RelationFieldMap::validate_destination(
                 binding.destination,
-                field_map.slot_width(),
+                slot_width,
             )?;
-            let target_oid = field_map.attr_types()[dest].0;
-            let pg = Self::pg_target_at(field_map.attr_types(), dest)?;
+            let target_oid = attr_types[dest].0;
+            let pg = Self::pg_target_at(attr_types, dest)?;
             let rule = field.resolve_rule_for_column(pg, target_oid)?;
             let codec = match (target_oid, &rule) {
                 (pg_sys::JSONBOID, ColumnRule::PostgresJsonbVarlena) => {
@@ -200,30 +203,31 @@ impl ColumnMapping {
 }
 
 // ---------------------------------------------------------------------------
-// ScanColumns: bound read-side column plan
+// Read projection and PostgreSQL row materialization
 // ---------------------------------------------------------------------------
 
-/// Holds the bound Iceberg schema and compiled decoder for one scan.
-pub(crate) struct ScanColumns {
+/// Storage-facing projection independent of PostgreSQL datum materialization.
+pub(crate) struct ReadProjection {
     schema: Arc<IcebergSchema>,
-    decoder: ArrowColumnDecoder,
     project_field_ids: Box<[i32]>,
 }
 
-impl ScanColumns {
-    /// Zero-column output plan for a row-only scan.
-    ///
-    /// Iceberg still reads every visible row and applies delete/overlay
-    /// semantics; reader-owned predicate/delete dependencies remain internal.
-    /// Only requested output columns and PostgreSQL datum decoding are omitted.
-    /// The empty decoder remains confined to the short-lived
-    /// [`ScanSpec`](crate::scan::ScanSpec) preparation object and is
-    /// not carried into DataFusion state.
+impl ReadProjection {
+    /// Zero-column output projection for a row-count scan.
     pub(crate) fn row_only(schema: Arc<IcebergSchema>) -> Self {
         Self {
             schema,
-            decoder: ArrowColumnDecoder::new(Vec::new()),
             project_field_ids: Box::new([]),
+        }
+    }
+
+    pub(crate) fn from_field_ids(
+        schema: Arc<IcebergSchema>,
+        project_field_ids: Box<[i32]>,
+    ) -> Self {
+        Self {
+            schema,
+            project_field_ids,
         }
     }
 
@@ -249,12 +253,28 @@ impl ScanColumns {
         Ok(ArrowSchema::new(fields))
     }
 
-    /// Select-all plan (full-schema plan).
+    pub(crate) fn schema(&self) -> &IcebergSchema {
+        self.schema.as_ref()
+    }
+
+    pub(crate) fn project_field_ids(&self) -> &[i32] {
+        &self.project_field_ids
+    }
+}
+
+/// PostgreSQL slot decoder paired with its storage-facing projection.
+pub(crate) struct PgRowProjection {
+    read: ReadProjection,
+    decoder: ArrowColumnDecoder,
+}
+
+impl PgRowProjection {
+    /// Select-all PostgreSQL row projection.
     ///
     /// The relation shape owns the live `(attno, name)` columns and the full
     /// tuple layout. This module owns the name→Iceberg-field resolution and
     /// the `dest = attno - 1` arithmetic.
-    pub(crate) fn new(
+    pub(crate) fn full(
         schema: Arc<IcebergSchema>,
         shape: &RelationShape,
     ) -> IcebergResult<Self> {
@@ -268,7 +288,12 @@ impl ScanColumns {
         // dropped-but-unsupported field that no live column maps to is never
         // decoded and so is correctly left unchecked.
         let field_map = RelationFieldMap::from_shape(&schema, shape)?;
-        Self::from_field_map(schema, &field_map)
+        Self::from_field_map(
+            schema,
+            &field_map,
+            shape.slot_width(),
+            shape.attr_types(),
+        )
     }
 
     /// Projected plan.
@@ -282,7 +307,7 @@ impl ScanColumns {
     /// whole-schema gate here would reject `SELECT a FROM t` merely because
     /// some *unprojected* column has an unsupported shape, even though the
     /// underlying scan only ever selects the projected field ids.
-    pub(crate) fn with_projection(
+    pub(crate) fn projected(
         schema: Arc<IcebergSchema>,
         shape: &RelationShape,
         projection: &Projection,
@@ -290,7 +315,10 @@ impl ScanColumns {
         attr_types: &[(pg_sys::Oid, i32)],
     ) -> IcebergResult<Self> {
         if projection.columns().is_empty() {
-            return Ok(Self::row_only(schema));
+            return Ok(Self {
+                read: ReadProjection::row_only(schema),
+                decoder: ArrowColumnDecoder::new(Vec::new()),
+            });
         }
 
         let full_map = RelationFieldMap::from_shape(&schema, shape)?;
@@ -299,39 +327,32 @@ impl ScanColumns {
                 .columns()
                 .iter()
                 .map(|field| (field.attno, field.destination)),
-            slot_width,
-            attr_types,
         )?;
-        Self::from_field_map(schema, &field_map)
+        Self::from_field_map(schema, &field_map, slot_width, attr_types)
     }
 
     fn from_field_map(
         schema: Arc<IcebergSchema>,
         field_map: &RelationFieldMap,
+        slot_width: usize,
+        attr_types: &[(pg_sys::Oid, i32)],
     ) -> IcebergResult<Self> {
         let project_field_ids = field_map.field_ids().into_boxed_slice();
-        let plan = ColumnMapping::from_field_map(&schema, field_map)?;
+        let plan = ColumnMapping::from_field_map(
+            &schema, field_map, slot_width, attr_types,
+        )?;
         let decoder = plan.into_decoder()?;
         Ok(Self {
-            schema,
+            read: ReadProjection {
+                schema,
+                project_field_ids,
+            },
             decoder,
-            project_field_ids,
         })
     }
 
-    /// Bound Iceberg schema. Cheap (no allocation): exposes the inner `Arc`'s
-    /// referent.
-    pub(crate) fn schema(&self) -> &IcebergSchema {
-        self.schema.as_ref()
-    }
-
-    /// Clone the scan-lifetime decoder plan without rebuilding its columns.
-    pub(crate) fn decoder(&self) -> ArrowColumnDecoder {
-        self.decoder.clone()
-    }
-
-    pub(crate) fn project_field_ids(&self) -> &[i32] {
-        &self.project_field_ids
+    pub(crate) fn into_parts(self) -> (ReadProjection, ArrowColumnDecoder) {
+        (self.read, self.decoder)
     }
 }
 
@@ -340,7 +361,7 @@ impl ScanColumns {
 // ---------------------------------------------------------------------------
 
 /// The relation-bound columnar write buffer for the mutation path — the write-side
-/// analogue of [`ScanColumns`] (and a sibling of the read cursor, which bundles
+/// analogue of [`PgRowProjection`] (and a sibling of the read cursor, which bundles
 /// its decoder and batch source the same way).
 ///
 /// It owns the per-column Arrow write buffer, whose columns each carry their
@@ -376,7 +397,12 @@ impl WriteColumns {
         // field, so iterating all fields here is the correct scope (no
         // projection on the write path).
         let field_map = RelationFieldMap::from_shape(schema, shape)?;
-        let columns = Self::resolve_columns(schema, &field_map)?;
+        let columns = Self::resolve_columns(
+            schema,
+            &field_map,
+            shape.slot_width(),
+            shape.attr_types(),
+        )?;
         let arrow_schema = Arc::new(schema.to_arrow_schema()?);
         let buffer = BoundWriteBuffer::new(arrow_schema, columns.into_boxed_slice())?;
         Ok(Self { buffer })
@@ -397,6 +423,8 @@ impl WriteColumns {
     fn resolve_columns(
         schema: &IcebergSchema,
         field_map: &RelationFieldMap,
+        slot_width: usize,
+        attr_types: &[(pg_sys::Oid, i32)],
     ) -> IcebergResult<Vec<BoundWriteColumnPlan>> {
         let fields = schema.as_struct().fields();
         let mut columns = Vec::with_capacity(fields.len());
@@ -411,20 +439,17 @@ impl WriteColumns {
                 Some(binding) => {
                     let dest = RelationFieldMap::validate_destination(
                         binding.destination,
-                        field_map.slot_width(),
+                        slot_width,
                     )?;
-                    let pg =
-                        ColumnMapping::pg_target_at(field_map.attr_types(), dest)?;
+                    let pg = ColumnMapping::pg_target_at(attr_types, dest)?;
                     matched_live += 1;
-                    let rule = field.resolve_rule_for_column(
-                        pg,
-                        field_map.attr_types()[dest].0,
-                    )?;
+                    let rule =
+                        field.resolve_rule_for_column(pg, attr_types[dest].0)?;
                     BoundWriteColumnPlan::bind(
                         rule,
                         Some(dest),
-                        Some(field_map.attr_types()[dest].0),
-                        field_map.slot_width(),
+                        Some(attr_types[dest].0),
+                        slot_width,
                     )?
                 }
                 None => {
@@ -458,7 +483,7 @@ impl WriteColumns {
                         field.resolve_rule(pg)?,
                         None,
                         None,
-                        field_map.slot_width(),
+                        slot_width,
                     )?
                 }
             };

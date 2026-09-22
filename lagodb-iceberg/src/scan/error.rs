@@ -1,6 +1,7 @@
 //! Catalog-independent Iceberg query and parallel-scan failures.
 
 use lagodb_core::diag::SqlStateError;
+use lagodb_core::parallel_scan::ParallelScanError;
 use lagodb_core::runtime_api::RuntimePredicateCodecError;
 use pgrx::prelude::PgSqlErrorCode;
 
@@ -16,6 +17,8 @@ pub(crate) enum ScanError {
     ParallelScanConfiguration(String),
     #[error("invalid Iceberg worker source payload: {0}")]
     WorkerPayload(String),
+    #[error("invalid PostgreSQL parallel scan state: {0}")]
+    ParallelCoordinator(#[from] ParallelScanError),
 }
 
 impl SqlStateError for ScanError {
@@ -27,6 +30,7 @@ impl SqlStateError for ScanError {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
             }
             Self::WorkerPayload(_) => PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
+            Self::ParallelCoordinator(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
         }
     }
 }

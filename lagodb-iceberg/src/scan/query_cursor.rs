@@ -1,20 +1,27 @@
-//! Query-only Iceberg cursor shared by TableAM, CustomScan, and FDW scans.
+//! PostgreSQL row-materialization cursor shared by query scan adapters.
 
+use arrow_array::RecordBatch;
 use lagodb_arrow::{ArrowColumnDecoder, BoundBatch};
-use lagodb_core::batch::{AmScanBatchSource, BatchRowDecoder};
-use lagodb_core::prelude::{AmResult, SlotColumns};
+use lagodb_core::batch::{AmScanBatchSource, BatchRowDecoder, ScanBatchDriver};
+use lagodb_core::prelude::{AmResult, ScanDirection, SlotColumns};
 
 use super::batch::ScanBatchSource;
 
-pub(crate) struct QueryCursor {
-    source: ScanBatchSource,
+pub(crate) struct PgRowCursor<S = ScanBatchSource>
+where
+    S: AmScanBatchSource<Batch = RecordBatch>,
+{
+    source: S,
     decoder: ArrowColumnDecoder,
     current: Option<BoundBatch>,
     row_index: usize,
 }
 
-impl QueryCursor {
-    pub(crate) fn new(source: ScanBatchSource, decoder: ArrowColumnDecoder) -> Self {
+impl<S> PgRowCursor<S>
+where
+    S: AmScanBatchSource<Batch = RecordBatch>,
+{
+    pub(crate) fn new(source: S, decoder: ArrowColumnDecoder) -> Self {
         Self {
             source,
             decoder,
@@ -28,7 +35,7 @@ impl QueryCursor {
         out: &mut SlotColumns<'_>,
     ) -> AmResult<bool> {
         self.next_with(|decoder, bound, row_index| {
-            // SAFETY: ScanColumns compiled the decoder from the relation
+            // SAFETY: PgRowProjection compiled the decoder from the relation
             // layout used by this cursor and validated every destination
             // against the same slot width.
             unsafe { decoder.write_row_unchecked(bound, row_index, out) }?;
@@ -59,5 +66,23 @@ impl QueryCursor {
             self.current = Some(self.decoder.bind(batch)?);
             self.row_index = 0;
         }
+    }
+}
+
+impl<S> ScanBatchDriver for PgRowCursor<S>
+where
+    S: AmScanBatchSource<Batch = RecordBatch>,
+{
+    fn next_into_slot(
+        &mut self,
+        direction: ScanDirection,
+        out: &mut SlotColumns<'_>,
+    ) -> AmResult<bool> {
+        if direction != ScanDirection::Forward {
+            return lagodb_core::api::unsupported_callback(
+                "non-forward Iceberg scan",
+            );
+        }
+        PgRowCursor::next_into_slot(self, out)
     }
 }

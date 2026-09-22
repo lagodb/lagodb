@@ -17,7 +17,8 @@ pub use crate::customscan::plan_data::tuple_layout::{
 };
 pub use contract::LagodbCustomScanProvider;
 pub use execution::{
-    BeginContext, CreateStateContext, EndContext, NextSlotContext, ReScanContext,
+    BeginContext, CreateStateContext, EndContext, NextSlotAttempt, NextSlotContext,
+    NextSlotEmitter, NextSlotResult, ReScanContext,
 };
 pub(crate) use methods::method_tables_for;
 pub use planning::*;

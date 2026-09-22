@@ -1,373 +1,263 @@
-//! Iceberg-specific runtime state and scan lifecycle.
+//! Iceberg-specific CustomScan lifecycle routing.
 
-use std::sync::Arc;
+use core::ffi::c_void;
+use std::mem;
 
 use crate::error::IcebergError;
+use crate::managed_table::ManagedTableSnapshot;
 use crate::managed_table::access::mutation::{
-    IcebergModifyQueryState, IcebergModifyScanContext,
+    IcebergModifyScanContext, PreparedManagedMutationScan,
 };
-use crate::managed_table::access::scan::{BatchCursor, ScanSpec};
 use crate::predicate::BoundIcebergPredicate;
-use crate::scan::ScanError;
-use crate::scan::parallel::{TaskGrouping, WorkerSource};
+use crate::scan::{
+    PreparedRowScan, ReaderPredicate, ScanPredicates, StablePruningPredicate,
+};
 use crate::schema::relation::RelationShape;
 use iceberg_lite::expr::Predicate;
-use lagodb_core::access::mutation::ModifyScanBinding;
 use lagodb_core::customscan::modify::ModifyBindContext;
 use lagodb_core::customscan::provider::{
-    BeginContext, CustomScanError, EndContext, NextSlotContext, ReScanContext,
-    ScanPurpose,
+    BeginContext, CustomScanError, EndContext, NextSlotContext, NextSlotResult,
+    ReScanContext,
 };
-use lagodb_core::parallel_scan::{ParallelScanCoordinator, PreparedParallelScan};
 use pgrx::pg_sys;
 
 use super::IcebergCustomScanProvider;
+use super::execution::{MutationTargetScan, PostgresParallelScan, SerialScan};
 use super::projection::ProjectionResolver;
 
-/// Per-scan runtime state inside the framework's `CustomScanStateWrapper`.
+/// Per-scan runtime state inside the framework wrapper.
 pub(crate) struct IcebergScanState {
-    active_scan: Option<ScanSpec>,
-    cursor: Option<BatchCursor>,
-    conflict_filter: Predicate,
-    purpose: ScanPurpose,
-    modify_binding: Option<ModifyScanBinding<IcebergModifyQueryState>>,
-    parallel: ParallelScanCoordinator,
-    parallel_source: Option<WorkerSource>,
-    parallel_aware: bool,
+    execution: ScanExecutionState,
+}
+
+/// Closed set of CustomScan execution modes and externally visible lifecycle
+/// boundaries.
+enum ScanExecutionState {
+    NotStarted,
+    SerialScan(SerialScan),
+    PostgresParallelScan(PostgresParallelScan),
+    MutationAwaitingBinding(PreparedManagedMutationScan),
+    MutationTargetScan(MutationTargetScan),
+    Finished,
 }
 
 impl Default for IcebergScanState {
     fn default() -> Self {
         Self {
-            active_scan: None,
-            cursor: None,
-            conflict_filter: Predicate::AlwaysTrue,
-            purpose: ScanPurpose::Query,
-            modify_binding: None,
-            parallel: ParallelScanCoordinator::default(),
-            parallel_source: None,
-            parallel_aware: false,
+            execution: ScanExecutionState::NotStarted,
         }
     }
 }
 
 impl IcebergScanState {
-    /// Build [`ScanSpec`]/[`BatchCursor`] and install already-bound
-    /// planned predicates.
     pub(super) fn begin(
         ctx: BeginContext<'_, IcebergCustomScanProvider>,
     ) -> Result<(), CustomScanError> {
-        let rel_oid = ctx.relation.oid();
-        let spc_oid = ctx.relation.tablespace_oid();
+        let relation_oid = ctx.relation.oid();
+        let tablespace_oid = ctx.relation.tablespace_oid();
         let scan_tuple = ctx.scan_tuple();
         let projection =
             ProjectionResolver.resolve(ctx.required_columns(), scan_tuple)?;
         let shape = RelationShape::from_relation(&ctx.relation)?;
+        let snapshot =
+            ManagedTableSnapshot::load_query(relation_oid, tablespace_oid)?
+                .into_read_snapshot();
 
-        let mut spec = match projection {
+        let mut prepared = match projection {
             None => {
-                ScanSpec::build_for_custom_scan(rel_oid, spc_oid, None, None, &shape)?
+                PreparedRowScan::full(snapshot, ScanPredicates::unfiltered(), &shape)?
             }
-            Some(proj) => {
-                let scan_attr_types = scan_tuple.attr_types();
-                ScanSpec::build_with_projection(
-                    rel_oid,
-                    spc_oid,
-                    proj,
-                    None,
-                    None,
-                    &shape,
-                    &scan_attr_types,
-                )?
-            }
+            Some(projection) => PreparedRowScan::projected(
+                snapshot,
+                projection,
+                ScanPredicates::unfiltered(),
+                &shape,
+                &scan_tuple.attr_types(),
+            )?,
         };
 
-        BoundIcebergPredicate::validate_schema(ctx.filters.iter(), spec.schema_id())
-            .map_err(CustomScanError::provider)?;
+        BoundIcebergPredicate::validate_schema(
+            ctx.filters.iter(),
+            prepared.schema_id(),
+        )
+        .map_err(CustomScanError::provider)?;
         let row_filter = BoundIcebergPredicate::conjoin(ctx.filters.iter());
         let planning_filter =
             BoundIcebergPredicate::conjoin(ctx.filters.rescan_stable());
-        let conflict_filter = if ctx.purpose.is_modify() {
-            BoundIcebergPredicate::conjoin(ctx.filters.static_values())
-                .unwrap_or(Predicate::AlwaysTrue)
+        prepared.replace_predicates(ScanPredicates::new(
+            StablePruningPredicate::new(planning_filter),
+            ReaderPredicate::new(row_filter),
+        ));
+
+        ctx.state.execution = if ctx.purpose.is_modify() {
+            let conflict_filter =
+                BoundIcebergPredicate::conjoin(ctx.filters.static_values())
+                    .unwrap_or(Predicate::AlwaysTrue);
+            ScanExecutionState::MutationAwaitingBinding(
+                PreparedManagedMutationScan::prepare(prepared, conflict_filter)?,
+            )
+        } else if ctx.parallel_aware {
+            ScanExecutionState::PostgresParallelScan(PostgresParallelScan::new(
+                prepared,
+            )?)
         } else {
-            Predicate::AlwaysTrue
+            ScanExecutionState::SerialScan(SerialScan::new(prepared)?)
         };
-        spec.set_predicates(planning_filter, row_filter);
-
-        let purpose = ctx.purpose;
-        let parallel_aware = ctx.parallel_aware;
-        let state = ctx.state;
-        state.purpose = purpose;
-        state.parallel_aware = parallel_aware;
-        state.conflict_filter = conflict_filter;
-        if purpose.is_modify() {
-            spec.prepare_mutation_tasks()?;
-        }
-
-        let cursor = if purpose.is_modify() || parallel_aware {
-            None
-        } else {
-            Some(spec.open_batch_cursor()?)
-        };
-        if parallel_aware && unsafe { pg_sys::ParallelWorkerNumber } < 0 {
-            let tasks = spec.planned_query_tasks()?;
-            let grouped = TaskGrouping::from_properties(spec.table_properties())?
-                .group(&tasks)?;
-            let work_count = u32::try_from(grouped.group_count()).map_err(|_| {
-                CustomScanError::provider(ScanError::WorkerPayload(
-                    "native parallel group count exceeds u32".to_owned(),
-                ))
-            })?;
-            let bytes =
-                WorkerSource::encode(&spec.query_arrow_schema()?, &tasks, grouped)?;
-            state.parallel.prepare(
-                PreparedParallelScan::new(bytes, work_count)
-                    .map_err(CustomScanError::internal)?,
-            );
-        }
-        state.active_scan = Some(spec);
-        state.cursor = cursor;
-        state.modify_binding = None;
-
         Ok(())
     }
 
     pub(super) fn modify_scan_context(&self) -> Option<IcebergModifyScanContext> {
-        self.active_scan.as_ref().and_then(|scan| {
-            let scan_tasks = scan.prepared_mutation_tasks()?;
-            Some(IcebergModifyScanContext::new(
-                scan.starting_snapshot_id(),
-                self.conflict_filter.clone(),
-                scan_tasks,
-            ))
-        })
+        match &self.execution {
+            ScanExecutionState::MutationAwaitingBinding(prepared) => {
+                Some(prepared.context())
+            }
+            ScanExecutionState::MutationTargetScan(scan) => Some(scan.context()),
+            _ => None,
+        }
     }
 
     pub(super) fn bind_modify(
         ctx: ModifyBindContext<'_, IcebergCustomScanProvider>,
     ) -> Result<(), CustomScanError> {
-        let binding = ctx.binding;
-        let state = ctx.state;
-        match state.modify_binding.as_ref() {
-            Some(existing) if existing == &binding => return Ok(()),
-            Some(_) => {
-                return Err(CustomScanError::provider(
-                    IcebergError::InvariantViolated(
+        let current =
+            mem::replace(&mut ctx.state.execution, ScanExecutionState::Finished);
+        match current {
+            ScanExecutionState::MutationAwaitingBinding(prepared) => {
+                let binding = ctx.binding;
+                let cursor =
+                    match prepared.open_cursor(binding.clone(), ctx.relation.oid()) {
+                        Ok(cursor) => cursor,
+                        Err(error) => {
+                            ctx.state.execution =
+                                ScanExecutionState::MutationAwaitingBinding(prepared);
+                            return Err(error.into());
+                        }
+                    };
+                ctx.state.execution = ScanExecutionState::MutationTargetScan(
+                    MutationTargetScan::new(cursor, prepared, binding),
+                );
+                Ok(())
+            }
+            ScanExecutionState::MutationTargetScan(scan) => {
+                let result = if scan.binding() == &ctx.binding {
+                    Ok(())
+                } else {
+                    Err(CustomScanError::provider(IcebergError::InvariantViolated(
                         "Modify scan was bound to two relation states",
-                    ),
-                ));
+                    )))
+                };
+                ctx.state.execution = ScanExecutionState::MutationTargetScan(scan);
+                result
             }
-            None => {}
-        }
-        state.active_scan.as_ref().ok_or_else(|| {
-            CustomScanError::provider(IcebergError::InvariantViolated(
-                "Modify scan binding has no scan specification",
-            ))
-        })?;
-        state.modify_binding = Some(binding);
-        Ok(())
-    }
-
-    /// Drive the slot-first cursor straight into the scan slot via
-    /// [`NextSlotContext::emit_columns`]. Returns `Ok(false)` at end-of-scan
-    /// without touching the slot.
-    pub(super) fn next_slot(
-        mut ctx: NextSlotContext<'_, IcebergCustomScanProvider>,
-    ) -> Result<bool, CustomScanError> {
-        if ctx.state.parallel_aware {
-            return Self::next_parallel_slot(ctx);
-        }
-        let purpose = ctx.state.purpose;
-        let mut cursor = match ctx.state.cursor.take() {
-            Some(cursor) => cursor,
-            None if purpose.is_modify() => {
-                let binding = ctx.state.modify_binding.clone().ok_or_else(|| {
-                    CustomScanError::provider(IcebergError::InvariantViolated(
-                        "Modify scan executed before outer binding",
-                    ))
-                })?;
-                ctx.state
-                    .active_scan
-                    .as_mut()
-                    .ok_or_else(|| {
-                        CustomScanError::provider(IcebergError::InvariantViolated(
-                            "Modify scan has no scan specification",
-                        ))
-                    })?
-                    .open_mutation_batch_cursor(binding, ctx.relation.oid())?
+            other => {
+                ctx.state.execution = other;
+                Err(CustomScanError::provider(IcebergError::InvariantViolated(
+                    "Modify scan binding has no managed mutation state",
+                )))
             }
-            None => return Ok(false),
-        };
-
-        let result = ctx.emit_columns(&mut cursor);
-        ctx.state.cursor = Some(cursor);
-        result
-    }
-
-    fn next_parallel_slot(
-        mut ctx: NextSlotContext<'_, IcebergCustomScanProvider>,
-    ) -> Result<bool, CustomScanError> {
-        loop {
-            if let Some(mut cursor) = ctx.state.cursor.take() {
-                let produced = ctx.emit_columns(&mut cursor)?;
-                if produced {
-                    ctx.state.cursor = Some(cursor);
-                    return Ok(true);
-                }
-            }
-            let Some(work_id) = ctx
-                .state
-                .parallel
-                .claim()
-                .map_err(CustomScanError::internal)?
-            else {
-                return Ok(false);
-            };
-            let tasks = ctx
-                .state
-                .parallel_source
-                .as_ref()
-                .ok_or_else(|| {
-                    CustomScanError::internal(std::io::Error::other(
-                        "parallel Iceberg source is not attached",
-                    ))
-                })?
-                .take_tasks(work_id)?;
-            let spec = ctx.state.active_scan.as_ref().ok_or_else(|| {
-                CustomScanError::provider(IcebergError::InvariantViolated(
-                    "parallel scan has no scan specification",
-                ))
-            })?;
-            ctx.state.cursor =
-                Some(spec.open_batch_cursor_with_tasks(Arc::from(
-                    tasks.into_boxed_slice(),
-                ))?);
         }
     }
 
-    /// Replace the complete row filter when values changed; always reopen the
-    /// cursor without replanning stable file tasks.
+    /// Dispatch one PostgreSQL tuple callback to its fixed execution mode.
+    ///
+    /// This is the only mode branch on the per-row CustomScan path. Serial and
+    /// mutation scans terminate directly; native parallel delegates its real
+    /// task-boundary loop to `PostgresParallelScan`.
+    #[inline]
+    pub(super) fn next_slot<'a>(
+        ctx: NextSlotContext<'a, IcebergCustomScanProvider>,
+    ) -> Result<NextSlotResult<'a>, CustomScanError> {
+        let (state, emitter) = ctx.split();
+        match &mut state.execution {
+            ScanExecutionState::SerialScan(scan) => scan.next_slot(emitter),
+            ScanExecutionState::PostgresParallelScan(scan) => scan.next_slot(emitter),
+            ScanExecutionState::MutationTargetScan(scan) => scan.next_slot(emitter),
+            ScanExecutionState::MutationAwaitingBinding(_) => {
+                Err(CustomScanError::provider(IcebergError::InvariantViolated(
+                    "Modify scan executed before outer binding",
+                )))
+            }
+            ScanExecutionState::NotStarted | ScanExecutionState::Finished => {
+                Ok(emitter.finish_eof())
+            }
+        }
+    }
+
     pub(super) fn rescan(
         ctx: ReScanContext<'_, IcebergCustomScanProvider>,
     ) -> Result<(), CustomScanError> {
-        let relation_oid = ctx.relation.oid();
         let replacement = ctx
             .filters_changed
-            .then(|| BoundIcebergPredicate::conjoin(ctx.filters.iter()));
+            .then(|| BoundIcebergPredicate::conjoin(ctx.filters.iter()))
+            .map(ReaderPredicate::new);
 
-        let state = ctx.state;
-        let Some(spec) = state.active_scan.as_mut() else {
-            return Ok(());
-        };
-        if let Some(predicate) = replacement {
-            spec.set_row_filter(predicate);
-        }
-
-        if state.parallel_aware {
-            state.cursor = None;
-            state.attach_parallel_source()?;
-            return Ok(());
-        }
-        state.cursor = Some(if state.purpose.is_modify() {
-            let binding = state.modify_binding.clone().ok_or_else(|| {
-                CustomScanError::provider(IcebergError::InvariantViolated(
+        match &mut ctx.state.execution {
+            ScanExecutionState::SerialScan(scan) => scan.rescan(replacement),
+            ScanExecutionState::PostgresParallelScan(scan) => {
+                scan.rescan(replacement)
+            }
+            ScanExecutionState::MutationTargetScan(scan) => {
+                scan.rescan(replacement, ctx.relation.oid())
+            }
+            ScanExecutionState::MutationAwaitingBinding(_) => {
+                Err(CustomScanError::provider(IcebergError::InvariantViolated(
                     "Modify rescan occurred before outer binding",
-                ))
-            })?;
-            spec.open_mutation_batch_cursor(binding, relation_oid)?
-        } else {
-            spec.open_batch_cursor()?
-        });
-        Ok(())
+                )))
+            }
+            ScanExecutionState::NotStarted | ScanExecutionState::Finished => Ok(()),
+        }
     }
 
     pub(super) fn end(
         ctx: EndContext<'_, IcebergCustomScanProvider>,
     ) -> Result<(), CustomScanError> {
-        let state = ctx.state;
-        // Drop cursor before the active scan so IO closes before
-        // metadata/predicate teardown.
-        let _ = state.cursor.take();
-        let _ = state.active_scan.take();
-        state.modify_binding = None;
-        state.parallel_source = None;
-        state.parallel.detach();
+        drop(mem::replace(
+            &mut ctx.state.execution,
+            ScanExecutionState::Finished,
+        ));
         Ok(())
     }
 
     pub(super) fn estimate_dsm(&mut self) -> Result<pg_sys::Size, CustomScanError> {
-        self.parallel.estimate().map_err(CustomScanError::internal)
+        self.postgres_parallel_mut()?.estimate_dsm()
     }
 
     pub(super) unsafe fn initialize_dsm(
         &mut self,
-        coordinate: *mut core::ffi::c_void,
+        coordinate: *mut c_void,
     ) -> Result<(), CustomScanError> {
-        unsafe { self.parallel.initialize(coordinate) }
-            .map_err(CustomScanError::internal)?;
-        self.attach_parallel_source()
+        unsafe { self.postgres_parallel_mut()?.initialize_dsm(coordinate) }
     }
 
     pub(super) unsafe fn reinitialize_dsm(
         &mut self,
-        coordinate: *mut core::ffi::c_void,
+        coordinate: *mut c_void,
     ) -> Result<(), CustomScanError> {
-        unsafe { self.parallel.attach(coordinate) }
-            .map_err(CustomScanError::internal)?;
-        self.parallel
-            .reinitialize()
-            .map_err(CustomScanError::internal)?;
-        Ok(())
+        unsafe { self.postgres_parallel_mut()?.reinitialize_dsm(coordinate) }
     }
 
     pub(super) unsafe fn initialize_worker(
         &mut self,
-        coordinate: *mut core::ffi::c_void,
+        coordinate: *mut c_void,
     ) -> Result<(), CustomScanError> {
-        unsafe { self.parallel.attach(coordinate) }
-            .map_err(CustomScanError::internal)?;
-        self.attach_parallel_source()
-    }
-
-    fn attach_parallel_source(&mut self) -> Result<(), CustomScanError> {
-        // SAFETY: `parallel_source` is cleared before the coordinator detaches
-        // this immutable native-parallel DSM payload on every lifecycle path.
-        let source = unsafe {
-            WorkerSource::decode_shared(
-                self.parallel.payload().map_err(CustomScanError::internal)?,
-                self.active_scan
-                    .as_ref()
-                    .ok_or_else(|| {
-                        CustomScanError::provider(IcebergError::InvariantViolated(
-                            "parallel scan has no scan specification",
-                        ))
-                    })?
-                    .file_io(),
-            )
-        }?;
-        let expected = self
-            .active_scan
-            .as_ref()
-            .ok_or_else(|| {
-                CustomScanError::provider(IcebergError::InvariantViolated(
-                    "parallel scan has no scan specification",
-                ))
-            })?
-            .query_arrow_schema()?;
-        if source.schema().as_ref() != expected.as_ref() {
-            return Err(CustomScanError::provider(ScanError::WorkerPayload(
-                "worker relation view does not match the leader scan schema"
-                    .to_owned(),
-            )));
-        }
-        self.parallel_source = Some(source);
-        Ok(())
+        unsafe { self.postgres_parallel_mut()?.initialize_worker(coordinate) }
     }
 
     pub(super) fn shutdown_parallel(&mut self) {
-        self.cursor = None;
-        self.parallel_source = None;
-        self.parallel.detach();
+        if let ScanExecutionState::PostgresParallelScan(scan) = &mut self.execution {
+            scan.shutdown();
+        }
+    }
+
+    fn postgres_parallel_mut(
+        &mut self,
+    ) -> Result<&mut PostgresParallelScan, CustomScanError> {
+        let ScanExecutionState::PostgresParallelScan(scan) = &mut self.execution
+        else {
+            return Err(CustomScanError::provider(IcebergError::InvariantViolated(
+                "PostgreSQL parallel callback received a non-parallel Iceberg scan",
+            )));
+        };
+        Ok(scan)
     }
 }

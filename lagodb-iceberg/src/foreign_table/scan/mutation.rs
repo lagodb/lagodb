@@ -2,10 +2,13 @@
 
 use std::rc::Rc;
 
+use iceberg_lite::scan::FileScanTask;
 use iceberg_lite::table::Table;
 
 use super::super::options::ForeignTableIdentity;
 use super::super::relation::RemoteTableKey;
+use crate::error::IcebergResult;
+use crate::scan::{PreparedRowScan, RowLocationScanInput};
 use crate::schema::relation::RelationShape;
 use crate::write::PlannedMutationTasks;
 
@@ -31,7 +34,7 @@ impl ForeignMutationScan {
         table: Table,
         shape: RelationShape,
         starting_snapshot_id: Option<i64>,
-        tasks: Rc<PlannedMutationTasks>,
+        tasks: Vec<FileScanTask>,
     ) -> Self {
         Self {
             inner: Rc::new(ForeignMutationScanInner {
@@ -40,7 +43,7 @@ impl ForeignMutationScan {
                 table,
                 shape,
                 starting_snapshot_id,
-                tasks,
+                tasks: Rc::new(PlannedMutationTasks::new(tasks)),
             }),
         }
     }
@@ -67,5 +70,12 @@ impl ForeignMutationScan {
 
     pub(crate) fn tasks(&self) -> Rc<PlannedMutationTasks> {
         Rc::clone(&self.inner.tasks)
+    }
+
+    pub(crate) fn open_row_location_scan(
+        &self,
+        prepared: &PreparedRowScan,
+    ) -> IcebergResult<RowLocationScanInput> {
+        prepared.open_row_location_scan(self.inner.tasks.shared_tasks())
     }
 }

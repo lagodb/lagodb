@@ -75,48 +75,17 @@ unsafe fn next_slot<P: LagodbCustomScanProvider>(
         per_tuple_ctx,
     );
 
-    let row_produced = P::next_slot(ctx);
+    let outcome = P::next_slot(ctx);
     let _ = unsafe { pg_sys::MemoryContextSwitchTo(prior_ctx) };
-    let row_produced = row_produced?;
+    let outcome = outcome?;
 
-    let slot_empty = unsafe { is_slot_empty(slot) };
-    match decide(row_produced, slot_empty) {
-        SlotOutcome::Return => unsafe {
+    if outcome.is_produced() {
+        unsafe {
             (*slot).tts_tableOid = (*scan_rel).rd_id;
-        },
-        SlotOutcome::RaiseEmptyProduced => {
-            return Err(CustomScanError::slot_not_filled(P::NAME));
         }
-        SlotOutcome::RaiseFilledEof => {
-            let _ = unsafe { pg_sys::ExecClearTuple(slot) };
-            return Err(CustomScanError::slot_filled_at_eof(P::NAME));
-        }
-        SlotOutcome::Eof => {}
     }
 
     Ok(slot)
-}
-
-/// Post-`next_slot` outcome from `(produced, slot_empty)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SlotOutcome {
-    Return,
-    Eof,
-    /// `Ok(true)` but empty slot — invariant violation.
-    RaiseEmptyProduced,
-    /// `Ok(false)` but filled slot — invariant violation.
-    RaiseFilledEof,
-}
-
-/// Maps `(produced, slot_empty)` to the framework outcome.
-#[inline]
-pub(crate) fn decide(produced: bool, slot_empty: bool) -> SlotOutcome {
-    match (produced, slot_empty) {
-        (true, false) => SlotOutcome::Return,
-        (true, true) => SlotOutcome::RaiseEmptyProduced,
-        (false, true) => SlotOutcome::Eof,
-        (false, false) => SlotOutcome::RaiseFilledEof,
-    }
 }
 
 /// Recheck callback for EPQ: set scantuple, reset per-tuple context, and run
@@ -139,15 +108,4 @@ unsafe extern "C-unwind" fn recheck_exact_filters<P: LagodbCustomScanProvider>(
 
     // ExecQual(NULL) is true, which is the no-recheck case.
     unsafe { pg_sys::ExecQual(wrapper.recheck_state, econtext) }
-}
-
-/// True when the live executor slot is empty.
-///
-/// # Safety
-///
-/// `slot` must be the non-null scan slot created by `ExecInitCustomScan`.
-#[inline]
-unsafe fn is_slot_empty(slot: *mut pg_sys::TupleTableSlot) -> bool {
-    let flags = unsafe { (*slot).tts_flags } as u32;
-    (flags & pg_sys::TTS_FLAG_EMPTY) != 0
 }

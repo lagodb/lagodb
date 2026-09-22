@@ -16,7 +16,7 @@ use super::provider::LagodbIceberg;
 use super::relation::RestForeignTable;
 use super::schema::ForeignSchemaBinding;
 use super::transaction::{ForeignTableView, ForeignTransaction};
-use crate::scan::{ScanSource, ScanSpec};
+use crate::scan::{IcebergReadSnapshot, PreparedRowScan, ScanPredicates};
 
 const MAX_ANALYZE_PAGES: u64 = u32::MAX as u64 - 1;
 
@@ -47,13 +47,12 @@ impl FdwAnalyze for LagodbIceberg {
             view.table.metadata().current_schema(),
         )?
         .into_relation_shape();
-        let mut spec = ScanSpec::full(
-            ScanSource::transaction_view(view.table, view.delta, None),
-            None,
-            None,
+        let mut prepared = PreparedRowScan::full(
+            IcebergReadSnapshot::new(view.table, view.delta),
+            ScanPredicates::unfiltered(),
             &shape,
         )?;
-        let mut cursor = spec.open_query_cursor()?;
+        let mut cursor = prepared.open_analyze_row_cursor()?;
         let tuple_desc = context.relation().tuple_desc();
         let slot = AnalyzeSlot::new(tuple_desc);
         let row_context = AnalyzeRowContext::new();

@@ -1,5 +1,6 @@
 //! Iceberg CustomScan provider and predicate pushdown implementation.
 
+mod execution;
 mod projection;
 mod scan_state;
 
@@ -15,8 +16,8 @@ use lagodb_core::customscan::modify::{
 use lagodb_core::customscan::provider::{
     BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
     CustomScanError, EndContext, LagodbCustomScanProvider, NextSlotContext,
-    NoPrivateData, PathContext, PathVariant, ReScanContext, RelationContext,
-    register_provider as register_scan_provider,
+    NextSlotResult, NoPrivateData, PathContext, PathVariant, ReScanContext,
+    RelationContext, register_provider as register_scan_provider,
 };
 use lagodb_core::expr::RuntimeValueBindings;
 use lagodb_core::expr::pushdown::{
@@ -28,8 +29,8 @@ use pgrx::pg_sys;
 use crate::config::scan_fraction;
 use crate::error::IcebergError;
 use crate::managed_table::IcebergTableAm;
+use crate::managed_table::ManagedTableSnapshot;
 use crate::managed_table::access::mutation::IcebergModifyScanContext;
-use crate::managed_table::access::scan::LoadedScanMetadata;
 use crate::managed_table::catalog::IcebergAccessMethod;
 use crate::managed_table::catalog::metadata_tracker::TxMetadata;
 use crate::predicate::{
@@ -51,7 +52,7 @@ impl FilterPushdown for IcebergCustomScanProvider {
     fn begin_filter_planning(
         context: &FilterPlanningContext,
     ) -> Result<Self::Planner, Self::Error> {
-        let metadata = LoadedScanMetadata::load_query(
+        let metadata = ManagedTableSnapshot::load_query(
             context.relation_oid(),
             context.tablespace_oid(),
         )?;
@@ -136,7 +137,9 @@ impl LagodbCustomScanProvider for IcebergCustomScanProvider {
         IcebergScanState::begin(ctx)
     }
 
-    fn next_slot(ctx: NextSlotContext<'_, Self>) -> Result<bool, CustomScanError> {
+    fn next_slot<'a>(
+        ctx: NextSlotContext<'a, Self>,
+    ) -> Result<NextSlotResult<'a>, CustomScanError> {
         IcebergScanState::next_slot(ctx)
     }
 

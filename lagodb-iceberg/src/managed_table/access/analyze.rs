@@ -6,6 +6,8 @@
 //! files, and samples their physical rows through iceberg-lite's normal
 //! delete-aware pipeline.
 
+use std::mem;
+
 mod cursor;
 mod population;
 mod sampling;
@@ -103,15 +105,16 @@ pub(crate) struct AnalyzeScanState {
 }
 
 enum AnalyzeScanPhase {
-    Pending(Option<AnalyzePreparation>),
+    Pending(AnalyzePreparation),
     Ready(AnalyzeBatchCursor),
+    Transitioning,
     Finished,
 }
 
 impl AnalyzeScanState {
     pub(crate) fn pending(preparation: AnalyzePreparation) -> Self {
         Self {
-            phase: AnalyzeScanPhase::Pending(Some(preparation)),
+            phase: AnalyzeScanPhase::Pending(preparation),
         }
     }
 
@@ -119,11 +122,15 @@ impl AnalyzeScanState {
         &mut self,
         stream: &AnalyzeReadStreamHandle,
     ) -> AmResult<bool> {
-        if let AnalyzeScanPhase::Pending(preparation) = &mut self.phase {
-            let preparation =
-                preparation.take().ok_or(IcebergError::InvariantViolated(
-                    "ANALYZE preparation was consumed more than once",
-                ))?;
+        if matches!(&self.phase, AnalyzeScanPhase::Pending(_)) {
+            let phase =
+                mem::replace(&mut self.phase, AnalyzeScanPhase::Transitioning);
+            let AnalyzeScanPhase::Pending(preparation) = phase else {
+                return Err(IcebergError::InvariantViolated(
+                    "ANALYZE entered an invalid lifecycle transition",
+                )
+                .into());
+            };
             let initial_sampler = stream.analyze_sampler_state().ok_or(
                 IcebergError::InvariantViolated(
                     "ANALYZE ReadStream is missing valid PG17 BlockSampler state",
@@ -183,10 +190,12 @@ impl AnalyzeScanState {
         match &mut self.phase {
             AnalyzeScanPhase::Ready(cursor) => cursor.next_ticket(),
             AnalyzeScanPhase::Finished => Ok(false),
-            AnalyzeScanPhase::Pending(_) => Err(IcebergError::InvariantViolated(
-                "ANALYZE state remained pending after initialization",
-            )
-            .into()),
+            AnalyzeScanPhase::Pending(_) | AnalyzeScanPhase::Transitioning => {
+                Err(IcebergError::InvariantViolated(
+                    "ANALYZE state remained incomplete after initialization",
+                )
+                .into())
+            }
         }
     }
 
@@ -197,10 +206,12 @@ impl AnalyzeScanState {
         match &mut self.phase {
             AnalyzeScanPhase::Ready(cursor) => cursor.next_tuple(out),
             AnalyzeScanPhase::Finished => Ok(AnalyzeTupleOutcome::end_of_block()),
-            AnalyzeScanPhase::Pending(_) => Err(IcebergError::InvariantViolated(
-                "ANALYZE tuple callback ran before block initialization",
-            )
-            .into()),
+            AnalyzeScanPhase::Pending(_) | AnalyzeScanPhase::Transitioning => {
+                Err(IcebergError::InvariantViolated(
+                    "ANALYZE tuple callback ran before block initialization",
+                )
+                .into())
+            }
         }
     }
 }

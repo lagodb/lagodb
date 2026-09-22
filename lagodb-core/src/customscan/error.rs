@@ -135,20 +135,6 @@ impl CustomScanError {
         })
     }
 
-    pub(crate) fn slot_not_filled(provider: &'static CStr) -> Self {
-        Self::framework(format!(
-            "customscan provider {provider:?} returned Ok(true) without filling \
-             the scan slot (slot-non-empty invariant violated)"
-        ))
-    }
-
-    pub(crate) fn slot_filled_at_eof(provider: &'static CStr) -> Self {
-        Self::framework(format!(
-            "customscan provider {provider:?} returned Ok(false) after filling \
-             the scan slot (EOF requires an empty slot)"
-        ))
-    }
-
     pub(crate) fn scan_relation_oid_mismatch(expected: u32, opened: u32) -> Self {
         Self::framework(format!(
             "customscan BeginCustomScan: scan relation OID mismatch \

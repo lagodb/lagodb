@@ -31,19 +31,21 @@ impl ProjectedField {
 
 /// A resolved column projection in stable base-schema read order.
 ///
-/// Select-all is represented by a `None` projection on
-/// [`ScanSpec`](super::scan::ScanSpec). An empty projection is valid for a
-/// Modify identity-only scan, where Iceberg metadata columns still drive one
-/// output row but no business column is decoded.
+/// Scan adapters represent select-all as `None` before constructing a prepared
+/// read. An empty projection is valid for a Modify identity-only scan, where
+/// Iceberg metadata columns still drive one output row but no business column
+/// is decoded.
 #[derive(Debug, Clone)]
 pub(crate) struct Projection {
     columns: Vec<ProjectedField>,
 }
 
 impl Projection {
-    /// Build a projection from resolved source/destination entries in storage
-    /// read order.
-    pub(crate) fn new(columns: Vec<ProjectedField>) -> Self {
+    /// Build a projection and normalize it to stable base-schema read order.
+    /// Destinations remain attached to their source fields, so compact scan
+    /// tuple order is preserved independently of storage order.
+    pub(crate) fn from_outputs(mut columns: Vec<ProjectedField>) -> Self {
+        columns.sort_unstable_by_key(|column| column.attno);
         Self { columns }
     }
 

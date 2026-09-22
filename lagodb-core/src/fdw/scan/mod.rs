@@ -39,7 +39,9 @@ pub use pushdown::{
     BeginForeignScanContext, ForeignExpressionValue, ForeignExprs,
     ReScanForeignScanContext, RuntimeExpressionValues, StartForeignScanContext,
 };
-pub use slot::{ScanDatumWriter, ScanOutputColumn, ScanSlotWriter};
+pub use slot::{
+    ForeignScanResult, ScanDatumWriter, ScanOutputColumn, ScanSlotWriter,
+};
 
 pub(crate) use callbacks::{
     begin_foreign_scan, end_foreign_scan, iterate_foreign_scan, rescan_foreign_scan,

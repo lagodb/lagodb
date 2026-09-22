@@ -46,9 +46,9 @@ pub use scan::{
     ForeignPathSpec, ForeignPlanContext, ForeignPlanFilter, ForeignPlanFilters,
     ForeignPlanPrivate, ForeignPlanQualLocation, ForeignPlanSpec, ForeignRelContext,
     ForeignRelSize, ForeignRelSizeContext, ForeignScanError, ForeignScanPhase,
-    PathVariantKind, ReScanForeignScanContext, Relids, RuntimeExpressionValues,
-    ScanDatumWriter, ScanOutputColumn, ScanProjection, ScanProjectionPolicy,
-    ScanSlotWriter, StartForeignScanContext,
+    ForeignScanResult, PathVariantKind, ReScanForeignScanContext, Relids,
+    RuntimeExpressionValues, ScanDatumWriter, ScanOutputColumn, ScanProjection,
+    ScanProjectionPolicy, ScanSlotWriter, StartForeignScanContext,
 };
 pub use validation::ForeignValidationError;
 

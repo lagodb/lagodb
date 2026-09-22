@@ -16,13 +16,27 @@ use crate::error::IcebergError;
 
 /// Adapts Iceberg's batch iterator to the format-neutral conversion source.
 ///
-/// The producer error remains an [`IcebergError`] at the callback boundary,
-/// and PostgreSQL cancellation is checked once for every underlying batch.
-/// Empty batches are deliberately preserved so consumers retain the old
-/// batch-schema validation behavior.
+/// Executor-driven scans enter through PostgreSQL's `ExecScanFetch` (or the
+/// CustomScan executor wrapper), which already checks interrupts before every
+/// row fetch. This adapter therefore performs no duplicate batch-level check.
+/// Empty batches are preserved so consumers retain batch-schema validation
+/// behavior.
 pub(crate) struct ArrowBatches(pub(crate) ArrowRecordBatchIterator);
 
 impl Iterator for ArrowBatches {
+    type Item = Result<RecordBatch, IcebergError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|batch| batch.map_err(IcebergError::from))
+    }
+}
+
+pub(crate) type ScanBatchSource = ArrowBatchSource<ArrowBatches, IcebergError>;
+
+/// ANALYZE batch adapter for paths not driven by `ExecScanFetch`.
+pub(crate) struct InterruptibleArrowBatches(pub(crate) ArrowRecordBatchIterator);
+
+impl Iterator for InterruptibleArrowBatches {
     type Item = Result<RecordBatch, IcebergError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -31,7 +45,8 @@ impl Iterator for ArrowBatches {
     }
 }
 
-pub(crate) type ScanBatchSource = ArrowBatchSource<ArrowBatches, IcebergError>;
+pub(crate) type AnalyzeBatchSource =
+    ArrowBatchSource<InterruptibleArrowBatches, IcebergError>;
 
 /// Stable positions of Iceberg's row-location metadata columns.
 #[derive(Clone, Copy)]
@@ -79,11 +94,11 @@ impl RowLocationLayout {
     ///
     /// # Safety
     ///
-    /// `batch` must come from `ArrowBatches` and have the same field
-    /// order and types as the batch used to create this layout. Iceberg's
-    /// reader produces `_file` as one required `RunArray<Int32Type>` constant
-    /// for the current `FileReadRequest`, and `_pos` as a required,
-    /// non-negative `Int64Array`.
+    /// `batch` must come from one of this module's Iceberg batch adapters and
+    /// have the same field order and types as the batch used to create this
+    /// layout. Iceberg's reader produces `_file` as one required
+    /// `RunArray<Int32Type>` constant for the current `FileReadRequest`, and
+    /// `_pos` as a required, non-negative `Int64Array`.
     pub(crate) unsafe fn bind<'a>(
         self,
         batch: &'a RecordBatch,

@@ -4,16 +4,17 @@ use lagodb_core::handles::RelationGuard;
 use lagodb_core::plan_data::{PlanDataError, PlanDataReader, PlanDataWriter};
 use pgrx::pg_sys;
 
-use crate::error::IcebergError;
 use crate::foreign_table::{
     ForeignSchemaBinding, ForeignTableIdentity, ForeignTransaction, IcebergFdwError,
     PlanSourceIdentity, RestForeignTable,
 };
-use crate::managed_table::LoadedScanMetadata;
+use crate::managed_table::ManagedTableSnapshot;
 use crate::scan::parallel::TaskGroupingConfig;
-use crate::scan::projection::{ProjectedField, Projection};
 use crate::scan::query::BoundScan as BoundQueryScan;
-use crate::scan::{BoundQueryScanInput, ScanSource, ScanSpec};
+use crate::scan::{
+    CountRowsRead, IcebergReadSnapshot, PreparedIcebergRead, QuerySourceBinding,
+    ScanPredicates,
+};
 use crate::schema::relation::RelationShape;
 
 use super::error::Error;
@@ -71,46 +72,38 @@ impl PlanProjection {
         }
     }
 
-    fn bind_count(source: ScanSource) -> Result<BoundQueryScanInput, Error> {
-        Ok(ScanSpec::count_rows(source).bind()?)
+    fn bind_count(
+        snapshot: IcebergReadSnapshot,
+    ) -> Result<QuerySourceBinding, Error> {
+        let read: CountRowsRead = PreparedIcebergRead::count_rows(snapshot);
+        Ok(read.bind_query_source()?)
     }
 
     fn bind_columns(
         attnos: &[pg_sys::AttrNumber],
-        source: ScanSource,
+        snapshot: IcebergReadSnapshot,
         shape: &RelationShape,
-    ) -> Result<BoundQueryScanInput, Error> {
-        let projection = Projection::new(
-            attnos
-                .iter()
-                .enumerate()
-                .map(|(destination, &attno)| ProjectedField::new(attno, destination))
-                .collect(),
-        );
-        let attr_types = attnos
-            .iter()
-            .map(|attno| {
-                shape.attr_types().get(*attno as usize - 1).copied().ok_or(
-                    IcebergError::InvariantViolated(
-                        "Iceberg query projection attno exceeds relation width",
-                    ),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(
-            ScanSpec::projected(source, projection, None, None, shape, &attr_types)?
-                .bind_query_source()?,
+    ) -> Result<QuerySourceBinding, Error> {
+        let mut attnos = attnos.to_vec();
+        attnos.sort_unstable();
+        let project_field_ids =
+            shape.project_field_ids(snapshot.schema(), attnos.into_iter())?;
+        Ok(PreparedIcebergRead::projected_fields(
+            snapshot,
+            project_field_ids,
+            ScanPredicates::unfiltered(),
         )
+        .bind_query_source()?)
     }
 
     fn bind_with_shape(
         &self,
-        source: ScanSource,
+        snapshot: IcebergReadSnapshot,
         shape: &RelationShape,
-    ) -> Result<BoundQueryScanInput, Error> {
+    ) -> Result<QuerySourceBinding, Error> {
         match self {
-            Self::CountRows => Self::bind_count(source),
-            Self::Columns(attnos) => Self::bind_columns(attnos, source, shape),
+            Self::CountRows => Self::bind_count(snapshot),
+            Self::Columns(attnos) => Self::bind_columns(attnos, snapshot, shape),
         }
     }
 }
@@ -125,18 +118,18 @@ pub(super) struct ManagedScanPlan {
 impl ManagedScanPlan {
     fn bind(&self) -> Result<BoundScan, Error> {
         let loaded =
-            LoadedScanMetadata::load_query(self.relation_oid, self.tablespace_oid)?;
+            ManagedTableSnapshot::load_query(self.relation_oid, self.tablespace_oid)?;
         let task_grouping = TaskGroupingConfig::from_properties(loaded.properties());
-        let source = loaded.into_source();
+        let snapshot = loaded.into_read_snapshot();
         let scan = match &self.projection {
-            PlanProjection::CountRows => PlanProjection::bind_count(source)?,
+            PlanProjection::CountRows => PlanProjection::bind_count(snapshot)?,
             PlanProjection::Columns(attnos) => {
                 let relation = RelationGuard::open(
                     self.relation_oid,
                     pg_sys::NoLock as pg_sys::LOCKMODE,
                 )?;
                 let shape = RelationShape::from_relation(&relation.as_handle())?;
-                PlanProjection::bind_columns(attnos, source, &shape)?
+                PlanProjection::bind_columns(attnos, snapshot, &shape)?
             }
         };
         Ok(BoundScan {
@@ -187,8 +180,8 @@ impl ForeignScanPlan {
             view.table.metadata().current_schema(),
         )?
         .into_relation_shape();
-        let source = ScanSource::transaction_view(view.table, view.delta, None);
-        let scan = self.projection.bind_with_shape(source, &shape)?;
+        let snapshot = IcebergReadSnapshot::new(view.table, view.delta);
+        let scan = self.projection.bind_with_shape(snapshot, &shape)?;
         Ok(BoundScan {
             scan: BoundQueryScan::new(scan, task_grouping),
             worker: ReopenPlan::Foreign {

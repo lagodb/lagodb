@@ -7,7 +7,7 @@ use lagodb_core::fdw::{
     BeginForeignScanContext, FdwScan, ForeignFilterExplainValues, ForeignPathBuilder,
     ForeignPathContext, ForeignPathKeys, ForeignPathSpec, ForeignPlanContext,
     ForeignPlanSpec, ForeignRelContext, ForeignRelSize, ForeignRelSizeContext,
-    ForeignScanError, ReScanForeignScanContext, ScanSlotWriter,
+    ForeignScanError, ForeignScanResult, ReScanForeignScanContext, ScanSlotWriter,
     StartForeignScanContext,
 };
 use pgrx::pg_sys;
@@ -161,11 +161,12 @@ impl FdwScan for LagodbIceberg {
         IcebergFdwScanState::begin(context)
     }
 
-    fn next_slot(
+    fn next_slot<'a>(
         state: &mut Self::State,
-        output: &mut ScanSlotWriter<'_>,
-    ) -> Result<bool, ForeignScanError> {
-        state.next_slot(output)
+        output: &'a mut ScanSlotWriter<'_>,
+    ) -> Result<ForeignScanResult<'a>, ForeignScanError> {
+        let produced = state.next_slot(output)?;
+        output.finish(produced)
     }
 
     fn start(
@@ -182,7 +183,8 @@ impl FdwScan for LagodbIceberg {
         state.rescan(context)
     }
 
-    fn end(_state: &mut Self::State) -> Result<(), ForeignScanError> {
+    fn end(state: &mut Self::State) -> Result<(), ForeignScanError> {
+        state.end();
         Ok(())
     }
 

@@ -17,7 +17,6 @@ pub use super::scan::next_slot_wrapper;
 #[cfg(test)]
 mod tests {
     use super::super::lifecycle::check_scan_relation_oid;
-    use super::super::scan;
     use core::ffi::CStr;
     use core::ffi::c_int;
     use core::marker::PhantomData;
@@ -31,7 +30,7 @@ mod tests {
     use crate::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, CustomScanPrivate, EndContext, LagodbCustomScanProvider,
-        NextSlotContext, PathContext, PathVariant, PrivateDataReader,
+        NextSlotContext, NextSlotResult, PathContext, PathVariant, PrivateDataReader,
         PrivateDataWriter, ReScanContext, RelationContext,
     };
     use crate::diag::SqlStateError;
@@ -141,9 +140,9 @@ mod tests {
             unreachable!("NoopProvider::begin is not exercised by host-only tests")
         }
 
-        fn next_slot(
-            _ctx: NextSlotContext<'_, Self>,
-        ) -> Result<bool, CustomScanError> {
+        fn next_slot<'a>(
+            _ctx: NextSlotContext<'a, Self>,
+        ) -> Result<NextSlotResult<'a>, CustomScanError> {
             unreachable!(
                 "NoopProvider::next_slot is not exercised by host-only tests"
             )
@@ -256,47 +255,6 @@ mod tests {
                 params_changed(&chgparam, &exec_ids),
                 !chgparam.is_disjoint(&exec_ids)
             );
-        }
-    }
-
-    #[test]
-    fn decide_covers_all_four_combinations() {
-        assert_eq!(scan::decide(true, false), scan::SlotOutcome::Return);
-        assert_eq!(
-            scan::decide(true, true),
-            scan::SlotOutcome::RaiseEmptyProduced
-        );
-        assert_eq!(
-            scan::decide(false, false),
-            scan::SlotOutcome::RaiseFilledEof
-        );
-        assert_eq!(scan::decide(false, true), scan::SlotOutcome::Eof);
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(256))]
-
-        #[test]
-        fn decide_never_truncates(
-            produced in any::<bool>(),
-            slot_empty in any::<bool>(),
-        ) {
-            let outcome = scan::decide(produced, slot_empty);
-            match (produced, slot_empty) {
-                (true, false) => prop_assert_eq!(outcome, scan::SlotOutcome::Return),
-                (true, true) => prop_assert_eq!(
-                    outcome,
-                    scan::SlotOutcome::RaiseEmptyProduced
-                ),
-                (false, false) => prop_assert_eq!(
-                    outcome,
-                    scan::SlotOutcome::RaiseFilledEof
-                ),
-                (false, true) => prop_assert_eq!(outcome, scan::SlotOutcome::Eof),
-            }
-            if produced {
-                prop_assert_ne!(outcome, scan::SlotOutcome::Eof);
-            }
         }
     }
 

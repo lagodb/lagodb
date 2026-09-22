@@ -6,7 +6,7 @@ use lagodb_core::batch::{AmScanBatchSource, BatchRowDecoder};
 use lagodb_core::fdw::{ForeignScanError, ScanSlotWriter};
 use lagodb_core::handles::ValidItemPointer;
 
-use crate::scan::MutationScanInput;
+use crate::scan::RowLocationScanInput;
 use crate::scan::batch::{RowLocationLayout, ScanBatchSource, position_unchecked};
 use crate::write::{IcebergFileId, IcebergRowIdentity, RelationRowRegistry};
 
@@ -28,7 +28,7 @@ pub(super) struct ForeignMutationCursor {
 
 impl ForeignMutationCursor {
     pub(super) fn new(
-        input: MutationScanInput,
+        input: RowLocationScanInput,
         registry: RelationRowRegistry,
     ) -> Self {
         Self {
@@ -83,6 +83,10 @@ impl ForeignMutationCursor {
             self.current = Some(bound);
             self.row_index = 0;
         }
+    }
+
+    pub(super) fn registry(&self) -> RelationRowRegistry {
+        self.registry.clone()
     }
 
     fn bind_batch(

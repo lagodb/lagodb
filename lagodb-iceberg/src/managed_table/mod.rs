@@ -14,10 +14,11 @@ mod hooks;
 mod maintenance;
 mod options;
 mod provider;
+mod source;
 pub(crate) mod storage;
 
-pub(crate) use access::scan::LoadedScanMetadata;
 pub(crate) use constants::ICEBERG_AM_NAME;
+pub(crate) use source::{ManagedAnalyzeSnapshot, ManagedTableSnapshot};
 pub(crate) use storage::StorageContext;
 
 pub use provider::{IcebergTableAm, get_iceberg_am_routine_ptr};

@@ -14,8 +14,9 @@ mod tests {
     use lagodb_core::customscan::exec::next_slot_wrapper;
     use lagodb_core::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
-        CustomScanError, EndContext, LagodbCustomScanProvider, NextSlotContext,
-        PathContext, PathVariant, ReScanContext, RelationContext,
+        CustomScanError, EndContext, LagodbCustomScanProvider, NextSlotAttempt,
+        NextSlotContext, NextSlotResult, PathContext, PathVariant, ReScanContext,
+        RelationContext,
     };
     use lagodb_core::customscan::provider::{
         CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
@@ -146,22 +147,25 @@ mod tests {
         }
 
         /// Read handle accessors and emit a text varlena via `emit_row`.
-        fn next_slot(
-            mut ctx: NextSlotContext<'_, Self>,
-        ) -> Result<bool, CustomScanError> {
-            ctx.state.seen_natts = ctx.relation.natts();
-            ctx.state.seen_oid = ctx.relation.oid();
+        fn next_slot<'a>(
+            mut ctx: NextSlotContext<'a, Self>,
+        ) -> Result<NextSlotResult<'a>, CustomScanError> {
+            let seen_natts = ctx.relation().natts();
+            let seen_oid = ctx.relation().oid();
 
             let mut row = Row::with_width(2);
             row.set_cell(0, Some(Cell::I32(7)));
             row.set_cell(1, Some(Cell::String(HANDLE_EMIT_TEXT.to_string())));
             let codec =
-                unsafe { RowDatumCodec::from_relation(ctx.relation.as_raw()) }
+                unsafe { RowDatumCodec::from_relation(ctx.relation().as_raw()) }
                     .map_err(CustomScanError::provider)?;
-            unsafe { ctx.emit_row(&mut row, &codec)? };
-
-            ctx.state.emitted = true;
-            Ok(true)
+            {
+                let state = ctx.state();
+                state.seen_natts = seen_natts;
+                state.seen_oid = seen_oid;
+                state.emitted = true;
+            }
+            unsafe { ctx.emit_row(&mut row, &codec) }
         }
 
         fn rescan(_ctx: ReScanContext<'_, Self>) -> Result<(), CustomScanError> {
@@ -417,12 +421,20 @@ mod tests {
             unreachable!("this test drives next_slot directly; begin is not invoked");
         }
 
-        fn next_slot(
-            mut ctx: NextSlotContext<'_, Self>,
-        ) -> Result<bool, CustomScanError> {
-            let produced = ctx.emit_columns(&mut EmitColumnsDriver)?;
-            ctx.state.emitted = produced;
-            Ok(produced)
+        fn next_slot<'a>(
+            ctx: NextSlotContext<'a, Self>,
+        ) -> Result<NextSlotResult<'a>, CustomScanError> {
+            let (state, emitter) = ctx.split();
+            Ok(match emitter.try_emit_columns(&mut EmitColumnsDriver)? {
+                NextSlotAttempt::Produced(produced) => {
+                    state.emitted = true;
+                    produced
+                }
+                NextSlotAttempt::Exhausted(emitter) => {
+                    state.emitted = false;
+                    emitter.finish_eof()
+                }
+            })
         }
 
         fn rescan(_ctx: ReScanContext<'_, Self>) -> Result<(), CustomScanError> {

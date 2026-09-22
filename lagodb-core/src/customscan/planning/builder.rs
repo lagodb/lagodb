@@ -328,7 +328,7 @@ mod tests {
 
     use crate::customscan::provider::{
         BeginContext, CreateStateContext, CustomScanError, EndContext,
-        NextSlotContext, PathContext, ReScanContext, RelationContext,
+        NextSlotContext, NextSlotResult, PathContext, ReScanContext, RelationContext,
     };
     use crate::customscan::provider::{CustomScanPrivate, PrivateDataReader};
     use crate::expr::RuntimeValueBindings;
@@ -438,9 +438,9 @@ mod tests {
                     )
                 }
 
-                fn next_slot(
-                    _ctx: NextSlotContext<'_, Self>,
-                ) -> Result<bool, CustomScanError> {
+                fn next_slot<'a>(
+                    _ctx: NextSlotContext<'a, Self>,
+                ) -> Result<NextSlotResult<'a>, CustomScanError> {
                     unreachable!(
                         "custom scan execution lifecycle is not exercised in builder tests"
                     )

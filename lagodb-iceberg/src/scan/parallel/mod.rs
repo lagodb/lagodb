@@ -1,5 +1,6 @@
 //! Worker-local Iceberg reader over a leader-planned task inventory.
 
+mod execution;
 mod grouping;
 mod payload;
 
@@ -15,6 +16,7 @@ use lagodb_core::runtime_api::SourceWorkId;
 
 use super::ScanError;
 use crate::error::IcebergError;
+pub(crate) use execution::PostgresParallelExecution;
 pub(crate) use grouping::{TaskGrouping, TaskGroupingConfig};
 use payload::WorkerSourcePayload;
 

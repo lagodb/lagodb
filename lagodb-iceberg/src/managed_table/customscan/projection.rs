@@ -44,8 +44,7 @@ impl ProjectionResolver {
         // Keep the storage request in base-schema order. Destination remains
         // independent, so the compact custom tuple can still follow targetlist
         // order while Arrow/Parquet sees a stable physical-field order.
-        columns.sort_unstable_by_key(|column| column.attno);
-        Ok(Some(Projection::new(columns)))
+        Ok(Some(Projection::from_outputs(columns)))
     }
 }
 

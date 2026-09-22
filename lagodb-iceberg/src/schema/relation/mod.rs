@@ -78,12 +78,40 @@ impl RelationShape {
         &self.live_columns
     }
 
-    fn slot_width(&self) -> usize {
+    pub(crate) fn slot_width(&self) -> usize {
         self.slot_width
     }
 
     pub(crate) fn attr_types(&self) -> &[(pg_sys::Oid, i32)] {
         &self.attr_types
+    }
+
+    /// Resolve a PostgreSQL attribute projection directly to Iceberg field
+    /// ids without constructing slot destinations or datum-type bindings.
+    pub(crate) fn project_field_ids(
+        &self,
+        schema: &IcebergSchema,
+        projected: impl ExactSizeIterator<Item = pg_sys::AttrNumber>,
+    ) -> IcebergResult<Box<[i32]>> {
+        let mut by_attno = vec![None; self.slot_width];
+        for column in &self.live_columns {
+            let field = schema
+                .field_by_name(&column.name)
+                .ok_or_else(|| IcebergError::ColumnNotFound(column.name.clone()))?;
+            let offset =
+                RelationFieldMap::attribute_offset(column.attno, self.slot_width)?;
+            by_attno[offset] = Some(field.id);
+        }
+
+        let mut field_ids = Vec::with_capacity(projected.len());
+        for attno in projected {
+            let offset = RelationFieldMap::attribute_offset(attno, self.slot_width)?;
+            let field_id = by_attno[offset].ok_or_else(|| {
+                IcebergError::ColumnNotFound(format!("attno {attno}"))
+            })?;
+            field_ids.push(field_id);
+        }
+        Ok(field_ids.into_boxed_slice())
     }
 }
 
@@ -115,8 +143,6 @@ pub(crate) struct RelationFieldMap {
     fields: Vec<RelationFieldBinding>,
     /// Width of the base relation's PostgreSQL attribute-number domain.
     relation_width: usize,
-    slot_width: usize,
-    attr_types: Vec<(pg_sys::Oid, i32)>,
 }
 
 impl RelationFieldMap {
@@ -140,8 +166,6 @@ impl RelationFieldMap {
         Ok(Self {
             fields,
             relation_width: shape.slot_width(),
-            slot_width: shape.slot_width(),
-            attr_types: shape.attr_types().to_vec(),
         })
     }
 
@@ -150,8 +174,6 @@ impl RelationFieldMap {
     pub(crate) fn project(
         self,
         projected: impl ExactSizeIterator<Item = (pg_sys::AttrNumber, usize)>,
-        slot_width: usize,
-        attr_types: &[(pg_sys::Oid, i32)],
     ) -> IcebergResult<Self> {
         let source_index = RelationFieldIndex::new(self);
         let mut fields = Vec::with_capacity(projected.len());
@@ -164,16 +186,11 @@ impl RelationFieldMap {
             let binding = source_index.binding_for_attno(attno).ok_or_else(|| {
                 IcebergError::ColumnNotFound(format!("attno {attno}"))
             })?;
-            fields.push(binding.with_destination(Self::validate_destination(
-                destination,
-                slot_width,
-            )?));
+            fields.push(binding.with_destination(destination));
         }
         Ok(Self {
             fields,
             relation_width: source_index.relation_width(),
-            slot_width,
-            attr_types: attr_types.to_vec(),
         })
     }
 
@@ -184,14 +201,6 @@ impl RelationFieldMap {
 
     pub(crate) fn bindings(&self) -> &[RelationFieldBinding] {
         &self.fields
-    }
-
-    pub(crate) fn slot_width(&self) -> usize {
-        self.slot_width
-    }
-
-    pub(crate) fn attr_types(&self) -> &[(pg_sys::Oid, i32)] {
-        &self.attr_types
     }
 
     pub(crate) fn field_ids(&self) -> Vec<i32> {

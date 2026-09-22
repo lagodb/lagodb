@@ -141,12 +141,6 @@ impl ForeignScanError {
         })
     }
 
-    pub(crate) fn slot_not_filled(provider: &'static CStr) -> Self {
-        Self::framework(format_args!(
-            "FDW provider {provider:?} returned Ok(true) without filling the scan slot"
-        ))
-    }
-
     pub(crate) fn with_callback_phase<P: ForeignDataWrapper>(
         self,
         phase: ForeignScanPhase,

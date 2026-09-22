@@ -159,11 +159,3 @@ pub(crate) unsafe fn compile_executor_layout(
 pub(crate) unsafe fn list_len(list: *mut pg_sys::List) -> usize {
     unsafe { pg_sys::list_length(list) as usize }
 }
-
-/// # Safety
-///
-/// `slot` must point to a live executor TupleTableSlot owned by the current
-/// ForeignScan callback.
-pub(crate) unsafe fn slot_is_empty(slot: *mut pg_sys::TupleTableSlot) -> bool {
-    unsafe { ((*slot).tts_flags as u32 & pg_sys::TTS_FLAG_EMPTY) != 0 }
-}

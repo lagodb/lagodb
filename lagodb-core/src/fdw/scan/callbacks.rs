@@ -10,7 +10,7 @@ use crate::handles::{RelationHandle, SnapshotHandle};
 
 use super::contract::FdwScan;
 use super::error::{ForeignScanError, ForeignScanPhase};
-use super::executor::{compile_executor_layout, list_len, slot_is_empty};
+use super::executor::{compile_executor_layout, list_len};
 use super::filter::{ForeignFilterExprs, ForeignScanFilters};
 use super::private::decode_scan_private;
 use super::pushdown::ReScanForeignScanContext;
@@ -133,16 +133,8 @@ pub(crate) unsafe extern "C-unwind" fn iterate_foreign_scan<P: FdwScan>(
         // PostgreSQL's ForeignNext has already switched
         // to the executor's per-tuple memory context for this callback.
         let mut writer = unsafe { wrapper.output_writer(slot) };
-        let produced = P::next_slot(unsafe { &mut *state_ptr }, &mut writer)?;
-        if produced {
-            writer.complete()?;
-        }
-
-        if produced {
-            if unsafe { slot_is_empty(slot) } {
-                return Err(ForeignScanError::slot_not_filled(P::NAME));
-            }
-        } else {
+        let outcome = P::next_slot(unsafe { &mut *state_ptr }, &mut writer)?;
+        if !outcome.is_produced() {
             // The writer defers clearing until the output representation is
             // known.  EOF has no representation, so return an empty slot here.
             // SAFETY: slot is the live scan slot supplied by PostgreSQL.

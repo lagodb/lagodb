@@ -1,5 +1,6 @@
 //! ForeignScan slot write planning and HeapTuple-slot output.
 
+use core::marker::PhantomData;
 use core::ptr;
 use core::slice;
 
@@ -224,6 +225,24 @@ pub struct ScanSlotWriter<'a> {
     item_pointer: Option<pg_sys::ItemPointerData>,
     datum_output_started: bool,
     stored: bool,
+}
+
+/// Sealed result of one FDW scan iteration.
+///
+/// The value can only be created by [`ScanSlotWriter::finish`], which validates
+/// and publishes every produced representation before the callback returns it
+/// to PostgreSQL.
+#[must_use]
+pub struct ForeignScanResult<'a> {
+    produced: bool,
+    _callback: PhantomData<&'a mut ()>,
+}
+
+impl ForeignScanResult<'_> {
+    #[inline]
+    pub(crate) fn is_produced(&self) -> bool {
+        self.produced
+    }
 }
 
 impl<'a> ScanSlotWriter<'a> {
@@ -454,5 +473,19 @@ impl<'a> ScanSlotWriter<'a> {
         }
         self.stored = true;
         Ok(())
+    }
+
+    /// Finalize one provider iteration and return its sealed callback result.
+    pub fn finish<'writer>(
+        &'writer mut self,
+        produced: bool,
+    ) -> Result<ForeignScanResult<'writer>, ForeignScanError> {
+        if produced {
+            self.complete()?;
+        }
+        Ok(ForeignScanResult {
+            produced,
+            _callback: PhantomData,
+        })
     }
 }

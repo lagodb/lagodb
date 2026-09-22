@@ -1,12 +1,11 @@
-//! Executor state backed by `ScanSpec` and the shared query cursor core.
+//! Typed ForeignScan lifecycle over the shared Iceberg query reader.
 
-use std::sync::Arc;
+use std::mem;
 
 use lagodb_core::fdw::{
     BeginForeignScanContext, ForeignRowIdentityRequirement, ForeignScanError,
     ReScanForeignScanContext, ScanSlotWriter, StartForeignScanContext,
 };
-use lagodb_core::parallel_scan::{ParallelScanCoordinator, PreparedParallelScan};
 use pgrx::pg_sys;
 
 use super::super::error::IcebergFdwError;
@@ -14,33 +13,46 @@ use super::super::provider::LagodbIceberg;
 use super::super::relation::RestForeignTable;
 use super::super::schema::ForeignSchemaBinding;
 use super::super::source_identity::PlanSourceIdentity;
-use crate::predicate::BoundIcebergPredicate;
-use crate::scan::ScanError;
-use crate::scan::parallel::{TaskGrouping, WorkerSource};
-use crate::scan::projection::{ProjectedField, Projection};
-use crate::scan::{QueryCursor, ScanSource, ScanSpec};
-use crate::write::RelationRowRegistry;
-
 use super::super::transaction::ForeignTransaction;
 use super::ForeignMutationScan;
 use super::cursor::ForeignMutationCursor;
-
-enum ForeignScanCursor {
-    Prepared,
-    Query(QueryCursor),
-    Mutation(ForeignMutationCursor),
-}
+use crate::predicate::BoundIcebergPredicate;
+use crate::scan::parallel::PostgresParallelExecution;
+use crate::scan::projection::{ProjectedField, Projection};
+use crate::scan::{
+    IcebergReadSnapshot, PgRowCursor, PreparedRowScan, ReaderPredicate,
+    ScanPredicates, StablePruningPredicate,
+};
+use crate::write::RelationRowRegistry;
 
 pub(crate) struct IcebergFdwScanState {
-    // Declaration order is intentional: the cursor releases readers before
-    // the ScanSpec-owned table/FileIO is dropped by the framework at End.
-    cursor: ForeignScanCursor,
-    spec: ScanSpec,
-    mutation_registry: Option<RelationRowRegistry>,
-    mutation_context: Option<ForeignMutationScan>,
-    parallel: ParallelScanCoordinator,
-    parallel_source: Option<WorkerSource>,
-    parallel_aware: bool,
+    phase: ForeignScanPhase,
+}
+
+enum ForeignScanPhase {
+    PreparedQuery {
+        prepared: PreparedRowScan,
+    },
+    SerialQuery {
+        cursor: PgRowCursor,
+        prepared: PreparedRowScan,
+    },
+    ParallelQuery {
+        execution: PostgresParallelExecution,
+        prepared: PreparedRowScan,
+    },
+    PreparedMutation {
+        prepared: PreparedRowScan,
+        registry: RelationRowRegistry,
+        context: ForeignMutationScan,
+    },
+    ForeignMutation {
+        cursor: ForeignMutationCursor,
+        prepared: PreparedRowScan,
+        context: ForeignMutationScan,
+    },
+    Transitioning,
+    Ended,
 }
 
 impl IcebergFdwScanState {
@@ -54,7 +66,6 @@ impl IcebergFdwScanState {
         if resolved.identity() != context.private_data.identity() {
             return Err(IcebergFdwError::PlanIdentityChanged.into());
         }
-
         let source = PlanSourceIdentity::from_table(resolved.table());
         if context
             .private_data
@@ -63,6 +74,7 @@ impl IcebergFdwScanState {
         {
             return Err(IcebergFdwError::PlanSourceChanged.into());
         }
+
         let mutation = matches!(
             context.row_identity_requirement,
             ForeignRowIdentityRequirement::ItemPointer
@@ -83,101 +95,131 @@ impl IcebergFdwScanState {
         let schema = table.metadata().current_schema();
         let shape = ForeignSchemaBinding::bind(&context.relation, schema)?
             .into_relation_shape();
-        let mut columns = context
-            .output_layout
-            .columns()
-            .iter()
-            .map(|column| ProjectedField::new(column.attno(), column.destination()))
-            .collect::<Vec<_>>();
-        columns.sort_unstable_by_key(|column| column.attno);
-        let projection = Projection::new(columns);
+        let projection = Projection::from_outputs(
+            context
+                .output_layout
+                .columns()
+                .iter()
+                .map(|column| {
+                    ProjectedField::new(column.attno(), column.destination())
+                })
+                .collect(),
+        );
         let planning_filter =
             BoundIcebergPredicate::conjoin(context.filters.rescan_stable());
-        let row_filter = planning_filter.clone();
-        let mut spec = ScanSpec::projected(
-            ScanSource::transaction_view(table, view.delta, None),
+        let predicates = ScanPredicates::new(
+            StablePruningPredicate::new(planning_filter.clone()),
+            ReaderPredicate::new(planning_filter),
+        );
+        let mut prepared = PreparedRowScan::projected(
+            IcebergReadSnapshot::new(table, view.delta),
             projection,
-            planning_filter,
-            row_filter,
+            predicates,
             &shape,
             context.output_layout.slot_types(),
         )
         .map_err(IcebergFdwError::from)?;
-        let mutation_registry = if mutation {
-            Some(ForeignTransaction::row_registry(&view.key)?)
-        } else {
-            None
-        };
-        let mutation_context = if mutation {
-            spec.prepare_mutation_tasks()
+
+        let phase = if mutation {
+            let tasks = prepared
+                .plan_row_location_tasks()
                 .map_err(IcebergFdwError::from)?;
-            let tasks = spec.prepared_mutation_tasks().ok_or_else(|| {
-                IcebergFdwError::InvalidPlan {
-                    detail: "mutation scan did not retain its planned tasks",
-                }
-            })?;
-            Some(ForeignMutationScan::new(
+            let registry = ForeignTransaction::row_registry(&view.key)?;
+            let mutation_table =
+                mutation_table.ok_or_else(|| IcebergFdwError::InvalidPlan {
+                    detail: "mutation scan did not retain its transaction table",
+                })?;
+            let mutation_context = ForeignMutationScan::new(
                 context.private_data.identity().clone(),
                 view.key,
-                mutation_table
-                    .expect("mutation scan retains its transaction-view table"),
+                mutation_table,
                 shape,
-                spec.starting_snapshot_id(),
+                prepared.starting_snapshot_id(),
                 tasks,
-            ))
+            );
+            ForeignScanPhase::PreparedMutation {
+                prepared,
+                registry,
+                context: mutation_context,
+            }
+        } else if context.parallel_aware {
+            let mut execution = PostgresParallelExecution::new();
+            if unsafe { pg_sys::ParallelWorkerNumber } < 0 {
+                execution
+                    .prepare(&mut prepared)
+                    .map_err(ForeignScanError::provider)?;
+            }
+            ForeignScanPhase::ParallelQuery {
+                execution,
+                prepared,
+            }
         } else {
-            None
+            ForeignScanPhase::PreparedQuery { prepared }
         };
-        let mut state = Self {
-            cursor: ForeignScanCursor::Prepared,
-            spec,
-            mutation_registry,
-            mutation_context,
-            parallel: ParallelScanCoordinator::default(),
-            parallel_source: None,
-            parallel_aware: context.parallel_aware,
-        };
-        if state.parallel_aware && unsafe { pg_sys::ParallelWorkerNumber } < 0 {
-            state.prepare_parallel()?;
-        }
-        Ok(state)
+        Ok(Self { phase })
     }
 
     pub(crate) fn start(
         &mut self,
         context: StartForeignScanContext<'_, LagodbIceberg>,
     ) -> Result<(), ForeignScanError> {
-        if !matches!(self.cursor, ForeignScanCursor::Prepared) {
-            return Err(IcebergFdwError::InvalidPlan {
-                detail: "Iceberg scan was started more than once",
+        let row_filter = ReaderPredicate::new(BoundIcebergPredicate::conjoin(
+            context.filters.iter(),
+        ));
+        let phase = mem::replace(&mut self.phase, ForeignScanPhase::Transitioning);
+        self.phase = match phase {
+            ForeignScanPhase::PreparedQuery { mut prepared } => {
+                prepared.rebind_reader_filter(row_filter);
+                let cursor =
+                    prepared.open_row_cursor().map_err(IcebergFdwError::from)?;
+                ForeignScanPhase::SerialQuery { cursor, prepared }
             }
-            .into());
-        }
-        self.spec
-            .set_row_filter(BoundIcebergPredicate::conjoin(context.filters.iter()));
-        if !self.parallel_aware {
-            self.cursor = self.open_cursor()?;
-        }
+            ForeignScanPhase::ParallelQuery {
+                execution,
+                mut prepared,
+            } => {
+                prepared.rebind_reader_filter(row_filter);
+                ForeignScanPhase::ParallelQuery {
+                    execution,
+                    prepared,
+                }
+            }
+            ForeignScanPhase::PreparedMutation {
+                mut prepared,
+                registry,
+                context,
+            } => {
+                prepared.rebind_reader_filter(row_filter);
+                let cursor = ForeignMutationCursor::new(
+                    context
+                        .open_row_location_scan(&prepared)
+                        .map_err(IcebergFdwError::from)?,
+                    registry,
+                );
+                ForeignScanPhase::ForeignMutation {
+                    cursor,
+                    prepared,
+                    context,
+                }
+            }
+            active => {
+                self.phase = active;
+                return Err(IcebergFdwError::InvalidPlan {
+                    detail: "Iceberg scan was started more than once",
+                }
+                .into());
+            }
+        };
         Ok(())
     }
 
     pub(crate) fn mutation_context(&self) -> Option<ForeignMutationScan> {
-        self.mutation_context.clone()
-    }
-
-    fn open_cursor(&mut self) -> Result<ForeignScanCursor, ForeignScanError> {
-        match self.mutation_registry.as_ref() {
-            Some(registry) => {
-                Ok(ForeignScanCursor::Mutation(ForeignMutationCursor::new(
-                    self.spec.mutation_input().map_err(IcebergFdwError::from)?,
-                    registry.clone(),
-                )))
+        match &self.phase {
+            ForeignScanPhase::PreparedMutation { context, .. }
+            | ForeignScanPhase::ForeignMutation { context, .. } => {
+                Some(context.clone())
             }
-            None => Ok(ForeignScanCursor::Query(
-                self.spec
-                    .open_query_cursor()
-                    .map_err(IcebergFdwError::from)?,
-            )),
+            _ => None,
         }
     }
 
@@ -185,20 +227,9 @@ impl IcebergFdwScanState {
         &mut self,
         output: &mut ScanSlotWriter<'_>,
     ) -> Result<bool, ForeignScanError> {
-        if self.parallel_aware {
-            return self.next_parallel_slot(output);
-        }
-        match &mut self.cursor {
-            ForeignScanCursor::Prepared => Err(IcebergFdwError::InvalidPlan {
-                detail: "Iceberg scan cursor was not started",
-            }
-            .into()),
-            ForeignScanCursor::Mutation(cursor) => cursor.next_slot(output),
-            ForeignScanCursor::Query(cursor) => cursor
+        match &mut self.phase {
+            ForeignScanPhase::SerialQuery { cursor, .. } => cursor
                 .next_with(|decoder, batch, row_index| {
-                    // SAFETY: Begin compiled the decoder from this exact output
-                    // layout; the callback writes one complete datum row and the
-                    // framework owns the slot for the duration of this closure.
                     let mut columns = unsafe { output.datum_columns() };
                     unsafe {
                         decoder.write_row_unchecked(batch, row_index, &mut columns)
@@ -206,53 +237,52 @@ impl IcebergFdwScanState {
                     Ok(())
                 })
                 .map_err(ForeignScanError::from),
-        }
-    }
-
-    fn next_parallel_slot(
-        &mut self,
-        output: &mut ScanSlotWriter<'_>,
-    ) -> Result<bool, ForeignScanError> {
-        loop {
-            let cursor =
-                std::mem::replace(&mut self.cursor, ForeignScanCursor::Prepared);
-            if let ForeignScanCursor::Query(mut cursor) = cursor {
-                let produced = cursor
-                    .next_with(|decoder, batch, row_index| {
-                        let mut columns = unsafe { output.datum_columns() };
-                        unsafe {
-                            decoder.write_row_unchecked(
-                                batch,
-                                row_index,
-                                &mut columns,
-                            )
-                        }?;
-                        Ok(())
-                    })
-                    .map_err(ForeignScanError::from)?;
-                if produced {
-                    self.cursor = ForeignScanCursor::Query(cursor);
-                    return Ok(true);
+            ForeignScanPhase::ParallelQuery {
+                execution,
+                prepared,
+            } => loop {
+                if let Some(cursor) = execution.cursor() {
+                    let produced = cursor
+                        .next_with(|decoder, batch, row_index| {
+                            let mut columns = unsafe { output.datum_columns() };
+                            unsafe {
+                                decoder.write_row_unchecked(
+                                    batch,
+                                    row_index,
+                                    &mut columns,
+                                )
+                            }?;
+                            Ok(())
+                        })
+                        .map_err(ForeignScanError::from)?;
+                    if produced {
+                        return Ok(true);
+                    }
+                    execution.finish_cursor();
                 }
+                if !execution
+                    .open_next(prepared)
+                    .map_err(ForeignScanError::provider)?
+                {
+                    return Ok(false);
+                }
+            },
+            ForeignScanPhase::ForeignMutation { cursor, .. } => {
+                cursor.next_slot(output)
             }
-            let Some(work_id) =
-                self.parallel.claim().map_err(ForeignScanError::provider)?
-            else {
-                return Ok(false);
-            };
-            let tasks = self
-                .parallel_source
-                .as_ref()
-                .ok_or_else(|| IcebergFdwError::InvalidPlan {
-                    detail: "parallel Iceberg source is not attached",
-                })?
-                .take_tasks(work_id)
-                .map_err(ForeignScanError::provider)?;
-            self.cursor = ForeignScanCursor::Query(
-                self.spec
-                    .open_query_cursor_with_tasks(Arc::from(tasks.into_boxed_slice()))
-                    .map_err(IcebergFdwError::from)?,
-            );
+            ForeignScanPhase::PreparedQuery { .. }
+            | ForeignScanPhase::PreparedMutation { .. } => {
+                Err(IcebergFdwError::InvalidPlan {
+                    detail: "Iceberg scan cursor was not started",
+                }
+                .into())
+            }
+            ForeignScanPhase::Transitioning | ForeignScanPhase::Ended => {
+                Err(IcebergFdwError::InvalidPlan {
+                    detail: "Iceberg scan is in an invalid lifecycle transition",
+                }
+                .into())
+            }
         }
     }
 
@@ -260,113 +290,154 @@ impl IcebergFdwScanState {
         &mut self,
         context: ReScanForeignScanContext<'_, LagodbIceberg>,
     ) -> Result<(), ForeignScanError> {
-        if context.filters_changed {
-            self.spec.set_row_filter(BoundIcebergPredicate::conjoin(
-                context.filters.iter(),
-            ));
-        }
-        if self.parallel_aware {
-            self.cursor = ForeignScanCursor::Prepared;
-            self.attach_parallel_source()?;
-        } else {
-            self.cursor = self.open_cursor()?;
-        }
-        Ok(())
-    }
-
-    fn prepare_parallel(&mut self) -> Result<(), ForeignScanError> {
-        let tasks = self
-            .spec
-            .planned_query_tasks()
-            .map_err(IcebergFdwError::from)?;
-        let grouped = TaskGrouping::from_properties(self.spec.table_properties())
-            .map_err(ForeignScanError::provider)?
-            .group(&tasks)
-            .map_err(ForeignScanError::provider)?;
-        let work_count = u32::try_from(grouped.group_count()).map_err(|_| {
-            IcebergFdwError::InvalidPlan {
-                detail: "native parallel group count exceeds u32",
+        let replacement = context
+            .filters_changed
+            .then(|| BoundIcebergPredicate::conjoin(context.filters.iter()))
+            .map(ReaderPredicate::new);
+        match &mut self.phase {
+            ForeignScanPhase::SerialQuery { cursor, prepared } => {
+                if let Some(predicate) = replacement {
+                    prepared.rebind_reader_filter(predicate);
+                }
+                *cursor =
+                    prepared.open_row_cursor().map_err(IcebergFdwError::from)?;
             }
-        })?;
-        let bytes = WorkerSource::encode(
-            &self
-                .spec
-                .query_arrow_schema()
-                .map_err(IcebergFdwError::from)?,
-            &tasks,
-            grouped,
-        )
-        .map_err(ForeignScanError::provider)?;
-        self.parallel.prepare(
-            PreparedParallelScan::new(bytes, work_count)
-                .map_err(ForeignScanError::provider)?,
-        );
+            ForeignScanPhase::ParallelQuery {
+                execution,
+                prepared,
+            } => {
+                if let Some(predicate) = replacement {
+                    prepared.rebind_reader_filter(predicate);
+                }
+                execution
+                    .reset_local(prepared)
+                    .map_err(ForeignScanError::provider)?;
+            }
+            ForeignScanPhase::ForeignMutation {
+                cursor,
+                prepared,
+                context,
+            } => {
+                if let Some(predicate) = replacement {
+                    prepared.rebind_reader_filter(predicate);
+                }
+                let registry = cursor.registry();
+                *cursor = ForeignMutationCursor::new(
+                    context
+                        .open_row_location_scan(prepared)
+                        .map_err(IcebergFdwError::from)?,
+                    registry,
+                );
+            }
+            ForeignScanPhase::PreparedQuery { .. }
+            | ForeignScanPhase::PreparedMutation { .. }
+            | ForeignScanPhase::Transitioning
+            | ForeignScanPhase::Ended => {
+                return Err(IcebergFdwError::InvalidPlan {
+                    detail: "Iceberg scan was rescanned before start",
+                }
+                .into());
+            }
+        }
         Ok(())
     }
 
-    pub(crate) fn estimate_dsm(&mut self) -> Result<pg_sys::Size, ForeignScanError> {
-        self.parallel.estimate().map_err(ForeignScanError::provider)
+    pub(crate) fn estimate_dsm(&self) -> Result<pg_sys::Size, ForeignScanError> {
+        self.parallel()?
+            .estimate()
+            .map_err(ForeignScanError::provider)
     }
 
     pub(crate) unsafe fn initialize_dsm(
         &mut self,
         coordinate: *mut core::ffi::c_void,
     ) -> Result<(), ForeignScanError> {
-        unsafe { self.parallel.initialize(coordinate) }
-            .map_err(ForeignScanError::provider)?;
-        self.attach_parallel_source()
+        let ForeignScanPhase::ParallelQuery {
+            execution,
+            prepared,
+        } = &mut self.phase
+        else {
+            return Err(Self::parallel_state_error());
+        };
+        unsafe { execution.initialize(coordinate, prepared) }
+            .map_err(ForeignScanError::provider)
     }
 
     pub(crate) unsafe fn reinitialize_dsm(
         &mut self,
         coordinate: *mut core::ffi::c_void,
     ) -> Result<(), ForeignScanError> {
-        unsafe { self.parallel.attach(coordinate) }
-            .map_err(ForeignScanError::provider)?;
-        self.parallel
-            .reinitialize()
-            .map_err(ForeignScanError::provider)?;
-        Ok(())
+        unsafe { self.parallel_mut()?.reinitialize_shared(coordinate) }
+            .map_err(ForeignScanError::provider)
     }
 
     pub(crate) unsafe fn initialize_worker(
         &mut self,
         coordinate: *mut core::ffi::c_void,
     ) -> Result<(), ForeignScanError> {
-        unsafe { self.parallel.attach(coordinate) }
-            .map_err(ForeignScanError::provider)?;
-        self.attach_parallel_source()
-    }
-
-    fn attach_parallel_source(&mut self) -> Result<(), ForeignScanError> {
-        // SAFETY: `parallel_source` is cleared before the coordinator detaches
-        // this immutable native-parallel DSM payload on every lifecycle path.
-        let source = unsafe {
-            WorkerSource::decode_shared(
-                self.parallel
-                    .payload()
-                    .map_err(ForeignScanError::provider)?,
-                self.spec.file_io(),
-            )
-        }
-        .map_err(ForeignScanError::provider)?;
-        let expected = self
-            .spec
-            .query_arrow_schema()
-            .map_err(IcebergFdwError::from)?;
-        if source.schema().as_ref() != expected.as_ref() {
-            return Err(ForeignScanError::provider(ScanError::WorkerPayload(
-                "worker relation view does not match the leader scan schema"
-                    .to_owned(),
-            )));
-        }
-        self.parallel_source = Some(source);
-        Ok(())
+        let ForeignScanPhase::ParallelQuery {
+            execution,
+            prepared,
+        } = &mut self.phase
+        else {
+            return Err(Self::parallel_state_error());
+        };
+        unsafe { execution.attach_worker(coordinate, prepared) }
+            .map_err(ForeignScanError::provider)
     }
 
     pub(crate) fn shutdown_parallel(&mut self) {
-        self.cursor = ForeignScanCursor::Prepared;
-        self.parallel_source = None;
-        self.parallel.detach();
+        if let ForeignScanPhase::ParallelQuery { execution, .. } = &mut self.phase {
+            execution.shutdown();
+        }
+    }
+
+    pub(crate) fn end(&mut self) {
+        let phase = mem::replace(&mut self.phase, ForeignScanPhase::Ended);
+        match phase {
+            ForeignScanPhase::SerialQuery { cursor, prepared } => {
+                drop(cursor);
+                drop(prepared);
+            }
+            ForeignScanPhase::ParallelQuery {
+                execution,
+                prepared,
+            } => {
+                drop(execution);
+                drop(prepared);
+            }
+            ForeignScanPhase::ForeignMutation {
+                cursor, prepared, ..
+            } => {
+                drop(cursor);
+                drop(prepared);
+            }
+            ForeignScanPhase::PreparedQuery { prepared }
+            | ForeignScanPhase::PreparedMutation { prepared, .. } => drop(prepared),
+            ForeignScanPhase::Transitioning | ForeignScanPhase::Ended => {}
+        }
+    }
+
+    fn parallel(&self) -> Result<&PostgresParallelExecution, ForeignScanError> {
+        let ForeignScanPhase::ParallelQuery { execution, .. } = &self.phase else {
+            return Err(Self::parallel_state_error());
+        };
+        Ok(execution)
+    }
+
+    fn parallel_mut(
+        &mut self,
+    ) -> Result<&mut PostgresParallelExecution, ForeignScanError> {
+        let ForeignScanPhase::ParallelQuery { execution, .. } = &mut self.phase
+        else {
+            return Err(Self::parallel_state_error());
+        };
+        Ok(execution)
+    }
+
+    fn parallel_state_error() -> ForeignScanError {
+        ForeignScanError::provider(IcebergFdwError::InvalidPlan {
+            detail: "parallel callback received a non-parallel Iceberg scan",
+        })
     }
 }

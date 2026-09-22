@@ -63,7 +63,13 @@ mod tests {
             &shape(&[(1, "a"), (2, "b"), (3, "c")], 3),
         )
         .unwrap();
-        let plan = ColumnMapping::from_field_map(&schema, &field_map).unwrap();
+        let plan = ColumnMapping::from_field_map(
+            &schema,
+            &field_map,
+            3,
+            &int_attribute_types(3),
+        )
+        .unwrap();
 
         assert_eq!(plan.entries.len(), 3);
         for (index, entry) in plan.entries.iter().enumerate() {
@@ -80,7 +86,13 @@ mod tests {
             &shape(&[(1, "a"), (2, "b"), (4, "d")], 4),
         )
         .unwrap();
-        let plan = ColumnMapping::from_field_map(&schema, &field_map).unwrap();
+        let plan = ColumnMapping::from_field_map(
+            &schema,
+            &field_map,
+            4,
+            &int_attribute_types(4),
+        )
+        .unwrap();
         let field_index = field_map.into_indexed();
 
         assert_eq!(
@@ -110,7 +122,13 @@ mod tests {
         let field_map =
             RelationFieldMap::from_shape(&schema, &shape(&[(1, "a"), (3, "c")], 3))
                 .unwrap();
-        let plan = ColumnMapping::from_field_map(&schema, &field_map).unwrap();
+        let plan = ColumnMapping::from_field_map(
+            &schema,
+            &field_map,
+            3,
+            &int_attribute_types(3),
+        )
+        .unwrap();
 
         assert_eq!(plan.entries.len(), 2);
         assert_eq!((plan.entries[0].src_col, plan.entries[0].dest), (0, 0));
@@ -134,7 +152,7 @@ mod tests {
             &shape(&[(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e")], 5),
         )
         .unwrap();
-        let projection = Projection::new(vec![
+        let projection = Projection::from_outputs(vec![
             ProjectedField::new(2, 1),
             ProjectedField::new(5, 0),
         ]);
@@ -144,11 +162,15 @@ mod tests {
                     .columns()
                     .iter()
                     .map(|field| (field.attno, field.destination)),
-                2,
-                &int_attribute_types(2),
             )
             .unwrap();
-        let plan = ColumnMapping::from_field_map(&schema, &field_map).unwrap();
+        let plan = ColumnMapping::from_field_map(
+            &schema,
+            &field_map,
+            2,
+            &int_attribute_types(2),
+        )
+        .unwrap();
         let field_index = field_map.into_indexed();
 
         assert!(field_index.binding_for_attno(1).is_none());
@@ -179,7 +201,7 @@ mod tests {
             &shape(&[(1, "a"), (2, "b"), (4, "e")], 4),
         )
         .unwrap();
-        let projection = Projection::new(vec![
+        let projection = Projection::from_outputs(vec![
             ProjectedField::new(2, 0),
             ProjectedField::new(4, 1),
         ]);
@@ -189,11 +211,15 @@ mod tests {
                     .columns()
                     .iter()
                     .map(|field| (field.attno, field.destination)),
-                2,
-                &int_attribute_types(2),
             )
             .unwrap();
-        let plan = ColumnMapping::from_field_map(&schema, &field_map).unwrap();
+        let plan = ColumnMapping::from_field_map(
+            &schema,
+            &field_map,
+            2,
+            &int_attribute_types(2),
+        )
+        .unwrap();
 
         assert_eq!(
             plan.entries
@@ -209,14 +235,12 @@ mod tests {
         let schema = int_schema(&["a", "b"]);
         let full_map =
             RelationFieldMap::from_shape(&schema, &shape(&[(2, "b")], 2)).unwrap();
-        let projection = Projection::new(vec![ProjectedField::new(1, 0)]);
+        let projection = Projection::from_outputs(vec![ProjectedField::new(1, 0)]);
         let result = full_map.project(
             projection
                 .columns()
                 .iter()
                 .map(|field| (field.attno, field.destination)),
-            2,
-            &int_attribute_types(2),
         );
 
         assert!(matches!(result, Err(IcebergError::ColumnNotFound(_))));
@@ -227,14 +251,12 @@ mod tests {
         let schema = int_schema(&["a", "b"]);
         let full_map =
             RelationFieldMap::from_shape(&schema, &shape(&[(1, "a")], 2)).unwrap();
-        let projection = Projection::new(vec![ProjectedField::new(0, 0)]);
+        let projection = Projection::from_outputs(vec![ProjectedField::new(0, 0)]);
         let result = full_map.project(
             projection
                 .columns()
                 .iter()
                 .map(|field| (field.attno, field.destination)),
-            2,
-            &int_attribute_types(2),
         );
 
         assert!(matches!(result, Err(IcebergError::InvariantViolated(_))));
@@ -245,15 +267,22 @@ mod tests {
         let schema = int_schema(&["a", "b"]);
         let full_map =
             RelationFieldMap::from_shape(&schema, &shape(&[(2, "b")], 2)).unwrap();
-        let projection = Projection::new(vec![ProjectedField::new(2, 5)]);
-        let result = full_map.project(
-            projection
-                .columns()
-                .iter()
-                .map(|field| (field.attno, field.destination)),
-            2,
-            &int_attribute_types(2),
-        );
+        let projection = Projection::from_outputs(vec![ProjectedField::new(2, 5)]);
+        let result = full_map
+            .project(
+                projection
+                    .columns()
+                    .iter()
+                    .map(|field| (field.attno, field.destination)),
+            )
+            .and_then(|field_map| {
+                ColumnMapping::from_field_map(
+                    &schema,
+                    &field_map,
+                    2,
+                    &int_attribute_types(2),
+                )
+            });
 
         assert!(matches!(result, Err(IcebergError::InvariantViolated(_))));
     }

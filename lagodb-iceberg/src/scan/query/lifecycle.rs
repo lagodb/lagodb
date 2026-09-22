@@ -14,7 +14,7 @@ use lagodb_core::runtime_api::{RuntimePruningPredicate, TableScanTaskMetrics};
 use super::{ArrowStream, runtime_predicate::IcebergPredicatePlanner};
 use crate::error::{IcebergError, IcebergResult};
 use crate::scan::parallel::{TaskGrouping, TaskGroupingConfig};
-use crate::scan::{BoundQueryScanInput, QueryTaskPlanner, ScanError};
+use crate::scan::{QuerySourceBinding, QueryTaskPlanner, ScanError};
 
 /// Immutable statement snapshot and schema binding. Physical tasks are
 /// deliberately absent and are planned only after DataFusion optimization.
@@ -69,7 +69,7 @@ pub(crate) struct BoundScan {
 
 impl BoundScan {
     pub(crate) fn new(
-        input: BoundQueryScanInput,
+        input: QuerySourceBinding,
         task_grouping: TaskGroupingConfig,
     ) -> Self {
         let scan = StatementScan {

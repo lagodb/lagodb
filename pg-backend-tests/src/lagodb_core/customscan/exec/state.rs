@@ -9,7 +9,7 @@ mod tests {
     use lagodb_core::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, EndContext, LagodbCustomScanProvider, NextSlotContext,
-        PathContext, PathVariant, ReScanContext, RelationContext,
+        NextSlotResult, PathContext, PathVariant, ReScanContext, RelationContext,
     };
     use lagodb_core::customscan::provider::{CustomScanPrivate, NoPrivateData};
     use pgrx::pg_sys;
@@ -42,10 +42,10 @@ mod tests {
             Ok(())
         }
 
-        fn next_slot(
-            _ctx: NextSlotContext<'_, Self>,
-        ) -> Result<bool, CustomScanError> {
-            Ok(false)
+        fn next_slot<'a>(
+            ctx: NextSlotContext<'a, Self>,
+        ) -> Result<NextSlotResult<'a>, CustomScanError> {
+            Ok(ctx.finish_eof())
         }
 
         fn rescan(_ctx: ReScanContext<'_, Self>) -> Result<(), CustomScanError> {

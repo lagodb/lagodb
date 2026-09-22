@@ -1,4 +1,4 @@
-//! Slot-first query and mutation cursors.
+//! Slot-first cursor for managed-table mutation scans.
 
 use arrow_array::{Int64Array, RecordBatch};
 use lagodb_arrow::{ArrowColumnDecoder, BoundBatch};
@@ -9,39 +9,23 @@ use pgrx::pg_sys;
 use crate::managed_table::access::mutation::{
     IcebergFileSource, IcebergModifyQueryState,
 };
-use crate::scan::QueryCursor;
 use crate::scan::batch::{RowLocationLayout, ScanBatchSource, position_unchecked};
 use crate::write::IcebergFileId;
 
-/// Query and mutation scans have different valid bound-batch states.
-///
-/// Keeping them as enum variants prevents query batches from carrying
-/// row-location state and prevents mutation batches from existing without a
-/// registered file identity.
-pub struct BatchCursor {
-    kind: CursorKind,
+/// Row-location-bearing cursor for a managed-table modification scan.
+pub(crate) struct ManagedMutationCursor {
+    inner: MutationBatchCursor,
 }
 
-enum CursorKind {
-    Query(QueryCursor),
-    Mutation(MutationBatchCursor),
-}
-
-impl BatchCursor {
-    pub(super) fn query(cursor: QueryCursor) -> Self {
-        Self {
-            kind: CursorKind::Query(cursor),
-        }
-    }
-
-    pub(super) fn mutation(
+impl ManagedMutationCursor {
+    pub(crate) fn new(
         source: ScanBatchSource,
         decoder: ArrowColumnDecoder,
         binding: ModifyScanBinding<IcebergModifyQueryState>,
         table_oid: pg_sys::Oid,
     ) -> Self {
         Self {
-            kind: CursorKind::Mutation(MutationBatchCursor {
+            inner: MutationBatchCursor {
                 source,
                 decoder,
                 current: None,
@@ -52,12 +36,12 @@ impl BatchCursor {
                     table_oid,
                     last_file: None,
                 },
-            }),
+            },
         }
     }
 }
 
-impl ScanBatchDriver for BatchCursor {
+impl ScanBatchDriver for ManagedMutationCursor {
     fn next_into_slot(
         &mut self,
         direction: ScanDirection,
@@ -66,10 +50,7 @@ impl ScanBatchDriver for BatchCursor {
         if direction != ScanDirection::Forward {
             return unsupported_callback("non-forward Iceberg scan");
         }
-        match &mut self.kind {
-            CursorKind::Query(cursor) => cursor.next_into_slot(out),
-            CursorKind::Mutation(cursor) => cursor.next_into_slot(out),
-        }
+        self.inner.next_into_slot(out)
     }
 }
 
@@ -128,7 +109,7 @@ impl MutationBatchCursor {
                 && self.row_index < self.decoder.num_rows(&bound.decoded)
             {
                 let row_index = self.row_index;
-                // SAFETY: ScanColumns compiled the decoder from the relation
+                // SAFETY: PgRowProjection compiled the decoder from the relation
                 // layout used by this cursor and validated every destination
                 // against the same slot width.
                 unsafe {

@@ -10,7 +10,7 @@ mod tests {
     use lagodb_core::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, EndContext, LagodbCustomScanProvider, NextSlotContext,
-        PathContext, PathVariant, ReScanContext, RelationContext,
+        NextSlotResult, PathContext, PathVariant, ReScanContext, RelationContext,
     };
     use lagodb_core::customscan::provider::{
         CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
@@ -73,9 +73,9 @@ mod tests {
                     );
                 }
 
-                fn next_slot(
-                    _ctx: NextSlotContext<'_, Self>,
-                ) -> Result<bool, CustomScanError> {
+                fn next_slot<'a>(
+                    _ctx: NextSlotContext<'a, Self>,
+                ) -> Result<NextSlotResult<'a>, CustomScanError> {
                     unreachable!(
                         "glue method-table tests only verify FFI method tables and do not invoke scan lifecycle"
                     );

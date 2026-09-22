@@ -2,9 +2,9 @@ use lagodb_core::fdw::{
     BeginForeignScanContext, FdwScan, ForeignPathBuilder, ForeignPathContext,
     ForeignPathKeys, ForeignPathSpec, ForeignPlanContext, ForeignPlanPrivate,
     ForeignPlanSpec, ForeignRelContext, ForeignRelSize, ForeignRelSizeContext,
-    ForeignRowIdentityRequirement, ForeignScanError, PathVariantKind,
-    ReScanForeignScanContext, ScanDatumWriter, ScanOutputColumn, ScanProjection,
-    ScanProjectionPolicy, ScanSlotWriter, StartForeignScanContext,
+    ForeignRowIdentityRequirement, ForeignScanError, ForeignScanResult,
+    PathVariantKind, ReScanForeignScanContext, ScanDatumWriter, ScanOutputColumn,
+    ScanProjection, ScanProjectionPolicy, ScanSlotWriter, StartForeignScanContext,
 };
 use pgrx::IntoDatum;
 use pgrx::pg_sys;
@@ -273,10 +273,10 @@ impl FdwScan for FrameworkTestFdw {
         Ok(())
     }
 
-    fn next_slot(
+    fn next_slot<'a>(
         state: &mut Self::State,
-        output: &mut ScanSlotWriter<'_>,
-    ) -> Result<bool, ForeignScanError> {
+        output: &'a mut ScanSlotWriter<'_>,
+    ) -> Result<ForeignScanResult<'a>, ForeignScanError> {
         while let Some(row) = state.rows.get(state.cursor).cloned() {
             state.cursor += 1;
             if !state.filters.iter().all(|filter| filter.matches(&row)) {
@@ -291,9 +291,9 @@ impl FdwScan for FrameworkTestFdw {
             if state.item_pointer_identity {
                 output.write_item_pointer(&row.item_pointer());
             }
-            return Ok(true);
+            return output.finish(true);
         }
-        Ok(false)
+        output.finish(false)
     }
 
     fn rescan(

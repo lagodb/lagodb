@@ -15,7 +15,7 @@ use super::plan_filter::ForeignFilterExplainValues;
 use super::pushdown::{
     BeginForeignScanContext, ReScanForeignScanContext, StartForeignScanContext,
 };
-use super::slot::ScanSlotWriter;
+use super::slot::{ForeignScanResult, ScanSlotWriter};
 
 /// Optional scan capability of an FDW provider.
 pub trait FdwScan: ForeignDataWrapper + FilterPushdown + 'static {
@@ -134,19 +134,20 @@ pub trait FdwScan: ForeignDataWrapper + FilterPushdown + 'static {
         ctx: StartForeignScanContext<'_, Self>,
     ) -> Result<(), ForeignScanError>;
 
-    /// Produce the next row.
+    /// Produce the next row and finalize it through [`ScanSlotWriter::finish`].
     ///
-    /// Returning `true` requires either one datum representation or one
+    /// A produced result requires either one datum representation or one
     /// provider-owned HeapTuple representation. Datum output obtains
     /// [`super::slot::ScanDatumWriter`] once for the row and writes every
     /// [`super::slot::ScanOutputColumn`] exactly once; the requested row
-    /// identity must also be supplied. A
-    /// synthetic-null projection has no provider column to write. Returning
-    /// `false` requires leaving `output` untouched.
-    fn next_slot(
+    /// identity must also be supplied. A synthetic-null projection has no
+    /// provider column to write. An end-of-scan result is cleared by the
+    /// framework; providers that must probe PostgreSQL-owned output buffers
+    /// before discovering EOF may leave those unpublished writes in the writer.
+    fn next_slot<'a>(
         state: &mut Self::State,
-        output: &mut ScanSlotWriter<'_>,
-    ) -> Result<bool, ForeignScanError>;
+        output: &'a mut ScanSlotWriter<'_>,
+    ) -> Result<ForeignScanResult<'a>, ForeignScanError>;
 
     fn rescan(
         state: &mut Self::State,

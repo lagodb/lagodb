@@ -1,7 +1,7 @@
 //! Backend tests for Iceberg scan batch adaptation.
 //!
-//! Advancing [`ArrowBatches`] calls PostgreSQL's interrupt checker, so
-//! this test must execute inside a PostgreSQL backend.
+//! Advancing [`InterruptibleArrowBatches`] calls PostgreSQL's interrupt
+//! checker, so this test must execute inside a PostgreSQL backend.
 
 #[pgrx::pg_schema]
 mod tests {
@@ -11,7 +11,7 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
     use iceberg_lite::scan::ArrowRecordBatchIterator;
 
-    use crate::scan::batch::ArrowBatches;
+    use crate::scan::batch::InterruptibleArrowBatches;
 
     fn schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![Field::new(
@@ -29,7 +29,7 @@ mod tests {
                 .expect("valid test batch");
         let batches: ArrowRecordBatchIterator =
             Box::new(vec![Ok(empty.clone()), Ok(non_empty.clone())].into_iter());
-        let mut adapted = ArrowBatches(batches);
+        let mut adapted = InterruptibleArrowBatches(batches);
 
         assert_eq!(adapted.next().unwrap().unwrap(), empty);
         assert_eq!(adapted.next().unwrap().unwrap(), non_empty);

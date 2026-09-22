@@ -14,8 +14,8 @@ use std::sync::OnceLock;
 use lagodb_core::customscan::provider::{
     BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
     CustomScanError, EndContext, LagodbCustomScanProvider, NextSlotContext,
-    PathContext, PathVariant, PathVariantKind, ReScanContext, RelationContext,
-    register_provider,
+    NextSlotResult, PathContext, PathVariant, PathVariantKind, ReScanContext,
+    RelationContext, register_provider,
 };
 use lagodb_core::customscan::provider::{
     CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
@@ -362,8 +362,10 @@ impl LagodbCustomScanProvider for HookIntegrationProvider {
         Ok(())
     }
 
-    fn next_slot(_ctx: NextSlotContext<'_, Self>) -> Result<bool, CustomScanError> {
-        Ok(false)
+    fn next_slot<'a>(
+        ctx: NextSlotContext<'a, Self>,
+    ) -> Result<NextSlotResult<'a>, CustomScanError> {
+        Ok(ctx.finish_eof())
     }
 
     fn rescan(_ctx: ReScanContext<'_, Self>) -> Result<(), CustomScanError> {

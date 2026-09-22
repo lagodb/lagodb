@@ -8,7 +8,8 @@ use crate::customscan::error::CustomScanError;
 use crate::expr::pushdown::FilterPushdown;
 
 use super::execution::{
-    BeginContext, CreateStateContext, EndContext, NextSlotContext, ReScanContext,
+    BeginContext, CreateStateContext, EndContext, NextSlotContext, NextSlotResult,
+    ReScanContext,
 };
 use super::planning::{
     CustomPathBuilder, CustomPathPlan, PathContext, PathVariant, RelationContext,
@@ -58,8 +59,10 @@ pub trait LagodbCustomScanProvider: FilterPushdown {
     /// Open scan cursor; framework calls from BeginCustomScan.
     fn begin(ctx: BeginContext<'_, Self>) -> Result<(), CustomScanError>;
 
-    /// Produce the next row; `Ok(false)` means end of scan.
-    fn next_slot(ctx: NextSlotContext<'_, Self>) -> Result<bool, CustomScanError>;
+    /// Produce the next row through the framework-owned slot publication path.
+    fn next_slot<'a>(
+        ctx: NextSlotContext<'a, Self>,
+    ) -> Result<NextSlotResult<'a>, CustomScanError>;
 
     /// Rewind the scan, replacing predicates when `filters_changed`.
     fn rescan(ctx: ReScanContext<'_, Self>) -> Result<(), CustomScanError>;

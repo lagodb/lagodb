@@ -6,11 +6,13 @@ pub(crate) mod parallel;
 pub(crate) mod projection;
 pub(crate) mod query;
 mod query_cursor;
-mod spec;
+mod read;
 
 pub(crate) use error::ScanError;
-pub(crate) use query_cursor::QueryCursor;
-pub(crate) use spec::{
-    AnalyzeScanInput, BoundQueryScanInput, MutationScanInput, QueryTaskPlanner,
-    ScanSource, ScanSpec,
+pub(crate) use query::{QuerySourceBinding, QueryTaskPlanner};
+pub(crate) use query_cursor::PgRowCursor;
+pub(crate) use read::{
+    AnalyzeScanInput, CountRowsRead, IcebergReadSnapshot, PreparedIcebergRead,
+    PreparedRowScan, ReaderPredicate, RowLocationScanInput, ScanPredicates,
+    StablePruningPredicate,
 };

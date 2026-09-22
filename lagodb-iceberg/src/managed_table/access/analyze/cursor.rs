@@ -14,7 +14,8 @@ use lagodb_core::prelude::*;
 use super::sampling::SampledPosition;
 use crate::error::{IcebergError, IcebergResult};
 use crate::scan::batch::{
-    ArrowBatches, RowLocationLayout, ScanBatchSource, position_unchecked,
+    AnalyzeBatchSource, InterruptibleArrowBatches, RowLocationLayout,
+    position_unchecked,
 };
 
 const TUPLES_PER_SYNTHETIC_BLOCK: u64 = 2048;
@@ -34,7 +35,7 @@ impl AnalyzeReadPlan {
     pub(super) fn open(
         self,
         scan: &TableScan,
-    ) -> IcebergResult<(ScanBatchSource, ExpectedCursor)> {
+    ) -> IcebergResult<(AnalyzeBatchSource, ExpectedCursor)> {
         let (batches, expected) = match self {
             Self::Selected { requests, expected } => {
                 (scan.to_arrow_with_selected_rows(requests)?, expected)
@@ -43,7 +44,10 @@ impl AnalyzeReadPlan {
                 (scan.to_arrow_with_validated_tasks(tasks)?, expected)
             }
         };
-        Ok((ArrowBatchSource::new(ArrowBatches(batches)), expected))
+        Ok((
+            ArrowBatchSource::new(InterruptibleArrowBatches(batches)),
+            expected,
+        ))
     }
 }
 
@@ -54,7 +58,7 @@ struct AnalyzeBoundBatch {
 }
 
 pub(super) struct AnalyzeBatchCursor {
-    source: ScanBatchSource,
+    source: AnalyzeBatchSource,
     decoder: ArrowColumnDecoder,
     current: Option<AnalyzeBoundBatch>,
     row_location_layout: Option<RowLocationLayout>,
@@ -74,7 +78,7 @@ pub(super) struct AnalyzeBatchCursor {
 
 impl AnalyzeBatchCursor {
     pub(super) fn try_new(
-        source: ScanBatchSource,
+        source: AnalyzeBatchSource,
         decoder: ArrowColumnDecoder,
         expected: ExpectedCursor,
         tickets: u64,

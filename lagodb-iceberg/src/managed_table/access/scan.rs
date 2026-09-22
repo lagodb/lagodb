@@ -2,26 +2,20 @@
 //!
 //! Query scans keep two lifecycle layers:
 //!
-//! - [`ScanSpec`] owns the statement snapshot, bound columns, predicates, and
-//!   planned-task caches. It is built once in [`AmScanSession::scan_begin`] and
+//! - [`PreparedRowScan`] owns the statement snapshot, projection, predicates,
+//!   decoder, and query task cache. It is built once in
+//!   [`AmScanSession::scan_begin`] and
 //!   preserved across `scan_rescan`, so the visible snapshot is frozen for the
 //!   scan's duration. This matches the Read Committed contract: every
 //!   `scan_rescan` comes from the same statement that issued `scan_begin`.
-//! - [`BatchCursor`] owns one traversal over the planned tasks;
-//!   `scan_rescan` rebuilds only this traversal from the existing spec.
+//! - [`PgRowCursor`] owns one traversal over the planned tasks;
+//!   `scan_rescan` rebuilds only this traversal from the prepared read.
 //!
 //! ANALYZE has its own state after the shared statement metadata and decoder
-//! have been captured. Batch adaptation and row-location binding live in
-//! [`batch`], below both query and ANALYZE cursors.
+//! have been captured. Managed mutation cursors and task ownership live in the
+//! sibling `mutation` module, not in this TableAM scan adapter.
 
 use std::mem;
-
-mod cursor;
-mod spec;
-
-pub(crate) use crate::scan::ScanSpec;
-pub use cursor::BatchCursor;
-pub(crate) use spec::LoadedScanMetadata;
 
 use lagodb_core::access::scan::virtual_slot_callbacks_with_tid;
 use lagodb_core::handles::RelationHandle;
@@ -29,8 +23,11 @@ use lagodb_core::prelude::*;
 use pgrx::pg_sys;
 
 use crate::error::IcebergError;
-use crate::managed_table::IcebergTableAm;
-use crate::managed_table::access::analyze::AnalyzeScanState;
+use crate::managed_table::access::analyze::{AnalyzePreparation, AnalyzeScanState};
+use crate::managed_table::{
+    IcebergTableAm, ManagedAnalyzeSnapshot, ManagedTableSnapshot,
+};
+use crate::scan::{AnalyzeScanInput, PgRowCursor, PreparedRowScan, ScanPredicates};
 use crate::schema::relation::RelationShape;
 
 /// PostgreSQL-facing scan session for the Iceberg table AM.
@@ -73,12 +70,24 @@ impl ScanPurpose {
                 relation, keys,
             )?)),
             Self::Analyze => {
-                let spec = ScanSpec::build_for_analyze(
+                let loaded = ManagedAnalyzeSnapshot::load(
                     relation.oid,
                     relation.tablespace_oid,
+                )?;
+                let (snapshot, storage_bytes) = loaded.into_parts();
+                let prepared = PreparedRowScan::full(
+                    snapshot,
+                    ScanPredicates::unfiltered(),
                     &relation.shape,
                 )?;
-                let preparation = spec.prepare_analyze()?;
+                let AnalyzeScanInput {
+                    scan,
+                    tasks,
+                    decoder,
+                    storage_bytes,
+                } = prepared.analyze_input(storage_bytes)?;
+                let preparation =
+                    AnalyzePreparation::try_new(scan, tasks, decoder, storage_bytes)?;
                 Ok(IcebergScanState::Analyze(Box::new(
                     AnalyzeScanState::pending(preparation),
                 )))
@@ -88,25 +97,55 @@ impl ScanPurpose {
 }
 
 struct QueryScanState {
-    spec: ScanSpec,
-    cursor: BatchCursor,
+    prepared: PreparedRowScan,
+    cursor: TableScanCursor,
+}
+
+/// Public associated-type boundary for the table-AM scan driver.
+///
+/// The underlying Iceberg cursor remains crate-private because its generic
+/// batch-source representation is an implementation detail. This newtype
+/// boundary adds no allocation and keeps row dispatch statically
+/// bound through [`ScanBatchDriver`].
+pub struct TableScanCursor(PgRowCursor);
+
+impl TableScanCursor {
+    fn new(cursor: PgRowCursor) -> Self {
+        Self(cursor)
+    }
+}
+
+impl ScanBatchDriver for TableScanCursor {
+    #[inline]
+    fn next_into_slot(
+        &mut self,
+        direction: ScanDirection,
+        out: &mut SlotColumns<'_>,
+    ) -> AmResult<bool> {
+        ScanBatchDriver::next_into_slot(&mut self.0, direction, out)
+    }
 }
 
 impl QueryScanState {
-    fn begin(relation: &ScanRelation, keys: &OwnedScanKeys) -> AmResult<Self> {
-        let mut spec = ScanSpec::build(
-            relation.oid,
-            relation.tablespace_oid,
-            keys,
+    fn begin(relation: &ScanRelation, _keys: &OwnedScanKeys) -> AmResult<Self> {
+        let snapshot =
+            ManagedTableSnapshot::load_query(relation.oid, relation.tablespace_oid)?
+                .into_read_snapshot();
+        let mut prepared = PreparedRowScan::full(
+            snapshot,
+            ScanPredicates::unfiltered(),
             &relation.shape,
         )?;
-        let cursor = spec.open_batch_cursor()?;
-        Ok(Self { spec, cursor })
+        let cursor = TableScanCursor::new(prepared.open_row_cursor()?);
+        Ok(Self { prepared, cursor })
     }
 
-    fn rescan(&mut self, keys: &OwnedScanKeys) -> AmResult<()> {
-        self.spec.refresh_filter(keys)?;
-        self.cursor = self.spec.open_batch_cursor()?;
+    fn rescan(&mut self, _keys: &OwnedScanKeys) -> AmResult<()> {
+        // Iceberg advertises no scan-key path. PostgreSQL remains responsible
+        // for SeqScan qualification, matching the previous empty translation.
+        self.prepared
+            .replace_predicates(ScanPredicates::unfiltered());
+        self.cursor = TableScanCursor::new(self.prepared.open_row_cursor()?);
         Ok(())
     }
 }
@@ -129,7 +168,7 @@ impl AmScan for IcebergTableAm {
 }
 
 impl AmScanSession for IcebergScan {
-    type BatchDriver = BatchCursor;
+    type BatchDriver = TableScanCursor;
 
     fn new(
         rel: &RelationHandle,
