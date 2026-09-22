@@ -75,7 +75,7 @@ fn usage_error(message: &str) -> String {
            cargo xtask test-all pg17\n  \
            cargo xtask regress pg17\n  \
            cargo xtask regress pg17 iceberg worker\n  \
-           cargo xtask regress pg17 connectors copy_codecs\n  \
+           cargo xtask regress pg17 connectors compression\n  \
            cargo xtask isolation pg17\n  \
            cargo xtask isolation pg17 cas_retry_stress"
     )

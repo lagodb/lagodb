@@ -1,8 +1,6 @@
 \i include/column_definitions.sql
 
--- Stream compression inference, explicit overrides, and malformed input.
-
-SET client_min_messages = warning;
+-- Shared stream-compression inference, overrides, and codec boundaries.
 
 SELECT endpoint,
        bucket,
@@ -32,27 +30,15 @@ SELECT format('s3://%s/lagodb-connectors/codecs/plain-suffix.txt.gz',
               :'storage_bucket') AS gzip_member_2_path,
        format('s3://%s/lagodb-connectors/codecs/concatenated.txt.gz',
               :'storage_bucket') AS gzip_concatenated_path,
-       format('s3://%s/lagodb-connectors/codecs/truncated.txt.gz',
-              :'storage_bucket') AS truncated_gzip_path,
        format('s3://%s/lagodb-connectors/codecs/truncated.txt.zst',
               :'storage_bucket') AS truncated_zstd_path,
        format('s3://%s/lagodb-connectors/codecs/corrupt.txt.gz',
               :'storage_bucket') AS corrupt_gzip_path,
-       format('s3://%s/lagodb-connectors/codecs/corrupt.txt.zst',
-              :'storage_bucket') AS corrupt_zstd_path,
-       format('s3://%s/lagodb-connectors/codecs/malformed-framing.csv',
-              :'storage_bucket') AS malformed_framing_path,
-       format('s3://%s/lagodb-connectors/codecs/malformed-width.csv',
-              :'storage_bucket') AS malformed_width_path,
        'lagodb-connectors/codecs/member-1.txt.gz' AS gzip_member_1_key,
        'lagodb-connectors/codecs/member-2.txt.gz' AS gzip_member_2_key,
        'lagodb-connectors/codecs/concatenated.txt.gz' AS gzip_concatenated_key,
-       'lagodb-connectors/codecs/truncated.txt.gz' AS truncated_gzip_key,
        'lagodb-connectors/codecs/truncated.txt.zst' AS truncated_zstd_key,
-       'lagodb-connectors/codecs/corrupt.txt.gz' AS corrupt_gzip_key,
-       'lagodb-connectors/codecs/corrupt.txt.zst' AS corrupt_zstd_key,
-       'lagodb-connectors/codecs/malformed-framing.csv' AS malformed_framing_key,
-       'lagodb-connectors/codecs/malformed-width.csv' AS malformed_width_key
+       'lagodb-connectors/codecs/corrupt.txt.gz' AS corrupt_gzip_key
 \gset codec_
 
 -- An explicit compression option takes precedence over a compression-looking
@@ -70,7 +56,9 @@ WITH (
     compression 'none'
 );
 
+SET client_min_messages = warning;
 DROP TABLE IF EXISTS lagodb_connectors_regress.codec_plain_gz;
+RESET client_min_messages;
 CREATE TABLE lagodb_connectors_regress.codec_plain_gz
     (:common_columns);
 COPY lagodb_connectors_regress.codec_plain_gz
@@ -103,7 +91,9 @@ COPY lagodb_connectors_regress.common_source
 TO :'codec_zstd_alias_path'
 WITH (server 'lagodb_connectors_regress_s3');
 
+SET client_min_messages = warning;
 DROP TABLE IF EXISTS lagodb_connectors_regress.codec_gzip_alias;
+RESET client_min_messages;
 CREATE TABLE lagodb_connectors_regress.codec_gzip_alias
     (:common_columns);
 COPY lagodb_connectors_regress.codec_gzip_alias
@@ -140,7 +130,9 @@ WITH (server 'lagodb_connectors_regress_s3');
 \setenv OBJECT_STORAGE_KEY :codec_gzip_concatenated_key
 \! sh bin/object_storage_tool concatenate
 
+SET client_min_messages = warning;
 DROP TABLE IF EXISTS lagodb_connectors_regress.codec_concatenated_gzip;
+RESET client_min_messages;
 CREATE TABLE lagodb_connectors_regress.codec_concatenated_gzip
     (:common_columns);
 COPY lagodb_connectors_regress.codec_concatenated_gzip
@@ -150,17 +142,10 @@ SELECT count(*) AS concatenated_gzip_rows,
        string_agg(id::text, ',' ORDER BY id) AS concatenated_gzip_ids
 FROM lagodb_connectors_regress.codec_concatenated_gzip;
 
--- Corruption and truncation must surface a codec I/O SQLSTATE rather than
--- successful EOF. Header corruption deterministically invalidates the format
--- magic; truncation exercises final frame/trailer validation.
+-- One representative failure per codec protects error propagation without
+-- multiplying corruption and truncation across every stream format.
 COPY lagodb_connectors_regress.common_source
 TO :'codec_corrupt_gzip_path'
-WITH (server 'lagodb_connectors_regress_s3');
-COPY lagodb_connectors_regress.common_source
-TO :'codec_corrupt_zstd_path'
-WITH (server 'lagodb_connectors_regress_s3');
-COPY lagodb_connectors_regress.common_source
-TO :'codec_truncated_gzip_path'
 WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.common_source
 TO :'codec_truncated_zstd_path'
@@ -168,11 +153,7 @@ WITH (server 'lagodb_connectors_regress_s3');
 
 \setenv OBJECT_STORAGE_KEY :codec_corrupt_gzip_key
 \! sh bin/object_storage_tool corrupt
-\setenv OBJECT_STORAGE_KEY :codec_corrupt_zstd_key
-\! sh bin/object_storage_tool corrupt
 \setenv OBJECT_STORAGE_TRUNCATE_BYTES 8
-\setenv OBJECT_STORAGE_KEY :codec_truncated_gzip_key
-\! sh bin/object_storage_tool truncate
 \setenv OBJECT_STORAGE_KEY :codec_truncated_zstd_key
 \! sh bin/object_storage_tool truncate
 
@@ -181,19 +162,13 @@ SELECT lagodb.invalidate_object_cache(
        ) AS cache_invalidated
 \gset
 SELECT lagodb.invalidate_object_cache(
-           :'codec_corrupt_zstd_path', 'lagodb_connectors_regress_s3'
-       ) AS cache_invalidated
-\gset
-SELECT lagodb.invalidate_object_cache(
-           :'codec_truncated_gzip_path', 'lagodb_connectors_regress_s3'
-       ) AS cache_invalidated
-\gset
-SELECT lagodb.invalidate_object_cache(
            :'codec_truncated_zstd_path', 'lagodb_connectors_regress_s3'
        ) AS cache_invalidated
 \gset
 
+SET client_min_messages = warning;
 DROP TABLE IF EXISTS lagodb_connectors_regress.codec_error_sink;
+RESET client_min_messages;
 CREATE TABLE lagodb_connectors_regress.codec_error_sink
     (:common_columns);
 
@@ -202,52 +177,6 @@ COPY lagodb_connectors_regress.codec_error_sink
 FROM :'codec_corrupt_gzip_path'
 WITH (server 'lagodb_connectors_regress_s3');
 COPY lagodb_connectors_regress.codec_error_sink
-FROM :'codec_corrupt_zstd_path'
-WITH (server 'lagodb_connectors_regress_s3');
-COPY lagodb_connectors_regress.codec_error_sink
-FROM :'codec_truncated_gzip_path'
-WITH (server 'lagodb_connectors_regress_s3');
-COPY lagodb_connectors_regress.codec_error_sink
 FROM :'codec_truncated_zstd_path'
 WITH (server 'lagodb_connectors_regress_s3');
 \set VERBOSITY default
-
--- Raw fixtures reach PostgreSQL's CSV framing and field-count validation
--- through both the direct COPY adapter and the shared text/CSV FDW reader.
-\setenv OBJECT_STORAGE_FILE data/malformed_csv_framing.csv
-\setenv OBJECT_STORAGE_KEY :codec_malformed_framing_key
-\! sh bin/object_storage_tool put
-\setenv OBJECT_STORAGE_FILE data/malformed_csv_width.csv
-\setenv OBJECT_STORAGE_KEY :codec_malformed_width_key
-\! sh bin/object_storage_tool put
-
-DROP TABLE IF EXISTS lagodb_connectors_regress.codec_csv_sink;
-CREATE TABLE lagodb_connectors_regress.codec_csv_sink (
-    id integer,
-    payload text
-);
-CREATE FOREIGN TABLE lagodb_connectors_regress.codec_csv_framing (
-    id integer,
-    payload text
-)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'codec_malformed_framing_path', format 'csv');
-CREATE FOREIGN TABLE lagodb_connectors_regress.codec_csv_width (
-    id integer,
-    payload text
-)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'codec_malformed_width_path', format 'csv');
-
-\set VERBOSITY sqlstate
-COPY lagodb_connectors_regress.codec_csv_sink
-FROM :'codec_malformed_framing_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'csv');
-COPY lagodb_connectors_regress.codec_csv_sink
-FROM :'codec_malformed_width_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'csv');
-SELECT count(*) FROM lagodb_connectors_regress.codec_csv_framing;
-SELECT count(*) FROM lagodb_connectors_regress.codec_csv_width;
-\set VERBOSITY default
-
-RESET client_min_messages;

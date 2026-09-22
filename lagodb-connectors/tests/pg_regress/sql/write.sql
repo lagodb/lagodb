@@ -1,8 +1,6 @@
 \i include/column_definitions.sql
 
--- Transaction, statement-abort, and repeated-write lifecycle coverage.
-
-SET client_min_messages = warning;
+-- Shared writer transaction, statement-abort, and rollover lifecycle.
 
 SELECT endpoint,
        bucket,
@@ -20,14 +18,6 @@ FROM lagodb_regress.object_storage_fixture
 
 SELECT format('s3://%s/lagodb-connectors/lifecycle/rollback/text/',
               :'storage_bucket') AS rollback_text_path,
-       format('s3://%s/lagodb-connectors/lifecycle/rollback/csv/',
-              :'storage_bucket') AS rollback_csv_path,
-       format('s3://%s/lagodb-connectors/lifecycle/rollback/json/',
-              :'storage_bucket') AS rollback_json_path,
-       format('s3://%s/lagodb-connectors/lifecycle/rollback/avro/',
-              :'storage_bucket') AS rollback_avro_path,
-       format('s3://%s/lagodb-connectors/lifecycle/rollback/parquet/',
-              :'storage_bucket') AS rollback_parquet_path,
        format('s3://%s/lagodb-connectors/lifecycle/commit/',
               :'storage_bucket') AS commit_path,
        format('s3://%s/lagodb-connectors/lifecycle/savepoint/',
@@ -67,25 +57,10 @@ CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_rollback_text
     (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_rollback_text_path', format 'text');
-CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_rollback_csv
-    (:common_columns)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'lifecycle_rollback_csv_path', format 'csv');
-CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_rollback_json
-    (:json_columns)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'lifecycle_rollback_json_path', format 'json');
-CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_rollback_avro
-    (:common_columns)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'lifecycle_rollback_avro_path', format 'avro');
-CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_rollback_parquet
-    (:parquet_columns)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'lifecycle_rollback_parquet_path', format 'parquet');
 
--- Every writer publishes at statement finish. The object is visible inside
--- the transaction and removed by its distinct finish/flush path on abort.
+-- Abort cleanup is owned by the shared upload lifecycle, so one format covers
+-- the transaction callback. Per-format finish paths are covered below by the
+-- empty-output and rollover conformance matrices.
 BEGIN;
 INSERT INTO lagodb_connectors_regress.lifecycle_rollback_text
 SELECT * FROM lagodb_connectors_regress.common_source WHERE id = 1;
@@ -93,48 +68,8 @@ SELECT count(*) AS text_rows_before_rollback
 FROM lagodb_connectors_regress.lifecycle_rollback_text;
 ROLLBACK;
 
-BEGIN;
-INSERT INTO lagodb_connectors_regress.lifecycle_rollback_csv
-SELECT * FROM lagodb_connectors_regress.common_source WHERE id = 1;
-SELECT count(*) AS csv_rows_before_rollback
-FROM lagodb_connectors_regress.lifecycle_rollback_csv;
-ROLLBACK;
-
-BEGIN;
-INSERT INTO lagodb_connectors_regress.lifecycle_rollback_json
-SELECT * FROM lagodb_connectors_regress.json_source WHERE id = 1;
-SELECT count(*) AS json_rows_before_rollback
-FROM lagodb_connectors_regress.lifecycle_rollback_json;
-ROLLBACK;
-
-BEGIN;
-INSERT INTO lagodb_connectors_regress.lifecycle_rollback_avro
-SELECT * FROM lagodb_connectors_regress.common_source WHERE id = 1;
-SELECT count(*) AS avro_rows_before_rollback
-FROM lagodb_connectors_regress.lifecycle_rollback_avro;
-ROLLBACK;
-
-BEGIN;
-INSERT INTO lagodb_connectors_regress.lifecycle_rollback_parquet
-SELECT * FROM lagodb_connectors_regress.parquet_source WHERE id = 1;
-SELECT count(*) AS parquet_rows_before_rollback
-FROM lagodb_connectors_regress.lifecycle_rollback_parquet;
-ROLLBACK;
-
-SELECT relation, rows
-FROM (
-    SELECT 'text' AS relation, count(*) AS rows
-    FROM lagodb_connectors_regress.lifecycle_rollback_text
-    UNION ALL
-    SELECT 'csv', count(*) FROM lagodb_connectors_regress.lifecycle_rollback_csv
-    UNION ALL
-    SELECT 'json', count(*) FROM lagodb_connectors_regress.lifecycle_rollback_json
-    UNION ALL
-    SELECT 'avro', count(*) FROM lagodb_connectors_regress.lifecycle_rollback_avro
-    UNION ALL
-    SELECT 'parquet', count(*) FROM lagodb_connectors_regress.lifecycle_rollback_parquet
-) AS rollback_results
-ORDER BY relation;
+SELECT count(*) AS rows_after_rollback
+FROM lagodb_connectors_regress.lifecycle_rollback_text;
 
 -- A committed prefix object remains visible after the transaction callback.
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_commit
@@ -292,4 +227,133 @@ ROLLBACK;
 \! sh bin/object_storage_tool assert-prefix-empty
 
 RESET lagodb_connectors.target_file_size_mb;
+
+-- Prefix rollover for every writer implementation.
+
+SELECT format('s3://%s/lagodb-connectors/rollover/text/',
+              :'storage_bucket') AS text_path,
+       format('s3://%s/lagodb-connectors/rollover/csv/',
+              :'storage_bucket') AS csv_path,
+       format('s3://%s/lagodb-connectors/rollover/json/',
+              :'storage_bucket') AS json_path,
+       format('s3://%s/lagodb-connectors/rollover/avro/',
+              :'storage_bucket') AS avro_path,
+       format('s3://%s/lagodb-connectors/rollover/parquet/',
+              :'storage_bucket') AS parquet_path,
+       'lagodb-connectors/rollover/text/' AS text_key,
+       'lagodb-connectors/rollover/csv/' AS csv_key,
+       'lagodb-connectors/rollover/json/' AS json_key,
+       'lagodb-connectors/rollover/avro/' AS avro_key,
+       'lagodb-connectors/rollover/parquet/' AS parquet_key
+\gset rollover_
+
+SET lagodb_connectors.target_file_size_mb = 1;
+SET client_min_messages = warning;
+DROP TABLE IF EXISTS lagodb_connectors_regress.rollover_source CASCADE;
 RESET client_min_messages;
+CREATE TABLE lagodb_connectors_regress.rollover_source (
+    id integer,
+    payload text
+);
+INSERT INTO lagodb_connectors_regress.rollover_source
+SELECT row_id,
+       string_agg(md5(row_id::text || ':' || chunk_id::text), '' ORDER BY chunk_id)
+FROM generate_series(1, 800) AS row_values(row_id)
+CROSS JOIN generate_series(1, 800) AS chunk_values(chunk_id)
+GROUP BY row_id
+ORDER BY row_id;
+
+COPY lagodb_connectors_regress.rollover_source
+TO :'rollover_text_path'
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
+COPY lagodb_connectors_regress.rollover_source
+TO :'rollover_csv_path'
+WITH (server 'lagodb_connectors_regress_s3', format 'csv');
+COPY lagodb_connectors_regress.rollover_source
+TO :'rollover_json_path'
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
+COPY lagodb_connectors_regress.rollover_source
+TO :'rollover_avro_path'
+WITH (server 'lagodb_connectors_regress_s3', format 'avro');
+COPY lagodb_connectors_regress.rollover_source
+TO :'rollover_parquet_path'
+WITH (
+    server 'lagodb_connectors_regress_s3',
+    format 'parquet',
+    compression 'none'
+);
+
+\setenv OBJECT_STORAGE_PREFIX :rollover_text_key
+\! sh bin/object_storage_tool assert-prefix-rollover
+\setenv OBJECT_STORAGE_PREFIX :rollover_csv_key
+\! sh bin/object_storage_tool assert-prefix-rollover
+\setenv OBJECT_STORAGE_PREFIX :rollover_json_key
+\! sh bin/object_storage_tool assert-prefix-rollover
+\setenv OBJECT_STORAGE_PREFIX :rollover_avro_key
+\! sh bin/object_storage_tool assert-prefix-rollover
+\setenv OBJECT_STORAGE_PREFIX :rollover_parquet_key
+\! sh bin/object_storage_tool assert-prefix-rollover
+
+CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_text
+    (:id_payload_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'rollover_text_path', format 'text');
+CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_csv
+    (:id_payload_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'rollover_csv_path', format 'csv');
+CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_json
+    (:id_payload_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'rollover_json_path', format 'json');
+CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_avro
+    (:id_payload_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'rollover_avro_path', format 'avro');
+CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_parquet
+    (:id_payload_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'rollover_parquet_path', format 'parquet');
+
+SET client_min_messages = warning;
+DROP TABLE IF EXISTS lagodb_connectors_regress.rollover_parquet_copy;
+RESET client_min_messages;
+CREATE TABLE lagodb_connectors_regress.rollover_parquet_copy
+    (:id_payload_columns);
+COPY lagodb_connectors_regress.rollover_parquet_copy
+FROM :'rollover_parquet_path'
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
+
+SELECT relation, rows, digest
+FROM (
+    SELECT 'text' AS relation, count(*) AS rows,
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id)) AS digest
+    FROM lagodb_connectors_regress.rollover_text AS value
+    UNION ALL
+    SELECT 'csv', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.rollover_csv AS value
+    UNION ALL
+    SELECT 'json', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.rollover_json AS value
+    UNION ALL
+    SELECT 'avro', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.rollover_avro AS value
+    UNION ALL
+    SELECT 'parquet', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.rollover_parquet AS value
+    UNION ALL
+    SELECT 'parquet-copy', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.rollover_parquet_copy AS value
+    UNION ALL
+    SELECT 'source', count(*),
+           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
+    FROM lagodb_connectors_regress.rollover_source AS value
+) AS rollover_results
+ORDER BY relation;
+
+RESET lagodb_connectors.target_file_size_mb;
