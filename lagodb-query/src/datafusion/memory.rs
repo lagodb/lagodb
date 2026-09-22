@@ -18,7 +18,7 @@ use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 
 use crate::ExecutionProfile;
 
-use super::QueryExecutionError;
+use super::error::QueryExecutionError;
 
 pub(super) struct RuntimeResources {
     pub(super) environment: Arc<RuntimeEnv>,

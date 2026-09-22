@@ -12,7 +12,7 @@ use lagodb_core::runtime_api::{
     REGISTER_INVALID_DESCRIPTOR, TableScanDescriptor, TableScanPlanningRequest,
     TableScanWorkerDescriptor,
 };
-use lagodb_query::datafusion::{SerialTableScanCallbacks, WorkerTableScanCallbacks};
+use lagodb_query::datafusion::{TableScanCallbacks, WorkerTableScanCallbacks};
 use pgrx::{pg_sys, prelude::PgSqlErrorCode};
 
 use crate::descriptor_registry::{
@@ -25,15 +25,15 @@ thread_local! {
 }
 
 #[derive(Clone, Copy)]
-struct TableScanCallbacks {
+struct TableScanCallbackBundle {
     context: *mut c_void,
     owns_foreign_server: OwnsForeignServer,
     plan_scan: PlanTableScan,
-    serial: SerialTableScanCallbacks,
+    provider: TableScanCallbacks,
     worker: Option<WorkerTableScanCallbacks>,
 }
 
-impl TableScanCallbacks {
+impl TableScanCallbackBundle {
     fn from_descriptors(
         descriptor: &TableScanDescriptor,
         worker: Option<&TableScanWorkerDescriptor>,
@@ -44,9 +44,8 @@ impl TableScanCallbacks {
         }
         // SAFETY: the descriptor has the exact runtime ABI layout. Registration
         // treats its callback and context contracts as trusted unsafe input.
-        let serial = unsafe {
-            SerialTableScanCallbacks::from_validated_descriptor(descriptor)
-        }?;
+        let provider =
+            unsafe { TableScanCallbacks::from_validated_descriptor(descriptor) }?;
         let worker = match worker {
             Some(worker) => {
                 let expected_size =
@@ -54,17 +53,17 @@ impl TableScanCallbacks {
                 if worker.struct_size() != expected_size {
                     return None;
                 }
-                for (serial, parallel) in [
+                for (provider, worker) in [
                     (descriptor.access_method_name(), worker.access_method_name()),
                     (
                         descriptor.foreign_data_wrapper_name(),
                         worker.foreign_data_wrapper_name(),
                     ),
                 ] {
-                    if serial.is_null() != parallel.is_null()
-                        || (!serial.is_null()
-                            && unsafe { CStr::from_ptr(serial) }
-                                != unsafe { CStr::from_ptr(parallel) })
+                    if provider.is_null() != worker.is_null()
+                        || (!provider.is_null()
+                            && unsafe { CStr::from_ptr(provider) }
+                                != unsafe { CStr::from_ptr(worker) })
                     {
                         return None;
                     }
@@ -79,7 +78,7 @@ impl TableScanCallbacks {
             context: descriptor.context(),
             owns_foreign_server: descriptor.owns_foreign_server()?,
             plan_scan: descriptor.plan_scan()?,
-            serial,
+            provider,
             worker,
         })
     }
@@ -89,7 +88,7 @@ impl TableScanCallbacks {
 struct StoredTableScan {
     access_method_name: *const c_char,
     foreign_data_wrapper_name: *const c_char,
-    callbacks: TableScanCallbacks,
+    callbacks: TableScanCallbackBundle,
 }
 
 impl StoredTableScan {
@@ -97,7 +96,8 @@ impl StoredTableScan {
         descriptor: &TableScanDescriptor,
         worker: Option<&TableScanWorkerDescriptor>,
     ) -> Option<Self> {
-        let callbacks = TableScanCallbacks::from_descriptors(descriptor, worker)?;
+        let callbacks =
+            TableScanCallbackBundle::from_descriptors(descriptor, worker)?;
         let access_method_name = descriptor.access_method_name();
         let foreign_data_wrapper_name = descriptor.foreign_data_wrapper_name();
         if access_method_name.is_null() && foreign_data_wrapper_name.is_null() {
@@ -222,7 +222,7 @@ impl PendingTableScanRegistration {
 pub(super) struct ResolvedTableScan {
     route_kind: TableScanRouteKind,
     route_name: *const c_char,
-    callbacks: TableScanCallbacks,
+    callbacks: TableScanCallbackBundle,
 }
 
 impl ResolvedTableScan {
@@ -247,8 +247,8 @@ impl ResolvedTableScan {
         }
     }
 
-    fn serial_callbacks(self) -> SerialTableScanCallbacks {
-        self.callbacks.serial
+    fn provider_callbacks(self) -> TableScanCallbacks {
+        self.callbacks.provider
     }
 
     fn worker_callbacks(self) -> Option<WorkerTableScanCallbacks> {
@@ -307,11 +307,11 @@ impl TableScanRegistry {
         Ok(found)
     }
 
-    pub(super) fn resolve_serial_callbacks(
+    pub(super) fn resolve_provider_callbacks(
         route: TableScanRoute<'_>,
-    ) -> Result<SerialTableScanCallbacks, PgReportError> {
+    ) -> Result<TableScanCallbacks, PgReportError> {
         Self::resolve(route)
-            .map(ResolvedTableScan::serial_callbacks)
+            .map(ResolvedTableScan::provider_callbacks)
             .ok_or_else(|| {
                 PgReportError::from_message(
                     PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,

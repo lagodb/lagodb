@@ -11,8 +11,8 @@ use pgrx::pg_sys;
 
 use crate::{ExecutionProfile, ExecutionProfileError};
 
+use super::codec::{QueryPlanData, QueryPlanDataError};
 use super::table_scan_filter::TableScanFilterExplain;
-use super::{QueryPlanData, QueryPlanDataError};
 
 const PATH_PAYLOAD: i32 = 1;
 const EXECUTION_PAYLOAD: i32 = 2;

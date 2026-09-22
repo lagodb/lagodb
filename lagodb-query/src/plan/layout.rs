@@ -2,7 +2,7 @@
 
 use pgrx::pg_sys;
 
-use super::OutputId;
+use lagodb_core::query_contract::OutputId;
 
 /// Metadata for one physical PostgreSQL output slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

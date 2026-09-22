@@ -23,8 +23,7 @@ use lagodb_core::runtime_api::{
 };
 use pgrx::prelude::PgSqlErrorCode;
 
-use super::bound_scan::{BoundTableScanHandle, PlannedTableScanHandle};
-use super::stream_reader::StreamErrorSlot;
+use super::handles::{BoundTableScanHandle, PlannedTableScanHandle, StreamErrorSlot};
 
 #[derive(Clone, Copy)]
 pub struct WorkerTableScanCallbacks {

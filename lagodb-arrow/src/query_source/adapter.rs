@@ -48,7 +48,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
                 Self::get_bound_schema,
                 Self::negotiate_predicate,
                 Self::plan_scan_tasks,
-                Self::open_serial_stream,
+                Self::open_stream,
                 Self::release_predicate,
                 Self::release_planned,
                 Self::release_bound,
@@ -224,7 +224,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
         unsafe { (&mut *error).capture(operation) }
     }
 
-    unsafe extern "C-unwind" fn open_serial_stream(
+    unsafe extern "C-unwind" fn open_stream(
         context: *mut c_void,
         bound: *mut c_void,
         planned: *mut c_void,
@@ -241,7 +241,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
             let request = unsafe { &*request };
             let options = ScanStreamOptions::try_from_request(request)?;
             let stream = provider
-                .open_serial_stream(scan, tasks, options)
+                .open_stream(scan, tasks, options)
                 .map_err(PgReportError::from_domain_error)?;
             // SAFETY: output is caller-owned Arrow stream storage.
             unsafe {

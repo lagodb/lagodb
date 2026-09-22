@@ -14,9 +14,9 @@ use datafusion_distributed::{
     DistributedConfig, DistributedExt, SessionStateBuilderExt,
 };
 
-use super::codec::LagoPhysicalCodec;
+use super::codec::{LagoPhysicalCodec, LagoStagePlanDispatch};
 use super::host::ParallelExecutionHost;
-use super::{LagoStagePlanDispatch, ParallelTableScanExec};
+use super::scan_exec::ParallelTableScanExec;
 
 pub(in crate::datafusion) struct ParallelSession;
 

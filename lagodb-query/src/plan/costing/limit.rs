@@ -1,7 +1,7 @@
 //! PostgreSQL-aligned LIMIT/OFFSET run-cost adjustment.
 
-use super::super::LimitNode;
 use super::{CostingContext, PlanCost, PlanEstimate, QueryCostError};
+use crate::plan::ir::LimitNode;
 
 pub(super) struct LimitCostStrategy<'limit> {
     context: CostingContext,

@@ -245,7 +245,7 @@ unsafe fn begin_scan(
     };
     let callbacks = scans
         .iter()
-        .map(|scan| TableScanRegistry::resolve_serial_callbacks(scan.route()))
+        .map(|scan| TableScanRegistry::resolve_provider_callbacks(scan.route()))
         .collect::<Result<Vec<_>, _>>()?;
     let host = PgParallelHost::leader();
     let parallel = if parallel_safe && host.worker_cap() >= 2 {

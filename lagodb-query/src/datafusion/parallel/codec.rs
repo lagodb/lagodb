@@ -20,7 +20,7 @@ use prost::Message;
 
 use super::catalog::WorkerSourceCatalog;
 use super::scan_exec::ParallelTableScanExec;
-use crate::datafusion::native_semantics::PgIntegerAbsUdf;
+use crate::datafusion::integer_abs::PgIntegerAbsUdf;
 use crate::datafusion::numeric_aggregate;
 use lagodb_core::query_contract::ScanId;
 

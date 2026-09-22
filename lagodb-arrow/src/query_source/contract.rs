@@ -358,7 +358,7 @@ impl ScanStreamOptions {
     }
 }
 
-// SAFETY: the raw slot is borrowed from the current-thread serial engine and
+// SAFETY: the raw slot is borrowed from the current-thread engine and
 // is read only inside its serialized Arrow stream callback.
 unsafe impl Send for ScanStreamOptions {}
 
@@ -442,7 +442,7 @@ pub trait TableScanStream: Send + 'static {
 /// A bound scan is statement-owned and released exactly once after every
 /// run-local task plan and stream has been dropped. It must not retain borrowed
 /// PostgreSQL executor pointers, and its destructor must not panic. The
-/// `Send + Sync` bounds satisfy DataFusion's plan traits; the serial engine
+/// `Send + Sync` bounds satisfy DataFusion's plan traits; the query engine
 /// still polls and drops these values only on the owning backend thread.
 pub trait TableScanProvider: Send + Sync + 'static {
     /// PostgreSQL storage objects routed to this callback implementation.
@@ -453,7 +453,7 @@ pub trait TableScanProvider: Send + Sync + 'static {
     type ScanPlan: 'static;
     type BoundScan: Send + Sync + 'static;
     type PlannedTasks: Send + Sync + 'static;
-    type SerialStream: TableScanStream<Error = Self::Error>;
+    type Stream: TableScanStream<Error = Self::Error>;
     type Error: SqlStateError
         + From<PlanDataError>
         + From<ExpressionCodecError>
@@ -528,12 +528,12 @@ pub trait TableScanProvider: Send + Sync + 'static {
         runtime_predicate: Option<&Self::Predicate>,
     ) -> Result<PlannedScanTasks<Self::PlannedTasks>, Self::Error>;
 
-    fn open_serial_stream(
+    fn open_stream(
         &self,
         bound: &Self::BoundScan,
         planned: &Self::PlannedTasks,
         options: ScanStreamOptions,
-    ) -> Result<Self::SerialStream, Self::Error>;
+    ) -> Result<Self::Stream, Self::Error>;
 }
 
 /// Immutable provider payload copied into the parallel query protocol.

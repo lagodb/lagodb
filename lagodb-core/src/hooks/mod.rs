@@ -61,7 +61,7 @@ pub unsafe fn register_table_scan(descriptor: TableScanDescriptor) {
 }
 
 /// Stage this provider DSO's optional worker table-scan facet in the same
-/// atomic registration transaction as its serial table scan.
+/// atomic registration transaction as its base table scan.
 ///
 /// # Safety
 ///

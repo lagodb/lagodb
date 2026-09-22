@@ -150,10 +150,10 @@ pub type ReleaseTableScanWorkerSource = unsafe extern "C-unwind" fn(
     error: *mut CallbackErrorReport,
 ) -> u32;
 
-/// Optional parallel-worker facet for a serial table-scan route.
+/// Optional parallel-worker facet for a table-scan route.
 ///
 /// This descriptor is registered in the same provider transaction as its
-/// serial [`super::TableScanDescriptor`]. It owns no planning policy: it only
+/// base [`super::TableScanDescriptor`]. It owns no planning policy: it only
 /// serializes an already planned task inventory and reconstructs worker-local
 /// I/O state from that immutable payload.
 #[repr(C)]

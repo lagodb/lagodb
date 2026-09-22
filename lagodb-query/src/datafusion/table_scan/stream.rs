@@ -69,7 +69,7 @@ impl ExternalTableScanStream {
         let static_predicates = self.static_filters.handles();
         let (reader, task_metrics) = self
             .bound
-            .open_serial_stream(
+            .open_stream(
                 &self.projection,
                 &static_predicates,
                 self.maximum_batch_rows,

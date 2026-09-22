@@ -1,7 +1,7 @@
 //! DataFusion-aligned join input roles and operator cost.
 
-use super::super::JoinNode;
 use super::{CostingContext, PlanCost, PlanEstimate, QueryCostError};
+use crate::plan::ir::JoinNode;
 
 /// Physical input roles selected by DataFusion's join optimizer.
 ///

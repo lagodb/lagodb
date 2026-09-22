@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 use lagodb_core::diag::PgReportError;
 use lagodb_core::query_contract::TableScanRoute;
 
-use crate::datafusion::WorkerTableScanCallbacks;
+use crate::datafusion::scan_callbacks::WorkerTableScanCallbacks;
 
 /// Host-owned snapshot restored when a parallel interrupt hold ends.
 #[derive(Clone, Copy)]

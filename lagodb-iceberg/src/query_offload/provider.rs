@@ -28,7 +28,7 @@ use crate::scan::query::PlannedScan as PlannedQueryScan;
 use super::error::Error;
 use super::filter::{Filter, FilterPlanner};
 use super::plan::{BoundScan, Plan, PlanProjection};
-use super::stream::{Stream, WorkerStream};
+use super::stream::{Stream as QueryStream, WorkerStream};
 use super::worker::ReopenPlan;
 
 pub(super) struct Provider;
@@ -85,7 +85,7 @@ impl TableScanProvider for Provider {
     type ScanPlan = Plan;
     type BoundScan = BoundScan;
     type PlannedTasks = PlannedQueryScan;
-    type SerialStream = Stream;
+    type Stream = QueryStream;
     type Error = Error;
 
     fn owns_foreign_server(&self, server_oid: pg_sys::Oid) -> bool {
@@ -192,19 +192,19 @@ impl TableScanProvider for Provider {
         Ok(PlannedScanTasks::new(planned, metrics))
     }
 
-    fn open_serial_stream(
+    fn open_stream(
         &self,
         bound: &Self::BoundScan,
         planned: &Self::PlannedTasks,
         options: ScanStreamOptions,
-    ) -> Result<Self::SerialStream, Self::Error> {
+    ) -> Result<Self::Stream, Self::Error> {
         let batch_size =
             usize::try_from(options.maximum_batch_rows()).map_err(|_| {
                 Error::BatchRowLimit {
                     value: options.maximum_batch_rows(),
                 }
             })?;
-        Ok(Stream::new(
+        Ok(QueryStream::new(
             bound.scan.open_stream(planned, batch_size, options)?,
         ))
     }

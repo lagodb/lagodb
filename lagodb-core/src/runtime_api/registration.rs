@@ -202,6 +202,6 @@ pub struct ProviderRegistration {
     /// Optional table-scan facet. Null means none.
     pub table_scan: *const TableScanDescriptor,
     /// Optional worker reconstruction facet for `table_scan`. Null means the
-    /// registered routes are serial-only.
+    /// registered routes support only direct stream execution.
     pub table_scan_worker: *const TableScanWorkerDescriptor,
 }

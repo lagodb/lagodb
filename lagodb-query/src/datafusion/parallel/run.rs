@@ -24,11 +24,11 @@ use super::metrics::ParallelMetrics;
 use super::session::{ParallelSession, TransportHost};
 use super::source_inventory::{ParallelSourceRoute, PreparedSourceInventory};
 use super::stages::ParallelStageCatalog;
+use crate::datafusion::error::QueryExecutionError;
+use crate::datafusion::memory::QueryExecutionLimits;
 use crate::datafusion::metrics::ExecutionMetrics;
 use crate::datafusion::physical_plan::CompiledPhysicalPlan;
-use crate::datafusion::{
-    QueryExecutionError, QueryExecutionLimits, WorkerTableScanCallbacks,
-};
+use crate::datafusion::scan_callbacks::WorkerTableScanCallbacks;
 use crate::plan::PlannedTableScan;
 
 const METRICS_GRACE_PASSES: usize = 100;

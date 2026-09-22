@@ -97,7 +97,7 @@ pub(crate) struct AnalyzeScanInput {
 /// [`ScanSpec`] and the DataFusion source. Slot decoding and mutation state have
 /// already been discarded; the retained scan and task planner share one
 /// captured transaction view. The destination is `Send + Sync` only so it
-/// can enter the private DataFusion adapter; its outer serial execution owner
+/// can enter the private DataFusion adapter; its outer query-execution owner
 /// remains bound to the current PostgreSQL backend thread.
 pub(crate) struct BoundQueryScanInput {
     pub(crate) scan: TableScan,

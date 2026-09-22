@@ -167,7 +167,7 @@ impl Default for PlannedTableScanTasks {
     }
 }
 
-/// Per-run serial stream limits supplied by the engine.
+/// Per-run stream limits supplied by the engine.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TableScanStreamRequest {
@@ -320,7 +320,7 @@ impl TableScanRoutes {
     }
 }
 
-/// One provider's serial table-scan capability and stable internal routes.
+/// One provider's base table-scan capability and stable internal routes.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TableScanDescriptor {
@@ -334,7 +334,7 @@ pub struct TableScanDescriptor {
     get_bound_schema: Option<GetBoundTableScanSchema>,
     negotiate_predicate: Option<NegotiateTableScanPredicate>,
     plan_scan_tasks: Option<PlanTableScanTasks>,
-    open_serial_stream: Option<OpenTableScanStream>,
+    open_stream: Option<OpenTableScanStream>,
     release_predicate: Option<ReleaseTableScanPredicate>,
     release_planned: Option<ReleasePlannedTableScan>,
     release_bound: Option<ReleaseBoundTableScan>,
@@ -451,7 +451,7 @@ impl TableScanDescriptor {
     /// Every callback must uphold the runtime ABI contract, keep `context`
     /// live for the backend lifetime, contain PostgreSQL errors and Rust
     /// panics, and produce bound/task/stream values that remain valid under the
-    /// engine's current-thread serial `Send + Sync` adaptation. Route names
+    /// engine's current-thread `Send + Sync` adaptation. Route names
     /// must remain live for the backend lifetime.
     #[must_use]
     pub const unsafe fn new(
@@ -463,7 +463,7 @@ impl TableScanDescriptor {
         get_bound_schema: GetBoundTableScanSchema,
         negotiate_predicate: NegotiateTableScanPredicate,
         plan_scan_tasks: PlanTableScanTasks,
-        open_serial_stream: OpenTableScanStream,
+        open_stream: OpenTableScanStream,
         release_predicate: ReleaseTableScanPredicate,
         release_planned: ReleasePlannedTableScan,
         release_bound: ReleaseBoundTableScan,
@@ -479,7 +479,7 @@ impl TableScanDescriptor {
             get_bound_schema: Some(get_bound_schema),
             negotiate_predicate: Some(negotiate_predicate),
             plan_scan_tasks: Some(plan_scan_tasks),
-            open_serial_stream: Some(open_serial_stream),
+            open_stream: Some(open_stream),
             release_predicate: Some(release_predicate),
             release_planned: Some(release_planned),
             release_bound: Some(release_bound),
@@ -508,7 +508,7 @@ impl TableScanDescriptor {
         get_bound_schema: Option<GetBoundTableScanSchema>,
         negotiate_predicate: Option<NegotiateTableScanPredicate>,
         plan_scan_tasks: Option<PlanTableScanTasks>,
-        open_serial_stream: Option<OpenTableScanStream>,
+        open_stream: Option<OpenTableScanStream>,
         release_predicate: Option<ReleaseTableScanPredicate>,
         release_planned: Option<ReleasePlannedTableScan>,
         release_bound: Option<ReleaseBoundTableScan>,
@@ -524,7 +524,7 @@ impl TableScanDescriptor {
             get_bound_schema,
             negotiate_predicate,
             plan_scan_tasks,
-            open_serial_stream,
+            open_stream,
             release_predicate,
             release_planned,
             release_bound,
@@ -582,8 +582,8 @@ impl TableScanDescriptor {
     }
 
     #[inline]
-    pub const fn open_serial_stream(&self) -> Option<OpenTableScanStream> {
-        self.open_serial_stream
+    pub const fn open_stream(&self) -> Option<OpenTableScanStream> {
+        self.open_stream
     }
 
     #[inline]
