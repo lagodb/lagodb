@@ -81,6 +81,10 @@ pub(crate) struct DescriptorSnapshot<T: Copy> {
 }
 
 impl<T: Copy> DescriptorSnapshot<T> {
+    pub(crate) fn is_empty(self) -> bool {
+        self.first.is_null()
+    }
+
     pub(crate) fn for_each(self, mut callback: impl FnMut(T)) {
         let _: ControlFlow<(), ()> = self.walk(|descriptor| {
             callback(descriptor);

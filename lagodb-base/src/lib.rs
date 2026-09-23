@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use lagodb_core::diag::PgReportError;
+use lagodb_core::diag::SqlStateError;
 use pgrx::prelude::*;
 
 mod descriptor_registry;
@@ -13,6 +13,7 @@ mod provider_bootstrap;
 mod query_host;
 mod runtime_host;
 mod storage;
+mod table_provider_registry;
 mod worker;
 
 static RUNTIME_PRELOADED: AtomicBool = AtomicBool::new(false);
@@ -48,14 +49,22 @@ pub(crate) fn runtime_is_preloaded() -> bool {
     RUNTIME_PRELOADED.load(Ordering::Acquire)
 }
 
-pub(crate) fn ensure_runtime_preloaded() {
-    if !runtime_is_preloaded() {
-        PgReportError::from_message(
-            PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-            "lagodb_base must be loaded with shared_preload_libraries before use; add lagodb_base to shared_preload_libraries and restart PostgreSQL",
-        )
-        .report();
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "lagodb_base must be loaded with shared_preload_libraries before use; add lagodb_base to shared_preload_libraries and restart PostgreSQL"
+)]
+pub(crate) struct RuntimeNotPreloaded;
+
+impl SqlStateError for RuntimeNotPreloaded {
+    fn sql_error_code(&self) -> PgSqlErrorCode {
+        PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
     }
+}
+
+pub(crate) fn ensure_runtime_preloaded() -> Result<(), RuntimeNotPreloaded> {
+    runtime_is_preloaded()
+        .then_some(())
+        .ok_or(RuntimeNotPreloaded)
 }
 
 // `#[pg_test]` host wrappers call this module's runner configuration under

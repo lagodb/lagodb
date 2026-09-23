@@ -15,7 +15,6 @@ use lagodb_core::runtime_api::{
 };
 use pgrx::{pg_guard, pg_sys};
 
-use crate::maintenance;
 use crate::object_access::{self, PreparedObjectAccessHooks};
 use crate::planning_hooks::{self, PreparedPlanningHooks};
 use crate::process_utility::{self, PreparedUtilityConsumers, PreparedUtilityHooks};
@@ -23,10 +22,13 @@ use crate::provider_bootstrap::{
     self, PreparedProviderIdentity, ValidatedProviderIdentity,
 };
 use crate::query_host::PendingTableScanRegistration;
+use crate::table_provider_registry::{
+    PreparedTableProviderRegistration, ValidatedTableProvider,
+};
 
 struct ProviderRegistrationRef<'a> {
     provider: ValidatedProviderIdentity<'a>,
-    maintenance_provider: Option<maintenance::ValidatedProvider<'a>>,
+    table_provider: Option<ValidatedTableProvider<'a>>,
     utility: &'a [UtilityHookDescriptor],
     utility_consumers: &'a [UtilityConsumerDescriptor],
     object_access: &'a [ObjectAccessHookDescriptor],
@@ -64,20 +66,18 @@ impl<'a> ProviderRegistrationRef<'a> {
         // internal ABI contract validated by this constructor.
         let provider =
             unsafe { ValidatedProviderIdentity::from_raw(registration.provider) }?;
-        let maintenance_provider = if registration.maintenance_provider.is_null() {
+        let table_provider = if registration.table_provider.is_null() {
             None
         } else {
             // SAFETY: the containing exact-build registration guarantees a
-            // live maintenance descriptor for this synchronous validation.
+            // live table-provider descriptor for synchronous validation.
             Some(unsafe {
-                maintenance::ValidatedProvider::from_raw(
-                    registration.maintenance_provider,
-                )
+                ValidatedTableProvider::from_raw(registration.table_provider)
             }?)
         };
         Some(Self {
             provider,
-            maintenance_provider,
+            table_provider,
             // SAFETY: every pointer/count pair is covered by the containing
             // registration's trusted synchronous ABI contract.
             utility: unsafe {
@@ -122,7 +122,7 @@ impl<'a> ProviderRegistrationRef<'a> {
 }
 
 struct PreparedProviderRegistration {
-    maintenance: maintenance::PreparedRegistration,
+    table_provider: PreparedTableProviderRegistration,
     provider: PreparedProviderIdentity,
     utility: PreparedUtilityHooks,
     utility_consumers: PreparedUtilityConsumers,
@@ -136,9 +136,8 @@ impl PreparedProviderRegistration {
         // Every module finishes validation and all heap allocation before this
         // value can be committed. Returning an error therefore leaves every
         // logical runtime registry and PostgreSQL hook pointer unchanged.
-        let maintenance = maintenance::PreparedRegistration::prepare(
-            registration.maintenance_provider,
-        )?;
+        let table_provider =
+            PreparedTableProviderRegistration::prepare(registration.table_provider)?;
         let utility = process_utility::prepare_hooks(registration.utility)
             .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
         let utility_consumers =
@@ -164,7 +163,7 @@ impl PreparedProviderRegistration {
         // from being committed outside the bootstrap window.
         let provider = provider_bootstrap::prepare_identity(registration.provider)?;
         Ok(Self {
-            maintenance,
+            table_provider,
             provider,
             utility,
             utility_consumers,
@@ -179,7 +178,7 @@ impl PreparedProviderRegistration {
         // registration becomes visible.
         planning_hooks::commit(self.planning);
         self.table_scan.commit();
-        self.maintenance.commit();
+        self.table_provider.commit();
         process_utility::commit_hooks(self.utility);
         process_utility::commit_consumers(self.utility_consumers);
         object_access::commit_hooks(self.object_access);
@@ -216,10 +215,10 @@ mod tests {
     use std::ptr;
 
     use lagodb_core::runtime_api::{
-        CALLBACK_OK, CallbackErrorReport, MaintenanceProvider, MaintenanceReport,
-        MaintenanceRequest, MaintenanceStats, OBJECT_ACCESS_DROP,
-        ObjectAccessHookDescriptor, ObjectAccessStrHookDescriptor, ProviderIdentity,
-        RelationScanPlannerDescriptor, UtilityHookDescriptor,
+        CALLBACK_OK, CallbackErrorReport, MaintenanceReport, MaintenanceRequest,
+        MaintenanceStats, OBJECT_ACCESS_DROP, ObjectAccessHookDescriptor,
+        ObjectAccessStrHookDescriptor, ProviderIdentity,
+        RelationScanPlannerDescriptor, TableProvider, UtilityHookDescriptor,
     };
 
     use super::*;
@@ -228,16 +227,25 @@ mod tests {
         pg_sys::InvalidOid
     }
 
-    unsafe extern "C-unwind" fn execute(
-        _request: *const MaintenanceRequest,
-        _report: *mut MaintenanceReport,
+    unsafe extern "C-unwind" fn truncate_partitioned_table(
+        _relation: pg_sys::Relation,
     ) {
     }
 
-    unsafe extern "C-unwind" fn inspect(
+    unsafe extern "C-unwind" fn execute_maintenance(
+        _request: *const MaintenanceRequest,
+        _report: *mut MaintenanceReport,
+        _error: *mut CallbackErrorReport,
+    ) -> u32 {
+        CALLBACK_OK
+    }
+
+    unsafe extern "C-unwind" fn inspect_maintenance(
         _relation: pg_sys::Relation,
         _stats: *mut MaintenanceStats,
-    ) {
+        _error: *mut CallbackErrorReport,
+    ) -> u32 {
+        CALLBACK_OK
     }
 
     unsafe extern "C-unwind" fn utility_pre(
@@ -284,18 +292,20 @@ mod tests {
         CALLBACK_OK
     }
 
-    fn maintenance_descriptor(
+    fn table_provider_descriptor(
         name: &'static CStr,
         access_method_name: &'static CStr,
-    ) -> MaintenanceProvider {
-        MaintenanceProvider {
-            struct_size: size_of::<MaintenanceProvider>() as u32,
+    ) -> TableProvider {
+        TableProvider {
+            struct_size: size_of::<TableProvider>() as u32,
             name: name.as_ptr(),
             access_method_name: access_method_name.as_ptr(),
-            capability_flags: 0,
+            owns_partitioned_table: false,
+            supports_analyze: false,
             access_method_oid,
-            execute,
-            inspect,
+            truncate_partitioned_table,
+            execute_maintenance,
+            inspect_maintenance,
         }
     }
 
@@ -308,9 +318,9 @@ mod tests {
     }
 
     #[test]
-    fn invalid_hook_preparation_does_not_publish_maintenance_provider() {
+    fn invalid_hook_preparation_does_not_publish_table_provider() {
         let provider =
-            maintenance_descriptor(c"atomic-invalid", c"atomic-invalid-am");
+            table_provider_descriptor(c"atomic-invalid", c"atomic-invalid-am");
         let mut context = 0_u8;
         let invalid_utility = UtilityHookDescriptor {
             struct_size: size_of::<UtilityHookDescriptor>() as u32,
@@ -323,7 +333,7 @@ mod tests {
         let registration = ProviderRegistration {
             struct_size: size_of::<ProviderRegistration>() as u32,
             provider: &identity,
-            maintenance_provider: &provider,
+            table_provider: &provider,
             utility_hooks: &invalid_utility,
             utility_hook_count: 1,
             utility_consumers: ptr::null(),
@@ -348,15 +358,15 @@ mod tests {
             Some(REGISTER_INVALID_DESCRIPTOR)
         );
 
-        let competing = maintenance_descriptor(c"atomic-invalid", c"atomic-retry-am");
+        let competing =
+            table_provider_descriptor(c"atomic-invalid", c"atomic-retry-am");
         // SAFETY: the local descriptor and its static string pointers remain
         // live for this synchronous validation and preparation.
-        let competing =
-            unsafe { maintenance::ValidatedProvider::from_raw(&competing) }
-                .expect("competing maintenance provider is valid");
+        let competing = unsafe { ValidatedTableProvider::from_raw(&competing) }
+            .expect("competing table provider is valid");
         assert!(
-            maintenance::PreparedRegistration::prepare(Some(competing)).is_ok(),
-            "failed registration published its prepared maintenance provider"
+            PreparedTableProviderRegistration::prepare(Some(competing)).is_ok(),
+            "failed registration published its prepared table provider"
         );
     }
 
@@ -364,7 +374,7 @@ mod tests {
     fn invalid_planning_facet_does_not_publish_any_prepared_facet() {
         let identity = identity();
         let provider =
-            maintenance_descriptor(c"atomic-planning", c"atomic-planning-am");
+            table_provider_descriptor(c"atomic-planning", c"atomic-planning-am");
         let mut context = 0_u8;
         let context = ptr::from_mut(&mut context).cast();
         let utility = UtilityHookDescriptor {
@@ -391,6 +401,7 @@ mod tests {
         let invalid_planner = RelationScanPlannerDescriptor {
             struct_size: 0,
             context: ptr::null_mut(),
+            relation_info: None,
             plan_relation: Some(plan_relation),
         };
         let utility_count = process_utility::registered_hook_count();
@@ -398,7 +409,7 @@ mod tests {
         let registration = ProviderRegistration {
             struct_size: size_of::<ProviderRegistration>() as u32,
             provider: &identity,
-            maintenance_provider: &provider,
+            table_provider: &provider,
             utility_hooks: &utility,
             utility_hook_count: 1,
             utility_consumers: ptr::null(),
@@ -431,15 +442,16 @@ mod tests {
             object_access_counts,
             "failed registration published its prepared object-access hooks"
         );
-        let competing =
-            maintenance_descriptor(c"atomic-planning-retry", c"atomic-planning-am");
+        let competing = table_provider_descriptor(
+            c"atomic-planning-retry",
+            c"atomic-planning-am",
+        );
         // SAFETY: the local exact-build descriptor remains live for prepare.
-        let competing =
-            unsafe { maintenance::ValidatedProvider::from_raw(&competing) }
-                .expect("competing maintenance provider is valid");
+        let competing = unsafe { ValidatedTableProvider::from_raw(&competing) }
+            .expect("competing table provider is valid");
         assert!(
-            maintenance::PreparedRegistration::prepare(Some(competing)).is_ok(),
-            "failed registration published its prepared maintenance provider"
+            PreparedTableProviderRegistration::prepare(Some(competing)).is_ok(),
+            "failed registration published its prepared table provider"
         );
     }
 
@@ -449,7 +461,7 @@ mod tests {
         let registration = ProviderRegistration {
             struct_size: size_of::<ProviderRegistration>() as u32,
             provider: &identity,
-            maintenance_provider: ptr::null(),
+            table_provider: ptr::null(),
             utility_hooks: ptr::null(),
             utility_hook_count: 1,
             utility_consumers: ptr::null(),
@@ -477,7 +489,7 @@ mod tests {
         let mut registration = ProviderRegistration {
             struct_size: size_of::<ProviderRegistration>() as u32 + 1,
             provider: &identity,
-            maintenance_provider: ptr::null(),
+            table_provider: ptr::null(),
             utility_hooks: ptr::null(),
             utility_hook_count: 0,
             utility_consumers: ptr::null(),

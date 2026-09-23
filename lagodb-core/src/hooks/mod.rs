@@ -16,8 +16,8 @@ use std::mem::size_of;
 use std::ptr;
 
 use crate::runtime_api::{
-    MaintenanceProvider, ProviderIdentity, ProviderRegistration, RuntimeApiError,
-    RuntimeClient, RuntimeRegistrationError, TableScanDescriptor,
+    ProviderIdentity, ProviderRegistration, RuntimeApiError, RuntimeClient,
+    RuntimeRegistrationError, TableProvider, TableScanDescriptor,
     TableScanWorkerDescriptor,
 };
 
@@ -36,11 +36,12 @@ pub use object_access_hook::{
 };
 pub use utility_consumer::{CopyConsumer, CopyRoute, register_copy_consumer};
 pub use utility_hook::{
-    AlterTableMoveAllStmtNode, AlterTableSpaceOptionsStmtNode, AlterTableStmtNode,
-    AlterUserMappingStmtNode, CopyStmtNode, CreateForeignTableStmtNode,
-    CreateStmtNode, CreateTableAsStmtNode, CreateTableSpaceStmtNode,
-    CreateUserMappingStmtNode, PostUtilityContext, PreUtilityContext, RenameStmtNode,
-    UtilityHook, UtilityNode, UtilityStmtNode, VacuumStmtNode, register_utility_hook,
+    AlterDatabaseStmtNode, AlterTableMoveAllStmtNode, AlterTableSpaceOptionsStmtNode,
+    AlterTableStmtNode, AlterUserMappingStmtNode, CopyStmtNode,
+    CreateForeignTableStmtNode, CreateStmtNode, CreateTableAsStmtNode,
+    CreateTableSpaceStmtNode, CreateUserMappingStmtNode, CreatedbStmtNode,
+    PostUtilityContext, PreUtilityContext, RenameStmtNode, UtilityHook, UtilityNode,
+    UtilityStmtNode, VacuumStmtNode, register_utility_hook,
 };
 
 pub(crate) use planning::{register_modify, register_relation_scan};
@@ -96,10 +97,10 @@ pub enum HookRegistrationError {
     #[error("one provider registered more hooks than the runtime ABI can represent")]
     TooManyHooks,
     #[error(
-        "provider hooks were already published without the maintenance provider; provider and hooks must be registered together"
+        "provider hooks were already published without the table provider; provider and hooks must be registered together"
     )]
     ProviderRegisteredAfterFreeze,
-    #[error("this provider DSO already published a maintenance provider")]
+    #[error("this provider DSO already published a table provider")]
     ProviderAlreadyRegistered,
 }
 
@@ -125,9 +126,9 @@ pub fn freeze_hooks(
 
 pub(crate) fn freeze_hooks_with_provider(
     provider: &ProviderIdentity,
-    maintenance_provider: Option<&MaintenanceProvider>,
+    table_provider: Option<&TableProvider>,
 ) -> Result<(), HookRegistrationError> {
-    match (FREEZE_STATE.get(), maintenance_provider.is_some()) {
+    match (FREEZE_STATE.get(), table_provider.is_some()) {
         (FreezeState::Building, _) => {}
         (FreezeState::HooksOnly, true) => {
             return Err(HookRegistrationError::ProviderRegisteredAfterFreeze);
@@ -196,9 +197,7 @@ pub(crate) fn freeze_hooks_with_provider(
         struct_size: u32::try_from(size_of::<ProviderRegistration>())
             .expect("provider registration size exceeds u32"),
         provider,
-        maintenance_provider: maintenance_provider
-            .map(ptr::from_ref)
-            .unwrap_or(ptr::null()),
+        table_provider: table_provider.map(ptr::from_ref).unwrap_or(ptr::null()),
         utility_hooks,
         utility_hook_count: utility_count,
         utility_consumers,
@@ -240,7 +239,7 @@ pub(crate) fn freeze_hooks_with_provider(
     utility.publish_contexts();
     consumers.publish_contexts();
     object_access.publish_contexts();
-    FREEZE_STATE.set(if maintenance_provider.is_some() {
+    FREEZE_STATE.set(if table_provider.is_some() {
         FreezeState::WithProvider
     } else {
         FreezeState::HooksOnly

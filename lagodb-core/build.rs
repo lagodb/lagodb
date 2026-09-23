@@ -50,15 +50,32 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PGRX_PG_CONFIG_PATH");
     println!("cargo:rerun-if-env-changed=PGRX_HOME");
     println!("cargo:rerun-if-env-changed=HOME");
-    println!("cargo:rerun-if-changed=csrc/modify/lagodb_node_modify_table.c");
-    println!("cargo:rerun-if-changed=csrc/modify/lagodb_node_modify_table.h");
+    println!("cargo:rerun-if-changed=csrc/modify/lagodb_modify_table.c");
+    println!("cargo:rerun-if-changed=csrc/modify/lagodb_modify_table.h");
+    println!("cargo:rerun-if-changed=csrc/modify/lagodb_modify.c");
     println!("cargo:rerun-if-changed=csrc/analyze/lagodb_analyze.c");
     println!("cargo:rerun-if-changed=csrc/analyze/lagodb_analyze.h");
+    println!("cargo:rerun-if-changed=csrc/analyze/lagodb_analyze_sampler.c");
+    println!("cargo:rerun-if-changed=csrc/analyze/lagodb_analyze_sampler.h");
+    println!("cargo:rerun-if-changed=csrc/vacuum/lagodb_vacuum.c");
+    println!("cargo:rerun-if-changed=csrc/vacuum/lagodb_vacuum.h");
+    println!("cargo:rerun-if-changed=csrc/vacuum/lagodb_vacuum_probe.c");
+    println!("cargo:rerun-if-changed=csrc/vacuum/lagodb_vacuum_probe.h");
+    println!("cargo:rerun-if-changed=csrc/truncate/lagodb_truncate.c");
+    println!("cargo:rerun-if-changed=csrc/truncate/lagodb_truncate.h");
     println!("cargo:rerun-if-changed=csrc/compat/lagodb_pg_compat.h");
     println!("cargo:rerun-if-changed=csrc/compat/lagodb_injection_point.c");
     println!("cargo:rerun-if-changed=csrc/compat/lagodb_injection_point.h");
     println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy.c");
+    println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy_prepare.c");
+    println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy_datum.c");
+    println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy_from.c");
+    println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy_to.c");
     println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy.h");
+    println!("cargo:rerun-if-changed=csrc/catalog/lagodb_partition_key.c");
+    println!("cargo:rerun-if-changed=csrc/catalog/lagodb_partition_key.h");
+    println!("cargo:rerun-if-changed=csrc/catalog/lagodb_relation.c");
+    println!("cargo:rerun-if-changed=csrc/catalog/lagodb_relation.h");
 
     let Some(pg_feature) = active_pg_config() else {
         return;
@@ -101,13 +118,17 @@ fn main() {
     let mut build = cc::Build::new();
     build.include(include);
     let mut has_sources = false;
-    // `lagodb_copy.c` owns COPY preparation, raw-field parsing, and the PG17
-    // Text/CSV row-encoder bridge. The source is selected per PostgreSQL
+    // The COPY bridges own command preparation, raw-field parsing, and the
+    // PostgreSQL Text/CSV row encoder. Sources are selected per PostgreSQL
     // feature here; the C header applies the shared major-version gate and
     // local source branches handle audited minor epochs.
     if pg_feature.copy_bridge_supported {
         build
             .file("csrc/copy/lagodb_copy.c")
+            .file("csrc/copy/lagodb_copy_prepare.c")
+            .file("csrc/copy/lagodb_copy_datum.c")
+            .file("csrc/copy/lagodb_copy_from.c")
+            .file("csrc/copy/lagodb_copy_to.c")
             .include(PathBuf::from("csrc/copy"))
             .include(PathBuf::from("csrc/compat"))
             .flag_if_supported("-Wno-unused-function")
@@ -124,10 +145,20 @@ fn main() {
 
     if pg_feature.c_forks_supported {
         build
-            .file("csrc/modify/lagodb_node_modify_table.c")
+            .file("csrc/modify/lagodb_modify_table.c")
+            .file("csrc/modify/lagodb_modify.c")
             .file("csrc/analyze/lagodb_analyze.c")
+            .file("csrc/analyze/lagodb_analyze_sampler.c")
+            .file("csrc/vacuum/lagodb_vacuum.c")
+            .file("csrc/vacuum/lagodb_vacuum_probe.c")
+            .file("csrc/truncate/lagodb_truncate.c")
+            .file("csrc/catalog/lagodb_partition_key.c")
+            .file("csrc/catalog/lagodb_relation.c")
             .include(PathBuf::from("csrc/modify"))
             .include(PathBuf::from("csrc/analyze"))
+            .include(PathBuf::from("csrc/vacuum"))
+            .include(PathBuf::from("csrc/truncate"))
+            .include(PathBuf::from("csrc/catalog"))
             .include(PathBuf::from("csrc/compat"));
         has_sources = true;
     }

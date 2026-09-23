@@ -168,6 +168,25 @@ impl CallbackErrorReport {
         self.sql_error_code != 0
     }
 
+    /// Decode a synchronous callback status without reporting to PostgreSQL.
+    ///
+    /// # Safety
+    ///
+    /// On failure, this record must contain the callback's diagnostic payload
+    /// and its PostgreSQL-owned text must remain live until this method returns.
+    pub unsafe fn into_result(
+        self,
+        status: u32,
+        callback: &'static str,
+    ) -> Result<(), PgReportError> {
+        if status == CALLBACK_OK {
+            Ok(())
+        } else {
+            // SAFETY: the caller keeps the synchronous callback payload live.
+            Err(unsafe { self.to_error(callback) })
+        }
+    }
+
     /// Reconstruct an owned error in the runtime DSO.
     ///
     /// # Safety

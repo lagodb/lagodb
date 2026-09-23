@@ -20,9 +20,9 @@ use lagodb_core::runtime_api::{
 use lagodb_core::storage::volume::StorageVolumeId;
 use pgrx::{PgMemoryContexts, pg_guard, pg_sys};
 
-use crate::maintenance;
 use crate::storage::volume_config::resolve_route;
 use crate::{gucs, object_access, process_utility, runtime_is_preloaded, worker};
+use crate::{maintenance, table_provider_registry};
 
 #[pg_guard]
 unsafe extern "C-unwind" fn customscan_mode() -> u32 {
@@ -104,8 +104,8 @@ unsafe extern "C-unwind" fn resolve_storage_volume_route(
 static RUNTIME_API: RuntimeApi = RuntimeApi {
     struct_size: size_of::<RuntimeApi>() as u32,
     register_provider: registration::register_provider,
-    has_providers: maintenance::has_providers,
-    provider_for_am: maintenance::provider_for_am,
+    has_providers: table_provider_registry::has_providers,
+    provider_for_am: table_provider_registry::provider_for_am,
     customscan_mode,
     maintenance_config: maintenance::maintenance_config,
     stage_worker_wakeup,

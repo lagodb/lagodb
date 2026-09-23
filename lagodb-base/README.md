@@ -151,6 +151,18 @@ ProcessUtility Hook Router
   │           └─ Forward untouched to the previous ProcessUtility hook
 ```
 
+Native-only TRUNCATE and ordinary managed-table TRUNCATE are delegated to the
+previous utility hook after a target-lock-free ownership probe. An unresolved
+target ends the probe and delegates the complete statement. A provider-owned
+provider-owned partitioned table found before that point selects one executor for all targets. The
+[TRUNCATE bridge contract](../lagodb-core/csrc/truncate/README.md) documents the standalone partitioned table
+topology, consumed-command hook boundary, and accepted negative-probe DDL window.
+
+The runtime owns maintenance admission, provider policy, the command recursion
+scope, and captured parent delegation. PostgreSQL option parsing, relation-plan
+memory, VACUUM/ANALYZE transaction and snapshot sequencing, and TRUNCATE execution
+are implemented by core's [maintenance executor](../lagodb-core/src/table_maintenance/README.md).
+
 ### 4. Background Worker and Maintenance Lifecycle
 
 ```text

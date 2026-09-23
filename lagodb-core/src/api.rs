@@ -156,6 +156,10 @@ pub fn unsupported_callback<T>(method: &'static str) -> AmResult<T> {
 pub trait TableAccessMethod:
     AmScan + AmRelation + AmIndexCallbacks + AmDdl + 'static
 {
+    /// Whether this AM stores a PostgreSQL partitioned table as one logical
+    /// provider-owned table instead of PostgreSQL child relations.
+    const OWNS_PARTITIONED_TABLE: bool = false;
+
     type ScanSession: AmScanSession;
     type IndexFetchSession: AmIndexFetchSession;
     type ModifyQueryState: AmModifyQueryState;
@@ -925,7 +929,7 @@ impl<Q: AmModifyQueryState, C> ModifyStateContext<Q, C> {
 pub trait AmModifyState {
     type QueryState: AmModifyQueryState;
 
-    /// Storage-specific metadata captured by the Modify-purpose target scan.
+    /// Storage-specific metadata captured by the ModifyTarget-purpose target scan.
     type ScanContext: Clone + PartialEq + 'static;
 
     /// Begin and construct the complete write session for one result relation.
@@ -1050,6 +1054,15 @@ pub trait AmCopySession {
 }
 
 pub trait AmDdl {
+    /// Remove all rows from one provider-owned logical table transactionally.
+    ///
+    /// PostgreSQL reaches this operation through its relfilenumber callbacks
+    /// for ordinary relations. The runtime TRUNCATE bridge invokes it directly
+    /// for provider-owned partitioned tables, whose `rd_tableam` remains unset.
+    fn truncate(rel: &RelationHandle) -> AmResult<()>
+    where
+        Self: Sized;
+
     fn relation_set_new_filelocator(
         rel: &RelationHandle,
         newrlocator: &RelFileLocator,

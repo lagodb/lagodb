@@ -10,6 +10,10 @@
 
 It concentrates unsafe C FFI, planner hooks, executor lifecycle management, memory contexts, error recovery, and transaction boundaries in one place. Concrete providers (such as [`lagodb-iceberg`](../lagodb-iceberg) and [`lagodb-connectors`](../lagodb-connectors)) implement storage and format logic behind safe Rust traits instead of re-implementing PostgreSQL internals in each extension.
 
+PostgreSQL maintenance execution is also encapsulated in core's
+[table-maintenance executor](src/table_maintenance/README.md). The base runtime
+retains global hook ownership, admission, provider registration and policy.
+
 ## Core Architecture and Seams
 
 `lagodb-core` connects PostgreSQL's database engine with pluggable lakehouse storage providers across four distinct seams:

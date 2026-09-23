@@ -2876,7 +2876,7 @@ dependencies = [
 [[package]]
 name = "iceberg-lite"
 version = "0.1.0"
-source = "git+https://github.com/lagodb/iceberg-lite.git?rev=b99a8c634c62e7b2315682ff57a655dad7a359fb#b99a8c634c62e7b2315682ff57a655dad7a359fb"
+source = "git+https://github.com/lagodb/iceberg-lite.git?rev=9e924457126383c7e1b5cafa7279a9421b338e35#9e924457126383c7e1b5cafa7279a9421b338e35"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3342,6 +3342,7 @@ dependencies = [
  "md-5 0.10.6",
  "once_cell",
  "parquet",
+ "percent-encoding",
  "pgrx",
  "pgrx-tests",
  "proptest",

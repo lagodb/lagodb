@@ -6,7 +6,7 @@ use std::mem::size_of;
 use pgrx::pg_sys;
 
 use super::{
-    MaintenanceProvider, ModifyPlannerDescriptor, RelationScanPlannerDescriptor,
+    ModifyPlannerDescriptor, RelationScanPlannerDescriptor, TableProvider,
     TableScanDescriptor, TableScanWorkerDescriptor,
 };
 
@@ -171,7 +171,7 @@ pub struct ObjectAccessStrHookDescriptor {
 
 /// One provider's complete runtime registration transaction.
 ///
-/// The runtime validates and prepares the optional maintenance provider and
+/// The runtime validates and prepares the optional table-provider facet and
 /// every hook descriptor before publishing any of them. Pointer fields may be
 /// null only when the corresponding count is zero; descriptor storage only
 /// needs to live for the registration call.
@@ -185,8 +185,8 @@ pub struct ProviderRegistration {
     pub struct_size: u32,
     /// Required identity of the registering AM or FDW.
     pub provider: *const ProviderIdentity,
-    /// Optional maintenance provider staged by the same provider. Null means none.
-    pub maintenance_provider: *const MaintenanceProvider,
+    /// Optional table-provider facet staged by the same provider. Null means none.
+    pub table_provider: *const TableProvider,
     pub utility_hooks: *const UtilityHookDescriptor,
     pub utility_hook_count: u32,
     pub utility_consumers: *const UtilityConsumerDescriptor,

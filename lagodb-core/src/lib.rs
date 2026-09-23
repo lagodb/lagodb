@@ -72,6 +72,8 @@ pub mod resource;
 /// Exact-build C ABI published by `lagodb-base` through rendezvous.
 pub mod runtime_api;
 
+mod scan_explain;
+
 /// Transaction lifecycle callbacks.  Distinct from ResourceOwner cleanup.
 pub mod transaction;
 
@@ -83,6 +85,9 @@ pub(crate) mod maintenance_config;
 
 /// Format-neutral logical table-maintenance provider SPI and VACUUM routing.
 pub mod table_maintenance;
+
+/// Runtime identity and cross-command capabilities for one table provider.
+pub mod table_provider;
 
 /// Helper functions and diagnostics
 pub mod diag;
