@@ -1,4 +1,3 @@
-use crate::diag::PgError;
 use crate::wrapper::PgWrapper;
 use pgrx::pg_sys;
 
@@ -26,10 +25,7 @@ impl SysCacheTuple {
     ///
     /// The returned `Datum` may point into PostgreSQL-owned syscache memory.
     /// Callers must use it or copy its contents before this guard is dropped.
-    pub fn get_attr(
-        &self,
-        attribute_number: i16,
-    ) -> Result<Option<pg_sys::Datum>, PgError> {
+    pub fn get_attr(&self, attribute_number: i16) -> Option<pg_sys::Datum> {
         let mut is_null = false;
         let datum = unsafe {
             PgWrapper::sys_cache_get_attr_raw(
@@ -37,18 +33,15 @@ impl SysCacheTuple {
                 self.tuple,
                 attribute_number,
                 &mut is_null,
-            )?
+            )
         };
-        Ok((!is_null).then_some(datum))
+        (!is_null).then_some(datum)
     }
 }
 
 impl Drop for SysCacheTuple {
     fn drop(&mut self) {
-        // Drop cannot report PostgreSQL errors. Releasing a syscache reference
-        // is best-effort here; callers needing explicit error handling should
-        // add an explicit close/release API before relying on Drop.
-        let _ = unsafe { PgWrapper::release_sys_cache_raw(self.tuple) };
+        unsafe { PgWrapper::release_sys_cache_raw(self.tuple) };
     }
 }
 
@@ -76,10 +69,7 @@ impl SysCacheTupleCopy {
     ///
     /// The returned `Datum` may point into this tuple copy. Callers must use it
     /// or copy its contents before this guard is dropped.
-    pub fn get_attr(
-        &self,
-        attribute_number: i16,
-    ) -> Result<Option<pg_sys::Datum>, PgError> {
+    pub fn get_attr(&self, attribute_number: i16) -> Option<pg_sys::Datum> {
         let mut is_null = false;
         let datum = unsafe {
             PgWrapper::sys_cache_get_attr_raw(
@@ -87,9 +77,9 @@ impl SysCacheTupleCopy {
                 self.tuple,
                 attribute_number,
                 &mut is_null,
-            )?
+            )
         };
-        Ok((!is_null).then_some(datum))
+        (!is_null).then_some(datum)
     }
 }
 
@@ -101,21 +91,18 @@ impl Drop for SysCacheTupleCopy {
     }
 }
 
-pub fn search_syscache1(
-    cache_id: i32,
-    key1: pg_sys::Datum,
-) -> Result<Option<SysCacheTuple>, PgError> {
-    let tuple = PgWrapper::search_sys_cache1_raw(cache_id, key1)?;
-    Ok(tuple.map(|tuple| SysCacheTuple::new(cache_id, tuple)))
+pub fn search_syscache1(cache_id: i32, key1: pg_sys::Datum) -> Option<SysCacheTuple> {
+    PgWrapper::search_sys_cache1_raw(cache_id, key1)
+        .map(|tuple| SysCacheTuple::new(cache_id, tuple))
 }
 
 pub(crate) fn search_syscache2(
     cache_id: i32,
     key1: pg_sys::Datum,
     key2: pg_sys::Datum,
-) -> Result<Option<SysCacheTuple>, PgError> {
-    let tuple = PgWrapper::search_sys_cache2_raw(cache_id, key1, key2)?;
-    Ok(tuple.map(|tuple| SysCacheTuple::new(cache_id, tuple)))
+) -> Option<SysCacheTuple> {
+    PgWrapper::search_sys_cache2_raw(cache_id, key1, key2)
+        .map(|tuple| SysCacheTuple::new(cache_id, tuple))
 }
 
 pub fn search_syscache_copy(
@@ -124,8 +111,7 @@ pub fn search_syscache_copy(
     key2: pg_sys::Datum,
     key3: pg_sys::Datum,
     key4: pg_sys::Datum,
-) -> Result<Option<SysCacheTupleCopy>, PgError> {
-    let tuple =
-        PgWrapper::search_sys_cache_copy_raw(cache_id, key1, key2, key3, key4)?;
-    Ok(tuple.map(|tuple| SysCacheTupleCopy::new(cache_id, tuple)))
+) -> Option<SysCacheTupleCopy> {
+    PgWrapper::search_sys_cache_copy_raw(cache_id, key1, key2, key3, key4)
+        .map(|tuple| SysCacheTupleCopy::new(cache_id, tuple))
 }

@@ -9,7 +9,7 @@ pub mod table;
 pub mod tablespace;
 
 pub use schema::{
-    OptionDef, OptionKind, OptionMutability, OptionSchemaError,
+    OptionAccess, OptionDef, OptionKind, OptionSchemaError,
     extract_and_remove_options,
 };
 pub use table::{

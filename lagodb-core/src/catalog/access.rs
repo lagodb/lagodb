@@ -1,3 +1,5 @@
+use std::ptr::{addr_of_mut, null_mut};
+
 use crate::diag::PgError;
 use crate::handles::{
     HeapTupleGuard, HeapTupleRef, RelationGuard, RelationHandle, SnapshotHandle,
@@ -18,11 +20,14 @@ pub enum CatalogUpdateResult {
 /// Snapshot selection for PostgreSQL system catalog scans.
 ///
 /// `Default` asks PostgreSQL to use and register the catalog snapshot for the
-/// scanned relation. `Borrowed` passes an existing live snapshot without taking
-/// ownership of it.
+/// scanned relation. `SelfVisible` exposes catalog changes made by the current
+/// command, as required by PostgreSQL object-access hooks. `Borrowed` passes an
+/// existing live snapshot without taking ownership of it.
 #[derive(Debug, Clone, Copy)]
 pub enum CatalogSnapshot<'a> {
     Default,
+    /// See catalog rows inserted or updated by the current command.
+    SelfVisible,
     Borrowed(&'a SnapshotHandle<'a>),
 }
 
@@ -30,7 +35,12 @@ impl CatalogSnapshot<'_> {
     #[inline]
     fn as_raw(&self) -> pg_sys::Snapshot {
         match self {
-            CatalogSnapshot::Default => std::ptr::null_mut(),
+            CatalogSnapshot::Default => null_mut(),
+            CatalogSnapshot::SelfVisible => {
+                // PostgreSQL owns this backend-local static snapshot for the
+                // process lifetime; catalog scans only borrow it.
+                addr_of_mut!(pg_sys::SnapshotSelfData)
+            }
             CatalogSnapshot::Borrowed(snapshot) => snapshot.as_raw(),
         }
     }
@@ -219,12 +229,17 @@ pub struct CatalogRelation {
 }
 
 impl CatalogRelation {
+    /// Make catalog writes visible to subsequent work in this command.
+    pub fn make_changes_visible() -> Result<(), PgError> {
+        PgWrapper::make_catalog_changes_visible()
+    }
+
     pub fn open(
         oid: pg_sys::Oid,
         lock_mode: pg_sys::LOCKMODE,
     ) -> Result<Self, PgError> {
         Ok(Self {
-            guard: RelationGuard::open(oid, lock_mode)?,
+            guard: RelationGuard::open_table(oid, lock_mode)?,
         })
     }
 
@@ -234,7 +249,7 @@ impl CatalogRelation {
         lock_mode: pg_sys::LOCKMODE,
     ) -> Result<Self, PgError> {
         Ok(Self {
-            guard: RelationGuard::open_retain_lock(oid, lock_mode)?,
+            guard: RelationGuard::open_table_retain_lock(oid, lock_mode)?,
         })
     }
 
@@ -246,6 +261,35 @@ impl CatalogRelation {
     #[inline]
     pub fn as_raw(&self) -> pg_sys::Relation {
         self.guard.as_raw()
+    }
+
+    /// Read one user attribute from a tuple produced by a scan of this
+    /// catalog relation.
+    ///
+    /// The returned datum borrows storage owned by `tuple`; callers must copy
+    /// pass-by-reference values before advancing the scan.
+    ///
+    /// # Safety
+    ///
+    /// `tuple` must come from a scan of this relation, remain valid for this
+    /// call, and `attribute_number` must identify a valid user attribute in
+    /// this relation's tuple descriptor.
+    #[inline]
+    pub unsafe fn get_attr(
+        &self,
+        tuple: HeapTupleRef<'_>,
+        attribute_number: pg_sys::AttrNumber,
+    ) -> Option<pg_sys::Datum> {
+        let mut is_null = false;
+        let datum = unsafe {
+            PgWrapper::heap_get_attr_raw(
+                tuple.as_raw(),
+                attribute_number,
+                (*self.as_raw()).rd_att,
+                &mut is_null,
+            )
+        };
+        (!is_null).then_some(datum)
     }
 
     /// Insert an owned heap tuple into this catalog relation.
@@ -361,7 +405,7 @@ impl CatalogRelation {
                 _phantom: std::marker::PhantomData,
             }),
             Err(error) => {
-                let _ = unsafe {
+                unsafe {
                     PgWrapper::index_close_raw(
                         index_relation,
                         pg_sys::AccessShareLock as _,
@@ -375,7 +419,7 @@ impl CatalogRelation {
     #[inline]
     fn scan_key_ptr(keys: &mut [pg_sys::ScanKeyData]) -> pg_sys::ScanKey {
         if keys.is_empty() {
-            std::ptr::null_mut()
+            null_mut()
         } else {
             keys.as_mut_ptr()
         }
@@ -406,8 +450,8 @@ impl Drop for CatalogWriter<'_> {
         if self.index_state.is_null() {
             return;
         }
-        let _ = unsafe { PgWrapper::catalog_close_indexes_raw(self.index_state) };
-        self.index_state = std::ptr::null_mut();
+        unsafe { PgWrapper::catalog_close_indexes_raw(self.index_state) };
+        self.index_state = null_mut();
     }
 }
 
@@ -438,9 +482,7 @@ impl CatalogScan<'_> {
 
 impl Drop for CatalogScan<'_> {
     fn drop(&mut self) {
-        // Drop cannot report PostgreSQL errors; ending the scan is best-effort
-        // cleanup at this point.
-        let _ = unsafe { PgWrapper::systable_endscan_raw(self.scan) };
+        unsafe { PgWrapper::systable_endscan_raw(self.scan) };
     }
 }
 
@@ -461,8 +503,8 @@ impl CatalogOrderedScan<'_> {
 
 impl Drop for CatalogOrderedScan<'_> {
     fn drop(&mut self) {
-        let _ = unsafe { PgWrapper::systable_endscan_ordered_raw(self.scan) };
-        let _ = unsafe {
+        unsafe { PgWrapper::systable_endscan_ordered_raw(self.scan) };
+        unsafe {
             PgWrapper::index_close_raw(
                 self.index_relation,
                 pg_sys::AccessShareLock as _,

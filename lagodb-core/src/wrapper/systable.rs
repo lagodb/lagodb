@@ -28,16 +28,8 @@ impl PgWrapper {
     pub(crate) unsafe fn index_close_raw(
         relation: pg_sys::Relation,
         lock_mode: pg_sys::LOCKMODE,
-    ) -> Result<(), PgError> {
-        let relation = AssertUnwindSafe(relation);
-        unsafe {
-            PgTryBuilder::new(move || {
-                pg_sys::index_close(*relation, lock_mode);
-                Ok(())
-            })
-            .catch_others(|err| Err(PgError::from_caught(err)))
-            .execute()
-        }
+    ) {
+        unsafe { pg_sys::index_close(relation, lock_mode) }
     }
 
     /// # Safety
@@ -141,18 +133,8 @@ impl PgWrapper {
     ///
     /// `sysscan` must be a live system table scan descriptor that has not
     /// already been ended.
-    pub(crate) unsafe fn systable_endscan_raw(
-        sysscan: pg_sys::SysScanDesc,
-    ) -> Result<(), PgError> {
-        let sysscan = AssertUnwindSafe(sysscan);
-        unsafe {
-            PgTryBuilder::new(move || {
-                pg_sys::systable_endscan(*sysscan);
-                Ok(())
-            })
-            .catch_others(|err| Err(PgError::from_caught(err)))
-            .execute()
-        }
+    pub(crate) unsafe fn systable_endscan_raw(sysscan: pg_sys::SysScanDesc) {
+        unsafe { pg_sys::systable_endscan(sysscan) }
     }
 
     /// End an ordered catalog scan.
@@ -160,17 +142,7 @@ impl PgWrapper {
     /// # Safety
     ///
     /// `sysscan` must be live and not already ended.
-    pub(crate) unsafe fn systable_endscan_ordered_raw(
-        sysscan: pg_sys::SysScanDesc,
-    ) -> Result<(), PgError> {
-        let sysscan = AssertUnwindSafe(sysscan);
-        unsafe {
-            PgTryBuilder::new(move || {
-                pg_sys::systable_endscan_ordered(*sysscan);
-                Ok(())
-            })
-            .catch_others(|err| Err(PgError::from_caught(err)))
-            .execute()
-        }
+    pub(crate) unsafe fn systable_endscan_ordered_raw(sysscan: pg_sys::SysScanDesc) {
+        unsafe { pg_sys::systable_endscan_ordered(sysscan) }
     }
 }

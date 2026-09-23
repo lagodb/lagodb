@@ -5,7 +5,7 @@
 
 use crate::catalog::{self, CatalogRelation, CatalogScanKey, CatalogSnapshot};
 use crate::diag::{PgError, SqlStateError, domain_error_report};
-use crate::options::schema::{self, OptionDef, OptionMutability, OptionSchemaError};
+use crate::options::schema::{self, OptionAccess, OptionDef, OptionSchemaError};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
@@ -27,6 +27,9 @@ pub enum TableOptionError {
 
     #[error("table option '{0}' can only be specified by CREATE TABLE")]
     CreateOnlyOption(String),
+
+    #[error("table option '{0}' is not managed by the table access method")]
+    NotAccessMethodManaged(String),
 
     #[error("failed to persist table options")]
     PersistFailed(#[source] PgError),
@@ -59,7 +62,9 @@ impl SqlStateError for TableOptionError {
             Self::PersistFailed(error)
             | Self::LoadFailed(error)
             | Self::DeleteFailed(error) => error.sql_error_code(),
-            Self::NullRelation => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            Self::NullRelation | Self::NotAccessMethodManaged(_) => {
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+            }
         }
     }
 }
@@ -68,8 +73,11 @@ impl SqlStateError for TableOptionError {
 //  TableOptions
 // ============================================================================
 
-/// Wrapper for custom table options extracted from `CREATE TABLE` statements.
-#[derive(Debug, Clone)]
+/// Complete persisted option set for one table.
+///
+/// Values may originate from user DDL or from an access method. Their access
+/// policy remains authoritative in the corresponding [`OptionDef`] schema.
+#[derive(Debug, Clone, Default)]
 pub struct TableOptions {
     options: Vec<(String, Option<String>)>,
 }
@@ -100,6 +108,68 @@ impl TableOptions {
             .iter()
             .find(|(k, _)| k == key)
             .and_then(|(_, v)| v.as_deref())
+    }
+
+    /// Insert a value owned by the table access method.
+    ///
+    /// The definition, rather than a caller-provided flag or raw option name,
+    /// authorizes this write. This keeps option ownership in the schema and
+    /// enforces the same duplicate and value rules as user-supplied options.
+    pub fn insert_access_method_value(
+        &mut self,
+        definition: &OptionDef,
+        value: impl Into<String>,
+    ) -> Result<(), TableOptionError> {
+        if definition.access != OptionAccess::AccessMethodManaged {
+            return Err(TableOptionError::NotAccessMethodManaged(
+                definition.name.to_owned(),
+            ));
+        }
+        if self.options.iter().any(|(name, _)| name == definition.name) {
+            return Err(OptionSchemaError::Duplicate {
+                option: definition.name.to_owned(),
+            }
+            .into());
+        }
+        let value = schema::validate_option_value(
+            definition,
+            definition.name,
+            Some(value.into()),
+        )?;
+        self.options.push((definition.name.to_owned(), value));
+        Ok(())
+    }
+
+    pub fn get_value(&self, definition: &OptionDef) -> Option<&str> {
+        self.get_str(definition.name)
+    }
+
+    /// Replace an AM-owned value without changing the remaining options.
+    pub fn set_access_method_value(
+        &mut self,
+        definition: &OptionDef,
+        value: impl Into<String>,
+    ) -> Result<(), TableOptionError> {
+        if definition.access != OptionAccess::AccessMethodManaged {
+            return Err(TableOptionError::NotAccessMethodManaged(
+                definition.name.to_owned(),
+            ));
+        }
+        let value = schema::validate_option_value(
+            definition,
+            definition.name,
+            Some(value.into()),
+        )?;
+        if let Some((_, existing)) = self
+            .options
+            .iter_mut()
+            .find(|(name, _)| name == definition.name)
+        {
+            *existing = value;
+        } else {
+            self.options.push((definition.name.to_owned(), value));
+        }
+        Ok(())
     }
 
     pub fn get_int(&self, key: &str) -> Option<i32> {
@@ -344,10 +414,10 @@ impl TableOptions {
 }
 
 impl TableOptionAlterations {
-    /// Reject recognized CREATE-only options before the command tree is
-    /// rewritten.  Keeping this rule on the shared schema ensures SET and
-    /// RESET cannot drift apart as AM option sets grow.
-    unsafe fn reject_create_only(
+    /// Reject recognized options that user ALTER commands cannot change before
+    /// the command tree is rewritten. Keeping this rule on the shared schema
+    /// ensures SET and RESET cannot drift apart as AM option sets grow.
+    unsafe fn reject_non_mutable(
         options: *mut pg_sys::List,
         valid_options: &[OptionDef],
     ) -> Result<(), TableOptionError> {
@@ -365,11 +435,21 @@ impl TableOptionAlterations {
             if let Some(definition) = valid_options
                 .iter()
                 .find(|definition| name.to_bytes() == definition.name.as_bytes())
-                && definition.mutability == OptionMutability::CreateOnly
             {
-                return Err(TableOptionError::CreateOnlyOption(
-                    definition.name.to_owned(),
-                ));
+                match definition.access {
+                    OptionAccess::UserMutable => {}
+                    OptionAccess::UserCreateOnly => {
+                        return Err(TableOptionError::CreateOnlyOption(
+                            definition.name.to_owned(),
+                        ));
+                    }
+                    OptionAccess::AccessMethodManaged => {
+                        return Err(OptionSchemaError::AccessMethodManaged {
+                            option: definition.name.to_owned(),
+                        }
+                        .into());
+                    }
+                }
             }
         }
         Ok(())
@@ -453,7 +533,7 @@ impl TableOptionAlterations {
             match unsafe { (*command).subtype } {
                 pg_sys::AlterTableType::AT_SetRelOptions => {
                     unsafe {
-                        Self::reject_create_only(
+                        Self::reject_non_mutable(
                             (*command).def.cast::<pg_sys::List>(),
                             valid_options,
                         )?;
@@ -475,7 +555,7 @@ impl TableOptionAlterations {
                 }
                 pg_sys::AlterTableType::AT_ResetRelOptions => {
                     unsafe {
-                        Self::reject_create_only(
+                        Self::reject_non_mutable(
                             (*command).def.cast::<pg_sys::List>(),
                             valid_options,
                         )?;

@@ -1,4 +1,4 @@
-use crate::options::schema::{self, OptionDef, OptionKind, OptionMutability};
+use crate::options::schema::{self, OptionAccess, OptionDef, OptionKind};
 use pgrx::pg_sys;
 
 pub const PUBLIC_STORAGE_VOLUME_OPTION: &str = "storage_volume";
@@ -7,13 +7,13 @@ pub const INTERNAL_STORAGE_VOLUME_ID_OPTION: &str = "lagodb_volume_id";
 static TABLESPACE_OPTION_DEFS: &[OptionDef] = &[
     OptionDef {
         name: PUBLIC_STORAGE_VOLUME_OPTION,
-        mutability: OptionMutability::CreateOnly,
+        access: OptionAccess::UserCreateOnly,
         kind: OptionKind::String { default: None },
         description: "LagoDB storage volume name",
     },
     OptionDef {
         name: INTERNAL_STORAGE_VOLUME_ID_OPTION,
-        mutability: OptionMutability::CreateOnly,
+        access: OptionAccess::UserCreateOnly,
         kind: OptionKind::String { default: None },
         description: "LagoDB internal storage volume id",
     },

@@ -27,12 +27,12 @@ pub fn get_lagodb_namespace_oid() -> Result<pg_sys::Oid, PgError> {
 
 pub fn get_table_options_oid() -> Result<pg_sys::Oid, PgError> {
     let schema_oid = get_lagodb_namespace_oid()?;
-    super::get_relation_oid(TABLE_OPTIONS_TABLE, schema_oid)
+    Ok(super::get_relation_oid(TABLE_OPTIONS_TABLE, schema_oid))
 }
 
 pub fn get_table_options_pkey_oid() -> Result<pg_sys::Oid, PgError> {
     let schema_oid = get_lagodb_namespace_oid()?;
-    super::get_relation_oid(TABLE_OPTIONS_PKEY, schema_oid)
+    Ok(super::get_relation_oid(TABLE_OPTIONS_PKEY, schema_oid))
 }
 
 /// Resolve the maintenance catalog only after its extension SQL is installed.
@@ -47,11 +47,11 @@ pub(crate) fn get_maintenance_catalog_ids()
         return Ok(None);
     }
 
-    let table = super::get_relation_oid(MAINTENANCE_QUEUE_TABLE, schema)?;
-    let pkey = super::get_relation_oid(MAINTENANCE_QUEUE_PKEY, schema)?;
-    let ready_index = super::get_relation_oid(MAINTENANCE_QUEUE_READY_INDEX, schema)?;
+    let table = super::get_relation_oid(MAINTENANCE_QUEUE_TABLE, schema);
+    let pkey = super::get_relation_oid(MAINTENANCE_QUEUE_PKEY, schema);
+    let ready_index = super::get_relation_oid(MAINTENANCE_QUEUE_READY_INDEX, schema);
     let target_index =
-        super::get_relation_oid(MAINTENANCE_QUEUE_TARGET_INDEX, schema)?;
+        super::get_relation_oid(MAINTENANCE_QUEUE_TARGET_INDEX, schema);
     if [table, pkey, ready_index, target_index]
         .into_iter()
         .any(|oid| oid == pg_sys::InvalidOid)

@@ -45,6 +45,9 @@ pub enum OptionSchemaError {
         value: String,
         allowed: String,
     },
+
+    #[error("table option '{option}' is managed by the table access method")]
+    AccessMethodManaged { option: String },
 }
 
 impl SqlStateError for OptionSchemaError {
@@ -73,15 +76,19 @@ pub enum OptionKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OptionMutability {
-    CreateOnly,
-    Mutable,
+pub enum OptionAccess {
+    /// Accepted on CREATE but rejected by ALTER SET and RESET.
+    UserCreateOnly,
+    /// Accepted on CREATE and by ALTER SET and RESET.
+    UserMutable,
+    /// Declared by an AM but never accepted from user DDL.
+    AccessMethodManaged,
 }
 
 pub struct OptionDef {
     pub name: &'static str,
     pub kind: OptionKind,
-    pub mutability: OptionMutability,
+    pub access: OptionAccess,
     pub description: &'static str,
 }
 
@@ -101,6 +108,12 @@ unsafe fn try_extract_single_option(
     let Some(def) = valid_options.iter().find(|opt| opt.name == def_name) else {
         return Ok(false);
     };
+
+    if def.access == OptionAccess::AccessMethodManaged {
+        return Err(OptionSchemaError::AccessMethodManaged {
+            option: def_name.to_owned(),
+        });
+    }
 
     // SAFETY: defGetString reads from a valid DefElem node.
     let raw_val = unsafe {
@@ -279,7 +292,7 @@ pub unsafe fn extract_and_remove_option_names(
     Ok(custom_names)
 }
 
-fn validate_option_value(
+pub(crate) fn validate_option_value(
     def: &OptionDef,
     option: &str,
     raw_val: Option<String>,

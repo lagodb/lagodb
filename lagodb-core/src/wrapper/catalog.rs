@@ -41,20 +41,46 @@ impl Drop for CatalogIndexGuard {
         if self.state.is_null() {
             return;
         }
-
-        let state = AssertUnwindSafe(self.state);
-        let _ = unsafe {
-            PgTryBuilder::new(move || {
-                pg_sys::CatalogCloseIndexes(*state);
-                Ok(())
-            })
-            .catch_others(|err| Err(PgError::from_caught(err)))
-            .execute()
-        };
+        unsafe { pg_sys::CatalogCloseIndexes(self.state) };
     }
 }
 
 impl PgWrapper {
+    /// # Safety
+    ///
+    /// `tuple` must match `tuple_desc`, and `attribute_number` must identify a
+    /// valid user attribute in that descriptor.
+    #[inline]
+    pub(crate) unsafe fn heap_get_attr_raw(
+        tuple: pg_sys::HeapTuple,
+        attribute_number: pg_sys::AttrNumber,
+        tuple_desc: pg_sys::TupleDesc,
+        is_null: &mut bool,
+    ) -> pg_sys::Datum {
+        unsafe {
+            pg_sys::heap_getattr(tuple, attribute_number as _, tuple_desc, is_null)
+        }
+    }
+
+    pub(crate) fn record_tablespace_dependency(
+        class_id: pg_sys::Oid,
+        object_id: pg_sys::Oid,
+        tablespace_id: pg_sys::Oid,
+    ) -> Result<(), PgError> {
+        unsafe {
+            PgTryBuilder::new(move || {
+                pg_sys::recordDependencyOnTablespace(
+                    class_id,
+                    object_id,
+                    tablespace_id,
+                );
+                Ok(())
+            })
+            .catch_others(|err| Err(PgError::from_caught(err)))
+            .execute()
+        }
+    }
+
     /// Open all indexes belonging to a catalog relation for reuse across a
     /// bounded sequence of tuple writes.
     ///
@@ -77,18 +103,8 @@ impl PgWrapper {
     /// # Safety
     ///
     /// `state` must be live catalog index state that has not already been closed.
-    pub(crate) unsafe fn catalog_close_indexes_raw(
-        state: pg_sys::CatalogIndexState,
-    ) -> Result<(), PgError> {
-        let state = AssertUnwindSafe(state);
-        unsafe {
-            PgTryBuilder::new(move || {
-                pg_sys::CatalogCloseIndexes(*state);
-                Ok(())
-            })
-            .catch_others(|err| Err(PgError::from_caught(err)))
-            .execute()
-        }
+    pub(crate) unsafe fn catalog_close_indexes_raw(state: pg_sys::CatalogIndexState) {
+        unsafe { pg_sys::CatalogCloseIndexes(state) }
     }
 
     /// # Safety

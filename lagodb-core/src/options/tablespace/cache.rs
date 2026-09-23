@@ -10,16 +10,13 @@ use thiserror::Error;
 
 use super::options::{TablespaceBinding, TablespaceError, parse_catalog_binding};
 use crate::catalog::{SysCacheTuple, search_syscache1};
-use crate::diag::{PgError, SqlStateError};
+use crate::diag::SqlStateError;
 use crate::runtime_api::{RuntimeClient, StorageVolumeRouteLookupError};
 use crate::storage::volume::{StorageVolumeId, StorageVolumeRoute};
 use crate::wrapper::CacheRegisterSyscacheCallback;
 
 #[derive(Debug, Error)]
 pub enum TablespaceCacheError {
-    #[error("failed to look up tablespace: {0}")]
-    LookupFailed(#[from] PgError),
-
     #[error("invalid LagoDB tablespace binding: {0}")]
     InvalidBinding(#[from] TablespaceError),
 
@@ -30,7 +27,6 @@ pub enum TablespaceCacheError {
 impl SqlStateError for TablespaceCacheError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
-            Self::LookupFailed(error) => error.sql_error_code(),
             Self::InvalidBinding(error) => error.sql_error_code(),
             Self::Route(
                 StorageVolumeRouteLookupError::NotFound(_)
@@ -122,11 +118,11 @@ pub fn is_distributed_tablespace(
     let tuple = search_syscache1(
         pg_sys::SysCacheIdentifier::TABLESPACEOID as i32,
         pg_sys::Datum::from(u32::from(spcid) as usize),
-    )?;
+    );
     let Some(tuple) = tuple else {
         return Ok(false);
     };
-    Ok(parse_catalog_binding(&read_options(&tuple)?)?.is_some())
+    Ok(parse_catalog_binding(&read_options(&tuple))?.is_some())
 }
 
 pub fn get_tablespace(
@@ -149,21 +145,21 @@ fn lookup_tablespace_options(
     let tuple = search_syscache1(
         pg_sys::SysCacheIdentifier::TABLESPACEOID as i32,
         pg_sys::Datum::from(u32::from(spcid) as usize),
-    )?;
+    );
     let Some(tuple) = tuple else {
         return Ok(None);
     };
-    let options = read_options(&tuple)?;
+    let options = read_options(&tuple);
     CachedTablespaceOpts::from_catalog_options(&options)
 }
 
-fn read_options(tuple: &SysCacheTuple) -> Result<Vec<String>, PgError> {
-    let Some(datum) = tuple.get_attr(pg_sys::Anum_pg_tablespace_spcoptions as i16)?
+fn read_options(tuple: &SysCacheTuple) -> Vec<String> {
+    let Some(datum) = tuple.get_attr(pg_sys::Anum_pg_tablespace_spcoptions as i16)
     else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     // SAFETY: FromDatum copies the array while the syscache tuple is pinned.
-    Ok(unsafe { Vec::<String>::from_datum(datum, false) }.unwrap_or_default())
+    unsafe { Vec::<String>::from_datum(datum, false) }.unwrap_or_default()
 }
 
 #[cfg(test)]

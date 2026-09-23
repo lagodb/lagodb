@@ -1,4 +1,4 @@
-use std::slice;
+use std::{ptr::addr_of, slice};
 
 use super::borrowed::{PgBorrowed, PgNullable};
 use crate::catalog::{search_syscache1, search_syscache2};
@@ -6,7 +6,7 @@ use crate::diag::PgError;
 use crate::wrapper::PgWrapper;
 use pgrx::pg_sys;
 
-use super::RelationColumn;
+use super::{RelationColumn, RelationName, RelationTablespace};
 
 #[derive(Debug)]
 pub struct RelationHandle<'a> {
@@ -34,6 +34,15 @@ impl<'a> RelationHandle<'a> {
         unsafe { self.inner.as_ref().rd_id }
     }
 
+    /// Queue relcache and dependent-plan invalidation for this relation.
+    ///
+    /// PostgreSQL processes the notification at the next command counter
+    /// increment and manages its commit and abort lifetime.
+    pub fn invalidate_relcache(&self) -> Result<(), PgError> {
+        // SAFETY: the handle keeps this PostgreSQL relation valid for the call.
+        unsafe { PgWrapper::invalidate_relation_cache(self.as_raw()) }
+    }
+
     /// Whether PostgreSQL created this relation in the current subtransaction.
     ///
     /// Table AMs use this to distinguish the initial
@@ -52,8 +61,10 @@ impl<'a> RelationHandle<'a> {
     }
 
     #[inline]
-    pub fn tablespace_oid(&self) -> pg_sys::Oid {
-        unsafe { (*self.rd_rel()).reltablespace }
+    pub fn tablespace(&self) -> RelationTablespace {
+        RelationTablespace::from_catalog_oid(unsafe {
+            (*self.rd_rel()).reltablespace
+        })
     }
 
     #[inline]
@@ -63,23 +74,23 @@ impl<'a> RelationHandle<'a> {
 
     /// The relation's physical file locator (`rd_locator`).
     ///
-    /// Unlike [`Self::tablespace_oid`] (which returns `reltablespace`, `0` for
-    /// the default tablespace), the locator carries the *resolved* physical
-    /// `spc_oid` PostgreSQL uses for storage. Storage-facing callers should use
-    /// this so default-tablespace relations resolve to the right location.
+    /// For relation kinds with physical storage, the locator carries the
+    /// resolved `spc_oid` PostgreSQL uses for storage. Storage-less relation
+    /// kinds do not have a valid locator; callers that need logical tablespace
+    /// placement should use [`Self::tablespace`].
     #[inline]
     pub fn locator(&self) -> RelFileLocator {
         unsafe { RelFileLocator::from_raw_unchecked(&(*self.as_raw()).rd_locator) }
     }
 
+    /// Copy the relation name into inline storage, preserving server-encoding
+    /// bytes. The returned value is independent of the relation and relcache.
     #[inline]
-    pub fn relation_name(&self) -> String {
-        unsafe {
-            let name_ptr = (*self.rd_rel()).relname.data.as_ptr();
-            std::ffi::CStr::from_ptr(name_ptr)
-                .to_string_lossy()
-                .to_string()
-        }
+    pub fn relation_name(&self) -> RelationName {
+        // SAFETY: the live relation owns rd_rel. PostgreSQL initializes relname
+        // as a zero-padded, NUL-terminated NameData, and copying it does not
+        // reenter PostgreSQL or retain a borrow of relcache memory.
+        unsafe { RelationName::from_raw(addr_of!((*self.rd_rel()).relname)) }
     }
 
     #[inline]
@@ -206,12 +217,11 @@ impl<'a> RelationHandle<'a> {
                 pg_sys::SysCacheIdentifier::ATTNUM as i32,
                 pg_sys::Datum::from(self.oid()),
                 pg_sys::Datum::from(attr.attnum),
-            )?
-            else {
+            ) else {
                 continue;
             };
             let target = tuple
-                .get_attr(pg_sys::Anum_pg_attribute_attstattarget as i16)?
+                .get_attr(pg_sys::Anum_pg_attribute_attstattarget as i16)
                 .map_or(default_target, |datum| datum.value() as i16 as i32);
             max_target =
                 Some(max_target.map_or(target, |current: i32| current.max(target)));
@@ -223,12 +233,11 @@ impl<'a> RelationHandle<'a> {
             let Some(tuple) = search_syscache1(
                 pg_sys::SysCacheIdentifier::STATEXTOID as i32,
                 pg_sys::Datum::from(statistics_oid),
-            )?
-            else {
+            ) else {
                 continue;
             };
             let Some(datum) =
-                tuple.get_attr(pg_sys::Anum_pg_statistic_ext_stxstattarget as i16)?
+                tuple.get_attr(pg_sys::Anum_pg_statistic_ext_stxstattarget as i16)
             else {
                 continue;
             };
@@ -256,8 +265,11 @@ pub struct RelationGuard {
 }
 
 impl RelationGuard {
-    /// Opens a relation with the specified lock mode.
-    pub fn open(
+    /// Opens a table relation with the specified lock mode.
+    ///
+    /// PostgreSQL rejects indexes, partitioned indexes, and composite types at
+    /// this boundary.
+    pub fn open_table(
         oid: pg_sys::Oid,
         lock_mode: pg_sys::LOCKMODE,
     ) -> Result<Self, PgError> {
@@ -265,11 +277,11 @@ impl RelationGuard {
         Ok(Self { rel, lock_mode })
     }
 
-    /// Opens a relation while retaining its lock until transaction end.
+    /// Opens a table relation while retaining its lock until transaction end.
     ///
     /// Closing the relcache handle with `NoLock` leaves PostgreSQL's lock
     /// manager to release the originally acquired lock at commit or abort.
-    pub fn open_retain_lock(
+    pub fn open_table_retain_lock(
         oid: pg_sys::Oid,
         lock_mode: pg_sys::LOCKMODE,
     ) -> Result<Self, PgError> {
@@ -298,9 +310,7 @@ impl RelationGuard {
 
 impl Drop for RelationGuard {
     fn drop(&mut self) {
-        // Drop cannot report PostgreSQL errors; relation close is best-effort
-        // cleanup at this point.
-        let _ = unsafe { PgWrapper::table_close(self.rel, self.lock_mode) };
+        unsafe { PgWrapper::relation_close(self.rel, self.lock_mode) };
     }
 }
 

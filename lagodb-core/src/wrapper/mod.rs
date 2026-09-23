@@ -18,9 +18,11 @@
 mod catalog;
 mod composite;
 mod cstring;
+mod database;
 mod json;
 mod namespace;
 mod relation;
+mod relation_storage;
 mod syscache;
 mod systable;
 mod wal;

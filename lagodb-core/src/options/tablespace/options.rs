@@ -124,12 +124,10 @@ impl TablespaceBinding {
                 0.into(),
                 0.into(),
             )
-            .map_err(TablespaceError::UpdateFailed)?
             .ok_or(TablespaceError::NotFound(spcoid))?;
 
-            let existing = tuple
-                .get_attr(pg_sys::Anum_pg_tablespace_spcoptions as i16)
-                .map_err(TablespaceError::UpdateFailed)?;
+            let existing =
+                tuple.get_attr(pg_sys::Anum_pg_tablespace_spcoptions as i16);
             let mut options = existing
                 .and_then(|datum| Vec::<String>::from_datum(datum, false))
                 .unwrap_or_default();

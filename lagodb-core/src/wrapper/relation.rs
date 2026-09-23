@@ -26,17 +26,27 @@ impl PgWrapper {
     /// # Safety
     ///
     /// `relation` must be a valid relation opened with the matching lock mode.
-    pub(crate) unsafe fn table_close(
+    pub(crate) unsafe fn relation_close(
         relation: pg_sys::Relation,
         lockmode: pg_sys::LOCKMODE,
+    ) {
+        unsafe { pg_sys::relation_close(relation, lockmode) }
+    }
+
+    /// # Safety
+    ///
+    /// `relation` must be a live PostgreSQL relation in the current transaction.
+    pub(crate) unsafe fn invalidate_relation_cache(
+        relation: pg_sys::Relation,
     ) -> Result<(), PgError> {
         let relation = AssertUnwindSafe(relation);
+        // SAFETY: the caller keeps the relation alive throughout this call.
         unsafe {
             PgTryBuilder::new(move || {
-                pg_sys::table_close(*relation, lockmode);
+                pg_sys::CacheInvalidateRelcache(*relation);
                 Ok(())
             })
-            .catch_others(|err| Err(PgError::from_caught(err)))
+            .catch_others(|error| Err(PgError::from_caught(error)))
             .execute()
         }
     }

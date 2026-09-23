@@ -28,8 +28,12 @@
 mod borrowed;
 mod index;
 mod mutation;
+mod partition_key;
 mod relation;
 mod relation_column;
+mod relation_name;
+mod relation_storage;
+mod relation_tablespace;
 mod scan;
 mod tuple;
 
@@ -37,11 +41,14 @@ pub use index::{
     IndexBuildCallbackHandle, IndexInfoHandle, ValidateIndexStateHandle,
 };
 pub use mutation::{TM_FailureData, TMIndexDeleteOpHandle};
+pub use partition_key::{PartitionKeyField, PartitionKeyHandle, PartitionStrategy};
 pub use relation::{
     AttrWidthsHandle, BufferAccessStrategyHandle, RelFileLocator, RelationGuard,
     RelationHandle, SnapshotHandle, VacuumParamsHandle, VarlenaHandle,
 };
 pub use relation_column::RelationColumn;
+pub use relation_name::RelationName;
+pub use relation_tablespace::RelationTablespace;
 pub use scan::AnalyzeSamplerState;
 pub use scan::{
     AnalyzeReadStreamHandle, OwnedScanKeys, ParallelTableScanDescHandle,
