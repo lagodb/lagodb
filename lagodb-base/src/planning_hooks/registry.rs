@@ -8,7 +8,8 @@ use crate::descriptor_registry::{
 };
 use lagodb_core::runtime_api::{
     ModifyPlannerDescriptor, RelationScanPlannerDescriptor, RoutedModifyPlannerPost,
-    RoutedModifyPlannerPre, RoutedModifyUpperPlanner, RoutedRelationScanPlanner,
+    RoutedModifyQueryPreparation, RoutedModifyUpperPlanner, RoutedRelationInfo,
+    RoutedRelationScanPlanner,
 };
 
 thread_local! {
@@ -21,6 +22,7 @@ thread_local! {
 #[derive(Clone, Copy)]
 pub(super) struct StoredRelationScanPlanner {
     pub(super) context: *mut c_void,
+    pub(super) relation_info: RoutedRelationInfo,
     pub(super) plan_relation: RoutedRelationScanPlanner,
 }
 
@@ -32,6 +34,7 @@ impl StoredRelationScanPlanner {
         }
         Some(Self {
             context: descriptor.context,
+            relation_info: descriptor.relation_info?,
             plan_relation: descriptor.plan_relation?,
         })
     }
@@ -40,7 +43,7 @@ impl StoredRelationScanPlanner {
 #[derive(Clone, Copy)]
 pub(super) struct StoredModifyPlanner {
     pub(super) context: *mut c_void,
-    pub(super) planner_pre: RoutedModifyPlannerPre,
+    pub(super) prepare_query: RoutedModifyQueryPreparation,
     pub(super) planner_post: RoutedModifyPlannerPost,
     pub(super) create_upper_paths: RoutedModifyUpperPlanner,
 }
@@ -52,7 +55,7 @@ impl StoredModifyPlanner {
         }
         Some(Self {
             context: descriptor.context,
-            planner_pre: descriptor.planner_pre?,
+            prepare_query: descriptor.prepare_query?,
             planner_post: descriptor.planner_post?,
             create_upper_paths: descriptor.create_upper_paths?,
         })
@@ -118,7 +121,18 @@ mod tests {
         CALLBACK_OK
     }
 
-    unsafe extern "C-unwind" fn planner_pre(
+    unsafe extern "C-unwind" fn relation_info(
+        _context: *mut c_void,
+        _root: *mut pg_sys::PlannerInfo,
+        _relation_oid: pg_sys::Oid,
+        _inhparent: bool,
+        _rel: *mut pg_sys::RelOptInfo,
+        _error: *mut CallbackErrorReport,
+    ) -> u32 {
+        CALLBACK_OK
+    }
+
+    unsafe extern "C-unwind" fn prepare_query(
         _context: *mut c_void,
         _parse: *mut pg_sys::Query,
         _error: *mut CallbackErrorReport,
@@ -151,12 +165,16 @@ mod tests {
         let mut descriptor = RelationScanPlannerDescriptor {
             struct_size: size_of::<RelationScanPlannerDescriptor>() as u32,
             context: ptr::null_mut(),
+            relation_info: Some(relation_info),
             plan_relation: Some(relation),
         };
         assert!(StoredRelationScanPlanner::from_descriptor(&descriptor).is_some());
         descriptor.struct_size += 1;
         assert!(StoredRelationScanPlanner::from_descriptor(&descriptor).is_none());
         descriptor.struct_size = size_of::<RelationScanPlannerDescriptor>() as u32;
+        descriptor.relation_info = None;
+        assert!(StoredRelationScanPlanner::from_descriptor(&descriptor).is_none());
+        descriptor.relation_info = Some(relation_info);
         descriptor.plan_relation = None;
         assert!(StoredRelationScanPlanner::from_descriptor(&descriptor).is_none());
     }
@@ -166,7 +184,7 @@ mod tests {
         let mut descriptor = ModifyPlannerDescriptor {
             struct_size: size_of::<ModifyPlannerDescriptor>() as u32,
             context: ptr::null_mut(),
-            planner_pre: Some(planner_pre),
+            prepare_query: Some(prepare_query),
             planner_post: Some(planner_post),
             create_upper_paths: Some(upper),
         };

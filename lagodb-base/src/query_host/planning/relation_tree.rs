@@ -8,6 +8,7 @@ mod subplan;
 
 use std::ptr;
 
+use lagodb_core::expr::planning::PlanRelationResolver;
 use lagodb_core::query_contract::ScanId;
 use pgrx::pg_sys;
 
@@ -178,7 +179,7 @@ impl RelationTreePlanner {
         let mut relations_by_rti = vec![None; planner.simple_rel_array_size as usize];
         for (offset, rti) in rtis.into_iter().enumerate() {
             let relation = unsafe { *planner.simple_rel_array.add(rti as usize) };
-            let rte = unsafe { *planner.simple_rte_array.add(rti as usize) };
+            let rte = unsafe { PlanRelationResolver::new(root).query_rte(rti) };
             if relation.is_null()
                 || rte.is_null()
                 || !unsafe {

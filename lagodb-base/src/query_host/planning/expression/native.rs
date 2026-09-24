@@ -131,7 +131,7 @@ impl FunctionSignature {
                 ),
                 pg_sys::F_REPEAT => (
                     // PostgreSQL repeat(text, int4) maps directly to DataFusion's
-                    // vectorized repeat expression. PostgreSQL 17 rejects results
+                    // vectorized repeat expression. PostgreSQL rejects results
                     // above MaxAllocSize (1 GiB - 1), while DataFusion's Utf8
                     // kernel uses the larger i32 offset limit. This known
                     // allocation/error-semantics difference must be addressed by

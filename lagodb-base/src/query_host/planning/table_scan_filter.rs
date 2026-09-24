@@ -1,11 +1,15 @@
 //! Query table-scan predicate placement and diagnostics.
 
-use std::ffi::{CString, c_void};
+mod deparse;
 
-use lagodb_core::expr::explain::deparse_and_join;
+use std::ffi::CString;
+
 use pgrx::pg_sys;
 
 use crate::query_host::error::QueryHostError;
+
+use super::expression::ScopedRuntimeBinding;
+use deparse::FilterDeparser;
 
 /// PostgreSQL source identity for a ScanNode predicate. The exact expression
 /// is owned and always executed by the ScanNode; provider negotiation may only
@@ -23,57 +27,25 @@ impl TableScanFilter {
         self.source_expression
     }
 
-    unsafe fn deparse(
-        source_expression: *mut pg_sys::Node,
-        range_table_index: pg_sys::Index,
-        range_table_entry: *mut pg_sys::RangeTblEntry,
-    ) -> Result<CString, QueryHostError> {
-        let expression = unsafe {
-            pg_sys::copyObjectImpl(source_expression.cast::<c_void>())
-                .cast::<pg_sys::Node>()
-        };
-        unsafe {
-            pg_sys::ChangeVarNodes(expression, range_table_index as i32, 1, 0);
-        }
-        let range_table_entry = unsafe { &*range_table_entry };
-        let alias = unsafe { &*range_table_entry.eref };
-        let context = unsafe {
-            pg_sys::deparse_context_for(alias.aliasname, range_table_entry.relid)
-        };
-        let expressions = if unsafe { (*expression).type_ } == pg_sys::NodeTag::T_List
-        {
-            let list = expression.cast::<pg_sys::List>();
-            let count = unsafe { pg_sys::list_length(list) };
-            (0..count)
-                .map(|index| unsafe { pg_sys::list_nth(list, index) }.cast())
-                .collect::<Vec<*mut pg_sys::Expr>>()
-        } else {
-            vec![expression.cast()]
-        };
-        unsafe { deparse_and_join(context, expressions) }.ok_or_else(|| {
-            QueryHostError::invalid_plan(
-                "PostgreSQL could not deparse a table-scan filter",
-            )
-        })
-    }
-
     pub(super) unsafe fn explain_texts(
         &self,
         pruning_expression: Option<*mut pg_sys::Expr>,
+        root: *mut pg_sys::PlannerInfo,
         range_table_index: pg_sys::Index,
         range_table_entry: *mut pg_sys::RangeTblEntry,
+        runtime_bindings: &[ScopedRuntimeBinding],
     ) -> Result<(CString, Option<CString>), QueryHostError> {
-        let exact = unsafe {
-            Self::deparse(
-                self.source_expression,
+        let mut deparser = unsafe {
+            FilterDeparser::new(
+                runtime_bindings,
+                root,
                 range_table_index,
                 range_table_entry,
             )
-        }?;
+        };
+        let exact = unsafe { deparser.deparse(self.source_expression) }?;
         let pruning = pruning_expression
-            .map(|expression| unsafe {
-                Self::deparse(expression.cast(), range_table_index, range_table_entry)
-            })
+            .map(|expression| unsafe { deparser.deparse(expression.cast()) })
             .transpose()?;
         Ok((exact, pruning))
     }

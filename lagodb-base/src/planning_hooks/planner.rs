@@ -1,11 +1,10 @@
-//! ModifyTable-only PlannerPre -> previous/standard planner -> PlannerPost routing.
+//! Shared partitioned table preparation and provider ModifyTable planner routing.
 //!
 //! Query offload does not use this hook. It contributes an upper CustomPath
 //! through `set_join_pathlist_hook`/`create_upper_paths_hook` and then uses
-//! PostgreSQL CustomScan method tables. The planner hook remains required by
-//! the pre-existing custom-modify
-//! contract, which injects whole-row inputs before planning and fixes the
-//! resulting ModifyTable plan afterward.
+//! PostgreSQL CustomScan method tables. The planner hook prepares shared
+//! partitioned table semantics and provider Modify inputs in one query-tree walk.
+//! Modify post callbacks fix the resulting plan afterward.
 
 use std::ffi::c_char;
 
@@ -13,6 +12,7 @@ use lagodb_core::diag::{PgReportError, ReportableError};
 use lagodb_core::runtime_api::CallbackErrorReport;
 use pgrx::{pg_guard, pg_sys};
 
+use super::query_tree_preparation::QueryTreePreparation;
 use super::{PREV_PLANNER, callback_result, registry};
 
 #[pg_guard]
@@ -35,15 +35,9 @@ unsafe fn route(
     bound_params: pg_sys::ParamListInfo,
 ) -> Result<*mut pg_sys::PlannedStmt, PgReportError> {
     let snapshot = registry::modify_snapshot();
-    snapshot.try_for_each(|descriptor| {
-        let mut error = CallbackErrorReport::default();
-        // SAFETY: registration validated this exact-build callback; `parse`
-        // and the stack error record remain live for this synchronous call.
-        let status = unsafe {
-            (descriptor.planner_pre)(descriptor.context, parse, &mut error)
-        };
-        callback_result(status, &error, "modify planner pre callback")
-    })?;
+    // SAFETY: PostgreSQL supplies rewrite-complete input with relation locks.
+    // One walk prepares partitioned table RTEs and Modify inputs in each Query.
+    unsafe { QueryTreePreparation::new(snapshot).prepare_tree(parse) }?;
 
     let planned = if let Some(Some(previous)) = PREV_PLANNER.get() {
         // SAFETY: this is the PostgreSQL-provided predecessor planner and the

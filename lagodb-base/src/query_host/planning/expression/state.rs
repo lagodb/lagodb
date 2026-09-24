@@ -4,7 +4,8 @@ use core::ffi::c_int;
 use std::mem;
 
 use lagodb_core::expr::{
-    ColumnRef, ExprType, RuntimeValueExpr, RuntimeValueId, RuntimeValueSpec,
+    ColumnRef, ExprType, RuntimeValueExpr, RuntimeValueId, RuntimeValueSource,
+    RuntimeValueSpec,
 };
 use lagodb_core::query_contract::{OutputId, ScanId};
 use pgrx::pg_sys;
@@ -26,6 +27,37 @@ pub(in crate::query_host::planning) enum ExpressionDecline {
 
 pub(in crate::query_host::planning) type ExpressionPlanResult<T> =
     Result<T, ExpressionDecline>;
+
+/// A complete runtime expression in its PostgreSQL planner namespace.
+///
+/// The record's position remains its query-global RuntimeValueId. The root is
+/// planning-only provenance and is discarded when expressions are encoded.
+pub(in crate::query_host::planning) struct ScopedRuntimeBinding {
+    root: *mut pg_sys::PlannerInfo,
+    value: RuntimeValueExpr,
+}
+
+impl ScopedRuntimeBinding {
+    pub(in crate::query_host::planning) fn expr(&self) -> *mut pg_sys::Expr {
+        self.value.expr()
+    }
+
+    /// # Safety
+    ///
+    /// `expression` and the registered expression must be live PostgreSQL
+    /// expression trees. `root` identifies the expression's planner scope.
+    pub(in crate::query_host::planning) unsafe fn matches_runtime_expression(
+        &self,
+        root: *mut pg_sys::PlannerInfo,
+        expression: *mut pg_sys::Node,
+    ) -> bool {
+        // PG equal() compares Var/Param fields, not their PlannerInfo owner.
+        // Keep RelabelType boundaries intact and literals visible as literals.
+        self.root == root
+            && self.value.metadata().source_kind != RuntimeValueSource::Constant
+            && unsafe { pg_sys::equal(self.value.expr().cast(), expression.cast()) }
+    }
+}
 
 /// One PostgreSQL planner scope with its dense RTI-to-ScanId mapping.
 struct ExpressionSourceScope {
@@ -263,13 +295,16 @@ impl QueryExpressionPlanner {
 
     pub(super) fn push_runtime(
         &mut self,
+        root: *mut pg_sys::PlannerInfo,
         expression: *mut pg_sys::Expr,
         spec: RuntimeValueSpec,
     ) -> RuntimeValueId {
         let id = RuntimeValueId::from_index(self.runtime_specs.len());
         self.runtime_specs.push(spec);
-        self.runtime_exprs
-            .push(RuntimeValueExpr::new(expression, spec));
+        self.runtime_exprs.push(ScopedRuntimeBinding {
+            root,
+            value: RuntimeValueExpr::new(expression, spec),
+        });
         id
     }
 
@@ -293,7 +328,7 @@ impl QueryExpressionPlanner {
 
     pub(in crate::query_host::planning) fn take_runtime_exprs(
         &mut self,
-    ) -> Vec<RuntimeValueExpr> {
+    ) -> Vec<ScopedRuntimeBinding> {
         mem::take(&mut self.runtime_exprs)
     }
 

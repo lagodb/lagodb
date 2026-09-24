@@ -41,6 +41,7 @@ impl QueryExpressionPlanner {
             let value_type = Self::expr_type(expression);
             return Ok(ExecutionExpr::DecimalValue {
                 value: self.push_runtime(
+                    scope.source_root(),
                     expression,
                     RuntimeValueSpec {
                         value_type,

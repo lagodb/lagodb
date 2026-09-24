@@ -4,7 +4,10 @@ use pgrx::pg_sys;
 
 use crate::expr::{ExprType, RuntimeValueId, RuntimeValueSpec};
 
-/// PostgreSQL expression aligned with one fragment-local value slot.
+/// Complete PostgreSQL expression aligned with one fragment-local value slot.
+///
+/// RelabelType wrappers remain part of the binding: evaluation and diagnostic
+/// substitution must use this expression's result type, typmod, and collation.
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeValueExpr {
     pub(crate) expr: *mut pg_sys::Expr,
@@ -33,7 +36,7 @@ impl RuntimeValueExpr {
     }
 }
 
-/// One value evaluated by PostgreSQL for the current Begin/ReScan pass.
+/// One value evaluated by PostgreSQL for the current Begin/Start/ReScan pass.
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeValue {
     datum: pg_sys::Datum,

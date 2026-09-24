@@ -2,7 +2,9 @@
 
 mod pathlist;
 mod planner;
+mod query_tree_preparation;
 mod registry;
+mod relation_info;
 
 use std::sync::OnceLock;
 
@@ -14,6 +16,8 @@ use pgrx::prelude::PgSqlErrorCode;
 pub(crate) use registry::{PreparedPlanningHooks, commit, prepare};
 
 static PREV_PLANNER: OnceLock<pg_sys::planner_hook_type> = OnceLock::new();
+static PREV_GET_RELATION_INFO: OnceLock<pg_sys::get_relation_info_hook_type> =
+    OnceLock::new();
 static PREV_SET_REL_PATHLIST: OnceLock<pg_sys::set_rel_pathlist_hook_type> =
     OnceLock::new();
 static PREV_SET_JOIN_PATHLIST: OnceLock<pg_sys::set_join_pathlist_hook_type> =
@@ -28,6 +32,11 @@ pub(crate) fn init() {
         PREV_PLANNER.get_or_init(|| {
             let previous = pg_sys::planner_hook;
             pg_sys::planner_hook = Some(planner::planner);
+            previous
+        });
+        PREV_GET_RELATION_INFO.get_or_init(|| {
+            let previous = pg_sys::get_relation_info_hook;
+            pg_sys::get_relation_info_hook = Some(relation_info::get_relation_info);
             previous
         });
         PREV_SET_REL_PATHLIST.get_or_init(|| {

@@ -175,8 +175,10 @@ impl QueryPathInstallation {
                                 .pruning
                                 .as_ref()
                                 .map(|pruning| pruning.expression),
+                            scan.input.root,
                             scan.input.range_table_index,
                             scan.input.range_table_entry,
+                            &self.planned.runtime_exprs,
                         )
                     })
                     .transpose()

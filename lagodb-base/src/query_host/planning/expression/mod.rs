@@ -11,8 +11,7 @@ use std::ptr;
 
 use lagodb_core::expr::pg::{PgExprRef, PgScalarExprRef};
 use lagodb_core::expr::{
-    ColumnRef, ExprType, PgComparisonOp, RuntimeValueExpr, RuntimeValueSource,
-    RuntimeValueSpec,
+    ColumnRef, ExprType, PgComparisonOp, RuntimeValueSource, RuntimeValueSpec,
 };
 use lagodb_core::query_contract::ScanId;
 use lagodb_query::plan::{
@@ -27,13 +26,14 @@ pub(in crate::query_host::planning) use state::{
 };
 pub(super) use state::{
     ExpressionScope, ExpressionSourceCatalog, OutputCatalog, ResolvedOutput,
+    ScopedRuntimeBinding,
 };
 
 pub(super) type PredicateDomain = ScalarSemantics;
 
 pub(super) struct QueryExpressionPlanner {
     sources: ExpressionSourceCatalog,
-    runtime_exprs: Vec<RuntimeValueExpr>,
+    runtime_exprs: Vec<ScopedRuntimeBinding>,
     runtime_specs: Vec<RuntimeValueSpec>,
     columns_by_scan: Vec<Vec<Option<ColumnRef>>>,
     column_registrations: Vec<ColumnRegistration>,
@@ -226,6 +226,7 @@ impl QueryExpressionPlanner {
                             .is_runtime_outer(scope.source_root(), var.varno())
                     {
                         return self.lower_runtime_value(
+                            scope.source_root(),
                             expression.as_ptr(),
                             RuntimeValueSource::OuterValue,
                         );
@@ -275,6 +276,7 @@ impl QueryExpressionPlanner {
                 })
             }
             PgScalarExprRef::Const { expression, .. } => self.lower_runtime_value(
+                scope.source_root(),
                 expression.as_ptr(),
                 RuntimeValueSource::Constant,
             ),
@@ -289,13 +291,18 @@ impl QueryExpressionPlanner {
                     pg_sys::ParamKind::PARAM_EXEC => RuntimeValueSource::ExecParam,
                     _ => return Err(ExpressionDecline::UnsupportedRuntimeSource),
                 };
-                self.lower_runtime_value(expression.as_ptr(), source)
+                self.lower_runtime_value(
+                    scope.source_root(),
+                    expression.as_ptr(),
+                    source,
+                )
             }
         }
     }
 
     fn lower_runtime_value(
         &mut self,
+        root: *mut pg_sys::PlannerInfo,
         expression: *mut pg_sys::Expr,
         source_kind: RuntimeValueSource,
     ) -> ExpressionPlanResult<ExecutionExpr> {
@@ -303,6 +310,7 @@ impl QueryExpressionPlanner {
         ExecutionScalarRepr::for_runtime_value(value_type)
             .ok_or(ExpressionDecline::UnsupportedType(value_type.type_oid))?;
         Ok(ExecutionExpr::Value(self.push_runtime(
+            root,
             expression,
             RuntimeValueSpec {
                 value_type,

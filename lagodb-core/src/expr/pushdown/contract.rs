@@ -16,7 +16,6 @@ use super::PredicateFragment;
 pub struct FilterPlanningContext {
     relation_oid: pg_sys::Oid,
     scan_relid: pg_sys::Index,
-    tablespace_oid: pg_sys::Oid,
     effective_user_id: pg_sys::Oid,
 }
 
@@ -24,13 +23,11 @@ impl FilterPlanningContext {
     pub const fn new(
         relation_oid: pg_sys::Oid,
         scan_relid: pg_sys::Index,
-        tablespace_oid: pg_sys::Oid,
         effective_user_id: pg_sys::Oid,
     ) -> Self {
         Self {
             relation_oid,
             scan_relid,
-            tablespace_oid,
             effective_user_id,
         }
     }
@@ -43,11 +40,6 @@ impl FilterPlanningContext {
     #[inline]
     pub const fn scan_relid(&self) -> pg_sys::Index {
         self.scan_relid
-    }
-
-    #[inline]
-    pub const fn tablespace_oid(&self) -> pg_sys::Oid {
-        self.tablespace_oid
     }
 
     /// Role selected by PostgreSQL for relation access (including view owner

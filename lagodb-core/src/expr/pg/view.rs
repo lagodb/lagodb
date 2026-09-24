@@ -162,6 +162,22 @@ impl PgConst<'_> {
     pub fn typmod(self) -> i32 {
         unsafe { (*self.ptr.as_ptr()).consttypmod }
     }
+
+    /// Copy a non-NULL built-in `text` constant as server-encoding bytes.
+    ///
+    /// This intentionally does not assume the database encoding is UTF-8.
+    pub fn text_bytes(self) -> Option<Vec<u8>> {
+        let (type_oid, _, datum, is_null) = self.parts();
+        if type_oid != pg_sys::TEXTOID || is_null {
+            return None;
+        }
+        // SAFETY: this view owns a live Const datum for the current planning
+        // context. PostgreSQL returns a NUL-terminated copy in that context;
+        // copying the bytes makes the result independent from it.
+        let ptr =
+            unsafe { pg_sys::text_to_cstring(datum.cast_mut_ptr::<pg_sys::text>()) };
+        Some(unsafe { std::ffi::CStr::from_ptr(ptr) }.to_bytes().to_vec())
+    }
 }
 
 impl PgParam<'_> {
@@ -256,6 +272,31 @@ impl<'a> PgOpExpr<'a> {
 }
 
 impl<'a> PgFuncExpr<'a> {
+    #[inline]
+    pub fn function_oid(self) -> pg_sys::Oid {
+        unsafe { (*self.ptr.as_ptr()).funcid }
+    }
+
+    #[inline]
+    pub fn result_type(self) -> pg_sys::Oid {
+        unsafe { (*self.ptr.as_ptr()).funcresulttype }
+    }
+
+    #[inline]
+    pub fn arity(self) -> usize {
+        unsafe { pg_sys::list_length((*self.ptr.as_ptr()).args) as usize }
+    }
+
+    pub fn argument(self, index: usize) -> Option<PgExprRef<'a>> {
+        if index >= self.arity() {
+            return None;
+        }
+        let index = i32::try_from(index).ok()?;
+        let argument = unsafe { pg_sys::list_nth((*self.ptr.as_ptr()).args, index) }
+            as *mut pg_sys::Expr;
+        unsafe { PgExprRef::from_raw_opt(argument) }
+    }
+
     pub fn builtin_starts_with_operands(
         self,
     ) -> Option<(PgExprRef<'a>, PgExprRef<'a>, pg_sys::Oid)> {

@@ -1,4 +1,4 @@
-//! Shared Begin/ReScan binding state for planned provider predicates.
+//! Shared Begin/Start/ReScan binding state for planned provider predicates.
 
 use pgrx::pg_sys;
 
@@ -105,16 +105,6 @@ impl<P: FilterPushdown> RelationFilterBinding<P> {
         Ok(())
     }
 
-    /// Bind all records for executor paths whose parameters are already valid
-    /// at their Begin callback.
-    pub(crate) unsafe fn bind_initial(
-        &mut self,
-        econtext: *mut pg_sys::ExprContext,
-    ) -> Result<(), RelationFilterBindingError<P::Error>> {
-        unsafe { self.bind_stable(econtext) }?;
-        unsafe { self.bind_dynamic_initial(econtext) }
-    }
-
     /// Bind the records that depend on `PARAM_EXEC` or outer-tuple values once
     /// PostgreSQL has supplied the first valid parameter set.
     ///
@@ -151,6 +141,7 @@ impl<P: FilterPushdown> RelationFilterBinding<P> {
     /// # Safety
     ///
     /// `econtext` is the live executor ExprContext used at initialization.
+    /// Begin and Start must have bound stable and initial dynamic values.
     pub(crate) unsafe fn rebind_dynamic(
         &mut self,
         econtext: *mut pg_sys::ExprContext,
@@ -158,6 +149,7 @@ impl<P: FilterPushdown> RelationFilterBinding<P> {
         if !self.values.has_dynamic_values() {
             return Ok(());
         }
+        debug_assert!(!self.values.values().is_empty());
         unsafe { self.values.rebind_dynamic(econtext) };
         Self::bind_dynamic_records(
             &self.planned,

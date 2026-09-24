@@ -2,3 +2,5 @@
 
 pub mod inspect;
 pub(crate) mod relation;
+
+pub use relation::PlanRelationResolver;

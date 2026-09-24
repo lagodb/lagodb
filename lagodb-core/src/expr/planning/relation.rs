@@ -16,6 +16,21 @@ impl PlanRelationResolver {
         Self { root }
     }
 
+    /// Query RTE retaining catalog and execution identity. A planner adapter
+    /// can use a separate sizing view in `simple_rte_array`.
+    ///
+    /// # Safety
+    ///
+    /// `self.root` and its Query must be live, and `relid` must index that
+    /// Query's range table, including any entries added during planning.
+    pub unsafe fn query_rte(
+        self,
+        relid: pg_sys::Index,
+    ) -> *mut pg_sys::RangeTblEntry {
+        let parse = unsafe { (*self.root).parse };
+        unsafe { pg_sys::list_nth((*parse).rtable, (relid - 1) as c_int).cast() }
+    }
+
     /// `pg_class` OID for a scan RTI, mirroring PostgreSQL's
     /// `planner_rt_fetch`.
     ///
@@ -27,10 +42,7 @@ impl PlanRelationResolver {
     pub unsafe fn rel_oid(self, relid: pg_sys::Index) -> pg_sys::Oid {
         let simple_rte_array = unsafe { (*self.root).simple_rte_array };
         let rte = if simple_rte_array.is_null() {
-            let parse = unsafe { (*self.root).parse };
-            let rtable = unsafe { (*parse).rtable };
-            unsafe { pg_sys::list_nth(rtable, (relid - 1) as c_int) }
-                .cast::<pg_sys::RangeTblEntry>()
+            unsafe { self.query_rte(relid) }
         } else {
             unsafe { *simple_rte_array.add(relid as usize) }
         };

@@ -119,7 +119,7 @@ impl RelationTreePlanner {
     }
 
     /// Collect only scan-bearing base RTIs from a PostgreSQL relation identity.
-    /// PG17 joinrel identities also contain synthetic outer-join relids; those
+    /// PostgreSQL joinrel identities also contain synthetic outer-join relids; those
     /// participate in join ordering and qual placement but have no scan RTE.
     ///
     /// # Safety
@@ -377,7 +377,7 @@ impl RelationTreePlanner {
             pg_sys::JoinType::JOIN_ANTI => Some(JoinType::LeftAnti),
             // RIGHT SEMI is introduced after the PG17 target used by LagoDB.
             // When PG18 support is added it must be normalized by swapping
-            // inputs, just like PG17's RIGHT_ANTI alternative above.
+            // inputs, just like the RIGHT_ANTI alternative above.
             _ => None,
         }
     }

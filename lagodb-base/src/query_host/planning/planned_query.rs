@@ -1,10 +1,10 @@
 //! Planner-owned query tree and provider scan inputs before path encoding.
 
-use lagodb_core::expr::RuntimeValueExpr;
 use lagodb_core::query_contract::ScanId;
 use lagodb_query::plan::QueryPlanData;
 use pgrx::pg_sys;
 
+use super::expression::ScopedRuntimeBinding;
 use super::table_scan_filter::TableScanFilter;
 
 pub(super) struct PlannedScanInput {
@@ -20,7 +20,7 @@ pub(super) struct PlannedScanInput {
 
 pub(super) struct PlannedQuery {
     pub(super) query: QueryPlanData,
-    pub(super) runtime_exprs: Vec<RuntimeValueExpr>,
+    pub(super) runtime_exprs: Vec<ScopedRuntimeBinding>,
     pub(super) scan_target_exprs: Vec<*mut pg_sys::Expr>,
     pub(super) scans: Box<[PlannedScanInput]>,
 }

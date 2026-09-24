@@ -3,6 +3,7 @@
 use std::ffi::c_void;
 
 use lagodb_core::diag::{PgReportError, ReportableError};
+use lagodb_core::expr::planning::PlanRelationResolver;
 use lagodb_core::runtime_api::CallbackErrorReport;
 use pgrx::{pg_guard, pg_sys};
 
@@ -25,6 +26,9 @@ pub(super) unsafe extern "C-unwind" fn set_rel_pathlist(
         // current hook arguments remain live for the duration of the call.
         unsafe { previous(root, rel, rti, rte) };
     }
+    // PG sizes and costs using its planner-local RTE view. Provider admission
+    // and query offload must retain the Query's actual catalog identity.
+    let query_rte = unsafe { PlanRelationResolver::new(root).query_rte(rti) };
     let result = registry::relation_scan_snapshot().try_for_each(|descriptor| {
         let mut error = CallbackErrorReport::default();
         // SAFETY: registration validated this exact-build callback, and
@@ -35,14 +39,16 @@ pub(super) unsafe extern "C-unwind" fn set_rel_pathlist(
                 root,
                 rel,
                 rti,
-                rte,
+                query_rte,
                 &mut error,
             )
         };
         callback_result(status, &error, "relation planning callback")
     });
     result
-        .and_then(|()| unsafe { query_host::set_rel_pathlist(root, rel, rti, rte) })
+        .and_then(|()| unsafe {
+            query_host::set_rel_pathlist(root, rel, rti, query_rte)
+        })
         .report_unwrap();
 }
 
