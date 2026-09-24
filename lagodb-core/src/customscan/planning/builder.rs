@@ -154,7 +154,7 @@ pub(crate) unsafe fn emit_custom_path<P: LagodbCustomScanProvider>(
         path.param_info = param_info;
         let native_parallel_capable = P::NATIVE_PARALLEL
             && (*ctx.baserel).consider_parallel
-            && ctx.purpose == ScanPurpose::Query;
+            && ctx.purpose == ScanPurpose::Read;
         path.parallel_aware = false;
         path.parallel_safe = native_parallel_capable && plan.parallel_safe_complete;
         path.parallel_workers = 0;
@@ -194,7 +194,7 @@ pub(crate) unsafe fn emit_custom_path<P: LagodbCustomScanProvider>(
         })?;
         (*cpath_ptr).custom_private = encode_path_private(
             ctx.purpose,
-            ctx.purpose.is_modify() && path_ctx.modify_requests_wholerow(),
+            ctx.purpose.is_modify_target() && path_ctx.modify_requests_wholerow(),
             provider_metadata,
         )?;
 
@@ -329,6 +329,7 @@ mod tests {
     use crate::customscan::provider::{
         BeginContext, CreateStateContext, CustomScanError, EndContext,
         NextSlotContext, NextSlotResult, PathContext, ReScanContext, RelationContext,
+        StartContext,
     };
     use crate::customscan::provider::{CustomScanPrivate, PrivateDataReader};
     use crate::expr::RuntimeValueBindings;
@@ -432,6 +433,14 @@ mod tests {
 
                 fn begin(
                     _ctx: BeginContext<'_, Self>,
+                ) -> Result<(), CustomScanError> {
+                    unreachable!(
+                        "custom scan execution lifecycle is not exercised in builder tests"
+                    )
+                }
+
+                fn start(
+                    _ctx: StartContext<'_, Self>,
                 ) -> Result<(), CustomScanError> {
                     unreachable!(
                         "custom scan execution lifecycle is not exercised in builder tests"

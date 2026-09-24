@@ -52,6 +52,9 @@ pub struct CustomScanStateWrapper<P: LagodbCustomScanProvider> {
     /// (EXPLAIN_ONLY may have state without begin).
     pub(crate) provider_began: bool,
 
+    /// Set after Start succeeds; checked only by lifecycle callbacks.
+    pub(crate) provider_started: bool,
+
     /// Zero-sized marker for provider type `P`.
     _marker: PhantomData<fn() -> P>,
 }
@@ -188,7 +191,7 @@ pub unsafe extern "C-unwind" fn create_custom_scan_state_trampoline<
                 },
                 ..Default::default()
             },
-            methods: method_tables_for::<P>().exec(),
+            methods: method_tables_for::<P>().initial_exec(),
             ..Default::default()
         },
         recheck_state: core::ptr::null_mut(),
@@ -198,6 +201,7 @@ pub unsafe extern "C-unwind" fn create_custom_scan_state_trampoline<
         provider_state: None,
         cached_envelope: None,
         provider_began: false,
+        provider_started: false,
         _marker: PhantomData,
     };
 

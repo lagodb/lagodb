@@ -6,6 +6,7 @@
 mod context;
 mod contract;
 mod execution;
+mod lifecycle;
 pub mod methods;
 mod planning;
 mod private_data;
@@ -17,8 +18,10 @@ pub use crate::customscan::plan_data::tuple_layout::{
 };
 pub use contract::LagodbCustomScanProvider;
 pub use execution::{
-    BeginContext, CreateStateContext, EndContext, NextSlotAttempt, NextSlotContext,
-    NextSlotEmitter, NextSlotResult, ReScanContext,
+    NextSlotAttempt, NextSlotContext, NextSlotEmitter, NextSlotResult,
+};
+pub use lifecycle::{
+    BeginContext, CreateStateContext, EndContext, ReScanContext, StartContext,
 };
 pub(crate) use methods::method_tables_for;
 pub use planning::*;

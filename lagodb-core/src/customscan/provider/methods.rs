@@ -59,6 +59,7 @@ pub fn method_tables_for<P: LagodbCustomScanProvider>()
         ProviderMethodTables::serial(P::NAME, callbacks)
     };
 
+    let tables = tables.with_first_exec(exec::first_exec_custom_scan_trampoline::<P>);
     let leaked = Box::leak(Box::new(tables));
     METHOD_TABLES.with_borrow_mut(|cache| {
         cache.insert(key, MethodTablesRef(leaked));

@@ -1,17 +1,24 @@
 //! Validation of a base relation as a CustomScan planning candidate.
 
 use pgrx::pg_sys;
+use thiserror::Error;
 
 use crate::customscan::ScanPurpose;
 use crate::customscan::provider::RelationContext;
 use crate::expr::inspect::{RelationExprAnalyzer, RelationExprUsage, RelationScope};
 
 /// Reason a relation cannot participate in CustomScan planning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum CustomScanRejection {
+    #[error("CustomScan requires a relation range-table entry")]
     NotARegularRelation,
+    #[error("CustomScan does not support relation kind {relkind}")]
     UnsupportedRelKind { relkind: u8 },
+    #[error("TABLESAMPLE is not supported by CustomScan")]
+    HasTableSample,
+    #[error("row locking is not supported by CustomScan")]
     HasRowMark,
+    #[error("the referenced system column is not supported by CustomScan")]
     SystemColumnReference,
 }
 
@@ -35,9 +42,9 @@ impl CustomScanCandidate {
         rte: *mut pg_sys::RangeTblEntry,
     ) -> Result<Self, CustomScanRejection> {
         let purpose = if unsafe { Self::is_modify_target(root, rel) } {
-            ScanPurpose::Modify
+            ScanPurpose::ModifyTarget
         } else {
-            ScanPurpose::Query
+            ScanPurpose::Read
         };
         let candidate = Self {
             root,
@@ -60,6 +67,12 @@ impl CustomScanCandidate {
             return Err(CustomScanRejection::UnsupportedRelKind { relkind });
         }
 
+        // SAFETY: `inspect` requires a live RTE for this validation. A non-NULL
+        // sampling clause carries scan semantics absent from the provider contract.
+        if !unsafe { (*self.rte).tablesample }.is_null() {
+            return Err(CustomScanRejection::HasTableSample);
+        }
+
         let relid = unsafe { (*self.rel).relid };
         let row_marks = unsafe { (*self.root).rowMarks };
         if unsafe { Self::has_rowmark_for(row_marks, relid) } {
@@ -67,7 +80,7 @@ impl CustomScanCandidate {
         }
 
         let usage = unsafe { self.collect_usage() };
-        if self.purpose == ScanPurpose::Query
+        if self.purpose == ScanPurpose::Read
             && usage
                 .system_attnos()
                 .iter()
@@ -149,7 +162,9 @@ impl CustomScanCandidate {
         usage
     }
 
-    /// Heap-shaped relkind supported in v1 (`r`, `m`, `t`).
+    /// Relation kinds whose tuple shape fits the provider scan contract.
+    /// Partitioned tables are only admitted as candidates; the selected
+    /// provider must separately claim partitioned table ownership.
     #[inline]
     fn is_supported_storage_relkind(relkind: u8) -> bool {
         matches!(
@@ -157,6 +172,7 @@ impl CustomScanCandidate {
             pg_sys::RELKIND_RELATION
                 | pg_sys::RELKIND_MATVIEW
                 | pg_sys::RELKIND_TOASTVALUE
+                | pg_sys::RELKIND_PARTITIONED_TABLE
         )
     }
 

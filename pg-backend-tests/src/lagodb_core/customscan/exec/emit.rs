@@ -16,7 +16,7 @@ mod tests {
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, EndContext, LagodbCustomScanProvider, NextSlotAttempt,
         NextSlotContext, NextSlotResult, PathContext, PathVariant, ReScanContext,
-        RelationContext,
+        RelationContext, StartContext,
     };
     use lagodb_core::customscan::provider::{
         CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
@@ -147,6 +147,10 @@ mod tests {
         }
 
         /// Read handle accessors and emit a text varlena via `emit_row`.
+        fn start(_ctx: StartContext<'_, Self>) -> Result<(), CustomScanError> {
+            Ok(())
+        }
+
         fn next_slot<'a>(
             mut ctx: NextSlotContext<'a, Self>,
         ) -> Result<NextSlotResult<'a>, CustomScanError> {
@@ -419,6 +423,10 @@ mod tests {
 
         fn begin(_ctx: BeginContext<'_, Self>) -> Result<(), CustomScanError> {
             unreachable!("this test drives next_slot directly; begin is not invoked");
+        }
+
+        fn start(_ctx: StartContext<'_, Self>) -> Result<(), CustomScanError> {
+            Ok(())
         }
 
         fn next_slot<'a>(

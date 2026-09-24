@@ -17,6 +17,7 @@ use crate::plan_data::PlanDataError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CustomScanPhase {
     Begin,
+    Start,
     ReScan,
     NextSlot,
     EstimateDsm,
@@ -31,6 +32,7 @@ impl CustomScanPhase {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Begin => "BeginCustomScan",
+            Self::Start => "ExecCustomScan start",
             Self::ReScan => "ReScanCustomScan",
             Self::NextSlot => "ExecCustomScan access",
             Self::EstimateDsm => "EstimateDSMCustomScan",
@@ -150,8 +152,27 @@ impl CustomScanError {
 
     pub(crate) fn required_modify_path(provider: &CStr) -> Self {
         Self::framework(format!(
-            "required Modify CustomScan provider {provider:?} emitted no path"
+            "required ModifyTarget CustomScan provider {provider:?} emitted no path"
         ))
+    }
+
+    pub(crate) fn required_partitioned_table_path(provider: &CStr) -> Self {
+        Self::framework(format!(
+            "CustomScan provider {provider:?} emitted no path for a partitioned table"
+        ))
+    }
+
+    pub(crate) fn partitioned_table_rejected(
+        provider: &CStr,
+        reason: impl Display,
+    ) -> Self {
+        PgReportError::from_message(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!(
+                "provider {provider:?} cannot use PostgreSQL fallback for a partitioned table: {reason}"
+            ),
+        )
+        .into()
     }
 
     pub(crate) fn modify_binding(message: impl Into<String>) -> Self {

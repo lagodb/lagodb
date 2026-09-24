@@ -89,7 +89,17 @@ unsafe fn explain_custom_scan<P: LagodbCustomScanProvider>(
         unsafe { (*es).format == pg_sys::ExplainFormat::EXPLAIN_FORMAT_TEXT };
     let verbose = unsafe { (*es).verbose };
 
-    if priv_payload.purpose.is_modify() || verbose {
+    if unsafe { (*es).analyze }
+        && verbose
+        && let Some(metrics) = wrapper
+            .provider_state
+            .as_ref()
+            .and_then(P::scan_task_metrics)
+    {
+        unsafe { metrics.explain(es) };
+    }
+
+    if priv_payload.purpose.is_modify_target() || verbose {
         unsafe {
             pg_sys::ExplainPropertyText(
                 PROP_SCAN_PURPOSE.as_ptr(),

@@ -133,7 +133,7 @@ unsafe fn begin_custom_scan<P: LagodbCustomScanProvider>(
     let mut filters = unsafe {
         CustomScanFilters::<P>::initialize(&priv_payload, binding_exprs, parent)
     }?;
-    unsafe { filters.bind_initial(econtext) }?;
+    unsafe { filters.bind_stable(econtext) }?;
     let recheck_list =
         unsafe { filters.recheck_list(expr_sections.relation_pushdown_provenance()) };
     wrapper.recheck_state = if recheck_list.is_null() {
@@ -201,6 +201,9 @@ pub unsafe extern "C-unwind" fn rescan_custom_scan_trampoline<
             .with_callback_phase(P::NAME, CustomScanPhase::ReScan)
             .report();
     }
+    // nodeCustom delegates this responsibility to the provider callback.
+    // Every node using ExecScan must reset its scan slot and EPQ state here.
+    unsafe { pg_sys::ExecScanReScan(&mut (*node).ss) };
 }
 
 unsafe fn rescan_custom_scan<P: LagodbCustomScanProvider>(
@@ -208,11 +211,9 @@ unsafe fn rescan_custom_scan<P: LagodbCustomScanProvider>(
 ) -> Result<(), CustomScanError> {
     let wrapper = unsafe { CustomScanStateWrapper::<P>::from_node_ptr(node) };
 
-    if !wrapper.provider_began {
-        debug_assert!(
-            false,
-            "ReScanCustomScan invoked before BeginCustomScan completed",
-        );
+    // NestLoop calls ReScan before the inner scan's first row. Its first
+    // cursor and dynamic bindings still belong to Start, not ReScan.
+    if !wrapper.provider_started {
         return Ok(());
     }
 
@@ -225,27 +226,31 @@ unsafe fn rescan_custom_scan<P: LagodbCustomScanProvider>(
     let econtext = unsafe { (*node).ss.ps.ps_ExprContext };
     let snapshot = unsafe { (*estate).es_snapshot };
 
-    let filters = wrapper
-        .filters
-        .as_mut()
-        .expect("ReScanCustomScan: filters must be initialized by BeginCustomScan");
-    let filters_changed = unsafe { filters.filters_changed(chg_param) };
-    if filters_changed {
-        unsafe { filters.rebind_dynamic(econtext) }?;
-    }
+    let previous_context =
+        unsafe { pg_sys::MemoryContextSwitchTo((*estate).es_query_cxt) };
+    let result = (|| {
+        let filters = wrapper.filters.as_mut().expect(
+            "ReScanCustomScan: filters must be initialized by BeginCustomScan",
+        );
+        let filters_changed = unsafe { filters.filters_changed(chg_param) };
+        if filters_changed {
+            unsafe { filters.rebind_dynamic(econtext) }?;
+        }
 
-    let provider_state_ref: &mut P::State =
-        unsafe { wrapper.provider_state.as_mut().unwrap_unchecked() };
-    let rescan_ctx = ReScanContext::<P>::new(
-        provider_state_ref,
-        filters_changed,
-        envelope.purpose,
-        filters.bound(),
-        unsafe { RelationHandle::from_raw(scan_rel) },
-        unsafe { SnapshotHandle::from_raw(snapshot) },
-    );
-    P::rescan(rescan_ctx)?;
-    Ok(())
+        let provider_state_ref: &mut P::State =
+            unsafe { wrapper.provider_state.as_mut().unwrap_unchecked() };
+        let rescan_ctx = ReScanContext::<P>::new(
+            provider_state_ref,
+            filters_changed,
+            envelope.purpose,
+            filters.bound(),
+            unsafe { RelationHandle::from_raw(scan_rel) },
+            unsafe { SnapshotHandle::from_raw(snapshot) },
+        );
+        P::rescan(rescan_ctx)
+    })();
+    unsafe { pg_sys::MemoryContextSwitchTo(previous_context) };
+    result
 }
 
 /// `EndCustomScan`: close the provider and drop framework-owned state.
@@ -274,6 +279,7 @@ pub unsafe extern "C-unwind" fn end_custom_scan_trampoline<
         wrapper.provider_began = false;
     }
 
+    wrapper.provider_started = false;
     let _ = wrapper.provider_state.take();
     let _ = wrapper.decoded_private.take();
 

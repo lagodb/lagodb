@@ -45,25 +45,17 @@ impl<'a> RelationContext<'a> {
         unsafe { self.rte.as_ref().relkind as u8 }
     }
 
-    /// The relation's table access method OID (`pg_class.relam`).
+    /// The relation's catalog access-method OID (`pg_class.relam`).
     ///
-    /// Returns [`pg_sys::Oid::INVALID`] for relations without a TableAM.
+    /// This is independent of whether PostgreSQL initialized
+    /// `RelationData.rd_tableam`. In particular, a partitioned table can carry
+    /// an access-method OID for inheritance while its `rd_tableam` is unset.
+    /// Returns [`pg_sys::Oid::INVALID`] when `pg_class.relam` is unset.
     #[inline]
     pub fn access_method_oid(&self) -> pg_sys::Oid {
         // SAFETY: `get_rel_relam` accepts the valid relation OID returned by
         // `rel_oid` and resolves it through PostgreSQL's syscache.
         unsafe { pg_sys::get_rel_relam(self.rel_oid()) }
-    }
-
-    /// The relation's tablespace OID (`pg_class.reltablespace`).
-    ///
-    /// This can be [`pg_sys::Oid::INVALID`] for the database default
-    /// tablespace.
-    #[inline]
-    pub fn tablespace_oid(&self) -> pg_sys::Oid {
-        // SAFETY: `get_rel_tablespace` accepts the valid relation OID returned
-        // by `rel_oid` and resolves it through PostgreSQL's syscache.
-        unsafe { pg_sys::get_rel_tablespace(self.rel_oid()) }
     }
 }
 
@@ -120,16 +112,12 @@ impl<'a> PathContext<'a> {
         self.relation.relkind()
     }
 
-    /// The relation's table access method OID (`pg_class.relam`).
+    /// The relation's catalog access-method OID (`pg_class.relam`).
+    ///
+    /// This does not imply that `RelationData.rd_tableam` is initialized.
     #[inline]
     pub fn access_method_oid(&self) -> pg_sys::Oid {
         self.relation.access_method_oid()
-    }
-
-    /// The relation's tablespace OID (`pg_class.reltablespace`).
-    #[inline]
-    pub fn tablespace_oid(&self) -> pg_sys::Oid {
-        self.relation.tablespace_oid()
     }
 
     /// `baserel->pages` (unpruned baseline).

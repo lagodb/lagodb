@@ -6,6 +6,7 @@
 
 use core::ffi::c_int;
 use std::ffi::CStr;
+use std::ptr;
 
 use pgrx::pg_sys;
 
@@ -84,6 +85,7 @@ pub struct CustomScanMethodTables {
     path: pg_sys::CustomPathMethods,
     scan: pg_sys::CustomScanMethods,
     exec: pg_sys::CustomExecMethods,
+    first_exec: Option<pg_sys::CustomExecMethods>,
 }
 
 // SAFETY: `CustomName` points to process-static bytes supplied by the caller;
@@ -128,6 +130,7 @@ impl CustomScanMethodTables {
             )
         });
         Self {
+            first_exec: None,
             path: pg_sys::CustomPathMethods {
                 CustomName: name.as_ptr(),
                 PlanCustomPath: Some(callbacks.plan),
@@ -168,5 +171,25 @@ impl CustomScanMethodTables {
     #[inline]
     pub fn exec(&'static self) -> &'static pg_sys::CustomExecMethods {
         &self.exec
+    }
+
+    /// Install a one-time execution entry point without a per-row start check.
+    pub(crate) fn with_first_exec(mut self, execute: ExecCustomScan) -> Self {
+        self.first_exec = Some(pg_sys::CustomExecMethods {
+            ExecCustomScan: Some(execute),
+            ..self.exec
+        });
+        self
+    }
+
+    pub(crate) fn initial_exec(&'static self) -> &'static pg_sys::CustomExecMethods {
+        self.first_exec.as_ref().unwrap_or(&self.exec)
+    }
+
+    pub(crate) fn owns_exec(
+        &'static self,
+        methods: *const pg_sys::CustomExecMethods,
+    ) -> bool {
+        ptr::eq(methods, self.exec()) || ptr::eq(methods, self.initial_exec())
     }
 }

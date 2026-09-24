@@ -1,7 +1,7 @@
 //! Stable CustomScan executor facade.
 //!
-//! Lifecycle callbacks live in [`lifecycle`]; row production and EPQ recheck
-//! live in [`scan`]. Re-exports keep the method-table and test entry points
+//! Lifecycle callbacks live in [`lifecycle`] and [`super::start`]; row production
+//! and EPQ recheck live in [`scan`]. Re-exports keep method-table and test entry points
 //! independent of that internal split.
 
 pub(crate) use super::lifecycle::end_custom_scan_trampoline;
@@ -10,6 +10,7 @@ pub use super::lifecycle::{
     begin_custom_scan_trampoline, rescan_custom_scan_trampoline,
 };
 pub(crate) use super::scan::exec_custom_scan_trampoline;
+pub(crate) use super::start::first_exec_custom_scan_trampoline;
 
 pub use super::lifecycle::check_scan_relation_oid;
 pub use super::scan::next_slot_wrapper;
@@ -31,7 +32,7 @@ mod tests {
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, CustomScanPrivate, EndContext, LagodbCustomScanProvider,
         NextSlotContext, NextSlotResult, PathContext, PathVariant, PrivateDataReader,
-        PrivateDataWriter, ReScanContext, RelationContext,
+        PrivateDataWriter, ReScanContext, RelationContext, StartContext,
     };
     use crate::diag::SqlStateError;
     use crate::expr::RuntimeValueBindings;
@@ -138,6 +139,10 @@ mod tests {
 
         fn begin(_ctx: BeginContext<'_, Self>) -> Result<(), CustomScanError> {
             unreachable!("NoopProvider::begin is not exercised by host-only tests")
+        }
+
+        fn start(_ctx: StartContext<'_, Self>) -> Result<(), CustomScanError> {
+            unreachable!("NoopProvider::start is not exercised by host-only tests")
         }
 
         fn next_slot<'a>(

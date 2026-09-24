@@ -6,10 +6,11 @@ use pgrx::pg_sys;
 
 use crate::customscan::error::CustomScanError;
 use crate::expr::pushdown::FilterPushdown;
+use crate::runtime_api::TableScanTaskMetrics;
 
-use super::execution::{
-    BeginContext, CreateStateContext, EndContext, NextSlotContext, NextSlotResult,
-    ReScanContext,
+use super::execution::{NextSlotContext, NextSlotResult};
+use super::lifecycle::{
+    BeginContext, CreateStateContext, EndContext, ReScanContext, StartContext,
 };
 use super::planning::{
     CustomPathBuilder, CustomPathPlan, PathContext, PathVariant, RelationContext,
@@ -28,7 +29,7 @@ pub trait LagodbCustomScanProvider: FilterPushdown {
     /// Per-scan runtime state inside `CustomScanStateWrapper`.
     type State;
 
-    /// Whether query scans provide PostgreSQL native-parallel DSM lifecycle
+    /// Whether read scans provide PostgreSQL native-parallel DSM lifecycle
     /// support. The framework can install an unparameterized parallel-aware
     /// partial path for this capability. A complete path is marked
     /// parallel-safe separately by [`CustomPathBuilder`],
@@ -40,6 +41,14 @@ pub trait LagodbCustomScanProvider: FilterPushdown {
     /// This is independent of CustomScan parallel capability: retaining such a
     /// path would call unsupported table-AM callbacks or duplicate the scan.
     const SUPPRESS_TABLE_AM_PARALLEL_SCAN: bool = false;
+
+    /// Whether this provider stores a PostgreSQL partitioned table as one
+    /// provider-owned logical table instead of PostgreSQL leaf relations.
+    ///
+    /// The planner consults this once while building relation paths so it can
+    /// replace PostgreSQL's dummy/Append paths for that table. It adds no
+    /// executor or per-row dispatch.
+    const OWNS_PARTITIONED_TABLE: bool = false;
 
     /// Whether this provider claims the relation after framework path gates.
     fn supports_relation(ctx: &RelationContext<'_>) -> bool;
@@ -56,8 +65,14 @@ pub trait LagodbCustomScanProvider: FilterPushdown {
     /// Construct per-scan state before [`Self::begin`].
     fn create_state(ctx: CreateStateContext<Self>) -> Self::State;
 
-    /// Open scan cursor; framework calls from BeginCustomScan.
+    /// Prepare scan resources and statement-stable predicates at Begin.
+    /// Dynamic inputs and the first row cursor belong to Start.
     fn begin(ctx: BeginContext<'_, Self>) -> Result<(), CustomScanError>;
+
+    /// Open the first cursor with the framework's bound dynamic predicates
+    /// after executor initialization, before the first row. This runs once,
+    /// including when PostgreSQL rescans the node before its first execution.
+    fn start(ctx: StartContext<'_, Self>) -> Result<(), CustomScanError>;
 
     /// Produce the next row through the framework-owned slot publication path.
     fn next_slot<'a>(
@@ -69,6 +84,18 @@ pub trait LagodbCustomScanProvider: FilterPushdown {
 
     /// Close the cursor and release provider-owned runtime resources.
     fn end(ctx: EndContext<'_, Self>) -> Result<(), CustomScanError>;
+
+    /// Physical inventory selected by the active scan after storage pruning.
+    ///
+    /// Called only by EXPLAIN ANALYZE VERBOSE, before scan teardown. Return
+    /// `None` when this execution mode has no retained inventory. Reading this
+    /// state must not plan another scan or perform storage I/O. These are
+    /// selected tasks, not per-row counters or the number of opened files.
+    /// Rescan-dependent filters may narrow reads within this retained inventory
+    /// without changing its counts.
+    fn scan_task_metrics(_state: &Self::State) -> Option<TableScanTaskMetrics> {
+        None
+    }
 
     fn estimate_dsm(
         _state: &mut Self::State,

@@ -10,6 +10,7 @@ mod tests {
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
         CustomScanError, EndContext, LagodbCustomScanProvider, NextSlotContext,
         NextSlotResult, PathContext, PathVariant, ReScanContext, RelationContext,
+        StartContext,
     };
     use lagodb_core::customscan::provider::{CustomScanPrivate, NoPrivateData};
     use pgrx::pg_sys;
@@ -39,6 +40,10 @@ mod tests {
         fn create_state(_ctx: CreateStateContext<Self>) -> Self::State {}
 
         fn begin(_ctx: BeginContext<'_, Self>) -> Result<(), CustomScanError> {
+            Ok(())
+        }
+
+        fn start(_ctx: StartContext<'_, Self>) -> Result<(), CustomScanError> {
             Ok(())
         }
 

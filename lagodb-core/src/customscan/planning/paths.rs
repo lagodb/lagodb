@@ -35,7 +35,6 @@ impl CustomScanPathPlanner {
         let context = FilterPlanningContext::new(
             relation.rel_oid(),
             unsafe { (*rel).relid },
-            relation.tablespace_oid(),
             unsafe {
                 let user = (*rel).userid;
                 if user == pg_sys::InvalidOid {
@@ -161,7 +160,7 @@ impl<'a> ParameterizedVariant<'a> {
     }
 
     fn merged_filters(&self) -> Option<PathFilterSet> {
-        (self.purpose.is_modify() || self.ppi_filters.has_planned_filters())
+        (self.purpose.is_modify_target() || self.ppi_filters.has_planned_filters())
             .then(|| self.base_filters.merged(self.ppi_filters))
     }
 }

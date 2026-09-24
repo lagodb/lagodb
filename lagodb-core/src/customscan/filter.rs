@@ -113,17 +113,25 @@ impl<P: FilterPushdown> CustomScanFilters<P> {
         Ok(Self { runtime })
     }
 
-    /// Bind every value slot and planned predicate once at executor Begin.
+    /// Bind statement-stable predicates at executor Begin.
     ///
     /// # Safety
     ///
     /// `econtext` must be the live expression context used to initialize the
     /// binding expression states.
-    pub(crate) unsafe fn bind_initial(
+    pub(crate) unsafe fn bind_stable(
         &mut self,
         econtext: *mut pg_sys::ExprContext,
     ) -> Result<(), CustomScanError> {
-        unsafe { self.runtime.bind_initial(econtext) }?;
+        unsafe { self.runtime.bind_stable(econtext) }?;
+        Ok(())
+    }
+
+    pub(crate) unsafe fn bind_dynamic_initial(
+        &mut self,
+        econtext: *mut pg_sys::ExprContext,
+    ) -> Result<(), CustomScanError> {
+        unsafe { self.runtime.bind_dynamic_initial(econtext) }?;
         Ok(())
     }
 

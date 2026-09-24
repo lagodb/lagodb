@@ -10,7 +10,7 @@ code owns storage-specific planned predicates and scan state.
 customscan/
   planning/   planner hook, gates, path costing, final plan construction
   plan_data/  copyObject-safe envelopes, expression sections, tuple layout
-  execution/  Begin/ReScan/NextSlot/End, EPQ recheck, EXPLAIN
+  execution/  Begin/Start/ReScan/NextSlot/End, EPQ recheck, EXPLAIN
   provider/   typed provider SPI and type-erased planning registry
 
 expr/pushdown/
@@ -39,8 +39,12 @@ RestrictInfo clauses
        custom_private = planned predicates + contracts + slot metadata
   -> PostgreSQL replace_nestloop_params + setrefs
   -> BeginCustomScan
-       decode planned predicates once, evaluate value bindings, bind predicates
+       decode planned predicates once, bind statement-stable predicates
        derive Exact EPQ recheck from pushed provenance + decoded contracts
+       prepare provider resources, DSM inventory, and Modify scan ownership
+  -> first ExecCustomScan / provider Start
+       bind dynamic values after PostgreSQL initializes executor parameters
+       open the first provider cursor, then install the normal method table
   -> ReScanCustomScan
        reevaluate bindings when referenced parameters changed
        atomically replace the complete bound predicate set
@@ -96,6 +100,25 @@ Core applies gates before a provider sees a fragment:
 Scan-purpose and tuple-layout gates additionally protect modification scans,
 row identity, whole-row output, system columns, and projected scan tuples.
 
+CustomScan rejects every `TABLESAMPLE` clause before expression analysis or
+path replacement because the provider scan contract does not carry sampling
+semantics. Ordinary relations retain PostgreSQL's paths; sampling is executed
+or explicitly rejected by their table AM. Provider-owned partitioned tables
+cannot use that fallback and return `FEATURE_NOT_SUPPORTED`, even when
+optional CustomScan planning is disabled. Candidate rejections travel through
+the existing callback error record to the runtime's PostgreSQL hook boundary.
+
+Before query or modify paths are built for a provider-owned partitioned table,
+core restores the estimates that PostgreSQL's storage-less dummy path omits.
+It calls the table's catalog-selected TableAM `relation_estimate_size`, just as an ordinary
+storage-backed relation does, through a borrowed Relation view. Catalog relkind
+and the shared relcache entry stay unchanged. PostgreSQL's
+`set_baserel_size_estimates` supplies filtered rows, target width and qual cost;
+the existing provider pruning and CustomPath cost model then apply to both table
+shapes. Dummy Append parameterization records are discarded so LATERAL paths
+recompute their own base-relation estimates. No statistics lookup is added to
+execution or per-row paths.
+
 ## Plan field layout
 
 - `plan.qual`: unsupported originals and Conservative originals. `ExecScan`
@@ -122,7 +145,10 @@ Const, `PARAM_EXTERN`, `PARAM_EXEC`, and outer values become value slots during
 normalization. Their PostgreSQL expressions stay in `custom_exprs`, so
 PostgreSQL owns setrefs and runtime evaluation.
 
-Begin evaluates every binding slot and builds every provider filter once.
+Begin binds only statement-stable records (Const and PARAM_EXTERN). Start binds
+PARAM_EXEC and outer values once PostgreSQL has supplied them, then opens the
+first cursor. A ReScan before Start leaves both operations deferred; it does
+not evaluate an uninitialized InitPlan or open a cursor that Start would replace.
 ReScan uses the filter-specific `PARAM_EXEC` bitmap to skip unrelated changes;
 when a relevant parameter changes, it reevaluates only dynamic slots and
 rebuilds only planned records that contain dynamic bindings. Stable records
@@ -138,8 +164,13 @@ incremental state machine.
 
 ## Executor and hot path
 
-Begin validates the tuple layout once and installs provider state and bound
-filters. ReScan performs value rebinding and cursor replacement. End drops the
+Begin validates the tuple layout once and prepares provider state. Start opens
+serial and Modify cursors using the first complete predicate set; native parallel
+keeps its Begin-time DSM inventory and opens local cursors at task boundaries.
+Modify binding establishes ownership without opening a cursor. Start switches
+the CustomExecMethods table once, adding no startup check to subsequent rows.
+ReScan performs value rebinding and cursor replacement, then calls PostgreSQL's
+ExecScanReScan to reset the scan slot and EPQ state. End drops the
 cursor before the scan specification and preserves provider-owned teardown
 ordering.
 

@@ -185,7 +185,7 @@ impl PathPushdownSummary {
 
 /// Per-variant input to [`super::contract::LagodbCustomScanProvider::create_path`].
 pub struct PathVariant<'a> {
-    /// Query scan or modification-target scan using the same provider.
+    /// Read scan or modification-target scan using the same provider.
     pub purpose: ScanPurpose,
     /// Branch on this, not `param_info.is_some()`.
     pub kind: PathVariantKind,

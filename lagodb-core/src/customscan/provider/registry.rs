@@ -32,6 +32,8 @@ pub(crate) trait ErasedProvider: Sync {
 
     fn suppress_table_am_parallel_scan(&self) -> bool;
 
+    fn owns_partitioned_table(&self) -> bool;
+
     /// Forwards to `P::supports_relation` (framework path-stage gates already applied).
     fn supports_relation(&self, ctx: &RelationContext<'_>) -> bool;
 
@@ -98,6 +100,10 @@ impl<P: LagodbCustomScanProvider> ErasedProvider for ProviderEntry<P> {
 
     fn suppress_table_am_parallel_scan(&self) -> bool {
         P::SUPPRESS_TABLE_AM_PARALLEL_SCAN
+    }
+
+    fn owns_partitioned_table(&self) -> bool {
+        P::OWNS_PARTITIONED_TABLE
     }
 
     fn supports_relation(&self, ctx: &RelationContext<'_>) -> bool {

@@ -58,19 +58,15 @@ unsafe fn plan_custom_path<P: LagodbCustomScanProvider>(
 
     let relation_oid =
         unsafe { PlanRelationResolver::new(root).rel_oid((*rel).relid) };
-    let planning_context = FilterPlanningContext::new(
-        relation_oid,
-        unsafe { (*rel).relid },
-        unsafe { pg_sys::get_rel_tablespace(relation_oid) },
-        unsafe {
+    let planning_context =
+        FilterPlanningContext::new(relation_oid, unsafe { (*rel).relid }, unsafe {
             let user = (*rel).userid;
             if user == pg_sys::InvalidOid {
                 pg_sys::GetUserId()
             } else {
                 user
             }
-        },
-    );
+        });
     let mut filter_planner = P::begin_filter_planning(&planning_context)
         .map_err(CustomScanError::provider)?;
     let filters = unsafe {
@@ -106,7 +102,7 @@ unsafe fn plan_custom_path<P: LagodbCustomScanProvider>(
     let tuple_planner = BaseScanTuplePlanner::new(unsafe { (*rel).relid });
     let scan_tuple = if path_private.requires_wholerow {
         PlannedScanTuple::relation()
-    } else if path_private.purpose.is_modify() {
+    } else if path_private.purpose.is_modify_target() {
         unsafe {
             tuple_planner.plan_relation_scan(
                 tlist,
