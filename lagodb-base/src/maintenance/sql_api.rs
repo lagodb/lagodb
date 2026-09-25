@@ -1,6 +1,6 @@
 //! PostgreSQL SQL adapters and worker entry point for physical maintenance.
 
-use lagodb_core::diag::{PgReportError, SqlStateError};
+use lagodb_core::diag::{PgReportError, ReportableError, SqlStateError};
 use lagodb_core::object_cleanup::{
     ObjectCleanupError, ObjectCleanupItemId, ObjectCleanupQueue,
     run_object_cleanup_worker,
@@ -59,8 +59,7 @@ mod lagodb {
             name!(retained_data_bytes, i64),
         ),
     > {
-        use lagodb_core::diag::{PgReportError, ReportableError};
-        let relation = lagodb_core::handles::RelationGuard::open(
+        let relation = lagodb_core::handles::RelationGuard::open_table(
             relation.oid(),
             pg_sys::AccessShareLock as _,
         )
@@ -113,7 +112,9 @@ mod lagodb {
 
     #[pg_extern]
     fn retry_maintenance_item(target_item_id: Uuid) -> bool {
-        ensure_runtime_preloaded();
+        ensure_runtime_preloaded()
+            .map_err(PgReportError::from_domain_error)
+            .report_unwrap();
         ObjectCleanupQueue::retry_failed(ObjectCleanupItemId::from_pg_uuid(
             target_item_id,
         ))

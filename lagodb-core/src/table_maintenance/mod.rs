@@ -6,14 +6,12 @@
 //! exact-object work to the physical queue.
 
 mod error;
+pub mod postgres;
 mod provider;
 mod types;
 
 pub use error::TableMaintenanceError;
-pub use provider::{
-    LagodbTableMaintenanceProvider, TableMaintenanceRequest, TableMaintenanceRouter,
-    register_provider,
-};
+pub use provider::{TableMaintenanceRequest, TableMaintenanceRouter};
 
 pub use types::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMetric,

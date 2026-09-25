@@ -12,7 +12,7 @@ static PG_FEATURES: [PgFeature; 2] = [
     PgFeature {
         environment: "CARGO_FEATURE_PG16",
         pgrx_config: "pg16",
-        // The runtime VACUUM bridge has not been ported to PG16.
+        // The runtime maintenance command scope has not been ported to PG16.
         c_forks_supported: false,
     },
     PgFeature {
@@ -37,15 +37,23 @@ fn active_pg_config() -> Option<&'static PgFeature> {
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=csrc/vacuum/lagodb_vacuum.c");
-    println!("cargo:rerun-if-changed=csrc/vacuum/lagodb_vacuum.h");
-    println!("cargo:rerun-if-changed=../lagodb-core/csrc/compat/lagodb_pg_compat.h");
+    println!("cargo:rerun-if-env-changed=PGRX_PG_CONFIG_PATH");
+    println!("cargo:rerun-if-env-changed=PGRX_HOME");
+    println!("cargo:rerun-if-env-changed=HOME");
+    println!("cargo:rerun-if-changed=csrc/compat/lagodb_base_pg_compat.h");
+    println!("cargo:rerun-if-changed=csrc/maintenance/lagodb_maintenance.c");
+    println!("cargo:rerun-if-changed=csrc/maintenance/lagodb_maintenance.h");
 
     let Some(pg_feature) = active_pg_config() else {
         return;
     };
     if !pg_feature.c_forks_supported {
         return;
+    }
+    if std::env::var_os("PGRX_PG_CONFIG_PATH").is_none() {
+        let pgrx_config = Pgrx::config_toml()
+            .expect("failed to locate the pgrx configuration file");
+        println!("cargo:rerun-if-changed={}", pgrx_config.display());
     }
 
     let pgrx = Pgrx::from_config().expect("failed to read pgrx configuration");
@@ -55,17 +63,26 @@ fn main() {
             pg_feature.pgrx_config
         )
     });
+    let pg_config_path = pg_config.path().unwrap_or_else(|| {
+        panic!(
+            "{} configuration has no pg_config path",
+            pg_feature.pgrx_config
+        )
+    });
+    println!("cargo:rerun-if-changed={}", pg_config_path.display());
     let include = pg_config.includedir_server().unwrap_or_else(|error| {
         panic!(
             "{} server include directory is unavailable: {error}",
             pg_feature.pgrx_config
         )
     });
+    let pg_config_header = include.join("pg_config.h");
+    println!("cargo:rerun-if-changed={}", pg_config_header.display());
 
     cc::Build::new()
-        .file("csrc/vacuum/lagodb_vacuum.c")
-        .include(PathBuf::from("../lagodb-core/csrc/compat"))
-        .include(PathBuf::from("csrc/vacuum"))
+        .file("csrc/maintenance/lagodb_maintenance.c")
+        .include(PathBuf::from("csrc/maintenance"))
+        .include(PathBuf::from("csrc/compat"))
         .include(include)
         .flag_if_supported("-Wno-unused-function")
         .flag_if_supported("-Wno-unused-parameter")

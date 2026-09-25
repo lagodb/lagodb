@@ -6,10 +6,12 @@ use crate::handles::VacuumParamsHandle;
 use crate::maintenance_config::MaintenanceSettings;
 
 /// PostgreSQL command intensity and locking profile.
+/// The same representation is used by the exact-build maintenance ABI.
+#[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TableMaintenanceMode {
-    Routine,
-    Full,
+    Routine = 0,
+    Full = 1,
 }
 
 /// Provider-relevant PostgreSQL VACUUM options, parsed once at the boundary.

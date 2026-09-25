@@ -75,10 +75,6 @@ impl TableMaintenanceError {
         })
     }
 
-    pub(crate) fn report(self) -> ! {
-        PgReportError::raise(ErrorReport::from(self))
-    }
-
     fn append_pg_report_extras(
         &self,
         details: &mut Vec<String>,
