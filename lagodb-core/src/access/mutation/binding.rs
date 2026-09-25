@@ -5,7 +5,7 @@ use pgrx::pg_sys;
 
 use crate::api::{AmModifyQueryState, AmResult, ModifyQueryState};
 
-/// Query-lifetime handle used by a Modify-purpose scan to register physical
+/// Query-lifetime handle used by a ModifyTarget-purpose scan to register physical
 /// identity sources in the AM's shared state for one target relation.
 pub struct ModifyScanBinding<Q: AmModifyQueryState> {
     query_state: ModifyQueryState<Q>,

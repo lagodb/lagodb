@@ -10,8 +10,9 @@ use lagodb_core::hooks::{
     UtilityNode,
 };
 use lagodb_core::runtime_api::{
-    MaintenanceProvider, MaintenanceReport, MaintenanceRequest, MaintenanceStats,
-    ProviderIdentity, ProviderRegistration, RuntimeClient, RuntimeRegistrationError,
+    CALLBACK_OK, CallbackErrorReport, MaintenanceReport, MaintenanceRequest,
+    MaintenanceStats, ProviderIdentity, ProviderRegistration, RuntimeClient,
+    RuntimeRegistrationError, TableProvider,
 };
 use pgrx::prelude::*;
 
@@ -68,16 +69,25 @@ unsafe extern "C-unwind" fn duplicate_am_oid() -> pg_sys::Oid {
     pg_sys::InvalidOid
 }
 
+unsafe extern "C-unwind" fn duplicate_truncate_partitioned_table(
+    _relation: pg_sys::Relation,
+) {
+}
+
 unsafe extern "C-unwind" fn duplicate_execute(
     _request: *const MaintenanceRequest,
     _report: *mut MaintenanceReport,
-) {
+    _error: *mut CallbackErrorReport,
+) -> u32 {
+    CALLBACK_OK
 }
 
 unsafe extern "C-unwind" fn duplicate_inspect(
     _relation: pg_sys::Relation,
     _stats: *mut MaintenanceStats,
-) {
+    _error: *mut CallbackErrorReport,
+) -> u32 {
+    CALLBACK_OK
 }
 
 #[pg_schema]
@@ -89,15 +99,17 @@ mod delta {
     fn duplicate_iceberg_registration_rejected() -> bool {
         let runtime =
             RuntimeClient::connect().expect("runtime API must be published");
-        let descriptor = MaintenanceProvider {
-            struct_size: u32::try_from(size_of::<MaintenanceProvider>())
-                .expect("maintenance provider descriptor size exceeds u32"),
+        let descriptor = TableProvider {
+            struct_size: u32::try_from(size_of::<TableProvider>())
+                .expect("table provider descriptor size exceeds u32"),
             name: c"delta-duplicate".as_ptr(),
             access_method_name: c"iceberg".as_ptr(),
-            capability_flags: 0,
+            owns_partitioned_table: false,
+            supports_analyze: false,
             access_method_oid: duplicate_am_oid,
-            execute: duplicate_execute,
-            inspect: duplicate_inspect,
+            truncate_partitioned_table: duplicate_truncate_partitioned_table,
+            execute_maintenance: duplicate_execute,
+            inspect_maintenance: duplicate_inspect,
         };
         let identity = ProviderIdentity::access_method(
             c"delta-duplicate",
@@ -108,7 +120,7 @@ mod delta {
             struct_size: u32::try_from(size_of::<ProviderRegistration>())
                 .expect("provider registration size exceeds u32"),
             provider: &identity,
-            maintenance_provider: &descriptor,
+            table_provider: &descriptor,
             utility_hooks: ptr::null(),
             utility_hook_count: 0,
             utility_consumers: ptr::null(),

@@ -38,7 +38,7 @@ pub trait LagodbCustomModifyProvider: LagodbCustomScanProvider {
 
     const MODIFY_CAPABILITIES: ModifyCapabilities;
 
-    /// Attach this provider's Modify-purpose scan to the stable relation state
+    /// Attach this provider's ModifyTarget-purpose scan to the stable relation state
     /// owned by the outer ModifyTable execution.
     fn bind_modify(ctx: ModifyBindContext<'_, Self>) -> Result<(), CustomScanError>
     where
@@ -50,7 +50,7 @@ pub trait LagodbCustomModifyProvider: LagodbCustomScanProvider {
         Self::supports_relation(context)
     }
 
-    /// Return the immutable storage context captured when a Modify-purpose
+    /// Return the immutable storage context captured when a ModifyTarget-purpose
     /// scan opened.
     fn modify_scan_context(
         state: &Self::State,

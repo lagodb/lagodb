@@ -1,6 +1,6 @@
 //! Table-AM callbacks used by COPY FROM.
 //!
-//! PG17 ModifyTable mutation is intercepted by `LagoDBModifyTable` and calls the
+//! PostgreSQL ModifyTable mutation is intercepted by `LagoDBModifyTable` and calls the
 //! slot-first Rust SPI directly. Speculative insertion can only arrive from
 //! `nodeModifyTable`, so reaching its callbacks violates that routing invariant.
 //! PostgreSQL also invokes delete/update/lock callbacks from independent paths
@@ -60,9 +60,11 @@ pub(super) extern "C-unwind" fn tuple_insert<A: TableAccessMethod>(
     options: i32,
     _bistate: *mut pg_sys::BulkInsertStateData,
 ) {
+    // A TableAM owns the same transaction-local tuple counters as heapam.
     with_current_relation_session::<A, _>(rel, |session| unsafe {
         session.tuple_insert_slot(TupleSlotRow::from_raw(slot), cid, options)
     })
+    .inspect(|_| unsafe { pg_sys::pgstat_count_heap_insert(rel, 1) })
     .report_unwrap();
 }
 
@@ -77,6 +79,7 @@ pub(super) extern "C-unwind" fn multi_insert<A>(
 ) where
     A: TableAccessMethod,
 {
+    // Count the completed batch once, matching heap_multi_insert().
     with_current_relation_session::<A, _>(rel, |session| unsafe {
         session.multi_insert_slots(
             TupleSlotBatch::from_raw(slots, nslots as usize),
@@ -84,6 +87,7 @@ pub(super) extern "C-unwind" fn multi_insert<A>(
             options,
         )
     })
+    .inspect(|_| unsafe { pg_sys::pgstat_count_heap_insert(rel, nslots.into()) })
     .report_unwrap();
 }
 

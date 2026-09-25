@@ -6,7 +6,7 @@ use std::ptr::NonNull;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
-use crate::access::mutation::ModifyScanBinding;
+use crate::access::mutation::{ModifyScanBinding, RelationTriggerPolicy};
 use crate::api::{
     AmModifyState, AmResult, ModifyActions, ModifyQueryState, ModifyStateContext,
     MutationDeleteContext, MutationOutcome, MutationUpdateContext,
@@ -111,55 +111,9 @@ impl<P: LagodbCustomModifyProvider> ResultRelationState<P> {
                 "the Custom ModifyTable provider does not support PostgreSQL indexes",
             ));
         }
-        let trigger_desc = unsafe { result_rel_info.as_ref().ri_TrigDesc };
-        if !trigger_desc.is_null() {
-            let trigger_count =
-                usize::try_from(unsafe { (*trigger_desc).numtriggers })
-                    .map_err(|_| internal_error("invalid trigger count"))?;
-            let triggers = unsafe {
-                std::slice::from_raw_parts(
-                    if trigger_count == 0 {
-                        NonNull::<pg_sys::Trigger>::dangling().as_ptr()
-                    } else {
-                        (*trigger_desc).triggers
-                    },
-                    trigger_count,
-                )
-            };
-            let has_deferred_row_trigger = triggers.iter().any(|trigger| {
-                let trigger_type = u32::from(trigger.tgtype as u16);
-                let can_fire_for_command = match command {
-                    pg_sys::CmdType::CMD_INSERT => {
-                        trigger_type
-                            & (pg_sys::TRIGGER_TYPE_INSERT
-                                | pg_sys::TRIGGER_TYPE_UPDATE)
-                            != 0
-                    }
-                    pg_sys::CmdType::CMD_DELETE => {
-                        trigger_type & pg_sys::TRIGGER_TYPE_DELETE != 0
-                    }
-                    pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_MERGE => {
-                        trigger_type
-                            & (pg_sys::TRIGGER_TYPE_INSERT
-                                | pg_sys::TRIGGER_TYPE_UPDATE
-                                | pg_sys::TRIGGER_TYPE_DELETE)
-                            != 0
-                    }
-                    _ => false,
-                };
-                trigger.tgdeferrable
-                    && can_fire_for_command
-                    && trigger_type & pg_sys::TRIGGER_TYPE_ROW != 0
-                    && trigger_type & pg_sys::TRIGGER_TYPE_TIMING_MASK
-                        == pg_sys::TRIGGER_TYPE_AFTER
-            });
-            if has_deferred_row_trigger {
-                return Err(feature_not_supported(
-                    "LagoDB does not support deferrable AFTER ROW triggers; \
-                     retained OLD/NEW rows have statement lifetime",
-                ));
-            }
-        }
+        let relation_handle = unsafe { RelationHandle::from_raw(relation.as_ptr()) };
+        RelationTriggerPolicy::new(&relation_handle, P::OWNS_PARTITIONED_TABLE)
+            .validate_modify(command, actions)?;
         Ok(Self {
             relation,
             command,
@@ -396,7 +350,7 @@ impl<P: LagodbCustomModifyProvider> ModifyNodeState<P> {
 
         let plan = state.ps.plan.cast::<pg_sys::ModifyTable>();
         let actions = unsafe { modify_actions(plan) }?;
-        // The PG17 executor implements ON CONFLICT through speculative
+        // The PostgreSQL executor implements ON CONFLICT through speculative
         // TableAM callbacks. The Custom ModifyTable bridge has no speculative
         // relation state, so reject ON CONFLICT before executor entry.
         if unsafe { (*plan).onConflictAction }

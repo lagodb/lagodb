@@ -36,3 +36,15 @@ query-local tuplestore, matching PostgreSQL's FDW restriction.
 
 COPY FROM bypasses ModifyTable and uses its separate utility-scoped
 `AmCopySession` lifecycle.
+
+`RelationTriggerPolicy` owns the shared execution-time capability checks.
+ModifyTable checks each provider relation during result-state initialization;
+COPY FROM checks its locked relation during preparation, before opening a
+source or starting the COPY driver. Provider-owned partitioned tables
+reject AFTER ROW triggers for the statement's operations: INSERT, UPDATE,
+DELETE, the concrete MERGE actions, or COPY FROM's INSERT. Disabled and
+WHEN-false triggers are included because PG17 validates partitioned table row
+events before checking whether the trigger is enabled. BEFORE ROW and
+statement-level triggers are outside this restriction. Ordinary ModifyTable
+targets retain the existing deferred-trigger restriction and immediate-trigger
+row store. No relation kind or TableAM pointer is changed.

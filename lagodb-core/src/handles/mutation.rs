@@ -1,3 +1,5 @@
+use std::ptr::NonNull;
+
 use super::tuple::ItemPointer;
 use pgrx::pg_sys;
 
@@ -13,12 +15,11 @@ impl<'a> TMIndexDeleteOpHandle<'a> {
     /// `ptr` must be non-null, uniquely borrowed, and valid for `'a`.
     #[inline]
     pub unsafe fn from_raw(ptr: *mut pg_sys::TM_IndexDeleteOp) -> Self {
-        let ptr = std::ptr::NonNull::new(ptr)
+        let mut ptr = NonNull::new(ptr)
             .expect("PostgreSQL passed a null TM_IndexDeleteOp pointer");
-        unsafe {
-            Self {
-                inner: ptr.as_ptr().as_mut().unwrap(),
-            }
+        Self {
+            // SAFETY: the caller guarantees a valid, unique borrow for `'a`.
+            inner: unsafe { ptr.as_mut() },
         }
     }
 

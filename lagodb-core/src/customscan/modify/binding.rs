@@ -1,4 +1,4 @@
-//! Binding of Modify-purpose CustomScans to the outer ModifyTable state.
+//! Binding of ModifyTarget-purpose CustomScans to the outer ModifyTable state.
 
 use core::marker::PhantomData;
 
@@ -13,7 +13,7 @@ use pgrx::pg_sys;
 
 use super::contract::LagodbCustomModifyProvider;
 
-/// One-time outer-executor binding for a provider scan in `Modify` purpose.
+/// One-time outer-executor binding for a provider scan in `ModifyTarget` purpose.
 pub struct ModifyBindContext<'a, P: LagodbCustomModifyProvider + ?Sized> {
     pub state: &'a mut P::State,
     pub relation: RelationHandle<'a>,
@@ -52,29 +52,31 @@ pub(crate) unsafe fn bind_modify_scan<P: LagodbCustomModifyProvider>(
         <P::AccessMethod as TableAccessMethod>::ModifyQueryState,
     >,
 ) -> Result<(), CustomScanError> {
-    if node.is_null() || unsafe { (*node).methods } != method_tables_for::<P>().exec()
+    if node.is_null()
+        || !method_tables_for::<P>().owns_exec(unsafe { (*node).methods })
     {
         return Err(CustomScanError::modify_binding(
             "attempted to bind a CustomScan owned by another provider",
         ));
     }
     let plan = unsafe { (*node).ss.ps.plan };
-    if unsafe { provider_scan_purpose::<P>(plan) }? != Some(ScanPurpose::Modify) {
+    if unsafe { provider_scan_purpose::<P>(plan) }? != Some(ScanPurpose::ModifyTarget)
+    {
         return Err(CustomScanError::modify_binding(
-            "attempted to bind a CustomScan not planned for Modify",
+            "attempted to bind a CustomScan not planned for ModifyTarget",
         ));
     }
 
     let wrapper = unsafe { CustomScanStateWrapper::<P>::from_node_ptr(node) };
     let Some(provider_state) = wrapper.active_provider_state_mut() else {
         return Err(CustomScanError::modify_binding(
-            "Modify CustomScan binding occurred before provider begin completed",
+            "ModifyTarget CustomScan binding occurred before provider begin completed",
         ));
     };
     let relation = unsafe { (*node).ss.ss_currentRelation };
     if relation.is_null() {
         return Err(CustomScanError::modify_binding(
-            "Modify CustomScan has no open relation",
+            "ModifyTarget CustomScan has no open relation",
         ));
     }
     P::bind_modify(ModifyBindContext::new(

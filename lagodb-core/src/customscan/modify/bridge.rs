@@ -39,6 +39,8 @@ pub(super) struct LagodbPreparedUpdateTriggerRows {
 pub(super) struct LagodbModifyBridge {
     pub state: *mut c_void,
     pub postgres_indexes: bool,
+    pub provider_owned_partitioned_table: bool,
+    pub provider_owned_partitioned_table_state: *mut c_void,
     pub resolve_relation: unsafe extern "C-unwind" fn(
         *mut c_void,
         *mut pg_sys::ResultRelInfo,
@@ -152,10 +154,16 @@ impl<P: LagodbCustomModifyProvider> ModifyNodeCell<P> {
         operation(unsafe { &mut *self.inner.get() })
     }
 
-    pub fn bridge(&self) -> LagodbModifyBridge {
+    pub fn bridge(
+        &self,
+        provider_owned_partitioned_table: bool,
+        provider_owned_partitioned_table_state: *mut c_void,
+    ) -> LagodbModifyBridge {
         LagodbModifyBridge {
             state: std::ptr::from_ref(self).cast_mut().cast(),
             postgres_indexes: P::MODIFY_CAPABILITIES.postgres_indexes(),
+            provider_owned_partitioned_table,
+            provider_owned_partitioned_table_state,
             resolve_relation: resolve_relation::<P>,
             wholerow_attno: wholerow_attno::<P>,
             insert: insert::<P>,

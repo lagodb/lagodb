@@ -53,7 +53,13 @@ unsafe fn provider_for_rte(
         return None;
     }
     let context = RelationContext::from_ref(unsafe { &*rte });
-    registry::matching(&context)
+    let provider = registry::matching(&context)?;
+    if context.relkind() == pg_sys::RELKIND_PARTITIONED_TABLE
+        && !provider.owns_partitioned_table()
+    {
+        return None;
+    }
+    Some(provider)
 }
 
 struct WholeRowPlanner {
@@ -342,50 +348,21 @@ unsafe fn reject_explicit_target_system_columns(
     Ok(())
 }
 
-/// # Safety
-///
-/// `parse` and every nested Query must be live rewrite-complete planner input.
-pub(super) unsafe fn prepare_query_tree(
-    parse: *mut pg_sys::Query,
-) -> Result<(), PgReportError> {
-    unsafe {
-        inject_wholerow(parse);
-        reject_explicit_target_system_columns(parse)?;
-        let mut context = PrepareQueryContext { error: None };
-        pg_sys::query_tree_walker_impl(
-            parse,
-            Some(prepare_query_walker),
-            ptr::from_mut(&mut context).cast(),
-            0,
-        );
-        match context.error {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-}
+/// Modify-specific preparation for one Query supplied by the runtime walker.
+pub(super) struct ModifyQueryPreparation;
 
-struct PrepareQueryContext {
-    error: Option<PgReportError>,
-}
-
-unsafe extern "C-unwind" fn prepare_query_walker(
-    node: *mut pg_sys::Node,
-    context: *mut c_void,
-) -> bool {
-    if node.is_null() {
-        return false;
-    }
-    if unsafe { (*node).type_ } == pg_sys::NodeTag::T_Query {
-        let context = unsafe { &mut *context.cast::<PrepareQueryContext>() };
-        if let Err(error) = unsafe { prepare_query_tree(node.cast()) } {
-            context.error = Some(error);
-            return true;
+impl ModifyQueryPreparation {
+    /// # Safety
+    /// `parse` is live rewrite-complete input whose provider-owned partitioned tables are prepared.
+    /// The runtime owns recursion into nested queries and CTEs.
+    pub(super) unsafe fn prepare(
+        parse: *mut pg_sys::Query,
+    ) -> Result<(), PgReportError> {
+        // SAFETY: the runtime supplies the current planner-owned Query.
+        unsafe {
+            inject_wholerow(parse);
+            reject_explicit_target_system_columns(parse)
         }
-        return false;
-    }
-    unsafe {
-        pg_sys::expression_tree_walker_impl(node, Some(prepare_query_walker), context)
     }
 }
 

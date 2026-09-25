@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::ffi::c_void;
+use std::ptr;
 use std::rc::Rc;
 
 use crate::access::mutation::acquire_modify_query_state;
@@ -23,10 +24,21 @@ use super::execution::ModifyNodeState;
 use super::methods;
 
 unsafe extern "C-unwind" {
+    unsafe fn lagodb_exec_init_modify_table(
+        plan: *mut pg_sys::ModifyTable,
+        estate: *mut pg_sys::EState,
+        eflags: i32,
+        provider_owns_partitioned_table: bool,
+    ) -> *mut pg_sys::ModifyTableState;
+
     unsafe fn lagodb_exec_modify_table(
         mtstate: *mut pg_sys::ModifyTableState,
         bridge: *mut LagodbModifyBridge,
     ) -> *mut pg_sys::TupleTableSlot;
+
+    unsafe fn lagodb_exec_end_modify_table(mtstate: *mut pg_sys::ModifyTableState);
+
+    unsafe fn lagodb_exec_rescan_modify_table(mtstate: *mut pg_sys::ModifyTableState);
 }
 
 #[repr(C)]
@@ -99,7 +111,7 @@ pub(super) unsafe extern "C-unwind" fn create_state<P: LagodbCustomModifyProvide
 
 struct ModifyScanBinder<'a, P: LagodbCustomModifyProvider> {
     execution: &'a ModifyNodeCell<P>,
-    bound_scans: Result<usize, CustomScanError>,
+    result: Result<(), CustomScanError>,
     target_rtis: HashSet<pg_sys::Index>,
 }
 
@@ -146,7 +158,7 @@ unsafe fn bind_tree<P: LagodbCustomModifyProvider>(
     plan_state: *mut pg_sys::PlanState,
     context: &mut ModifyScanBinder<'_, P>,
 ) {
-    if plan_state.is_null() || context.bound_scans.is_err() {
+    if plan_state.is_null() || context.result.is_err() {
         return;
     }
     if unsafe { (*plan_state).type_ } == pg_sys::NodeTag::T_CustomScanState {
@@ -155,16 +167,16 @@ unsafe fn bind_tree<P: LagodbCustomModifyProvider>(
         {
             Ok(purpose) => purpose,
             Err(error) => {
-                context.bound_scans = Err(error);
+                context.result = Err(error);
                 return;
             }
         };
-        if purpose == Some(ScanPurpose::Modify) {
+        if purpose == Some(ScanPurpose::ModifyTarget) {
             let relation = unsafe { (*custom).ss.ss_currentRelation };
             if relation.is_null() {
-                context.bound_scans = Err(PgReportError::from_message(
+                context.result = Err(PgReportError::from_message(
                     PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    "Modify CustomScan has no open relation",
+                    "ModifyTarget CustomScan has no open relation",
                 )
                 .into());
                 return;
@@ -175,9 +187,9 @@ unsafe fn bind_tree<P: LagodbCustomModifyProvider>(
                     .active_provider_state_mut()
                     .and_then(|state| P::modify_scan_context(state));
             let Some(scan_context) = scan_context else {
-                context.bound_scans = Err(PgReportError::from_message(
+                context.result = Err(PgReportError::from_message(
                     PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    "Modify CustomScan provider state is not active",
+                    "ModifyTarget CustomScan provider state is not active",
                 )
                 .into());
                 return;
@@ -189,24 +201,21 @@ unsafe fn bind_tree<P: LagodbCustomModifyProvider>(
             } {
                 Ok(binding) => binding,
                 Err(error) => {
-                    context.bound_scans = Err(error.into());
+                    context.result = Err(error.into());
                     return;
                 }
             };
             if let Err(error) =
                 unsafe { super::binding::bind_modify_scan::<P>(custom, binding) }
             {
-                context.bound_scans = Err(error);
+                context.result = Err(error);
                 return;
-            }
-            if let Ok(bound_scans) = &mut context.bound_scans {
-                *bound_scans += 1;
             }
         } else if unsafe { scan_rti(plan_state) }
             .is_some_and(|rti| context.target_rtis.contains(&rti))
             && unsafe { is_provider_relation::<P>((*custom).ss.ss_currentRelation) }
         {
-            context.bound_scans = Err(PgReportError::from_message(
+            context.result = Err(PgReportError::from_message(
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
                 "required Modify relation was planned with an unbindable CustomScan",
             )
@@ -217,7 +226,7 @@ unsafe fn bind_tree<P: LagodbCustomModifyProvider>(
         .is_some_and(|rti| context.target_rtis.contains(&rti))
         && unsafe { is_provider_relation::<P>(scan_state_relation(plan_state)) }
     {
-        context.bound_scans = Err(PgReportError::from_message(
+        context.result = Err(PgReportError::from_message(
             PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
             "required Modify relation was planned with a standard scan",
         )
@@ -239,7 +248,7 @@ unsafe extern "C-unwind" fn bind_walker<P: LagodbCustomModifyProvider>(
 ) -> bool {
     let context = unsafe { &mut *raw_context.cast::<ModifyScanBinder<'_, P>>() };
     unsafe { bind_tree::<P>(plan_state, context) };
-    context.bound_scans.is_err()
+    context.result.is_err()
 }
 
 unsafe fn replace_aux_entry(
@@ -284,17 +293,45 @@ unsafe fn begin_impl<P: LagodbCustomModifyProvider>(
     let plan = unsafe { (*node).ss.ps.plan.cast::<pg_sys::CustomScan>() };
     let inner_plan =
         unsafe { pg_sys::list_nth((*plan).custom_plans, 0).cast::<pg_sys::Plan>() };
-    let inner_state = unsafe { pg_sys::ExecInitNode(inner_plan, estate, eflags) };
-    if inner_state.is_null()
-        || unsafe { (*inner_state).type_ } != pg_sys::NodeTag::T_ModifyTableState
-    {
-        return Err(PgReportError::from_message(
-            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-            "LagoDBModifyTable child is not ModifyTableState",
+    debug_assert_eq!(
+        unsafe { (*inner_plan).type_ },
+        pg_sys::NodeTag::T_ModifyTable
+    );
+    let modify_plan = inner_plan.cast::<pg_sys::ModifyTable>();
+    let root_rti = if unsafe { (*modify_plan).rootRelation } > 0 {
+        unsafe { (*modify_plan).rootRelation }
+    } else {
+        unsafe {
+            pg_sys::list_nth_int((*modify_plan).resultRelations, 0) as pg_sys::Index
+        }
+    };
+    // SAFETY: ModifyTable root/result RTIs are one-based indexes into the
+    // executor range table established by InitPlan before this node begins.
+    let root_rte = unsafe {
+        pg_sys::list_nth(
+            (*estate).es_range_table,
+            i32::try_from(root_rti - 1)
+                .expect("a PostgreSQL range-table index fits in i32"),
         )
-        .into());
-    }
-    state.inner = inner_state.cast();
+        .cast::<pg_sys::RangeTblEntry>()
+    };
+    let provider_owned_partitioned_table = P::OWNS_PARTITIONED_TABLE
+        && unsafe { (*root_rte).relkind } as u8 == pg_sys::RELKIND_PARTITIONED_TABLE
+        && P::AccessMethod::access_method_oid().is_some_and(|access_method| {
+            access_method == unsafe { pg_sys::get_rel_relam((*root_rte).relid) }
+        });
+    let inner = unsafe {
+        pg_guard_ffi_boundary(|| {
+            lagodb_exec_init_modify_table(
+                inner_plan.cast(),
+                estate,
+                eflags,
+                provider_owned_partitioned_table,
+            )
+        })
+    };
+    let inner_state = inner.cast::<pg_sys::PlanState>();
+    state.inner = inner;
     unsafe {
         (*node).custom_ps = pg_sys::lappend(std::ptr::null_mut(), inner_state.cast());
     }
@@ -330,7 +367,36 @@ unsafe fn begin_impl<P: LagodbCustomModifyProvider>(
         // the mutation callback and is serialized in the backend thread.
         unsafe { cleanup.with_mut(ModifyNodeState::abort) };
     }));
-    state.bridge = Some(execution.bridge());
+    let root_info = unsafe { (*state.inner).rootResultRelInfo };
+    let root_relation = unsafe { (*root_info).ri_RelationDesc };
+    debug_assert_eq!(
+        provider_owned_partitioned_table,
+        unsafe { is_provider_relation::<P>(root_relation) }
+            && unsafe { (*(*root_relation).rd_rel).relkind } as u8
+                == pg_sys::RELKIND_PARTITIONED_TABLE
+    );
+    let provider_owned_partitioned_table_state: *mut c_void =
+        if provider_owned_partitioned_table {
+            unsafe {
+                execution.with_mut(|execution| execution.resolve_relation(root_info))
+            }?
+            .map_or(std::ptr::null_mut(), |relation| relation.as_ptr().cast())
+        } else {
+            std::ptr::null_mut()
+        };
+    if provider_owned_partitioned_table
+        && provider_owned_partitioned_table_state.is_null()
+    {
+        return Err(PgReportError::from_message(
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            "provider-owned partitioned table has no mutation relation state",
+        )
+        .into());
+    }
+    state.bridge = Some(execution.bridge(
+        provider_owned_partitioned_table,
+        provider_owned_partitioned_table_state,
+    ));
     state.execution = Some(execution);
 
     let mut bind_context = ModifyScanBinder {
@@ -338,7 +404,7 @@ unsafe fn begin_impl<P: LagodbCustomModifyProvider>(
             .execution
             .as_deref()
             .expect("execution was just installed"),
-        bound_scans: Ok(0),
+        result: Ok(()),
         target_rtis: {
             let plan =
                 unsafe { (*state.inner).ps.plan.cast::<pg_sys::ModifyTable>() };
@@ -354,18 +420,10 @@ unsafe fn begin_impl<P: LagodbCustomModifyProvider>(
         },
     };
     unsafe { bind_tree::<P>((*state.inner).ps.lefttree, &mut bind_context) };
-    let bound_scans = bind_context.bound_scans?;
-    if matches!(
-        operation,
-        pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE
-    ) && bound_scans == 0
-    {
-        return Err(PgReportError::from_message(
-            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-            "required Modify plan contains no bindable provider scan",
-        )
-        .into());
-    }
+    // PG can eliminate the entire target scan (for example, WHERE FALSE).
+    // Every remaining target scan must bind, but an empty plan needs no scan
+    // context. ResultRelationState still rejects an unbound row-level mutation.
+    bind_context.result?;
 
     unsafe { replace_aux_entry(estate, state.inner, node) };
     Ok(())
@@ -376,10 +434,6 @@ pub(super) unsafe extern "C-unwind" fn exec<P: LagodbCustomModifyProvider>(
     node: *mut pg_sys::CustomScanState,
 ) -> *mut pg_sys::TupleTableSlot {
     let state = unsafe { state::<P>(node) };
-    let instrument = unsafe { (*state.inner).ps.instrument };
-    if !instrument.is_null() {
-        unsafe { pg_sys::InstrStartNode(instrument) };
-    }
     let bridge = state
         .bridge
         .as_mut()
@@ -387,14 +441,6 @@ pub(super) unsafe extern "C-unwind" fn exec<P: LagodbCustomModifyProvider>(
     let result = unsafe {
         pg_guard_ffi_boundary(|| lagodb_exec_modify_table(state.inner, bridge))
     };
-    if !instrument.is_null() {
-        unsafe {
-            pg_sys::InstrStopNode(
-                instrument,
-                if result.is_null() { 0.0 } else { 1.0 },
-            )
-        };
-    }
     if result.is_null() && unsafe { (*state.inner).mt_done } {
         let execution = state
             .execution
@@ -415,8 +461,12 @@ pub(super) unsafe extern "C-unwind" fn end<P: LagodbCustomModifyProvider>(
         return;
     }
     if !state.inner.is_null() {
-        unsafe { pg_sys::ExecEndNode(&mut (*state.inner).ps) };
-        state.inner = std::ptr::null_mut();
+        // SAFETY: the matching C initializer owns the embedded node's layout
+        // and the fork-specific cleanup, including standalone root slots.
+        unsafe {
+            pg_guard_ffi_boundary(|| lagodb_exec_end_modify_table(state.inner))
+        };
+        state.inner = ptr::null_mut();
     }
     if let Some(execution) = state.execution.as_ref() {
         // SAFETY: inner Modify scans are ended, so no borrowed binding can be
@@ -443,7 +493,10 @@ pub(super) unsafe extern "C-unwind" fn rescan<P: LagodbCustomModifyProvider>(
 ) {
     let state = unsafe { state::<P>(node) };
     if !state.inner.is_null() {
-        unsafe { pg_sys::ExecReScan(&mut (*state.inner).ps) };
+        // SAFETY: only the matching lifecycle adapter may operate this node.
+        unsafe {
+            pg_guard_ffi_boundary(|| lagodb_exec_rescan_modify_table(state.inner))
+        };
     }
 }
 

@@ -8,26 +8,27 @@ use pgrx::pg_sys;
 
 use crate::runtime_api::{CallbackErrorReport, ModifyPlannerDescriptor};
 
-use super::planning;
+use super::planning::{self, ModifyQueryPreparation};
 
 pub(super) fn descriptor() -> ModifyPlannerDescriptor {
     ModifyPlannerDescriptor {
         struct_size: size_of::<ModifyPlannerDescriptor>() as u32,
         context: ptr::null_mut(),
-        planner_pre: Some(planner_pre),
+        prepare_query: Some(prepare_query),
         planner_post: Some(planner_post),
         create_upper_paths: Some(plan_upper_paths),
     }
 }
 
-unsafe extern "C-unwind" fn planner_pre(
+unsafe extern "C-unwind" fn prepare_query(
     _context: *mut c_void,
     parse: *mut pg_sys::Query,
     error: *mut CallbackErrorReport,
 ) -> u32 {
     let operation = || {
-        // SAFETY: `parse` is the live query forwarded by the planner hook.
-        unsafe { planning::prepare_query_tree(parse) }
+        // SAFETY: the runtime prepared this Query's partitioned table RTEs and owns
+        // recursion. Provider matching and Modify changes stay in this DSO.
+        unsafe { ModifyQueryPreparation::prepare(parse) }
     };
     // SAFETY: the runtime supplies a live error record and forwards a live
     // rewrite-complete planner query for this synchronous callback.

@@ -15,6 +15,7 @@ pub(super) trait ErasedModifyProvider: Sync {
     fn type_id(&self) -> TypeId;
     fn name(&self) -> &'static std::ffi::CStr;
     fn supports_relation(&self, context: &RelationContext<'_>) -> bool;
+    fn owns_partitioned_table(&self) -> bool;
     fn path_methods(&self) -> *const pg_sys::CustomPathMethods;
     fn scan_methods(&self) -> *const pg_sys::CustomScanMethods;
 }
@@ -44,6 +45,10 @@ impl<P: LagodbCustomModifyProvider> ErasedModifyProvider for ModifyProviderEntry
 
     fn supports_relation(&self, context: &RelationContext<'_>) -> bool {
         P::supports_modify_target(context)
+    }
+
+    fn owns_partitioned_table(&self) -> bool {
+        P::OWNS_PARTITIONED_TABLE
     }
 
     fn path_methods(&self) -> *const pg_sys::CustomPathMethods {

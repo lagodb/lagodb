@@ -1,4 +1,4 @@
-//! PG17 provider-neutral Custom ModifyTable framework.
+//! PostgreSQL provider-neutral Custom ModifyTable framework.
 
 mod binding;
 mod bridge;

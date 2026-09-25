@@ -5,10 +5,12 @@
 //! gives the shared runtime a second real AM owner for cross-DSO registration
 //! coverage. It must not be treated as a Delta storage implementation.
 
+use lagodb_core::handles::RelationHandle;
 use lagodb_core::table_maintenance::{
-    LagodbTableMaintenanceProvider, TableMaintenanceError, TableMaintenanceReport,
-    TableMaintenanceRequest, TableMaintenanceStats,
+    TableMaintenanceError, TableMaintenanceReport, TableMaintenanceRequest,
+    TableMaintenanceStats,
 };
+use lagodb_core::table_provider::{LagodbTableProvider, register_provider};
 use pgrx::prelude::*;
 
 pgrx::pg_module_magic!();
@@ -16,9 +18,9 @@ pgrx::pg_module_magic!();
 #[cfg(feature = "pg_test")]
 mod pg_test_support;
 
-struct DeltaMaintenanceProvider;
+struct DeltaTableProvider;
 
-impl LagodbTableMaintenanceProvider for DeltaMaintenanceProvider {
+impl LagodbTableProvider for DeltaTableProvider {
     const NAME: &'static std::ffi::CStr = c"delta";
     const EXTENSION_NAME: &'static std::ffi::CStr = c"pg_delta_am";
     const LIBRARY_NAME: &'static std::ffi::CStr = c"pg_delta_am";
@@ -31,7 +33,7 @@ impl LagodbTableMaintenanceProvider for DeltaMaintenanceProvider {
         (oid != pg_sys::InvalidOid).then_some(oid)
     }
 
-    fn execute(
+    fn execute_maintenance(
         _request: TableMaintenanceRequest<'_>,
     ) -> Result<TableMaintenanceReport, TableMaintenanceError> {
         Err(TableMaintenanceError::framework(
@@ -39,8 +41,8 @@ impl LagodbTableMaintenanceProvider for DeltaMaintenanceProvider {
         ))
     }
 
-    fn inspect(
-        _relation: &lagodb_core::handles::RelationHandle<'_>,
+    fn inspect_maintenance(
+        _relation: &RelationHandle<'_>,
     ) -> Result<TableMaintenanceStats, TableMaintenanceError> {
         Ok(TableMaintenanceStats {
             format: Some("delta-skeleton".to_owned()),
@@ -80,5 +82,5 @@ pgrx::extension_sql!(
 extern "C-unwind" fn _PG_init() {
     #[cfg(feature = "pg_test")]
     pg_test_support::init_hooks();
-    lagodb_core::table_maintenance::register_provider::<DeltaMaintenanceProvider>();
+    register_provider::<DeltaTableProvider>();
 }

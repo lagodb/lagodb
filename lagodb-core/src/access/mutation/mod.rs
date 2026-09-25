@@ -1,4 +1,4 @@
-//! PG17 Custom ModifyTable execution state and the independent COPY FROM
+//! PostgreSQL Custom ModifyTable execution state and the independent COPY FROM
 //! table-AM callback lifecycle.
 //!
 //! ## Backend-local state
@@ -15,7 +15,7 @@
 //! - `COPY_FRAMES` and `NEXT_COPY_ID` own nested COPY FROM sessions and pair
 //!   them with ResourceOwner cleanup.
 //!
-//! Modify-purpose reads are always provider CustomScans. Their explicit
+//! ModifyTarget-purpose reads are always provider CustomScans. Their explicit
 //! [`ModifyScanBinding`] carries scan identity registration into the owning
 //! ModifyTable state; no thread-local scan handshake is involved.
 
@@ -24,11 +24,13 @@ mod callbacks;
 mod lifecycle;
 mod modify_query;
 mod session;
+mod trigger_policy;
 pub(crate) mod trigger_rows;
 
 pub use binding::ModifyScanBinding;
 pub use lifecycle::init_lifecycle_hooks;
 pub(crate) use modify_query::acquire as acquire_modify_query_state;
+pub(crate) use trigger_policy::RelationTriggerPolicy;
 
 use crate::api::TableAccessMethod;
 use pgrx::pg_sys;
