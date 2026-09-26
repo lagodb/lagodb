@@ -1,5 +1,6 @@
 //! PostgreSQL SQL adapters for storage service status and diagnostics.
 
+use lagodb_core::diag::{PgReportError, ReportableError};
 use lagodb_core::object_cleanup::ObjectTreeObserver;
 use pgrx::prelude::*;
 
@@ -15,7 +16,6 @@ mod lagodb {
         namespace: &str,
         prefix: &str,
     ) -> TableIterator<'static, (name!(objects, i64), name!(bytes, i64))> {
-        use lagodb_core::diag::PgReportError;
         let volume_id =
             lagodb_core::storage::volume::StorageVolumeId::try_from(volume_id)
                 .unwrap_or_else(|_| pgrx::error!("invalid storage volume id"));
@@ -69,7 +69,9 @@ mod lagodb {
             name!(last_error, Option<String>),
         ),
     > {
-        ensure_runtime_preloaded();
+        ensure_runtime_preloaded()
+            .map_err(PgReportError::from_domain_error)
+            .report_unwrap();
         let status = super::super::runtime_status();
         TableIterator::new(std::iter::once((
             status.enabled,

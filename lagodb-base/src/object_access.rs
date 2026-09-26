@@ -4,7 +4,10 @@ use std::ffi::{c_char, c_void};
 use std::sync::OnceLock;
 
 use crate::descriptor_registry::{DescriptorNode, DescriptorRegistry};
-use crate::{storage::volume_config::on_object_access, worker};
+use crate::{
+    storage::volume_config::{DatabaseDirectoryPolicy, on_object_access},
+    worker,
+};
 use lagodb_core::diag::PgReportError;
 use lagodb_core::runtime_api::{
     OBJECT_ACCESS_EVENTS_KNOWN, ObjectAccessHookDescriptor,
@@ -170,6 +173,11 @@ unsafe extern "C-unwind" fn object_access_router(
             PgReportError::from_domain_error(error).report();
         }
         if let Err(error) = on_object_access(access, class_id, object_id, sub_id) {
+            PgReportError::from_domain_error(error).report();
+        }
+        if let Err(error) = DatabaseDirectoryPolicy::on_object_access(
+            access, class_id, object_id, sub_id,
+        ) {
             PgReportError::from_domain_error(error).report();
         }
         if let Some(event) = object_access_event_mask(access) {

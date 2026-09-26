@@ -223,6 +223,10 @@ impl TransactionResource for PendingVolumeRetirementBatch {
         ))
     }
 
+    fn on_prepare(&self) {
+        CURRENT.with(|slot| *slot.borrow_mut() = None);
+    }
+
     fn on_commit_sub(&self, current_nest_level: i32) {
         for pending in self.pending.borrow_mut().iter_mut() {
             if pending.nest_level >= current_nest_level {

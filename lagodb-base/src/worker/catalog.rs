@@ -62,16 +62,16 @@ impl WorkerCatalog {
         if schema_oid == pg_sys::InvalidOid {
             return Ok(false);
         }
-        catalog::get_relation_oid(WORKERS_TABLE, schema_oid)
-            .map(|relation_oid| relation_oid != pg_sys::InvalidOid)
-            .map_worker_catalog_err(WorkerCatalogOperation::ResolveRelation)
+        Ok(
+            catalog::get_relation_oid(WORKERS_TABLE, schema_oid)
+                != pg_sys::InvalidOid,
+        )
     }
 
     pub(crate) fn open(lock_mode: pg_sys::LOCKMODE) -> WorkerResult<Self> {
         let schema_oid = catalog::get_namespace_oid(LAGODB_SCHEMA, false)
             .map_worker_catalog_err(WorkerCatalogOperation::ResolveSchema)?;
-        let relation_oid = catalog::get_relation_oid(WORKERS_TABLE, schema_oid)
-            .map_worker_catalog_err(WorkerCatalogOperation::ResolveRelation)?;
+        let relation_oid = catalog::get_relation_oid(WORKERS_TABLE, schema_oid);
         if relation_oid == pg_sys::InvalidOid {
             return Err(WorkerError::WorkersTableMissing);
         }
@@ -324,10 +324,7 @@ impl WorkerCatalog {
     }
 
     fn sequence_oid(&self) -> WorkerResult<pg_sys::Oid> {
-        let oid = self.object_oid(
-            WORKER_ID_SEQUENCE,
-            WorkerCatalogOperation::ResolveSequence,
-        )?;
+        let oid = catalog::get_relation_oid(WORKER_ID_SEQUENCE, self.schema_oid);
         if oid == pg_sys::InvalidOid {
             Err(WorkerError::WorkerIdSequenceMissing)
         } else {
@@ -336,8 +333,7 @@ impl WorkerCatalog {
     }
 
     fn primary_key_oid(&self) -> WorkerResult<pg_sys::Oid> {
-        let oid = self
-            .object_oid(WORKERS_PRIMARY_KEY, WorkerCatalogOperation::ResolveIndex)?;
+        let oid = catalog::get_relation_oid(WORKERS_PRIMARY_KEY, self.schema_oid);
         if oid == pg_sys::InvalidOid {
             Err(WorkerError::WorkersPrimaryKeyMissing)
         } else {
@@ -346,21 +342,11 @@ impl WorkerCatalog {
     }
 
     fn name_key_oid(&self) -> WorkerResult<pg_sys::Oid> {
-        let oid =
-            self.object_oid(WORKERS_NAME_KEY, WorkerCatalogOperation::ResolveIndex)?;
+        let oid = catalog::get_relation_oid(WORKERS_NAME_KEY, self.schema_oid);
         if oid == pg_sys::InvalidOid {
             Err(WorkerError::WorkersNameIndexMissing)
         } else {
             Ok(oid)
         }
-    }
-
-    fn object_oid(
-        &self,
-        name: &CStr,
-        operation: WorkerCatalogOperation,
-    ) -> WorkerResult<pg_sys::Oid> {
-        catalog::get_relation_oid(name, self.schema_oid)
-            .map_worker_catalog_err(operation)
     }
 }

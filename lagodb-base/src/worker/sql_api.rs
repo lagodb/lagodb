@@ -2,6 +2,7 @@
 
 use std::ffi::CStr;
 
+use lagodb_core::diag::{PgReportError, ReportableError};
 use pgrx::prelude::*;
 use pgrx::{pg_getarg, pg_getarg_datum_raw};
 
@@ -20,7 +21,9 @@ mod lagodb {
 
     #[pg_extern]
     fn register_worker_impl(worker_name: &str, entrypoint: pg_sys::Oid) -> i32 {
-        ensure_runtime_preloaded();
+        ensure_runtime_preloaded()
+            .map_err(PgReportError::from_domain_error)
+            .report_unwrap();
         let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
         let worker_id = registry::register(worker_name, entrypoint)
             .unwrap_or_else(|error| error.report());
@@ -33,7 +36,9 @@ mod lagodb {
 
     #[pg_extern]
     fn deregister_worker(worker_name: &str, missing_ok: default!(bool, "false")) {
-        ensure_runtime_preloaded();
+        ensure_runtime_preloaded()
+            .map_err(PgReportError::from_domain_error)
+            .report_unwrap();
         let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
         let worker_id =
             registry::deregister(worker_name).unwrap_or_else(|error| error.report());
@@ -54,7 +59,9 @@ mod lagodb {
 
     #[pg_extern]
     fn deregister_worker_by_id(worker_id: i32, missing_ok: default!(bool, "false")) {
-        ensure_runtime_preloaded();
+        ensure_runtime_preloaded()
+            .map_err(PgReportError::from_domain_error)
+            .report_unwrap();
         let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
         let deregistered = registry::deregister_by_id(worker_id)
             .unwrap_or_else(|error| error.report());
@@ -83,7 +90,9 @@ LANGUAGE c
 AS '@MODULE_PATHNAME@', '@FUNCTION_NAME@';
 "#)]
     fn request_worker_wakeup(fcinfo: pg_sys::FunctionCallInfo) {
-        ensure_runtime_preloaded();
+        ensure_runtime_preloaded()
+            .map_err(PgReportError::from_domain_error)
+            .report_unwrap();
         // SAFETY: the custom SQL declaration makes the second argument a
         // non-null PostgreSQL text value. Worker names are the UTF-8
         // application-name domain, so pgrx's &str conversion is intentional.
@@ -134,7 +143,9 @@ AS '@MODULE_PATHNAME@', '@FUNCTION_NAME@';
             name!(stop_requested, bool),
         ),
     > {
-        ensure_runtime_preloaded();
+        ensure_runtime_preloaded()
+            .map_err(PgReportError::from_domain_error)
+            .report_unwrap();
         TableIterator::new(runtime_worker_status().into_iter().map(|status| {
             (
                 pg_sys::Oid::from(status.database_oid),
@@ -164,7 +175,9 @@ AS '@MODULE_PATHNAME@', '@FUNCTION_NAME@';
             name!(needs_restart, Option<bool>),
         ),
     > {
-        ensure_runtime_preloaded();
+        ensure_runtime_preloaded()
+            .map_err(PgReportError::from_domain_error)
+            .report_unwrap();
         TableIterator::new(runtime_process_status().into_iter().map(|status| {
             (
                 status.process_kind,

@@ -12,16 +12,21 @@
 //!
 //! Use this module for transaction-scoped state, such as metadata updates,
 //! staged publication, or cleanup actions that must react to commit, abort,
-//! pre-commit, or subtransaction promotion/rollback.  Use [`crate::resource`] for
-//! executor, portal, mutation-frame, COPY, or other ResourceOwner-bound cleanup
+//! prepare, pre-commit, or subtransaction promotion/rollback. Use
+//! [`crate::resource`] for executor, portal, mutation-frame, COPY, or other
+//! ResourceOwner-bound cleanup
 //! that must run when PostgreSQL releases the owner after an ERROR has returned
 //! through pgrx's guarded Rust unwind boundary.
 //!
 //! The [`cleanup`] submodule provides higher-level helpers for common
-//! transaction-scoped cleanup patterns.
+//! transaction-scoped cleanup patterns. It keeps commit/abort and savepoint
+//! decisions here, then transfers committed deletes to [`crate::resource`]
+//! for execution after the top-level ResourceOwner releases transaction locks.
+//! Other transaction callbacks retain their PostgreSQL event timing.
 
 use std::cell::RefCell;
 use std::fmt::Debug;
+use std::mem;
 use std::rc::Rc;
 
 use crate::diag::PgReportError;
@@ -38,6 +43,10 @@ pub type TransactionResult<T> = Result<T, PgReportError>;
 /// Implementations can choose which events to respond to.
 pub trait TransactionResource: Debug {
     /// Called when the top-level transaction is committed.
+    ///
+    /// PostgreSQL invokes this event before releasing transaction locks.
+    /// Physical post-commit deletion belongs in [`cleanup::PendingDelete`],
+    /// whose adapter defers execution until ResourceOwner's AFTER_LOCKS phase.
     fn on_commit(&self) {}
 
     /// Called when the top-level transaction is aborted.
@@ -59,6 +68,16 @@ pub trait TransactionResource: Debug {
     fn on_pre_prepare(&self) -> TransactionResult<()> {
         Ok(())
     }
+
+    /// Called after PostgreSQL successfully prepares the top-level transaction.
+    ///
+    /// The framework removes the registered resources before this callback.
+    /// Implementations release backend-local state, including any reference
+    /// retained in a transaction-local registry. PREPARE is neither COMMIT nor
+    /// ABORT: do not publish changes or delete transaction-owned storage here.
+    /// Work requiring a final outcome must have durable two-phase state or be
+    /// rejected by `on_pre_prepare`.
+    fn on_prepare(&self) {}
 
     /// Called when a subtransaction is committed (RELEASE SAVEPOINT).
     fn on_commit_sub(&self, _current_nest_level: i32) {}
@@ -174,7 +193,7 @@ unsafe extern "C-unwind" fn xact_callback(
     match event {
         XACT_EVENT_COMMIT | XACT_EVENT_PARALLEL_COMMIT => {
             RESOURCES.with(|res| {
-                let resources = std::mem::take(&mut *res.borrow_mut());
+                let resources = mem::take(&mut *res.borrow_mut());
                 for r in resources {
                     if r.nest_level() >= current_nest_level {
                         r.on_commit();
@@ -184,7 +203,7 @@ unsafe extern "C-unwind" fn xact_callback(
         }
         XACT_EVENT_ABORT | XACT_EVENT_PARALLEL_ABORT => {
             RESOURCES.with(|res| {
-                let resources = std::mem::take(&mut *res.borrow_mut());
+                let resources = mem::take(&mut *res.borrow_mut());
                 for r in resources {
                     if r.nest_level() >= current_nest_level {
                         r.on_abort();
@@ -226,6 +245,16 @@ unsafe extern "C-unwind" fn xact_callback(
                     error.report();
                 }
             }
+        }
+        XACT_EVENT_PREPARE => {
+            RESOURCES.with(|res| {
+                let resources = mem::take(&mut *res.borrow_mut());
+                for r in resources {
+                    if r.nest_level() >= current_nest_level {
+                        r.on_prepare();
+                    }
+                }
+            });
         }
         _ => {}
     }

@@ -4,7 +4,7 @@
 //! patterns that several access methods may share.  It intentionally models
 //! cleanup timing, not any concrete storage implementation or WAL policy.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt::Debug;
 use std::rc::Rc;
 
@@ -12,13 +12,14 @@ use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
 use crate::diag::PgReportError;
+use crate::resource::CommittedCleanup;
 
 use super::{TransactionResource, TransactionResult, register_resource};
 
 /// When a transaction-scoped cleanup action should run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CleanupTiming {
-    /// Run after the top-level transaction commits.
+    /// Run after the top-level transaction commits and releases its locks.
     OnCommit,
     /// Run when the transaction or registering subtransaction aborts.
     OnAbort,
@@ -31,6 +32,10 @@ pub enum CleanupTiming {
 /// framework only handles transaction and subtransaction timing.
 pub trait PendingDelete: Debug {
     /// Execute the delete operation.
+    ///
+    /// Commit cleanup runs after transaction locks and other owner resources
+    /// are released. The action must own its storage capability and paths;
+    /// it cannot depend on a snapshot, relation handle or executor borrow.
     fn execute(&self);
 
     /// The transaction outcome that should trigger this delete.
@@ -45,26 +50,43 @@ pub trait PendingDelete: Debug {
 /// Adapter that implements TransactionResource for a PendingDelete implementation.
 #[derive(Debug)]
 struct PendingDeleteResource {
-    inner: Box<dyn PendingDelete>,
+    inner: RefCell<Option<Box<dyn PendingDelete>>>,
+    timing: CleanupTiming,
     nest_level: Cell<i32>,
 }
 
 impl PendingDeleteResource {
     fn should_run_on(&self, timing: CleanupTiming) -> bool {
-        self.inner.timing() == timing
+        self.timing == timing
+    }
+
+    fn take(&self) -> Box<dyn PendingDelete> {
+        self.inner
+            .borrow_mut()
+            .take()
+            .expect("pending delete is consumed once at its transaction outcome")
+    }
+
+    fn execute_abort(&self) {
+        self.inner
+            .borrow()
+            .as_ref()
+            .expect("abort cleanup retains its pending delete")
+            .execute();
     }
 }
 
 impl TransactionResource for PendingDeleteResource {
     fn on_commit(&self) {
         if self.should_run_on(CleanupTiming::OnCommit) {
-            self.inner.execute();
+            let pending = self.take();
+            CommittedCleanup::defer(move || pending.execute());
         }
     }
 
     fn on_abort(&self) {
         if self.should_run_on(CleanupTiming::OnAbort) {
-            self.inner.execute();
+            self.execute_abort();
         }
     }
 
@@ -72,7 +94,7 @@ impl TransactionResource for PendingDeleteResource {
         if self.nest_level() >= current_nest_level
             && self.should_run_on(CleanupTiming::OnAbort)
         {
-            self.inner.execute();
+            self.execute_abort();
             // The outer subtransaction callback removes resources registered
             // at or above this aborted nesting level after this hook returns.
         }
@@ -103,10 +125,13 @@ impl TransactionResource for PendingDeleteResource {
 /// The current transaction nesting level is captured so abort cleanup registered
 /// inside a savepoint runs when that savepoint rolls back, while cleanup
 /// promoted by `RELEASE SAVEPOINT` follows the parent transaction.
+/// Commit actions transfer ownership at COMMIT and execute at the top-level
+/// ResourceOwner's AFTER_LOCKS phase, without extending relation lock lifetime.
 pub fn register_pending_delete(entry: Box<dyn PendingDelete>) {
     let nest_level = unsafe { pg_sys::GetCurrentTransactionNestLevel() };
     let resource = Rc::new(PendingDeleteResource {
-        inner: entry,
+        timing: entry.timing(),
+        inner: RefCell::new(Some(entry)),
         nest_level: Cell::new(nest_level),
     });
 

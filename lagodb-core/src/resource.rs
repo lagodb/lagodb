@@ -2,7 +2,7 @@
 //!
 //! This module intentionally mirrors PostgreSQL's `ResourceOwner` release
 //! callback mechanism (`RegisterResourceReleaseCallback`), not PostgreSQL's
-//! transaction callback mechanism.  In PostgreSQL 17, `ResourceOwner` is used
+//! transaction callback mechanism.  PostgreSQL uses `ResourceOwner`
 //! for query/owner-lifespan resources and is released through
 //! `ResourceOwnerRelease(phase, isCommit, isTopLevel)`, while xact/subxact
 //! callbacks are separate transaction-event notifications registered via
@@ -14,6 +14,13 @@
 //! for frame-, portal-, executor-, or other owner-scoped resources whose normal
 //! completion callback can be omitted after pgrx has unwound Rust and returned
 //! an ERROR to PostgreSQL, such as mutation or COPY state.
+//!
+//! Transaction cleanup can also transfer already-committed, owned work here
+//! for execution after the top-level owner releases locks.
+//! That is expected cleanup, separate from the leak fallback below; transaction
+//! outcome and savepoint ownership remain the transaction module's concern.
+//! Its independent ResourceOwner callback also runs for transactions committed
+//! during backend exit, including PostgreSQL's temporary-table deletion.
 //!
 //! # Example
 //!
@@ -37,6 +44,10 @@ use pgrx::pg_sys;
 use pgrx::{PgTryBuilder, pg_guard};
 
 use crate::diag::{PgErrorReport, report_warning};
+
+mod committed_cleanup;
+
+pub use committed_cleanup::CommittedCleanup;
 
 /// A handle to a registered resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,9 +74,10 @@ thread_local! {
 /// or in-flight sessions when PostgreSQL cleanup omits their normal completion
 /// callback. Physical allocation lifetime remains a MemoryContext concern.
 ///
-/// Note: If the transaction commits and the resource hasn't been forgotten, the callback
-/// WILL still run, and a warning will be logged, implying a resource leak if explicit
-/// cleanup was expected.
+/// During transaction commit, a resource that has not been forgotten still
+/// runs and logs a resource-leak warning if explicit cleanup was expected.
+/// Owner fallback callbacks are skipped during backend process exit; this
+/// policy does not apply to normal committed transaction cleanup.
 ///
 /// Callbacks registered here run only in PostgreSQL's
 /// `RESOURCE_RELEASE_AFTER_LOCKS` phase. They must therefore be bounded,
@@ -142,6 +154,10 @@ pub fn init_resource_manager() {
             return;
         }
 
+        // PG prepends callbacks. Register normal cleanup first so owner
+        // fallback retains its existing order before committed deletion.
+        CommittedCleanup::register_callback();
+
         unsafe {
             pg_sys::RegisterResourceReleaseCallback(
                 Some(release_resource_callback),
@@ -166,7 +182,8 @@ unsafe extern "C-unwind" fn release_resource_callback(
         return;
     }
 
-    // Check if process exit is in progress
+    // This exit policy applies only to forgotten owner-scoped resources.
+    // Committed cleanup has an independent callback, including at backend exit.
     // SAFETY: proc_exit_inprogress is a PostgreSQL global variable
     if unsafe { pg_sys::proc_exit_inprogress } {
         return;

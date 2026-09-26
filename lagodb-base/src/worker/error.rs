@@ -25,9 +25,6 @@ impl<T> WorkerCatalogResultExt<T> for Result<T, PgError> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WorkerCatalogOperation {
     ResolveSchema,
-    ResolveRelation,
-    ResolveIndex,
-    ResolveSequence,
     AllocateId,
     ResolveEntrypoint,
     Open,
@@ -40,9 +37,6 @@ impl fmt::Display for WorkerCatalogOperation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::ResolveSchema => "resolve lagodb schema",
-            Self::ResolveRelation => "resolve lagodb.workers",
-            Self::ResolveIndex => "resolve lagodb.workers index",
-            Self::ResolveSequence => "resolve lagodb.worker_id_seq",
             Self::AllocateId => "allocate a LagoDB worker ID",
             Self::ResolveEntrypoint => "resolve worker entry point",
             Self::Open => "open lagodb.workers",

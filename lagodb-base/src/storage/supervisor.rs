@@ -15,7 +15,7 @@ use pgrx::pg_sys;
 use tokio_util::sync::CancellationToken;
 
 use lagodb_core::pg_latch::BackendLatch;
-use lagodb_storage::{ManagedStoreRegistry, StorageRuntime};
+use lagodb_storage::{ManagedStoreRegistry, StorageRuntime, StorageServerBuilder};
 
 use super::catalog::VolumeConfigSource;
 use super::config::StorageWorkerConfig;
@@ -95,8 +95,11 @@ impl StorageWorkerSupervisor {
 
         let storage_runtime = self.storage_runtime_or_exit();
         let storage_runtime_control = storage_runtime.clone();
-        let mut server_handle =
-            Some(self.spawn_storage_server(&runtime, registry, storage_runtime));
+        let mut server_handle = Some(self.start_storage_server_or_exit(
+            &runtime,
+            registry,
+            storage_runtime,
+        ));
 
         logging::emit_pg_log(
             pg_sys::INFO as i32,
@@ -167,8 +170,8 @@ impl StorageWorkerSupervisor {
         }
     }
 
-    fn spawn_storage_server(
-        &self,
+    fn start_storage_server_or_exit(
+        &mut self,
         runtime: &tokio::runtime::Runtime,
         registry: ManagedStoreRegistry,
         storage_runtime: StorageRuntime,
@@ -176,24 +179,35 @@ impl StorageWorkerSupervisor {
         let shutdown = self.shutdown.clone();
         let startup_config = &self.config.startup;
 
-        let socket_path = startup_config.socket_path.clone();
-        let cache_dir = startup_config.cache_dir.clone();
-        let server_config = startup_config.server_config.clone();
-        let service_config = startup_config.service_config.clone();
-
-        runtime.spawn(async move {
-            let server =
-                lagodb_storage::StorageServerBuilder::new(&socket_path, &cache_dir)
-                    .with_server_config(server_config)
-                    .with_service_config(service_config)
-                    .with_managed_store_registry(registry)
-                    .with_runtime(storage_runtime)
-                    .with_tracing_request_observer()
-                    .bind()
-                    .await?;
-
-            server.serve_until(shutdown).await
-        })
+        // Cache recovery and socket binding must finish before publishing Running.
+        // Spawning the bind itself let backends connect to a stale socket while
+        // the supervisor already advertised a usable service.
+        let server = runtime.block_on(
+            StorageServerBuilder::new(
+                &startup_config.socket_path,
+                &startup_config.cache_dir,
+            )
+            .with_server_config(startup_config.server_config.clone())
+            .with_service_config(startup_config.service_config.clone())
+            .with_managed_store_registry(registry)
+            .with_runtime(storage_runtime)
+            .with_tracing_request_observer()
+            .bind(),
+        );
+        let server = match server {
+            Ok(server) => server,
+            Err(error) => {
+                let message = format!(
+                    "storage server startup failed: {}",
+                    error.diagnostic_message(),
+                );
+                StorageStatusStore::new().mark_failed(&message);
+                logging::emit_pg_log(pg_sys::WARNING as i32, &message);
+                self.log_bridge.drain_to_pg_log();
+                unsafe { pg_sys::proc_exit(1) };
+            }
+        };
+        runtime.spawn(async move { server.serve_until(shutdown).await })
     }
 
     fn run_supervisor_loop(

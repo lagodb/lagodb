@@ -21,3 +21,8 @@ The storage worker is not stored in `lagodb.workers`; that table is reserved
 for database-local extension workers. Storage observability is exposed through
 `lagodb.storage_service_status()`, backed by this module's own shared-memory
 state rather than the worker subsystem's `Store`.
+
+The worker publishes `running` only after startup reconciliation, cache recovery,
+and Unix socket binding succeed. Regression setup waits for this state before
+using object storage; PostgreSQL accepting connections does not imply that its
+asynchronously started storage worker is ready.

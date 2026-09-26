@@ -8,7 +8,7 @@ use lagodb_core::storage::service::BackendStorageService;
 use pgrx::datum::JsonB;
 use pgrx::prelude::*;
 
-use crate::ensure_runtime_preloaded;
+use crate::{RuntimeNotPreloaded, ensure_runtime_preloaded};
 
 use super::control::StorageVolumeControl;
 use super::credential::CredentialConfig;
@@ -25,6 +25,8 @@ enum StorageVolumeSqlError {
     Tablespace(#[from] TablespaceCacheError),
     #[error(transparent)]
     Retirement(#[from] StorageVolumeRetirementError),
+    #[error(transparent)]
+    Runtime(#[from] RuntimeNotPreloaded),
 }
 
 impl SqlStateError for StorageVolumeSqlError {
@@ -34,6 +36,7 @@ impl SqlStateError for StorageVolumeSqlError {
             Self::Domain(error) => error.sql_error_code(),
             Self::Tablespace(error) => error.sql_error_code(),
             Self::Retirement(error) => error.sql_error_code(),
+            Self::Runtime(error) => error.sql_error_code(),
         }
     }
 }
@@ -48,7 +51,7 @@ fn ensure_admin_access() -> Result<(), StorageVolumeSqlError> {
     if !unsafe { pg_sys::superuser() } {
         return Err(StorageVolumeSqlError::RequiresSuperuser);
     }
-    ensure_runtime_preloaded();
+    ensure_runtime_preloaded()?;
     Ok(())
 }
 
