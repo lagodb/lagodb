@@ -2,6 +2,7 @@
 
 use std::ffi::CStr;
 
+use lagodb_core::copy::CopyEndpoint;
 use lagodb_core::diag::PgReportError;
 use pgrx::{PgSqlErrorCode, pg_sys};
 
@@ -23,7 +24,9 @@ pub(super) unsafe fn unclaimed_uri_error(
     // SAFETY: PostgreSQL COPY parse nodes store `filename` as a live
     // NUL-terminated string for the utility statement lifetime.
     let filename = unsafe { CStr::from_ptr(statement.filename) };
-    if !has_uri_scheme(filename.to_bytes()) {
+    if CopyEndpoint::from_filename(Some(filename), statement.is_program)
+        != CopyEndpoint::ExternalUri
+    {
         return None;
     }
     Some(PgReportError::from_parts(
@@ -35,16 +38,4 @@ pub(super) unsafe fn unclaimed_uri_error(
                 .to_owned(),
         ),
     ))
-}
-
-fn has_uri_scheme(filename: &[u8]) -> bool {
-    let Some(separator) = filename.windows(3).position(|window| window == b"://")
-    else {
-        return false;
-    };
-    let scheme = &filename[..separator];
-    scheme.first().is_some_and(u8::is_ascii_alphabetic)
-        && scheme.iter().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(*byte, b'+' | b'-' | b'.')
-        })
 }

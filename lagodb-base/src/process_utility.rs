@@ -1,8 +1,13 @@
 //! Runtime-owned `ProcessUtility_hook` router.
 
+mod analyze_router;
 mod consumer;
 mod copy_route;
-mod full_router;
+mod maintenance_command;
+mod provider_maintenance;
+mod tablespace_policy;
+mod truncate_router;
+mod vacuum_router;
 
 use std::ffi::{c_char, c_void};
 use std::sync::OnceLock;
@@ -10,20 +15,23 @@ use std::sync::OnceLock;
 use crate::descriptor_registry::{
     DescriptorNode, DescriptorRegistry, DescriptorSnapshot,
 };
-use lagodb_core::diag::ReportableError;
+use lagodb_core::diag::{PgReportError, ReportableError};
 use lagodb_core::runtime_api::UtilityHookDescriptor;
+use lagodb_core::table_maintenance::TableMaintenanceRouter;
 use pgrx::{pg_guard, pg_sys};
 
-use crate::{storage::volume_config, worker};
+use crate::worker;
+use maintenance_command::MaintenanceCommandScope;
+use tablespace_policy::StorageVolumeTablespacePolicy;
 
 pub(crate) use consumer::{
     PreparedUtilityConsumers, commit_consumers, prepare_consumers,
 };
 
+type UtilityHookRegistry = DescriptorRegistry<UtilityHookDescriptor>;
+
 static PREV_PROCESS_UTILITY: OnceLock<pg_sys::ProcessUtility_hook_type> =
     OnceLock::new();
-
-type UtilityHookRegistry = DescriptorRegistry<UtilityHookDescriptor>;
 
 pub(crate) struct PreparedUtilityHooks {
     // Each node is allocated before the runtime registration transaction is
@@ -216,6 +224,8 @@ type ProcessUtilityHookFn = unsafe extern "C-unwind" fn(
     completion_tag: *mut pg_sys::QueryCompletion,
 );
 
+// Shared with LagodbMaintenanceUtilityArgs in the runtime C command bridge.
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub(super) struct ProcessUtilityArgs {
     pub(crate) pstmt: *mut pg_sys::PlannedStmt,
@@ -231,6 +241,43 @@ pub(super) struct ProcessUtilityArgs {
 impl ProcessUtilityArgs {
     unsafe fn target_node(self) -> *mut pg_sys::Node {
         unsafe { (*self.pstmt).utilityStmt }
+    }
+
+    /// Save the original statement through all post-hooks. Ordinary commands
+    /// and nested ANALYZE use the caller's context. Top-level maintenance uses
+    /// a separate Portal child, reclaimed by PostgreSQL after ProcessUtility
+    /// returns, independently of the shorter-lived maintenance plan.
+    ///
+    /// # Safety
+    /// These arguments must describe the live backend ProcessUtility call.
+    /// The caller's context must remain live through post-hooks; top-level
+    /// maintenance must run inside a live Portal.
+    unsafe fn copy_original_for_hooks(self) -> *mut pg_sys::Node {
+        // SAFETY: the arguments supply the live statement and execution context.
+        unsafe {
+            let node = self.target_node();
+            let is_top_level = self.context
+                == pg_sys::ProcessUtilityContext::PROCESS_UTILITY_TOPLEVEL;
+            let previous =
+                if (*node).type_ == pg_sys::NodeTag::T_VacuumStmt && is_top_level {
+                    let snapshot_context = pg_sys::AllocSetContextCreateExtended(
+                        pg_sys::PortalContext,
+                        c"lagodb utility hook snapshot".as_ptr(),
+                        pg_sys::ALLOCSET_DEFAULT_MINSIZE as usize,
+                        pg_sys::ALLOCSET_DEFAULT_INITSIZE as usize,
+                        pg_sys::ALLOCSET_DEFAULT_MAXSIZE as usize,
+                    );
+                    Some(pg_sys::MemoryContextSwitchTo(snapshot_context))
+                } else {
+                    None
+                };
+            let copied =
+                pg_sys::copyObjectImpl(node.cast::<c_void>()).cast::<pg_sys::Node>();
+            if let Some(previous) = previous {
+                pg_sys::MemoryContextSwitchTo(previous);
+            }
+            copied
+        }
     }
 
     /// Give a utility callback the same writable-tree guarantee as
@@ -285,35 +332,22 @@ impl ProcessUtilityArgs {
         }
     }
 
-    pub(super) unsafe fn call_parent_with_node(self, node: *mut pg_sys::Node) {
-        let original_node = unsafe { (*self.pstmt).utilityStmt };
-        unsafe { (*self.pstmt).utilityStmt = node };
-        let mut completion = pg_sys::QueryCompletion::default();
-        let nested = Self {
-            completion_tag: &mut completion,
-            ..self
-        };
-        match PREV_PROCESS_UTILITY.get() {
-            Some(Some(previous)) => unsafe { nested.call_previous(*previous) },
-            _ => unsafe { nested.call_standard() },
-        }
-        unsafe { (*self.pstmt).utilityStmt = original_node };
-    }
-
-    pub(super) unsafe fn complete_vacuum(self) {
-        unsafe {
-            pg_sys::SetQueryCompletion(
-                self.completion_tag,
-                pg_sys::CommandTag::CMDTAG_VACUUM,
-                0,
-            );
-        }
-    }
-
     unsafe fn call_parent(self) {
         match PREV_PROCESS_UTILITY.get() {
             Some(Some(previous)) => unsafe { self.call_previous(*previous) },
             _ => unsafe { self.call_standard() },
+        }
+    }
+
+    unsafe fn check_maintenance_recursion(self) {
+        // SAFETY: the caller supplies live ProcessUtility arguments.
+        let target_node = unsafe { self.target_node() };
+        if unsafe { (*target_node).type_ } == pg_sys::NodeTag::T_VacuumStmt {
+            unsafe {
+                MaintenanceCommandScope::check_recursion(
+                    target_node.cast::<pg_sys::VacuumStmt>(),
+                );
+            }
         }
     }
 }
@@ -349,6 +383,9 @@ unsafe extern "C-unwind" fn process_utility_router(
             dest,
             completion_tag,
         };
+        // Reject a recursive maintenance command before any LagoDB pre-hook
+        // can perform catalog work or rewrite its utility node.
+        args.check_maintenance_recursion();
         let target_node = args.target_node();
 
         // Lifecycle preflight is deliberately first and is a no-op unless the
@@ -360,15 +397,20 @@ unsafe extern "C-unwind" fn process_utility_router(
             .with(|registry| UtilityHookSnapshot::new(registry.snapshot(), tag));
         let has_matching_hooks = hooks.has_matching_hooks();
         let has_matching_consumers = consumer::has_registered_consumer(tag);
-        let runtime_handles = volume_config::handles_utility(tag);
+        let mut tablespace_policy = StorageVolumeTablespacePolicy::for_tag(tag);
+        let has_tablespace_policy = tablespace_policy.is_some();
         let copy_from_route = tag == pg_sys::NodeTag::T_CopyStmt
             && (*target_node.cast::<pg_sys::CopyStmt>()).is_from;
-        let may_consume_vacuum = tag == pg_sys::NodeTag::T_VacuumStmt;
+        let may_consume_vacuum = tag == pg_sys::NodeTag::T_VacuumStmt
+            && TableMaintenanceRouter::has_providers();
+        let may_consume_truncate = tag == pg_sys::NodeTag::T_TruncateStmt
+            && crate::table_provider_registry::has_partitioned_table_provider();
 
         if !has_matching_hooks
             && !has_matching_consumers
-            && !runtime_handles
+            && !has_tablespace_policy
             && !may_consume_vacuum
+            && !may_consume_truncate
             && !copy_from_route
         {
             if tag == pg_sys::NodeTag::T_CopyStmt {
@@ -378,36 +420,34 @@ unsafe extern "C-unwind" fn process_utility_router(
                     error.report();
                 }
             }
-            args.call_parent();
+            if tag == pg_sys::NodeTag::T_VacuumStmt {
+                MaintenanceCommandScope::execute(args);
+            } else {
+                args.call_parent();
+            }
             return;
         }
 
-        let original_node = (has_matching_hooks || runtime_handles).then(|| {
-            let old_context = if may_consume_vacuum {
-                Some(pg_sys::MemoryContextSwitchTo(pg_sys::PortalContext))
-            } else {
-                None
-            };
-            let copied = pg_sys::copyObjectImpl(target_node.cast::<c_void>())
-                .cast::<pg_sys::Node>();
-            if let Some(old_context) = old_context {
-                pg_sys::MemoryContextSwitchTo(old_context);
-            }
-            copied
-        });
+        let original_node =
+            has_matching_hooks.then(|| args.copy_original_for_hooks());
 
-        let args = if read_only_tree && (has_matching_hooks || runtime_handles) {
+        let args = if read_only_tree && (has_matching_hooks || has_tablespace_policy)
+        {
             args.writable_copy()
         } else {
             args
         };
         let target_node = args.target_node();
 
-        if runtime_handles {
-            volume_config::utility_pre(
-                target_node,
-                context == pg_sys::ProcessUtilityContext::PROCESS_UTILITY_TOPLEVEL,
-            );
+        if let Some(policy) = tablespace_policy.as_mut() {
+            policy
+                .prepare(
+                    target_node,
+                    context
+                        == pg_sys::ProcessUtilityContext::PROCESS_UTILITY_TOPLEVEL,
+                )
+                .map_err(PgReportError::from_domain_error)
+                .report_unwrap();
         }
 
         hooks.for_each(|descriptor| {
@@ -418,12 +458,18 @@ unsafe extern "C-unwind" fn process_utility_router(
             );
         });
 
-        // A pre-hook is allowed to rewrite the utility node. Native routes,
-        // lifecycle, and consumer selection must therefore use the final
-        // utility tag and COPY direction, not the pre-hook input.
+        // A pre-hook can replace the utility node. Check the final node as a
+        // separate boundary invariant so a non-maintenance input cannot be
+        // rewritten into a recursive VACUUM/ANALYZE.
+        args.check_maintenance_recursion();
+
+        // A pre-hook may rewrite a non-runtime-owned utility node. Native routes,
+        // lifecycle, and consumer selection must therefore use the final utility
+        // tag and COPY direction, not the pre-hook input. Hooks for a
+        // runtime-owned policy are validation-only and preserve its tag and
+        // identity.
         let target_node = args.target_node();
         let final_tag = (*target_node).type_;
-        let may_consume_vacuum = final_tag == pg_sys::NodeTag::T_VacuumStmt;
         let selected_consumer = consumer::select(final_tag, args).report_unwrap();
         let consumer_consumed = selected_consumer.is_some();
         if final_tag == pg_sys::NodeTag::T_CopyStmt && !consumer_consumed {
@@ -439,16 +485,28 @@ unsafe extern "C-unwind" fn process_utility_router(
             // and the callback arguments remain live for this invocation.
             consumer.consume(consumer_args).report_unwrap();
         }
-        let consumed = consumer_consumed
-            || (may_consume_vacuum
-                && full_router::try_route_vacuum_full(
-                    target_node.cast(),
-                    args,
-                    context
-                        == pg_sys::ProcessUtilityContext::PROCESS_UTILITY_TOPLEVEL,
-                ));
-        if !consumed {
+        let is_maintenance = final_tag == pg_sys::NodeTag::T_VacuumStmt;
+        let maintenance_consumed = if is_maintenance {
+            MaintenanceCommandScope::execute(args)
+        } else {
+            false
+        };
+        let truncate_consumed = if final_tag == pg_sys::NodeTag::T_TruncateStmt {
+            truncate_router::try_route(target_node.cast::<pg_sys::TruncateStmt>())
+                .report_unwrap()
+        } else {
+            false
+        };
+        let consumed = consumer_consumed || maintenance_consumed || truncate_consumed;
+        // Maintenance's C scope already performed parent fallback while its
+        // recursion state was active. Other utility routes still delegate here.
+        if !consumed && !is_maintenance {
             args.call_parent();
+        } else if consumed {
+            // standard_ProcessUtility() performs this once after the command
+            // implementation returns. A consumer that replaces standard must
+            // preserve the same visibility boundary before post-hooks run.
+            pg_sys::CommandCounterIncrement();
         }
 
         if let Some(original_node) = original_node {
@@ -458,9 +516,12 @@ unsafe extern "C-unwind" fn process_utility_router(
                     original_node,
                 );
             });
-            if runtime_handles {
-                volume_config::utility_post(original_node);
-            }
+        }
+        if let Some(policy) = tablespace_policy.as_mut() {
+            policy
+                .complete()
+                .map_err(PgReportError::from_domain_error)
+                .report_unwrap();
         }
     }
 }

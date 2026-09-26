@@ -30,6 +30,15 @@ CREATE TABLE lagodb.table_options (
 
 SELECT pg_catalog.pg_extension_config_dump('lagodb.table_options', '');
 
+-- Relational read interface for the compact per-relation option storage.
+-- Ownership and write permissions remain defined by each AM's OptionDef schema.
+CREATE VIEW lagodb.table_option_values AS
+SELECT relid,
+       split_part(serialized_option, '=', 1) AS name,
+       substr(serialized_option, strpos(serialized_option, '=') + 1) AS value
+FROM lagodb.table_options
+CROSS JOIN LATERAL unnest(options) AS option_value(serialized_option);
+
 CREATE TABLE lagodb.maintenance_queue (
     item_id uuid PRIMARY KEY,
     operation smallint NOT NULL,

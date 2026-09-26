@@ -51,6 +51,16 @@ impl_utility_stmt_node!(
     pg_sys::NodeTag::T_AlterTableStmt
 );
 impl_utility_stmt_node!(
+    AlterDatabaseStmtNode,
+    pg_sys::AlterDatabaseStmt,
+    pg_sys::NodeTag::T_AlterDatabaseStmt
+);
+impl_utility_stmt_node!(
+    CreatedbStmtNode,
+    pg_sys::CreatedbStmt,
+    pg_sys::NodeTag::T_CreatedbStmt
+);
+impl_utility_stmt_node!(
     AlterTableMoveAllStmtNode,
     pg_sys::AlterTableMoveAllStmt,
     pg_sys::NodeTag::T_AlterTableMoveAllStmt
@@ -331,6 +341,17 @@ unsafe extern "C-unwind" fn route_external_post_hook(
         .report_unwrap();
 }
 
+/// Register a provider utility hook for one PostgreSQL utility tag.
+///
+/// Hooks for `T_CreateTableSpaceStmt`, `T_AlterTableSpaceOptionsStmt`, and
+/// `T_AlterDatabaseStmt` run after the runtime-owned storage policy has
+/// prepared the statement. For those tags, `on_pre` may inspect or reject the
+/// statement but must preserve its tag and target identity.
+///
+/// A `T_CreatedbStmt` pre-hook must only retain command context and must
+/// preserve the statement identity; validation and rejection belong in the
+/// database OAT_POST_CREATE event so PostgreSQL's native validation remains
+/// authoritative.
 pub fn register_utility_hook(
     tag: pg_sys::NodeTag,
     hook: Box<dyn UtilityHook + Send + Sync>,
