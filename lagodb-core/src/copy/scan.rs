@@ -127,16 +127,8 @@ impl CopyFromScan {
         Ok(())
     }
 
-    fn end_state(state: pg_sys::CopyFromState) -> Result<(), CopyError> {
-        unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                pg::CopyBridge::end_from(state);
-                Ok(())
-            }))
-            .catch_others(|error| Err(PgError::from_caught(error)))
-            .execute()
-        }
-        .map_err(CopyError::from)
+    fn end_state(state: pg_sys::CopyFromState) {
+        unsafe { pg::CopyBridge::end_from(state) }
     }
 
     /// Decode one row into the relation-shaped scan slot.
@@ -171,7 +163,7 @@ impl CopyFromScan {
                 .state
                 .take()
                 .expect("the active COPY parser was present above");
-            Self::end_state(state)?;
+            Self::end_state(state);
             if !self.source.next_document()? {
                 return Ok(false);
             }
@@ -185,7 +177,7 @@ impl CopyFromScan {
         econtext: *mut pg_sys::ExprContext,
     ) -> Result<(), CopyError> {
         if let Some(state) = self.state.take() {
-            Self::end_state(state)?;
+            Self::end_state(state);
         }
         self.source.reset()?;
         self.econtext = econtext;
@@ -196,18 +188,17 @@ impl CopyFromScan {
     }
 
     /// End the active parser state while retaining normal Rust cleanup order.
-    pub fn end(&mut self) -> Result<(), CopyError> {
+    pub fn end(&mut self) {
         if let Some(state) = self.state.take() {
-            Self::end_state(state)?;
+            Self::end_state(state);
         }
-        Ok(())
     }
 }
 
 impl Drop for CopyFromScan {
     fn drop(&mut self) {
         if let Some(state) = self.state.take() {
-            let _ = Self::end_state(state);
+            Self::end_state(state);
         }
     }
 }

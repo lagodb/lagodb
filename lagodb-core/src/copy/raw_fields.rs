@@ -150,25 +150,17 @@ impl<'source> CopyRawFieldReader<'source> {
         }))
     }
 
-    pub fn finish(&mut self) -> Result<(), CopyError> {
+    pub fn finish(&mut self) {
         let Some(state) = self.state.take() else {
-            return Ok(());
+            return;
         };
-        unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                pg::CopyBridge::end_raw_field_reader(state.as_ptr());
-                Ok(())
-            }))
-            .catch_others(|error| Err(PgError::from_caught(error)))
-            .execute()
-        }
-        .map_err(CopyError::from)
+        unsafe { pg::CopyBridge::end_raw_field_reader(state.as_ptr()) };
     }
 }
 
 impl Drop for CopyRawFieldReader<'_> {
     fn drop(&mut self) {
-        let _ = self.finish();
+        self.finish();
     }
 }
 
@@ -212,24 +204,16 @@ impl CopyTextInputValidator {
         .map_err(CopyError::from)
     }
 
-    pub fn finish(&mut self) -> Result<(), CopyError> {
+    pub fn finish(&mut self) {
         let Some(state) = self.state.take() else {
-            return Ok(());
+            return;
         };
-        unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                pg::CopyBridge::end_text_input_validator(state.as_ptr());
-                Ok(())
-            }))
-            .catch_others(|error| Err(PgError::from_caught(error)))
-            .execute()
-        }
-        .map_err(CopyError::from)
+        unsafe { pg::CopyBridge::end_text_input_validator(state.as_ptr()) };
     }
 }
 
 impl Drop for CopyTextInputValidator {
     fn drop(&mut self) {
-        let _ = self.finish();
+        self.finish();
     }
 }

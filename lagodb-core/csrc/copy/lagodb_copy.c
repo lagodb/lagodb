@@ -28,306 +28,28 @@
 #include "miscadmin.h"
 #include "tcop/utility.h"
 
+#include "lagodb_relation.h"
+
 #if !LAGODB_PG17
 #error "COPY bridge has not been ported to this PostgreSQL major version"
 #endif
 
 /*
- * The row encoder mirrors private copyto.c state from the audited PG17.0-
- * PG17.10 epoch.  Keep minor-version branches local to this code when a
- * future audit finds a relevant private-layout or serializer change.
+ * The row encoder owns its state and uses the source-derived text/CSV
+ * serializer from the audited PG17.0-PG17.10 epoch. Keep minor-version
+ * branches local to this code when a future audit finds a relevant
+ * options, output-function, or serializer contract change.
  */
-
-static void
-lagodb_check_copy_utility(bool is_from)
-{
-	/* A consuming hook bypasses standard_ProcessUtility's recursion guard. */
-	check_stack_depth();
-
-	/*
-	 * standard_ProcessUtility performs this check before DoCopy.  A consuming
-	 * utility route does not pass through that generic dispatcher, so keep the
-	 * same COPY FROM classification at the bridge boundary.  COPY FROM's
-	 * read-only-transaction exception is checked later against the target
-	 * relation, just as DoCopy does.  COPY TO is strictly read-only in PG17 and
-	 * therefore does not enter this generic restriction block.
-	 */
-	if (is_from && (XactReadOnly || IsInParallelMode()))
-	{
-		PreventCommandIfParallelMode("COPY");
-		PreventCommandDuringRecovery("COPY");
-	}
-}
-
-static Node *
-lagodb_prepare_where_clause(ParseState *pstate,
-								  const CopyStmt *stmt,
-							  Relation rel)
-{
-	Node	   *where_clause;
-#if PG_VERSION_NUM >= 170007
-	Bitmapset  *expr_attrs = NULL;
-	int			i;
-#endif
-
-	if (stmt->whereClause == NULL)
-		return NULL;
-
-	/* Keep this sequence aligned with PostgreSQL's DoCopy preparation epoch. */
-	where_clause = transformExpr(pstate, stmt->whereClause,
-								 EXPR_KIND_COPY_WHERE);
-	where_clause = coerce_to_boolean(pstate, where_clause, "WHERE");
-	assign_expr_collations(pstate, where_clause);
-
-#if PG_VERSION_NUM >= 170007
-	/* PG17.7 introduced generated-column validation for COPY FROM WHERE. */
-	pull_varattnos(where_clause, 1, &expr_attrs);
-	if (bms_is_member(0 - FirstLowInvalidHeapAttributeNumber, expr_attrs))
-	{
-		expr_attrs = bms_add_range(expr_attrs,
-									1 - FirstLowInvalidHeapAttributeNumber,
-									RelationGetNumberOfAttributes(rel) -
-									FirstLowInvalidHeapAttributeNumber);
-		expr_attrs = bms_del_member(expr_attrs,
-									0 - FirstLowInvalidHeapAttributeNumber);
-	}
-
-	i = -1;
-	while ((i = bms_next_member(expr_attrs, i)) >= 0)
-	{
-		AttrNumber attno = i + FirstLowInvalidHeapAttributeNumber;
-
-		Assert(attno != 0);
-		/* The attno guard is also required on PG17.7-17.9. */
-		if (attno > 0 &&
-			TupleDescAttr(RelationGetDescr(rel), attno - 1)->attgenerated)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
-					 errmsg("generated columns are not supported in COPY FROM WHERE conditions"),
-					 errdetail("Column \"%s\" is a generated column.",
-							   get_attname(RelationGetRelid(rel), attno, false))));
-	}
-#endif
-
-	where_clause = eval_const_expressions(NULL, where_clause);
-	where_clause = (Node *) canonicalize_qual((Expr *) where_clause, false);
-	return (Node *) make_ands_implicit((Expr *) where_clause);
-}
-
-static Relation
-lagodb_prepare_relation(ParseState *pstate,
-						  const CopyStmt *stmt,
-						  LOCKMODE lockmode,
-						  Node **where_clause)
-{
-	ParseNamespaceItem *nsitem;
-	RTEPermissionInfo *perminfo;
-	List		   *attnums;
-	ListCell	   *cur;
-	Relation		rel;
-
-	rel = table_openrv(stmt->relation, lockmode);
-	nsitem = addRangeTableEntryForRelation(pstate, rel, lockmode,
-									   NULL, false, false);
-	perminfo = nsitem->p_perminfo;
-	perminfo->requiredPerms = stmt->is_from ? ACL_INSERT : ACL_SELECT;
-
-	if (stmt->whereClause != NULL)
-	{
-		/* COPY FROM WHERE names the target relation's columns. */
-		addNSItemToQuery(pstate, nsitem, false, true, true);
-		*where_clause = lagodb_prepare_where_clause(pstate, stmt, rel);
-	}
-
-	attnums = CopyGetAttnums(RelationGetDescr(rel), rel, stmt->attlist);
-	foreach(cur, attnums)
-	{
-		int			attno = lfirst_int(cur);
-		Bitmapset **columns = stmt->is_from ? &perminfo->insertedCols :
-			&perminfo->selectedCols;
-
-		*columns = bms_add_member(*columns,
-								  attno - FirstLowInvalidHeapAttributeNumber);
-	}
-	ExecCheckPermissions(pstate->p_rtable,
-						 list_make1(perminfo), true);
-	return rel;
-}
-
-static RawStmt *
-lagodb_relation_query(const CopyStmt *stmt, Relation rel,
-							int stmt_location, int stmt_len)
-{
-	SelectStmt *select;
-	ColumnRef  *cr;
-	ResTarget  *target;
-	RangeVar   *from;
-	List		 *target_list = NIL;
-
-	if (stmt->attlist == NIL)
-	{
-		cr = makeNode(ColumnRef);
-		cr->fields = list_make1(makeNode(A_Star));
-		cr->location = -1;
-
-		target = makeNode(ResTarget);
-		target->val = (Node *) cr;
-		target->location = -1;
-		target_list = list_make1(target);
-	}
-	else
-	{
-		ListCell *lc;
-
-		foreach(lc, stmt->attlist)
-		{
-			cr = makeNode(ColumnRef);
-			cr->fields = list_make1(lfirst(lc));
-			cr->location = -1;
-
-			target = makeNode(ResTarget);
-			target->val = (Node *) cr;
-			target->location = -1;
-			target_list = lappend(target_list, target);
-		}
-	}
-
-	from = makeRangeVar(get_namespace_name(RelationGetNamespace(rel)),
-						pstrdup(RelationGetRelationName(rel)), -1);
-	from->inh = false;
-
-	select = makeNode(SelectStmt);
-	select->targetList = target_list;
-	select->fromClause = list_make1(from);
-
-	RawStmt *query = makeNode(RawStmt);
-	query->stmt = (Node *) select;
-	query->stmt_location = stmt_location;
-	query->stmt_len = stmt_len;
-	return query;
-}
-
-static void
-lagodb_close_preparation_relation(LagodbCopyPreparation *preparation)
-{
-	if (preparation->relation != NULL)
-	{
-		table_close(preparation->relation, NoLock);
-		preparation->relation = NULL;
-	}
-}
-
-void
-lagodb_prepare_copy_from(ParseState *pstate,
-						   const CopyStmt *stmt,
-						   int stmt_location,
-						   int stmt_len,
-						   LagodbCopyPreparation *preparation)
-{
-	LagodbCopyPreparation local = {0};
-
-	(void) stmt_location;
-	(void) stmt_len;
-	Assert(stmt->relation != NULL);
-
-	lagodb_check_copy_utility(stmt->is_from);
-
-	PG_TRY();
-	{
-		local.relation = lagodb_prepare_relation(pstate, stmt,
-										  RowExclusiveLock,
-										  &local.where_clause);
-		if (check_enable_rls(RelationGetRelid(local.relation),
-								  InvalidOid, false) == RLS_ENABLED)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("COPY FROM not supported with row-level security"),
-					 errhint("Use INSERT statements instead.")));
-		if (XactReadOnly && !local.relation->rd_islocaltemp)
-			PreventCommandIfReadOnly("COPY FROM");
-
-		*preparation = local;
-	}
-	PG_CATCH();
-	{
-		lagodb_close_preparation_relation(&local);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-}
-
-void
-lagodb_prepare_copy_to(ParseState *pstate,
-						 const CopyStmt *stmt,
-						 int stmt_location,
-						 int stmt_len,
-						 LagodbCopyPreparation *preparation)
-{
-	LagodbCopyPreparation local = {0};
-
-	lagodb_check_copy_utility(stmt->is_from);
-
-	PG_TRY();
-	{
-		if (stmt->relation == NULL)
-		{
-			Assert(stmt->query != NULL);
-			local.raw_query = makeNode(RawStmt);
-			local.raw_query->stmt = stmt->query;
-			local.raw_query->stmt_location = stmt_location;
-			local.raw_query->stmt_len = stmt_len;
-		}
-		else
-		{
-			local.relation = lagodb_prepare_relation(pstate, stmt,
-											AccessShareLock,
-											NULL);
-			local.query_rel_id = RelationGetRelid(local.relation);
-
-			/*
-			 * External COPY TO must be able to read a foreign table. PostgreSQL's
-			 * server-file path rejects that relation kind, so normalize it to the
-			 * same query form used for RLS before BeginCopyTo.
-			 */
-			if (check_enable_rls(local.query_rel_id, InvalidOid, false) == RLS_ENABLED ||
-				local.relation->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
-			{
-				local.raw_query = lagodb_relation_query(stmt,
-												 local.relation,
-												 stmt_location,
-												 stmt_len);
-				lagodb_close_preparation_relation(&local);
-			}
-		}
-
-		*preparation = local;
-	}
-	PG_CATCH();
-	{
-		lagodb_close_preparation_relation(&local);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-}
-
-void
-lagodb_dispose_copy_preparation(LagodbCopyPreparation *preparation)
-{
-	lagodb_close_preparation_relation(preparation);
-	preparation->where_clause = NULL;
-	preparation->raw_query = NULL;
-	preparation->query_rel_id = InvalidOid;
-}
 
 CopyFromState
 lagodb_begin_copy_from(ParseState *pstate,
-                         Relation rel,
-                         Node *where_clause,
-                         const char *filename,
-                         bool is_program,
-                         copy_data_source_cb data_source_cb,
-                         List *attnamelist,
-                         List *options)
+					   Relation rel,
+					   Node *where_clause,
+					   const char *filename,
+					   bool is_program,
+					   copy_data_source_cb data_source_cb,
+					   List *attnamelist,
+					   List *options)
 {
 	return BeginCopyFrom(pstate,
 						 rel,
@@ -336,14 +58,14 @@ lagodb_begin_copy_from(ParseState *pstate,
 						 is_program,
 						 data_source_cb,
 						 attnamelist,
-											 options);
+						 options);
 }
 
 bool
 lagodb_next_copy_from(CopyFromState state,
-						ExprContext *econtext,
-						Datum *values,
-						bool *nulls)
+					  ExprContext *econtext,
+					  Datum *values,
+					  bool *nulls)
 {
 	ErrorContextCallback errcallback;
 	MemoryContext oldcontext;
@@ -373,12 +95,6 @@ lagodb_next_copy_from(CopyFromState state,
 	return found;
 }
 
-uint64
-lagodb_copy_from(CopyFromState state)
-{
-	return CopyFrom(state);
-}
-
 void
 lagodb_end_copy_from(CopyFromState state)
 {
@@ -395,7 +111,7 @@ struct LagodbTextInputValidator
 {
 	MemoryContext context;
 	MemoryContext call_context;
-	FmgrInfo input_function;
+	FmgrInfo	input_function;
 	Oid			typioparam;
 };
 
@@ -426,8 +142,8 @@ lagodb_begin_raw_field_reader(copy_data_source_cb data_source_cb, List *options)
 	MemoryContext oldcontext;
 
 	context = AllocSetContextCreate(CurrentMemoryContext,
-								  "LagoDB raw COPY fields",
-								  ALLOCSET_DEFAULT_SIZES);
+									"LagoDB raw COPY fields",
+									ALLOCSET_DEFAULT_SIZES);
 	oldcontext = MemoryContextSwitchTo(context);
 	PG_TRY();
 	{
@@ -450,7 +166,7 @@ lagodb_begin_raw_field_reader(copy_data_source_cb data_source_cb, List *options)
 
 bool
 lagodb_next_raw_fields(LagodbRawFieldReader *reader, char ***fields,
-						size_t *field_count)
+					   size_t *field_count)
 {
 	ErrorContextCallback errcallback;
 	int			nfields;
@@ -496,8 +212,8 @@ lagodb_begin_text_input_validator(Oid type_oid)
 	Oid			input_function;
 
 	context = AllocSetContextCreate(CurrentMemoryContext,
-								  "LagoDB text input validator",
-								  ALLOCSET_DEFAULT_SIZES);
+									"LagoDB text input validator",
+									ALLOCSET_DEFAULT_SIZES);
 	oldcontext = MemoryContextSwitchTo(context);
 	PG_TRY();
 	{
@@ -506,8 +222,8 @@ lagodb_begin_text_input_validator(Oid type_oid)
 		getTypeInputInfo(type_oid, &input_function, &validator->typioparam);
 		fmgr_info_cxt(input_function, &validator->input_function, context);
 		validator->call_context = AllocSetContextCreate(context,
-													"LagoDB text input validation",
-													ALLOCSET_DEFAULT_SIZES);
+														"LagoDB text input validation",
+														ALLOCSET_DEFAULT_SIZES);
 	}
 	PG_CATCH();
 	{
@@ -522,7 +238,7 @@ lagodb_begin_text_input_validator(Oid type_oid)
 
 bool
 lagodb_text_input_accepts(LagodbTextInputValidator *validator,
-							const char *value)
+						  const char *value)
 {
 	ErrorSaveContext escontext = {0};
 	Datum		result;
@@ -534,10 +250,13 @@ lagodb_text_input_accepts(LagodbTextInputValidator *validator,
 	escontext.type = T_ErrorSaveContext;
 	PG_TRY();
 	{
-		/* Input functions receive mutable text, so isolate the parser's field buffer. */
+		/*
+		 * Input functions receive mutable text, so isolate the parser's field
+		 * buffer.
+		 */
 		accepted = InputFunctionCallSafe(&validator->input_function,
-											pstrdup(value), validator->typioparam, -1,
-											(Node *) &escontext, &result);
+										 pstrdup(value), validator->typioparam, -1,
+										 (Node *) &escontext, &result);
 	}
 	PG_CATCH();
 	{
@@ -556,22 +275,12 @@ lagodb_end_text_input_validator(LagodbTextInputValidator *validator)
 }
 
 /*
- * Exact layout of CopyToStateData in the audited PG17.0-PG17.10 copyto.c
- * epoch. The public API exposes CopyToState opaquely, but the row encoder must
- * initialize the same per-row state as DoCopyTo before using its source-derived
- * serializer.
+ * Local state for the source-derived text/CSV serializer. It is allocated
+ * and released by the row encoder, independently of PostgreSQL's COPY
+ * executor state and its private layout.
  */
-typedef enum LagodbCopyDest
+struct LagodbCopyRowEncoder
 {
-	LAGODB_COPY_FILE,
-	LAGODB_COPY_FRONTEND,
-	LAGODB_COPY_CALLBACK
-} LagodbCopyDest;
-
-typedef struct LagodbCopyToStateData
-{
-	LagodbCopyDest copy_dest;
-	FILE	   *copy_file;
 	StringInfo	fe_msgbuf;
 
 	int			file_encoding;
@@ -579,43 +288,31 @@ typedef struct LagodbCopyToStateData
 	bool		encoding_embeds_ascii;
 
 	Relation	rel;
-	QueryDesc  *queryDesc;
 	List	   *attnumlist;
-	char	   *filename;
-	bool		is_program;
-	copy_data_dest_cb data_dest_cb;
 
 	CopyFormatOptions opts;
-	Node	   *whereClause;
 
 	MemoryContext copycontext;
 
 	FmgrInfo   *out_functions;
 	MemoryContext rowcontext;
-	uint64		bytes_processed;
-} LagodbCopyToStateData;
-
-static LagodbCopyToStateData *
-lagodb_copy_to_state(CopyToState state)
-{
-	return (LagodbCopyToStateData *) state;
-}
+};
 
 static void
-lagodb_copy_send_data(LagodbCopyToStateData *state,
-						const void *data, int len)
+lagodb_copy_send_data(LagodbCopyRowEncoder *state,
+					  const void *data, int len)
 {
 	appendBinaryStringInfo(state->fe_msgbuf, data, len);
 }
 
 static void
-lagodb_copy_send_string(LagodbCopyToStateData *state, const char *value)
+lagodb_copy_send_string(LagodbCopyRowEncoder *state, const char *value)
 {
 	lagodb_copy_send_data(state, value, strlen(value));
 }
 
 static void
-lagodb_copy_send_char(LagodbCopyToStateData *state, char value)
+lagodb_copy_send_char(LagodbCopyRowEncoder *state, char value)
 {
 	appendStringInfoCharMacro(state->fe_msgbuf, value);
 }
@@ -628,8 +325,8 @@ lagodb_copy_send_char(LagodbCopyToStateData *state, char value)
 
 /* Source-derived from CopyAttributeOutText in the PG17.0-PG17.10 epoch. */
 static void
-lagodb_copy_attribute_out_text(LagodbCopyToStateData *state,
-							 const char *string)
+lagodb_copy_attribute_out_text(LagodbCopyRowEncoder *state,
+							   const char *string)
 {
 	const char *ptr;
 	const char *start;
@@ -650,12 +347,24 @@ lagodb_copy_attribute_out_text(LagodbCopyToStateData *state,
 			{
 				switch (c)
 				{
-					case '\b': c = 'b'; break;
-					case '\f': c = 'f'; break;
-					case '\n': c = 'n'; break;
-					case '\r': c = 'r'; break;
-					case '\t': c = 't'; break;
-					case '\v': c = 'v'; break;
+					case '\b':
+						c = 'b';
+						break;
+					case '\f':
+						c = 'f';
+						break;
+					case '\n':
+						c = 'n';
+						break;
+					case '\r':
+						c = 'r';
+						break;
+					case '\t':
+						c = 't';
+						break;
+					case '\v':
+						c = 'v';
+						break;
 					default:
 						if (c == delimc)
 							break;
@@ -687,12 +396,24 @@ lagodb_copy_attribute_out_text(LagodbCopyToStateData *state,
 			{
 				switch (c)
 				{
-					case '\b': c = 'b'; break;
-					case '\f': c = 'f'; break;
-					case '\n': c = 'n'; break;
-					case '\r': c = 'r'; break;
-					case '\t': c = 't'; break;
-					case '\v': c = 'v'; break;
+					case '\b':
+						c = 'b';
+						break;
+					case '\f':
+						c = 'f';
+						break;
+					case '\n':
+						c = 'n';
+						break;
+					case '\r':
+						c = 'r';
+						break;
+					case '\t':
+						c = 't';
+						break;
+					case '\v':
+						c = 'v';
+						break;
 					default:
 						if (c == delimc)
 							break;
@@ -719,8 +440,8 @@ lagodb_copy_attribute_out_text(LagodbCopyToStateData *state,
 
 /* Source-derived from CopyAttributeOutCSV in the PG17.0-PG17.10 epoch. */
 static void
-lagodb_copy_attribute_out_csv(LagodbCopyToStateData *state,
-							const char *string, bool use_quote)
+lagodb_copy_attribute_out_csv(LagodbCopyRowEncoder *state,
+							  const char *string, bool use_quote)
 {
 	const char *ptr;
 	const char *start;
@@ -798,11 +519,11 @@ lagodb_copy_parser_state(void)
 	return pstate;
 }
 
-CopyToState
+LagodbCopyRowEncoder *
 lagodb_begin_copy_row_encoder(Relation rel,
-								List *options)
+							  List *options)
 {
-	LagodbCopyToStateData *copy_state;
+	LagodbCopyRowEncoder *copy_state;
 	MemoryContext copycontext;
 	MemoryContext oldcontext;
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -810,16 +531,16 @@ lagodb_begin_copy_row_encoder(Relation rel,
 
 	/*
 	 * The Rust owner can be dropped by a reset callback on its executor query
-	 * context. PostgreSQL deletes child contexts before invoking that callback,
-	 * so this explicitly-owned context must not be a child of the owner context.
-	 * It is deleted by lagodb_end_copy_row_encoder on every normal and ERROR
-	 * cleanup path.
+	 * context. PostgreSQL deletes child contexts before invoking that
+	 * callback, so this explicitly-owned context must not be a child of the
+	 * owner context. It is deleted by lagodb_end_copy_row_encoder on every
+	 * normal and ERROR cleanup path.
 	 */
 	copycontext = AllocSetContextCreate(TopMemoryContext,
-		"lagodb COPY row encoder", ALLOCSET_DEFAULT_SIZES);
+										"lagodb COPY row encoder", ALLOCSET_DEFAULT_SIZES);
 	oldcontext = MemoryContextSwitchTo(copycontext);
-	copy_state = (LagodbCopyToStateData *) palloc0(
-		sizeof(LagodbCopyToStateData));
+	copy_state = (LagodbCopyRowEncoder *) palloc0(
+												  sizeof(LagodbCopyRowEncoder));
 	copy_state->copycontext = copycontext;
 
 	PG_TRY();
@@ -837,18 +558,18 @@ lagodb_begin_copy_row_encoder(Relation rel,
 		copy_state->rel = rel;
 		copy_state->attnumlist = CopyGetAttnums(tupdesc, rel, NIL);
 		copy_state->opts.force_quote_flags = (bool *) palloc0(
-			num_phys_attrs * sizeof(bool));
+															  num_phys_attrs * sizeof(bool));
 		if (copy_state->opts.force_quote_all)
 			MemSet(copy_state->opts.force_quote_flags, true,
-				num_phys_attrs * sizeof(bool));
+				   num_phys_attrs * sizeof(bool));
 		else if (copy_state->opts.force_quote != NIL)
 		{
-			List *force_quote_attnums = CopyGetAttnums(
-				tupdesc, rel, copy_state->opts.force_quote);
+			List	   *force_quote_attnums = CopyGetAttnums(
+															 tupdesc, rel, copy_state->opts.force_quote);
 
 			foreach(cur, force_quote_attnums)
 			{
-				int attnum = lfirst_int(cur);
+				int			attnum = lfirst_int(cur);
 
 				copy_state->opts.force_quote_flags[attnum - 1] = true;
 			}
@@ -864,23 +585,23 @@ lagodb_begin_copy_row_encoder(Relation rel,
 		copy_state->opts.null_print_client = copy_state->opts.null_print;
 		copy_state->fe_msgbuf = makeStringInfo();
 		copy_state->out_functions = (FmgrInfo *) palloc(
-			num_phys_attrs * sizeof(FmgrInfo));
+														num_phys_attrs * sizeof(FmgrInfo));
 		foreach(cur, copy_state->attnumlist)
 		{
-			int		attnum = lfirst_int(cur);
-			Oid		out_func_oid;
-			bool	isvarlena;
+			int			attnum = lfirst_int(cur);
+			Oid			out_func_oid;
+			bool		isvarlena;
 			Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
 
 			getTypeOutputInfo(attr->atttypid, &out_func_oid, &isvarlena);
 			fmgr_info(out_func_oid, &copy_state->out_functions[attnum - 1]);
 		}
 		copy_state->rowcontext = AllocSetContextCreate(CurrentMemoryContext,
-			"COPY TO", ALLOCSET_DEFAULT_SIZES);
+													   "COPY TO", ALLOCSET_DEFAULT_SIZES);
 		if (copy_state->need_transcoding)
 			copy_state->opts.null_print_client = pg_server_to_any(
-				copy_state->opts.null_print, copy_state->opts.null_print_len,
-				copy_state->file_encoding);
+																  copy_state->opts.null_print, copy_state->opts.null_print_len,
+																  copy_state->file_encoding);
 	}
 	PG_CATCH();
 	{
@@ -890,13 +611,13 @@ lagodb_begin_copy_row_encoder(Relation rel,
 	}
 	PG_END_TRY();
 	MemoryContextSwitchTo(oldcontext);
-	return (CopyToState) copy_state;
+	return copy_state;
 }
 
 void
-lagodb_encode_copy_header(CopyToState state, const char **data, int *len)
+lagodb_encode_copy_header(LagodbCopyRowEncoder *copy_state,
+						  const char **data, int *len)
 {
-	LagodbCopyToStateData *copy_state = lagodb_copy_to_state(state);
 	TupleDesc	tupdesc = RelationGetDescr(copy_state->rel);
 	ListCell   *cur;
 	bool		need_delim = false;
@@ -904,7 +625,7 @@ lagodb_encode_copy_header(CopyToState state, const char **data, int *len)
 	resetStringInfo(copy_state->fe_msgbuf);
 	foreach(cur, copy_state->attnumlist)
 	{
-		int		attnum = lfirst_int(cur);
+		int			attnum = lfirst_int(cur);
 		char	   *name = NameStr(TupleDescAttr(tupdesc, attnum - 1)->attname);
 
 		if (need_delim)
@@ -920,10 +641,9 @@ lagodb_encode_copy_header(CopyToState state, const char **data, int *len)
 }
 
 void
-lagodb_encode_copy_row(CopyToState state, TupleTableSlot *slot,
-						 const char **data, int *len)
+lagodb_encode_copy_row(LagodbCopyRowEncoder *copy_state, TupleTableSlot *slot,
+					   const char **data, int *len)
 {
-	LagodbCopyToStateData *copy_state = lagodb_copy_to_state(state);
 	FmgrInfo   *out_functions = copy_state->out_functions;
 	MemoryContext oldcontext;
 	ListCell   *cur;
@@ -938,22 +658,22 @@ lagodb_encode_copy_row(CopyToState state, TupleTableSlot *slot,
 		slot_getallattrs(slot);
 		foreach(cur, copy_state->attnumlist)
 		{
-			int		attnum = lfirst_int(cur);
-			Datum	value = slot->tts_values[attnum - 1];
-			bool	isnull = slot->tts_isnull[attnum - 1];
+			int			attnum = lfirst_int(cur);
+			Datum		value = slot->tts_values[attnum - 1];
+			bool		isnull = slot->tts_isnull[attnum - 1];
 
 			if (need_delim)
 				lagodb_copy_send_char(copy_state, copy_state->opts.delim[0]);
 			need_delim = true;
 			if (isnull)
 				lagodb_copy_send_string(copy_state,
-					copy_state->opts.null_print_client);
+										copy_state->opts.null_print_client);
 			else
 			{
 				string = OutputFunctionCall(&out_functions[attnum - 1], value);
 				if (copy_state->opts.csv_mode)
 					lagodb_copy_attribute_out_csv(copy_state, string,
-						copy_state->opts.force_quote_flags[attnum - 1]);
+												  copy_state->opts.force_quote_flags[attnum - 1]);
 				else
 					lagodb_copy_attribute_out_text(copy_state, string);
 			}
@@ -971,75 +691,18 @@ lagodb_encode_copy_row(CopyToState state, TupleTableSlot *slot,
 }
 
 void
-lagodb_end_copy_row_encoder(CopyToState state)
+lagodb_end_copy_row_encoder(LagodbCopyRowEncoder *copy_state)
 {
-	LagodbCopyToStateData *copy_state;
 	MemoryContext copycontext;
 
-	if (state == NULL)
+	if (copy_state == NULL)
 		return;
-	copy_state = lagodb_copy_to_state(state);
 	copycontext = copy_state->copycontext;
 	MemoryContextDelete(copycontext);
-}
-
-CopyToState
-lagodb_begin_copy_to(ParseState *pstate,
-					   Relation rel,
-					   RawStmt *raw_query,
-					   Oid query_rel_id,
-					   const char *filename,
-					   bool is_program,
-					   copy_data_dest_cb data_dest_cb,
-					   List *attnamelist,
-					   List *options)
-{
-	return BeginCopyTo(pstate,
-						rel,
-						raw_query,
-						query_rel_id,
-						filename,
-						is_program,
-						data_dest_cb,
-						attnamelist,
-						options);
-}
-
-uint64
-lagodb_copy_to(CopyToState state)
-{
-	return DoCopyTo(state);
-}
-
-void
-lagodb_end_copy_to(CopyToState state)
-{
-	EndCopyTo(state);
 }
 
 List *
 lagodb_copy_get_attnums(Relation rel, List *attnamelist)
 {
 	return CopyGetAttnums(RelationGetDescr(rel), rel, attnamelist);
-}
-
-TupleDesc
-lagodb_copy_to_tuple_desc(CopyToState state)
-{
-	LagodbCopyToStateData *copy = lagodb_copy_to_state(state);
-
-	Assert(copy != NULL);
-	if (copy->rel != NULL)
-		return RelationGetDescr(copy->rel);
-	Assert(copy->queryDesc != NULL);
-	return copy->queryDesc->tupDesc;
-}
-
-List *
-lagodb_copy_to_attnums(CopyToState state)
-{
-	LagodbCopyToStateData *copy = lagodb_copy_to_state(state);
-
-	Assert(copy != NULL);
-	return copy->attnumlist;
 }

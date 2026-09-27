@@ -1,4 +1,4 @@
-//! PG17-native COPY text/CSV row encoding for relation-bound providers.
+//! PostgreSQL-native COPY text/CSV row encoding for relation-bound providers.
 
 use std::panic::AssertUnwindSafe;
 
@@ -7,15 +7,15 @@ use pgrx::{PgTryBuilder, pg_sys};
 use crate::diag::PgError;
 
 use super::error::CopyError;
-use super::pg;
+use super::pg::{CopyBridge, LagodbCopyRowEncoder};
 
 /// A relation-bound PostgreSQL text/CSV serializer.
 ///
-/// Rows are encoded into PostgreSQL's reusable COPY buffer. The slice returned
-/// from [`Self::header`] or [`Self::row`] remains valid only until the next
-/// encoding call or [`Self::finish`].
+/// Rows are encoded into the encoder's reusable PostgreSQL StringInfo buffer.
+/// The slice returned from [`Self::header`] or [`Self::row`] remains valid only
+/// until the next encoding call or [`Self::finish`].
 pub struct CopyRowEncoder {
-    state: Option<pg_sys::CopyToState>,
+    state: Option<*mut LagodbCopyRowEncoder>,
 }
 
 impl CopyRowEncoder {
@@ -33,7 +33,7 @@ impl CopyRowEncoder {
     ) -> Result<Self, CopyError> {
         let state = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(|| {
-                Ok(pg::CopyBridge::begin_row_encoder(relation, options))
+                Ok(CopyBridge::begin_row_encoder(relation, options))
             }))
             .catch_others(|error| Err(PgError::from_caught(error)))
             .execute()
@@ -71,9 +71,9 @@ impl CopyRowEncoder {
         unsafe {
             PgTryBuilder::new(AssertUnwindSafe(|| {
                 if header {
-                    pg::CopyBridge::encode_copy_header(state, &mut data, &mut len);
+                    CopyBridge::encode_copy_header(state, &mut data, &mut len);
                 } else {
-                    pg::CopyBridge::encode_copy_row(state, slot, &mut data, &mut len);
+                    CopyBridge::encode_copy_row(state, slot, &mut data, &mut len);
                 }
                 Ok(())
             }))
@@ -87,25 +87,17 @@ impl CopyRowEncoder {
         Ok(unsafe { std::slice::from_raw_parts(data.cast(), len as usize) })
     }
 
-    /// Release PostgreSQL COPY state. Repeated calls are harmless.
-    pub fn finish(&mut self) -> Result<(), CopyError> {
+    /// Release the encoder's C-owned state. Repeated calls are harmless.
+    pub fn finish(&mut self) {
         let Some(state) = self.state.take() else {
-            return Ok(());
+            return;
         };
-        unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                pg::CopyBridge::end_row_encoder(state);
-                Ok(())
-            }))
-            .catch_others(|error| Err(PgError::from_caught(error)))
-            .execute()
-        }
-        .map_err(CopyError::from)
+        unsafe { CopyBridge::end_row_encoder(state) };
     }
 }
 
 impl Drop for CopyRowEncoder {
     fn drop(&mut self) {
-        let _ = self.finish();
+        self.finish();
     }
 }
