@@ -136,6 +136,10 @@ impl ObjectFileEncoder for AvroFileEncoder {
         Ok(FileWriteProgress::new(self.writer.estimated_file_bytes()))
     }
 
+    fn bytes_written(&self) -> u64 {
+        self.writer.bytes_written()
+    }
+
     fn finish(self) -> Result<StagedObjectWriter, ConnectorError> {
         self.writer.finish()
     }

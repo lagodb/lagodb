@@ -152,6 +152,10 @@ impl AvroOcfWriter {
         self.output.bytes_written().saturating_add(buffered)
     }
 
+    pub(super) fn bytes_written(&self) -> u64 {
+        self.output.bytes_written()
+    }
+
     pub(super) fn finish(mut self) -> Result<StagedObjectWriter, ConnectorError> {
         self.flush_block()?;
         self.output.flush().map_err(|source| {

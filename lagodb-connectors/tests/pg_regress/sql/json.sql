@@ -53,57 +53,49 @@ WITH (
     compression 'gzip'
 );
 
-CREATE TABLE lagodb_connectors_regress.json_copy_exact
-    (:json_columns);
-COPY lagodb_connectors_regress.json_copy_exact
+-- Normalize json values for equality; compare both directions with ALL
+-- so missing, extra, and duplicate rows are visible without aggregation.
+CREATE TABLE lagodb_connectors_regress.json_copy_sink (:json_columns);
+COPY lagodb_connectors_regress.json_copy_sink
 FROM :'json_exact_path'
 WITH (server 'lagodb_connectors_regress_s3');
-CREATE TABLE lagodb_connectors_regress.json_copy_compressed
-    (:json_columns);
-COPY lagodb_connectors_regress.json_copy_compressed
+(SELECT to_jsonb(value) AS row_data FROM lagodb_connectors_regress.json_copy_sink AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.json_source AS value)
+UNION ALL
+(SELECT to_jsonb(value) FROM lagodb_connectors_regress.json_source AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.json_copy_sink AS value);
+
+TRUNCATE lagodb_connectors_regress.json_copy_sink;
+COPY lagodb_connectors_regress.json_copy_sink
 FROM :'json_compressed_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'json');
-
-SELECT relation, rows, round_trip
-FROM (
-    SELECT 'exact' AS relation, count(*) AS rows,
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.json_source AS source)
-               AS round_trip
-    FROM lagodb_connectors_regress.json_copy_exact AS value
-    UNION ALL
-    SELECT 'gzip', count(*),
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.json_source AS source)
-    FROM lagodb_connectors_regress.json_copy_compressed AS value
-) AS results
-ORDER BY relation;
+(SELECT to_jsonb(value) AS row_data FROM lagodb_connectors_regress.json_copy_sink AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.json_source AS value)
+UNION ALL
+(SELECT to_jsonb(value) FROM lagodb_connectors_regress.json_source AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.json_copy_sink AS value);
 
 COPY lagodb_connectors_regress.json_source
 TO :'json_alias_path'
 WITH (server 'lagodb_connectors_regress_s3');
-CREATE TABLE lagodb_connectors_regress.json_alias_sink
-    (:json_columns);
-COPY lagodb_connectors_regress.json_alias_sink
+TRUNCATE lagodb_connectors_regress.json_copy_sink;
+COPY lagodb_connectors_regress.json_copy_sink
 FROM :'json_alias_path'
 WITH (server 'lagodb_connectors_regress_s3');
 SELECT count(*) AS alias_rows
-FROM lagodb_connectors_regress.json_alias_sink;
+FROM lagodb_connectors_regress.json_copy_sink;
 
 -- An empty exact object remains valid JSON input.
 COPY (
     SELECT * FROM lagodb_connectors_regress.json_source WHERE false
 ) TO :'json_empty_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'json');
-CREATE TABLE lagodb_connectors_regress.json_empty_sink
-    (:json_columns);
-COPY lagodb_connectors_regress.json_empty_sink
+TRUNCATE lagodb_connectors_regress.json_copy_sink;
+COPY lagodb_connectors_regress.json_copy_sink
 FROM :'json_empty_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'json');
 SELECT count(*) AS empty_rows
-FROM lagodb_connectors_regress.json_empty_sink;
+FROM lagodb_connectors_regress.json_copy_sink;
 
 -- Exact/prefix foreign scans and JSON-owned schema inference.
 CREATE FOREIGN TABLE lagodb_connectors_regress.json_exact
@@ -118,28 +110,23 @@ CREATE FOREIGN TABLE lagodb_connectors_regress.json_inferred ()
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'json_compressed_path');
 
-SELECT relation, rows, matches_source
-FROM (
-    SELECT 'exact' AS relation, count(*) AS rows,
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.json_source AS source)
-               AS matches_source
-    FROM lagodb_connectors_regress.json_exact AS value
-    UNION ALL
-    SELECT 'prefix', count(*),
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.json_source AS source)
-    FROM lagodb_connectors_regress.json_prefix AS value
-) AS results
-ORDER BY relation;
-SELECT count(*) AS inferred_columns,
-       string_agg(format_type(atttypid, atttypmod), ', ' ORDER BY attnum)
-           AS inferred_types
+(SELECT to_jsonb(value) AS row_data FROM lagodb_connectors_regress.json_exact AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.json_source AS value)
+UNION ALL
+(SELECT to_jsonb(value) FROM lagodb_connectors_regress.json_source AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.json_exact AS value);
+
+(SELECT to_jsonb(value) AS row_data FROM lagodb_connectors_regress.json_prefix AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.json_source AS value)
+UNION ALL
+(SELECT to_jsonb(value) FROM lagodb_connectors_regress.json_source AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.json_prefix AS value);
+
+SELECT attname, format_type(atttypid, atttypmod) AS type
 FROM pg_attribute
 WHERE attrelid = 'lagodb_connectors_regress.json_inferred'::regclass
-  AND attnum > 0 AND NOT attisdropped;
+  AND attnum > 0 AND NOT attisdropped
+ORDER BY attnum;
 SELECT count(*) AS inferred_rows
 FROM lagodb_connectors_regress.json_inferred;
 
@@ -149,12 +136,11 @@ SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'json_write_path', format 'json');
 INSERT INTO lagodb_connectors_regress.json_write
 SELECT * FROM lagodb_connectors_regress.json_source;
-SELECT count(*) AS written_rows,
-       array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-           (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-            FROM lagodb_connectors_regress.json_source AS source)
-           AS matches_source
-FROM lagodb_connectors_regress.json_write AS value;
+(SELECT to_jsonb(value) AS row_data FROM lagodb_connectors_regress.json_write AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.json_source AS value)
+UNION ALL
+(SELECT to_jsonb(value) FROM lagodb_connectors_regress.json_source AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.json_write AS value);
 
 -- JsonScanState must restart for parameterized nested-loop rescans.
 SET enable_hashjoin = off;
@@ -188,7 +174,7 @@ SELECT lagodb.invalidate_object_cache(
 \gset
 
 \set VERBOSITY sqlstate
-COPY lagodb_connectors_regress.json_copy_exact
+COPY lagodb_connectors_regress.json_copy_sink
 FROM :'json_corrupt_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'json');
 \set VERBOSITY default

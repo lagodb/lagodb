@@ -6,7 +6,7 @@ use std::num::NonZeroUsize;
 use lagodb_storage::StorageFile;
 
 use crate::error::ConnectorError;
-use crate::storage::ObjectFiles;
+use crate::storage::{ObjectFiles, ReadProgress};
 
 use super::super::{StreamCompression, StreamDecoder};
 
@@ -47,8 +47,11 @@ where
                 let payload_len = newline.unwrap_or(available.len());
                 let next_len = self.record.len().saturating_add(payload_len);
                 if next_len > self.max_record_bytes.get() {
+                    let line = self.logical_line + 1;
+                    self.discard_record()?;
+                    self.logical_line = line;
                     return Err(ConnectorError::JsonRecordTooLarge {
-                        line: self.logical_line + 1,
+                        line,
                         max_bytes: self.max_record_bytes.get(),
                     });
                 }
@@ -74,6 +77,24 @@ where
     pub(super) const fn logical_line(&self) -> u64 {
         self.logical_line
     }
+
+    /// Discard the rest of an oversized logical record so `ON_ERROR IGNORE`
+    /// can advance exactly once instead of repeatedly observing the same
+    /// unread buffer. An I/O error remains fatal and supersedes the row error.
+    fn discard_record(&mut self) -> Result<(), ConnectorError> {
+        loop {
+            let available = self.input.fill_buf().map_err(ConnectorError::json_io)?;
+            if available.is_empty() {
+                return Ok(());
+            }
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let consumed = newline.map_or(available.len(), |index| index + 1);
+            self.input.consume(consumed);
+            if newline.is_some() {
+                return Ok(());
+            }
+        }
+    }
 }
 
 type ObjectDecoder = JsonLineReader<BufReader<StreamDecoder<ObjectReader>>>;
@@ -83,6 +104,9 @@ pub(in crate::format) struct JsonRecordStream {
     compression: StreamCompression,
     max_record_bytes: NonZeroUsize,
     reader: Option<ObjectDecoder>,
+    track_progress: bool,
+    completed_bytes: u64,
+    current_progress: Option<ReadProgress>,
 }
 
 impl JsonRecordStream {
@@ -96,6 +120,25 @@ impl JsonRecordStream {
             compression,
             max_record_bytes,
             reader: None,
+            track_progress: false,
+            completed_bytes: 0,
+            current_progress: None,
+        }
+    }
+
+    pub(in crate::format) fn with_progress(
+        files: ObjectFiles,
+        compression: StreamCompression,
+        max_record_bytes: NonZeroUsize,
+    ) -> Self {
+        Self {
+            files,
+            compression,
+            max_record_bytes,
+            reader: None,
+            track_progress: true,
+            completed_bytes: 0,
+            current_progress: None,
         }
     }
 
@@ -118,40 +161,71 @@ impl JsonRecordStream {
                     .expect("the JSON line reader still owns the current record");
                 return Ok(Some((reader.logical_line(), reader.record())));
             }
+            self.finish_current_reader();
             self.reader = None;
         }
     }
 
     pub(in crate::format) fn reset(&mut self) {
         self.reader = None;
+        self.completed_bytes = 0;
+        self.current_progress = None;
         self.files.reset();
     }
 
     pub(in crate::format) fn close(&mut self) {
         self.reader = None;
+        self.current_progress = None;
+    }
+
+    pub(in crate::format) fn bytes_consumed(&self) -> u64 {
+        self.completed_bytes.saturating_add(
+            self.current_progress
+                .as_ref()
+                .map_or(0, ReadProgress::bytes),
+        )
     }
 
     fn open_next(&mut self) -> Result<bool, ConnectorError> {
         let Some(file) = self.files.next() else {
             return Ok(false);
         };
-        let input =
-            StreamDecoder::new(ObjectReader { file: file? }, self.compression)
-                .map_err(ConnectorError::json_io)?;
+        let progress = self.track_progress.then(ReadProgress::default);
+        let input = StreamDecoder::new(
+            ObjectReader {
+                file: file?,
+                progress: progress.clone(),
+            },
+            self.compression,
+        )
+        .map_err(ConnectorError::json_io)?;
+        self.current_progress = progress;
         self.reader = Some(JsonLineReader::new(
             BufReader::new(input),
             self.max_record_bytes,
         ));
         Ok(true)
     }
+
+    fn finish_current_reader(&mut self) {
+        if let Some(progress) = self.current_progress.take() {
+            self.completed_bytes =
+                self.completed_bytes.saturating_add(progress.bytes());
+        }
+    }
 }
 
 struct ObjectReader {
     file: StorageFile,
+    progress: Option<ReadProgress>,
 }
 
 impl Read for ObjectReader {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        self.file.read_into(output).map_err(io::Error::other)
+        let read = self.file.read_into(output).map_err(io::Error::other)?;
+        if let Some(progress) = &self.progress {
+            progress.record(read);
+        }
+        Ok(read)
     }
 }

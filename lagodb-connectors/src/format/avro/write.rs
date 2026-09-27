@@ -21,6 +21,7 @@ pub(super) use plan::{AvroValueKind, AvroWritePlan};
 
 pub(super) struct AvroObjectWriter {
     writer: Option<ObjectSetWriter<AvroEncoderFactory>>,
+    completed_bytes: u64,
 }
 
 impl AvroObjectWriter {
@@ -34,6 +35,7 @@ impl AvroObjectWriter {
                 output,
                 AvroEncoderFactory::new(plan, compression),
             )),
+            completed_bytes: 0,
         }
     }
 
@@ -51,11 +53,18 @@ impl AvroObjectWriter {
         let Some(writer) = self.writer.take() else {
             return Ok(());
         };
-        writer.finish(if emit_empty {
+        self.completed_bytes = writer.finish_with_bytes(if emit_empty {
             EmptyOutputPolicy::EmitFile
         } else {
             EmptyOutputPolicy::Skip
-        })
+        })?;
+        Ok(())
+    }
+
+    pub(super) fn bytes_written(&self) -> u64 {
+        self.writer
+            .as_ref()
+            .map_or(self.completed_bytes, ObjectSetWriter::bytes_written)
     }
 }
 

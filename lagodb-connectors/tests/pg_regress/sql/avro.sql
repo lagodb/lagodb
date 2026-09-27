@@ -54,41 +54,32 @@ COPY (
 ) TO :'avro_empty_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'avro');
 
-CREATE TABLE lagodb_connectors_regress.avro_copy_exact
-    (:common_columns);
-COPY lagodb_connectors_regress.avro_copy_exact
+-- Compare every column in both directions; ALL also checks duplicate counts.
+CREATE TABLE lagodb_connectors_regress.avro_copy (:common_columns);
+COPY lagodb_connectors_regress.avro_copy
 FROM :'avro_exact_path'
 WITH (server 'lagodb_connectors_regress_s3');
-CREATE TABLE lagodb_connectors_regress.avro_copy_snappy
-    (:common_columns);
-COPY lagodb_connectors_regress.avro_copy_snappy
+(SELECT * FROM lagodb_connectors_regress.avro_copy
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.avro_copy);
+
+TRUNCATE lagodb_connectors_regress.avro_copy;
+COPY lagodb_connectors_regress.avro_copy
 FROM :'avro_snappy_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'avro');
-CREATE TABLE lagodb_connectors_regress.avro_copy_empty
-    (:common_columns);
-COPY lagodb_connectors_regress.avro_copy_empty
+(SELECT * FROM lagodb_connectors_regress.avro_copy
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.avro_copy);
+
+TRUNCATE lagodb_connectors_regress.avro_copy;
+COPY lagodb_connectors_regress.avro_copy
 FROM :'avro_empty_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'avro');
-
-SELECT relation, rows, round_trip
-FROM (
-    SELECT 'exact' AS relation, count(*) AS rows,
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-               AS round_trip
-    FROM lagodb_connectors_regress.avro_copy_exact AS value
-    UNION ALL
-    SELECT 'snappy', count(*),
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-    FROM lagodb_connectors_regress.avro_copy_snappy AS value
-    UNION ALL
-    SELECT 'empty', count(*), count(*) = 0
-    FROM lagodb_connectors_regress.avro_copy_empty
-) AS results
-ORDER BY relation;
+SELECT count(*) AS empty_rows FROM lagodb_connectors_regress.avro_copy;
 
 -- Exact/prefix scans and Avro-owned schema inference.
 CREATE FOREIGN TABLE lagodb_connectors_regress.avro_exact
@@ -103,28 +94,23 @@ CREATE FOREIGN TABLE lagodb_connectors_regress.avro_inferred ()
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'avro_exact_path', format 'avro');
 
-SELECT relation, rows, matches_source
-FROM (
-    SELECT 'exact' AS relation, count(*) AS rows,
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-               AS matches_source
-    FROM lagodb_connectors_regress.avro_exact AS value
-    UNION ALL
-    SELECT 'prefix', count(*),
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-    FROM lagodb_connectors_regress.avro_prefix AS value
-) AS results
-ORDER BY relation;
-SELECT count(*) AS inferred_columns,
-       string_agg(format_type(atttypid, atttypmod), ', ' ORDER BY attnum)
-           AS inferred_types
+(SELECT * FROM lagodb_connectors_regress.avro_exact
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.avro_exact);
+
+(SELECT * FROM lagodb_connectors_regress.avro_prefix
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.avro_prefix);
+
+SELECT attname, format_type(atttypid, atttypmod) AS type
 FROM pg_attribute
 WHERE attrelid = 'lagodb_connectors_regress.avro_inferred'::regclass
-  AND attnum > 0 AND NOT attisdropped;
+  AND attnum > 0 AND NOT attisdropped
+ORDER BY attnum;
 SELECT count(*) AS inferred_rows
 FROM lagodb_connectors_regress.avro_inferred;
 
@@ -134,12 +120,11 @@ SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'avro_write_path', format 'avro');
 INSERT INTO lagodb_connectors_regress.avro_write
 SELECT * FROM lagodb_connectors_regress.common_source;
-SELECT count(*) AS written_rows,
-       array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-           (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-            FROM lagodb_connectors_regress.common_source AS source)
-           AS matches_source
-FROM lagodb_connectors_regress.avro_write AS value;
+(SELECT * FROM lagodb_connectors_regress.avro_write
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.avro_write);
 
 -- AvroScanState must restart for parameterized nested-loop rescans.
 SET enable_hashjoin = off;

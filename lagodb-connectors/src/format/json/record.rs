@@ -88,6 +88,25 @@ impl JsonColumn {
     ) -> pg_sys::Datum {
         unsafe { self.input.datum(value) }
     }
+
+    /// Convert a serde_json-validated, non-NUL byte slice through this bound
+    /// PostgreSQL input plan without an intermediate CSV field or Rust String.
+    ///
+    /// # Safety
+    ///
+    /// PostgreSQL's current memory context must be the COPY per-tuple context.
+    pub(in crate::format) unsafe fn input_bytes_datum(
+        &self,
+        value: &[u8],
+    ) -> pg_sys::Datum {
+        let length = value.len();
+        let input = unsafe { pg_sys::palloc(length + 1).cast::<u8>() };
+        unsafe {
+            std::ptr::copy_nonoverlapping(value.as_ptr(), input, length);
+            *input.add(length) = 0;
+            self.input.datum(CStr::from_ptr(input.cast()))
+        }
+    }
 }
 
 pub(in crate::format) struct JsonColumnPlan {

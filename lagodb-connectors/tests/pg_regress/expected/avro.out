@@ -57,46 +57,42 @@ COPY (
     SELECT * FROM lagodb_connectors_regress.common_source WHERE false
 ) TO :'avro_empty_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'avro');
-CREATE TABLE lagodb_connectors_regress.avro_copy_exact
-    (:common_columns);
-COPY lagodb_connectors_regress.avro_copy_exact
+-- Compare every column in both directions; ALL also checks duplicate counts.
+CREATE TABLE lagodb_connectors_regress.avro_copy (:common_columns);
+COPY lagodb_connectors_regress.avro_copy
 FROM :'avro_exact_path'
 WITH (server 'lagodb_connectors_regress_s3');
-CREATE TABLE lagodb_connectors_regress.avro_copy_snappy
-    (:common_columns);
-COPY lagodb_connectors_regress.avro_copy_snappy
+(SELECT * FROM lagodb_connectors_regress.avro_copy
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.avro_copy);
+ id | bool_col | smallint_col | integer_col | bigint_col | real_col | double_col | numeric_col | text_col | varchar_col | char_col | name_col | bytea_col | uuid_col | date_col | time_col | timestamp_col | timestamptz_col 
+----+----------+--------------+-------------+------------+----------+------------+-------------+----------+-------------+----------+----------+-----------+----------+----------+----------+---------------+-----------------
+(0 rows)
+
+TRUNCATE lagodb_connectors_regress.avro_copy;
+COPY lagodb_connectors_regress.avro_copy
 FROM :'avro_snappy_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'avro');
-CREATE TABLE lagodb_connectors_regress.avro_copy_empty
-    (:common_columns);
-COPY lagodb_connectors_regress.avro_copy_empty
+(SELECT * FROM lagodb_connectors_regress.avro_copy
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.avro_copy);
+ id | bool_col | smallint_col | integer_col | bigint_col | real_col | double_col | numeric_col | text_col | varchar_col | char_col | name_col | bytea_col | uuid_col | date_col | time_col | timestamp_col | timestamptz_col 
+----+----------+--------------+-------------+------------+----------+------------+-------------+----------+-------------+----------+----------+-----------+----------+----------+----------+---------------+-----------------
+(0 rows)
+
+TRUNCATE lagodb_connectors_regress.avro_copy;
+COPY lagodb_connectors_regress.avro_copy
 FROM :'avro_empty_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'avro');
-SELECT relation, rows, round_trip
-FROM (
-    SELECT 'exact' AS relation, count(*) AS rows,
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-               AS round_trip
-    FROM lagodb_connectors_regress.avro_copy_exact AS value
-    UNION ALL
-    SELECT 'snappy', count(*),
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-    FROM lagodb_connectors_regress.avro_copy_snappy AS value
-    UNION ALL
-    SELECT 'empty', count(*), count(*) = 0
-    FROM lagodb_connectors_regress.avro_copy_empty
-) AS results
-ORDER BY relation;
- relation | rows | round_trip 
-----------+------+------------
- empty    |    0 | t
- exact    |    2 | t
- snappy   |    2 | t
-(3 rows)
+SELECT count(*) AS empty_rows FROM lagodb_connectors_regress.avro_copy;
+ empty_rows 
+------------
+          0
+(1 row)
 
 -- Exact/prefix scans and Avro-owned schema inference.
 CREATE FOREIGN TABLE lagodb_connectors_regress.avro_exact
@@ -110,38 +106,50 @@ OPTIONS (path :'avro_prefix_path', format 'avro');
 CREATE FOREIGN TABLE lagodb_connectors_regress.avro_inferred ()
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'avro_exact_path', format 'avro');
-SELECT relation, rows, matches_source
-FROM (
-    SELECT 'exact' AS relation, count(*) AS rows,
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-               AS matches_source
-    FROM lagodb_connectors_regress.avro_exact AS value
-    UNION ALL
-    SELECT 'prefix', count(*),
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-    FROM lagodb_connectors_regress.avro_prefix AS value
-) AS results
-ORDER BY relation;
- relation | rows | matches_source 
-----------+------+----------------
- exact    |    2 | t
- prefix   |    2 | t
-(2 rows)
+(SELECT * FROM lagodb_connectors_regress.avro_exact
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.avro_exact);
+ id | bool_col | smallint_col | integer_col | bigint_col | real_col | double_col | numeric_col | text_col | varchar_col | char_col | name_col | bytea_col | uuid_col | date_col | time_col | timestamp_col | timestamptz_col 
+----+----------+--------------+-------------+------------+----------+------------+-------------+----------+-------------+----------+----------+-----------+----------+----------+----------+---------------+-----------------
+(0 rows)
 
-SELECT count(*) AS inferred_columns,
-       string_agg(format_type(atttypid, atttypmod), ', ' ORDER BY attnum)
-           AS inferred_types
+(SELECT * FROM lagodb_connectors_regress.avro_prefix
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.avro_prefix);
+ id | bool_col | smallint_col | integer_col | bigint_col | real_col | double_col | numeric_col | text_col | varchar_col | char_col | name_col | bytea_col | uuid_col | date_col | time_col | timestamp_col | timestamptz_col 
+----+----------+--------------+-------------+------------+----------+------------+-------------+----------+-------------+----------+----------+-----------+----------+----------+----------+---------------+-----------------
+(0 rows)
+
+SELECT attname, format_type(atttypid, atttypmod) AS type
 FROM pg_attribute
 WHERE attrelid = 'lagodb_connectors_regress.avro_inferred'::regclass
-  AND attnum > 0 AND NOT attisdropped;
- inferred_columns |                                                                                               inferred_types                                                                                                
-------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-               18 | integer, boolean, integer, integer, bigint, real, double precision, numeric(12,3), text, text, text, text, bytea, uuid, date, time without time zone, timestamp without time zone, timestamp with time zone
-(1 row)
+  AND attnum > 0 AND NOT attisdropped
+ORDER BY attnum;
+     attname     |            type             
+-----------------+-----------------------------
+ id              | integer
+ bool_col        | boolean
+ smallint_col    | integer
+ integer_col     | integer
+ bigint_col      | bigint
+ real_col        | real
+ double_col      | double precision
+ numeric_col     | numeric(12,3)
+ text_col        | text
+ varchar_col     | text
+ char_col        | text
+ name_col        | text
+ bytea_col       | bytea
+ uuid_col        | uuid
+ date_col        | date
+ time_col        | time without time zone
+ timestamp_col   | timestamp without time zone
+ timestamptz_col | timestamp with time zone
+(18 rows)
 
 SELECT count(*) AS inferred_rows
 FROM lagodb_connectors_regress.avro_inferred;
@@ -156,16 +164,14 @@ SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'avro_write_path', format 'avro');
 INSERT INTO lagodb_connectors_regress.avro_write
 SELECT * FROM lagodb_connectors_regress.common_source;
-SELECT count(*) AS written_rows,
-       array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-           (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-            FROM lagodb_connectors_regress.common_source AS source)
-           AS matches_source
-FROM lagodb_connectors_regress.avro_write AS value;
- written_rows | matches_source 
---------------+----------------
-            2 | t
-(1 row)
+(SELECT * FROM lagodb_connectors_regress.avro_write
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.avro_write);
+ id | bool_col | smallint_col | integer_col | bigint_col | real_col | double_col | numeric_col | text_col | varchar_col | char_col | name_col | bytea_col | uuid_col | date_col | time_col | timestamp_col | timestamptz_col 
+----+----------+--------------+-------------+------------+----------+------------+-------------+----------+-------------+----------+----------+-----------+----------+----------+----------+---------------+-----------------
+(0 rows)
 
 -- AvroScanState must restart for parameterized nested-loop rescans.
 SET enable_hashjoin = off;

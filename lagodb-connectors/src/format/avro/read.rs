@@ -24,7 +24,7 @@ use crate::fdw::LagodbConnectors;
 use crate::format::{
     FormatKind, FormatScanPlanner, FormatScanPrivate, FormatScanState,
 };
-use crate::storage::ObjectFiles;
+use crate::storage::{ObjectFiles, ReadProgress};
 
 use super::AvroValueKind;
 
@@ -86,17 +86,36 @@ impl FormatScanPlanner for AvroScanPlanner {
 /// Owns the storage handle behind one Avro reader.
 pub(super) struct AvroObjectReader {
     file: StorageFile,
+    progress: Option<ReadProgress>,
 }
 
 impl AvroObjectReader {
-    pub(super) const fn new(file: StorageFile) -> Self {
-        Self { file }
+    pub(super) fn new(file: StorageFile) -> Self {
+        Self {
+            file,
+            progress: None,
+        }
+    }
+
+    pub(super) fn with_progress(file: StorageFile) -> (Self, ReadProgress) {
+        let progress = ReadProgress::default();
+        (
+            Self {
+                file,
+                progress: Some(progress.clone()),
+            },
+            progress,
+        )
     }
 }
 
 impl Read for AvroObjectReader {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        self.file.read_into(output).map_err(io::Error::other)
+        let read = self.file.read_into(output).map_err(io::Error::other)?;
+        if let Some(progress) = &self.progress {
+            progress.record(read);
+        }
+        Ok(read)
     }
 }
 
@@ -142,6 +161,14 @@ impl AvroReadColumn {
 
     pub(super) const fn source(self) -> usize {
         self.source
+    }
+
+    /// Typmod already enforced when materializing this source datum.
+    pub(super) fn datum_typmod(self) -> i32 {
+        match self.kind {
+            AvroValueKind::Decimal(codec) => codec.typmod(),
+            _ => -1,
+        }
     }
 
     /// Decodes a field that was already bound against this object's writer schema.
@@ -284,7 +311,7 @@ impl AvroReadColumn {
     }
 
     fn out_of_range(self) -> ConnectorError {
-        ConnectorError::invalid_object_schema(
+        ConnectorError::row_conversion(
             FormatKind::Avro,
             "an Avro temporal value is outside the PostgreSQL range",
         )
