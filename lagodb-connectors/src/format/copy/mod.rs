@@ -4,13 +4,12 @@
 //! Format resolution, object adapters, and native-format completion remain in
 //! this module so adding a format does not grow COPY orchestration.
 
-mod canonical_csv;
 mod json;
 mod stream;
 
 use lagodb_core::copy::{
-    CopyColumnLayout, CopyContext, CopyDataDestination, CopyDataSource, CopyError,
-    CopyOptionView,
+    CopyColumnLayout, CopyContext, CopyDataDestination, CopyDataSource,
+    CopyDatumSource, CopyError, CopyOptionView, CopyTupleDestination,
 };
 use lagodb_core::storage::foreign::StorageManager;
 use pgrx::pg_sys;
@@ -28,24 +27,54 @@ use super::{
     AvroWriteCompression, FormatKind, ParquetWriteCompression, StreamCompression,
 };
 
-pub(super) use canonical_csv::{CanonicalCsv, CanonicalCsvRow};
 use json::{JsonCopyDestination, JsonCopySource};
+
+const CONNECTOR_OPTION_NAMES: [&[u8]; 3] = [b"server", b"format", b"compression"];
+const NATIVE_INVALID_OPTION_NAMES: [&[u8]; 10] = [
+    b"delimiter",
+    b"null",
+    b"default",
+    b"header",
+    b"quote",
+    b"escape",
+    b"encoding",
+    b"force_quote",
+    b"force_not_null",
+    b"force_null",
+];
+
+fn native_postgres_options(context: &CopyContext<'_>) -> *mut pg_sys::List {
+    context
+        .statement()
+        .option_view()
+        .without_names(&CONNECTOR_OPTION_NAMES)
+}
+
+pub(crate) enum FormatCopyInput<'a> {
+    Bytes(&'a mut dyn CopyDataSource),
+    Datums(&'a mut dyn CopyDatumSource),
+}
 
 /// COPY source constructed by one resolved format.
 pub(crate) trait FormatCopySource {
-    fn source(&mut self) -> &mut dyn CopyDataSource;
+    fn input(&mut self) -> FormatCopyInput<'_>;
 
     fn postgres_options(&self, context: &CopyContext<'_>) -> *mut pg_sys::List {
-        CanonicalCsv::postgres_options(context)
+        native_postgres_options(context)
     }
+}
+
+pub(crate) enum FormatCopyOutput<'a> {
+    Bytes(&'a mut dyn CopyDataDestination),
+    Tuples(&'a mut dyn CopyTupleDestination),
 }
 
 /// COPY destination constructed by one resolved format.
 pub(crate) trait FormatCopyDestination {
-    fn destination(&mut self) -> &mut dyn CopyDataDestination;
+    fn output(&mut self) -> FormatCopyOutput<'_>;
 
     fn postgres_options(&self, context: &CopyContext<'_>) -> *mut pg_sys::List {
-        CanonicalCsv::postgres_options(context)
+        native_postgres_options(context)
     }
 
     fn finish(self: Box<Self>) -> Result<(), CopyError>;
@@ -368,7 +397,24 @@ impl ResolvedCopyFormat {
         if matches!(kind, FormatKind::Text | FormatKind::Csv) {
             return Ok(());
         }
-        CanonicalCsv::reject_user_overrides(options)
+        for option in options.iter() {
+            if NATIVE_INVALID_OPTION_NAMES
+                .iter()
+                .any(|candidate| *candidate == option.name().to_bytes())
+            {
+                let name = option.name().to_str().map_err(|_| {
+                    ConnectorError::invalid_copy_option(
+                        "COPY option",
+                        "must be valid UTF-8",
+                    )
+                })?;
+                return Err(ConnectorError::invalid_copy_option(
+                    name,
+                    "is only valid for text or csv",
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) const fn kind(self) -> FormatKind {
@@ -398,8 +444,8 @@ impl CopyDataSource for StreamCopySource {
 }
 
 impl FormatCopySource for StreamCopySource {
-    fn source(&mut self) -> &mut dyn CopyDataSource {
-        &mut self.source
+    fn input(&mut self) -> FormatCopyInput<'_> {
+        FormatCopyInput::Bytes(&mut self.source)
     }
 
     fn postgres_options(&self, context: &CopyContext<'_>) -> *mut pg_sys::List {
@@ -419,8 +465,8 @@ impl CopyDataDestination for StreamCopyDestination {
 }
 
 impl FormatCopyDestination for StreamCopyDestination {
-    fn destination(&mut self) -> &mut dyn CopyDataDestination {
-        &mut self.destination
+    fn output(&mut self) -> FormatCopyOutput<'_> {
+        FormatCopyOutput::Bytes(&mut self.destination)
     }
 
     fn postgres_options(&self, context: &CopyContext<'_>) -> *mut pg_sys::List {

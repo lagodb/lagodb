@@ -32,7 +32,7 @@ use crate::error::ConnectorError;
 pub(crate) use codec::{
     AvroWriteCompression, ParquetWriteCompression, StreamCompression,
 };
-pub(crate) use copy::ResolvedCopyFormat;
+pub(crate) use copy::{FormatCopyInput, FormatCopyOutput, ResolvedCopyFormat};
 pub(crate) use filter::{
     FormatBoundFilter, FormatFilterPlan, FormatFilterPlanner, FormatPlannedFilter,
 };

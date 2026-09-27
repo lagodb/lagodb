@@ -127,7 +127,7 @@ impl ForeignTableDdlHook {
         if relation_oid == pg_sys::InvalidOid {
             return Ok(());
         }
-        let relation = RelationGuard::open(relation_oid, pg_sys::NoLock as _)?;
+        let relation = RelationGuard::open_table(relation_oid, pg_sys::NoLock as _)?;
         let target_uses_connectors = relation.as_handle().relkind() as u8
             == pg_sys::RELKIND_FOREIGN_TABLE
             && ResolvedStorageLocation::relation_uses_connectors(relation_oid);
@@ -176,7 +176,7 @@ impl ForeignTableDdlHook {
         {
             return Ok(());
         }
-        let relation = RelationGuard::open(relation_oid, pg_sys::NoLock as _)?;
+        let relation = RelationGuard::open_table(relation_oid, pg_sys::NoLock as _)?;
         ResolvedForeignRelation::resolve(relation_oid)?
             .validate_relation_columns(relation_oid, relation.as_handle().natts())?;
         Ok(())

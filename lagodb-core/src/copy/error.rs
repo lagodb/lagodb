@@ -7,6 +7,7 @@ use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
 use crate::diag::{PgError, PgReportError, SqlStateError};
+use crate::runtime_api::RuntimeApiError;
 
 #[derive(Debug, Error)]
 pub enum CopyError {
@@ -44,6 +45,9 @@ pub enum CopyError {
 
     #[error(transparent)]
     Postgres(#[from] PgReportError),
+
+    #[error(transparent)]
+    Runtime(#[from] RuntimeApiError),
 }
 
 impl CopyError {
@@ -65,7 +69,7 @@ impl CopyError {
         Self::Storage(error)
     }
 
-    pub(crate) const fn invalid_column_layout(reason: &'static str) -> Self {
+    pub const fn invalid_column_layout(reason: &'static str) -> Self {
         Self::InvalidColumnLayout(reason)
     }
 
@@ -94,6 +98,9 @@ impl SqlStateError for CopyError {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
             }
             Self::Postgres(error) => error.sql_error_code(),
+            Self::Runtime(_) => {
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
+            }
         }
     }
 }

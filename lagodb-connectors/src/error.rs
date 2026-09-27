@@ -2,7 +2,8 @@
 
 use std::error::Error as StdError;
 
-use lagodb_core::copy::CopyError;
+use lagodb_arrow::ArrowConversionError;
+use lagodb_core::copy::{CopyError, CopyRowRejection};
 use lagodb_core::diag::{PgReportError, SqlStateError};
 use lagodb_core::fdw::{
     ForeignModifyError, ForeignScanError, ForeignTableMaintenanceError,
@@ -11,7 +12,7 @@ use lagodb_core::fdw::{
 use lagodb_core::plan_data::PlanDataError;
 use lagodb_core::storage::foreign::StorageAcquireError;
 use lagodb_core::storage::profile::StorageProfileError;
-use lagodb_core::tuple::{DecimalCodecError, JsonValueError};
+use lagodb_core::tuple::{DatumConversionError, DecimalCodecError, JsonValueError};
 use lagodb_storage::StorageError;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
@@ -63,6 +64,12 @@ pub(crate) enum ConnectorError {
 
     #[error("PostgreSQL numeric conversion failed: {0}")]
     DecimalCodec(#[from] DecimalCodecError),
+
+    #[error("{format}/PostgreSQL row conversion failed: {reason}")]
+    RowConversion {
+        format: FormatKind,
+        reason: Box<str>,
+    },
 
     #[error("invalid Avro object: {0}")]
     Avro(#[from] apache_avro::Error),
@@ -165,6 +172,82 @@ pub(crate) enum ConnectorError {
 }
 
 impl ConnectorError {
+    /// Convert only recoverable, record-local data failures to COPY's
+    /// structured rejection path. Callers must have already separated object
+    /// I/O and schema binding from row conversion.
+    pub(crate) fn into_copy_row_rejection(
+        self,
+        column_index: Option<usize>,
+        location: impl Into<String>,
+    ) -> Result<CopyRowRejection, CopyError> {
+        if !self.is_copy_row_data_error() {
+            return Err(self.into());
+        }
+        let sql_error_code = self.sql_error_code();
+        let mut rejection = CopyRowRejection::new(self.to_string())
+            .with_sql_error_code(sql_error_code)
+            .with_location(location);
+        if let Some(column_index) = column_index {
+            rejection = rejection.with_column_index(column_index);
+        }
+        Ok(rejection)
+    }
+
+    fn is_copy_row_data_error(&self) -> bool {
+        match self {
+            Self::ArrowConversion(error) => match error {
+                ArrowConversionError::DatumConversion(error) => {
+                    Self::is_datum_row_data_error(error)
+                }
+                ArrowConversionError::InvalidInput(_)
+                | ArrowConversionError::ValueOutOfRange(_)
+                | ArrowConversionError::DatetimeConversionError(_)
+                | ArrowConversionError::NumericError(_)
+                | ArrowConversionError::UuidConversionError(_)
+                | ArrowConversionError::DecimalCodec(
+                    DecimalCodecError::ValueOutOfRange { .. },
+                ) => true,
+                ArrowConversionError::UnsupportedColumnType(_)
+                | ArrowConversionError::IncompatibleColumnType(_, _)
+                | ArrowConversionError::ArrowTypeMismatch(_)
+                | ArrowConversionError::ArrowError(_)
+                | ArrowConversionError::Postgres(_)
+                | ArrowConversionError::InvariantViolated(_)
+                | ArrowConversionError::DecimalCodec(_) => false,
+            },
+            Self::DatumConversion(error) => Self::is_datum_row_data_error(error),
+            Self::DecimalCodec(DecimalCodecError::ValueOutOfRange { .. })
+            | Self::RowConversion { .. }
+            | Self::Json { .. }
+            | Self::JsonRecordTooLarge { .. }
+            | Self::JsonValue { .. } => true,
+            Self::JsonDatum(error) => {
+                matches!(error, JsonValueError::Nul(_) | JsonValueError::Utf8(_))
+            }
+            Self::Postgres(error) => Self::is_data_exception(error.sql_error_code()),
+            _ => false,
+        }
+    }
+
+    /// PostgreSQL packs the five SQLSTATE characters into six-bit fields;
+    /// the first two characters therefore occupy the low twelve bits. COPY
+    /// may ignore only class 22 errors produced while converting this row.
+    fn is_data_exception(code: PgSqlErrorCode) -> bool {
+        const CLASS_MASK: isize = (1 << 12) - 1;
+        (code as isize & CLASS_MASK)
+            == (PgSqlErrorCode::ERRCODE_DATA_EXCEPTION as isize & CLASS_MASK)
+    }
+
+    fn is_datum_row_data_error(error: &DatumConversionError) -> bool {
+        matches!(
+            error,
+            DatumConversionError::IncompatibleType { .. }
+                | DatumConversionError::OutOfRange { .. }
+                | DatumConversionError::InvalidInput { .. }
+                | DatumConversionError::InvalidUtf8 { .. }
+        )
+    }
+
     #[inline]
     pub(crate) fn invalid_option(option: &str, reason: &'static str) -> Self {
         Self::InvalidOption {
@@ -191,6 +274,17 @@ impl ConnectorError {
             line,
             column: column.into(),
             reason,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn row_conversion(
+        format: FormatKind,
+        reason: impl Into<Box<str>>,
+    ) -> Self {
+        Self::RowConversion {
+            format,
+            reason: reason.into(),
         }
     }
 
@@ -346,7 +440,8 @@ impl SqlStateError for ConnectorError {
             Self::InvalidObjectSchema { .. }
             | Self::Json { .. }
             | Self::JsonRecordTooLarge { .. }
-            | Self::JsonValue { .. } => PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
+            | Self::JsonValue { .. }
+            | Self::RowConversion { .. } => PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
             Self::JsonDatum(error) => error.sql_error_code(),
             Self::Parquet(error) => {
                 Self::source_io_sql_error_code(error).unwrap_or(match error {

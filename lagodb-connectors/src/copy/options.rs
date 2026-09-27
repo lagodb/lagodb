@@ -2,7 +2,7 @@
 //!
 //! PostgreSQL COPY options are deliberately not decoded here. They remain in
 //! the original `CopyStmt` so the consumer can strip connector-owned options
-//! and pass the remaining options to the PG17 COPY bridge. This module parses
+//! and pass the remaining options to the PostgreSQL COPY bridge. This module parses
 //! the connector-owned option names; the selected format validates its COPY
 //! compression and PostgreSQL-option semantics.
 

@@ -11,6 +11,8 @@ use super::context::{
 use super::io::{
     DestinationGuard, SourceGuard, destination_callback, source_callback,
 };
+use super::pg::CopyToShutdown;
+use super::route::CopyTargetRoute;
 use super::{CopyDataDestination, CopyDataSource, CopyError, pg};
 
 /// Parameters for a standard PostgreSQL COPY FROM execution.
@@ -51,6 +53,7 @@ impl<'statement, 'parse, 'source> CopyFromSpec<'statement, 'parse, 'source> {
 /// RAII wrapper around PostgreSQL's `CopyFromState`.
 pub struct CopyFromDriver<'statement, 'parse, 'source> {
     state: pg_sys::CopyFromState,
+    target_route: CopyTargetRoute,
     finished: bool,
     _source_guard: SourceGuard<'source>,
     _preparation: CopyFromPreparation<'statement, 'parse>,
@@ -59,15 +62,8 @@ pub struct CopyFromDriver<'statement, 'parse, 'source> {
 }
 
 impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
-    fn end_state(state: pg_sys::CopyFromState) -> Result<(), PgError> {
-        unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                pg::CopyBridge::end_from(state);
-                Ok(())
-            }))
-            .catch_others(|error| Err(PgError::from_caught(error)))
-            .execute()
-        }
+    fn end_state(state: pg_sys::CopyFromState) {
+        unsafe { pg::CopyBridge::end_routed_from(state) }
     }
 
     /// Starts PostgreSQL's COPY FROM parser and executor state.
@@ -92,10 +88,11 @@ impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
         let source_guard = SourceGuard::install(spec.data_source);
         let attlist = statement.attlist();
         let options = spec.options;
+        let target_route = preparation.target_route();
 
         let state = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(move || {
-                Ok(pg::CopyBridge::begin_from(
+                Ok(pg::CopyBridge::begin_routed_from(
                     pstate,
                     relation,
                     where_clause,
@@ -107,6 +104,7 @@ impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
                     source_callback(),
                     attlist,
                     options,
+                    false,
                 ))
             }))
             .catch_others(|error| Err(PgError::from_caught(error)))
@@ -115,6 +113,7 @@ impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
 
         Ok(Self {
             state,
+            target_route,
             finished: false,
             _source_guard: source_guard,
             _preparation: preparation,
@@ -125,9 +124,14 @@ impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
 
     pub fn execute(mut self) -> Result<u64, CopyError> {
         let state = self.state;
+        let provider_owned_partitioned_table =
+            self.target_route.provider_owned_partitioned_table();
         let result = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(move || {
-                Ok(pg::CopyBridge::execute_from(state))
+                Ok(pg::CopyBridge::execute_routed_from_bytes(
+                    state,
+                    provider_owned_partitioned_table,
+                ))
             }))
             .catch_others(|error| Err(PgError::from_caught(error)))
             .execute()
@@ -135,17 +139,15 @@ impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
         match result {
             Ok(processed) => {
                 self.finished = true;
-                Self::end_state(state)?;
+                Self::end_state(state);
                 Ok(processed)
             }
             Err(error) => {
                 // The error has been caught by PgTryBuilder, so PostgreSQL's
                 // normal longjmp cleanup will not release this opaque state.
                 // EndCopyFrom is required here to release its COPY context;
-                // any cleanup error is deliberately ignored so the original
-                // COPY error remains the one reported by the outer boundary.
                 self.finished = true;
-                let _ = Self::end_state(state);
+                Self::end_state(state);
                 Err(error.into())
             }
         }
@@ -155,13 +157,9 @@ impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
 impl Drop for CopyFromDriver<'_, '_, '_> {
     fn drop(&mut self) {
         if !self.finished {
-            // Normal callers use execute(), which catches PostgreSQL ERROR and
-            // transfers ERROR cleanup to PostgreSQL. Drop is the best-effort
-            // guard for Rust-side early returns before execution begins.
-            // Keep this cleanup inside the same PgTryBuilder boundary as the
-            // normal EndCopyFrom path: a PostgreSQL ERROR must not escape from
-            // a Rust Drop implementation.
-            let _ = Self::end_state(self.state);
+            // Normal callers use execute(); Drop covers Rust-side early
+            // returns before execution begins.
+            Self::end_state(self.state);
         }
     }
 }
@@ -213,10 +211,13 @@ pub struct CopyToDriver<'statement, 'parse, 'destination> {
 impl<'statement, 'parse, 'destination>
     CopyToDriver<'statement, 'parse, 'destination>
 {
-    fn end_state(state: pg_sys::CopyToState) -> Result<(), PgError> {
+    fn end_state(
+        state: pg_sys::CopyToState,
+        shutdown: CopyToShutdown,
+    ) -> Result<(), PgError> {
         unsafe {
             PgTryBuilder::new(AssertUnwindSafe(|| {
-                pg::CopyBridge::end_to(state);
+                pg::CopyBridge::end_routed_to(state, shutdown);
                 Ok(())
             }))
             .catch_others(|error| Err(PgError::from_caught(error)))
@@ -242,10 +243,11 @@ impl<'statement, 'parse, 'destination>
         let mut destination_guard = DestinationGuard::install(spec.data_destination);
         let attlist = statement.attlist();
         let options = spec.options;
+        let target_route = preparation.target_route()?;
 
         let state = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(move || {
-                Ok(pg::CopyBridge::begin_to(
+                Ok(pg::CopyBridge::begin_routed_to(
                     pstate,
                     relation,
                     raw_query,
@@ -258,6 +260,8 @@ impl<'statement, 'parse, 'destination>
                     destination_callback(),
                     attlist,
                     options,
+                    target_route.provider_owned_partitioned_table(),
+                    false,
                 ))
             }))
             .catch_others(|error| Err(PgError::from_caught(error)))
@@ -265,21 +269,15 @@ impl<'statement, 'parse, 'destination>
         }?;
 
         let layout = unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                Ok(super::layout::CopyColumnLayout::from_descriptor(
-                    pg::CopyBridge::to_tuple_desc(state),
-                    pg::CopyBridge::to_attnums(state),
-                ))
-            }))
-            .catch_others(|error| Err(PgError::from_caught(error)))
-            .execute()
-        }
-        .map_err(CopyError::from)
-        .and_then(|layout| layout);
+            super::layout::CopyColumnLayout::from_descriptor(
+                pg::CopyBridge::routed_to_tuple_desc(state),
+                pg::CopyBridge::routed_to_attnums(state),
+            )
+        };
         if let Err(error) =
             layout.and_then(|layout| destination_guard.initialize(&layout))
         {
-            let _ = Self::end_state(state);
+            let _ = Self::end_state(state, CopyToShutdown::Abort);
             return Err(error);
         }
 
@@ -297,7 +295,7 @@ impl<'statement, 'parse, 'destination>
         let state = self.state;
         let result = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(move || {
-                Ok(pg::CopyBridge::execute_to(state))
+                Ok(pg::CopyBridge::execute_routed_to_bytes(state))
             }))
             .catch_others(|error| Err(PgError::from_caught(error)))
             .execute()
@@ -305,16 +303,15 @@ impl<'statement, 'parse, 'destination>
         match result {
             Ok(processed) => {
                 self.finished = true;
-                Self::end_state(state)?;
+                Self::end_state(state, CopyToShutdown::Complete)?;
                 Ok(processed)
             }
             Err(error) => {
-                // The error has been caught by PgTryBuilder, so PostgreSQL's
-                // normal longjmp cleanup will not release this opaque state.
-                // EndCopyTo is required here; preserve the original error if
-                // cleanup itself reports an ERROR.
+                // Release COPY storage without running a failed executor's
+                // shutdown callbacks. Transaction abort owns its resources;
+                // preserve the original error if COPY cleanup also fails.
                 self.finished = true;
-                let _ = Self::end_state(state);
+                let _ = Self::end_state(state, CopyToShutdown::Abort);
                 Err(error.into())
             }
         }
@@ -327,7 +324,7 @@ impl Drop for CopyToDriver<'_, '_, '_> {
             // Drop is a best-effort guard for Rust-side early returns. Keep
             // PostgreSQL cleanup under the same FFI error boundary as the
             // normal EndCopyTo path; a PG ERROR must not escape Drop.
-            let _ = Self::end_state(self.state);
+            let _ = Self::end_state(self.state, CopyToShutdown::Abort);
         }
     }
 }

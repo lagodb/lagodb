@@ -134,7 +134,7 @@ pub(super) const fn destination_callback() -> pg_sys::copy_data_dest_cb {
     Some(copy_destination_callback)
 }
 
-fn report(error: CopyError) -> ! {
+pub(super) fn report(error: CopyError) -> ! {
     match error {
         CopyError::Postgres(error) => error.report(),
         error => PgReportError::from_domain_error(error).report(),
