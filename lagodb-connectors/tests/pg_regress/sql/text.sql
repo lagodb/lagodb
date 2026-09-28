@@ -24,7 +24,7 @@ SELECT format('s3://%s/lagodb-connectors/text/exact.txt',
               :'lagodb_regress_bucket') AS write_path
 \gset text_
 
--- Scalar values, NULLs, escaping, exact COPY FROM, and prefix COPY TO.
+-- Scalar values, NULLs, escaping, and exact/prefix objects.
 COPY lagodb_connectors_regress.common_source
 TO :'text_exact_path'
 WITH (server 'lagodb_connectors_regress_s3');
@@ -43,23 +43,25 @@ COPY lagodb_connectors_regress.text_copy_sink
 FROM :'text_exact_path'
 WITH (server 'lagodb_connectors_regress_s3');
 
-SELECT count(*) AS rows,
-       array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-           (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-            FROM lagodb_connectors_regress.common_source AS source)
-           AS round_trip
-FROM lagodb_connectors_regress.text_copy_sink AS value;
+-- Compare every column in both directions; ALL also checks duplicate counts.
+(SELECT * FROM lagodb_connectors_regress.text_copy_sink
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.text_copy_sink);
 
 COPY lagodb_connectors_regress.common_source
 TO :'text_alias_path'
 WITH (server 'lagodb_connectors_regress_s3');
-CREATE TABLE lagodb_connectors_regress.text_alias_sink
-    (:common_columns);
-COPY lagodb_connectors_regress.text_alias_sink
+TRUNCATE lagodb_connectors_regress.text_copy_sink;
+COPY lagodb_connectors_regress.text_copy_sink
 FROM :'text_alias_path'
 WITH (server 'lagodb_connectors_regress_s3');
-SELECT count(*) AS alias_rows
-FROM lagodb_connectors_regress.text_alias_sink;
+(SELECT * FROM lagodb_connectors_regress.text_copy_sink
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.text_copy_sink);
 
 -- PostgreSQL text datum semantics include JSON values and arrays.
 COPY lagodb_connectors_regress.stream_extra_source
@@ -70,23 +72,19 @@ CREATE TABLE lagodb_connectors_regress.text_extra_sink
 COPY lagodb_connectors_regress.text_extra_sink
 FROM :'text_extra_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'text');
-SELECT count(*) AS extra_rows,
-       md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
-           AS extra_digest
-FROM lagodb_connectors_regress.text_extra_sink AS value;
+SELECT * FROM lagodb_connectors_regress.text_extra_sink ORDER BY id;
 
 -- An empty exact object is a valid Text object.
 COPY (
     SELECT * FROM lagodb_connectors_regress.common_source WHERE false
 ) TO :'text_empty_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'text');
-CREATE TABLE lagodb_connectors_regress.text_empty_sink
-    (:common_columns);
-COPY lagodb_connectors_regress.text_empty_sink
+TRUNCATE lagodb_connectors_regress.text_copy_sink;
+COPY lagodb_connectors_regress.text_copy_sink
 FROM :'text_empty_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'text');
 SELECT count(*) AS empty_rows
-FROM lagodb_connectors_regress.text_empty_sink;
+FROM lagodb_connectors_regress.text_copy_sink;
 
 -- Exact and prefix foreign scans plus Text-owned schema inference.
 CREATE FOREIGN TABLE lagodb_connectors_regress.text_exact
@@ -101,28 +99,23 @@ CREATE FOREIGN TABLE lagodb_connectors_regress.text_inferred ()
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'text_exact_path', format 'text');
 
-SELECT relation, rows, matches_source
-FROM (
-    SELECT 'exact' AS relation, count(*) AS rows,
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-               AS matches_source
-    FROM lagodb_connectors_regress.text_exact AS value
-    UNION ALL
-    SELECT 'prefix', count(*),
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-    FROM lagodb_connectors_regress.text_prefix AS value
-) AS results
-ORDER BY relation;
-SELECT count(*) AS inferred_columns,
-       string_agg(format_type(atttypid, atttypmod), ', ' ORDER BY attnum)
-           AS inferred_types
+(SELECT * FROM lagodb_connectors_regress.text_exact
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.text_exact);
+
+(SELECT * FROM lagodb_connectors_regress.text_prefix
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.text_prefix);
+
+SELECT attname, format_type(atttypid, atttypmod) AS type
 FROM pg_attribute
 WHERE attrelid = 'lagodb_connectors_regress.text_inferred'::regclass
-  AND attnum > 0 AND NOT attisdropped;
+  AND attnum > 0 AND NOT attisdropped
+ORDER BY attnum;
 SELECT count(*) AS inferred_rows
 FROM lagodb_connectors_regress.text_inferred;
 
@@ -133,12 +126,11 @@ SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'text_write_path', format 'text');
 INSERT INTO lagodb_connectors_regress.text_write
 SELECT * FROM lagodb_connectors_regress.common_source;
-SELECT count(*) AS written_rows,
-       array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-           (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-            FROM lagodb_connectors_regress.common_source AS source)
-           AS matches_source
-FROM lagodb_connectors_regress.text_write AS value;
+(SELECT * FROM lagodb_connectors_regress.text_write
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.text_write);
 
 -- Text represents the shared Text/CSV DelimitedScanState rescan path.
 SET enable_hashjoin = off;

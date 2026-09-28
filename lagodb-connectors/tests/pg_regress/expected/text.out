@@ -28,7 +28,7 @@ SELECT format('s3://%s/lagodb-connectors/text/exact.txt',
        format('s3://%s/lagodb-connectors/text/write/',
               :'lagodb_regress_bucket') AS write_path
 \gset text_
--- Scalar values, NULLs, escaping, exact COPY FROM, and prefix COPY TO.
+-- Scalar values, NULLs, escaping, and exact/prefix objects.
 COPY lagodb_connectors_regress.common_source
 TO :'text_exact_path'
 WITH (server 'lagodb_connectors_regress_s3');
@@ -45,31 +45,31 @@ CREATE TABLE lagodb_connectors_regress.text_copy_sink
 COPY lagodb_connectors_regress.text_copy_sink
 FROM :'text_exact_path'
 WITH (server 'lagodb_connectors_regress_s3');
-SELECT count(*) AS rows,
-       array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-           (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-            FROM lagodb_connectors_regress.common_source AS source)
-           AS round_trip
-FROM lagodb_connectors_regress.text_copy_sink AS value;
- rows | round_trip 
-------+------------
-    2 | t
-(1 row)
+-- Compare every column in both directions; ALL also checks duplicate counts.
+(SELECT * FROM lagodb_connectors_regress.text_copy_sink
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.text_copy_sink);
+ id | bool_col | smallint_col | integer_col | bigint_col | real_col | double_col | numeric_col | text_col | varchar_col | char_col | name_col | bytea_col | uuid_col | date_col | time_col | timestamp_col | timestamptz_col 
+----+----------+--------------+-------------+------------+----------+------------+-------------+----------+-------------+----------+----------+-----------+----------+----------+----------+---------------+-----------------
+(0 rows)
 
 COPY lagodb_connectors_regress.common_source
 TO :'text_alias_path'
 WITH (server 'lagodb_connectors_regress_s3');
-CREATE TABLE lagodb_connectors_regress.text_alias_sink
-    (:common_columns);
-COPY lagodb_connectors_regress.text_alias_sink
+TRUNCATE lagodb_connectors_regress.text_copy_sink;
+COPY lagodb_connectors_regress.text_copy_sink
 FROM :'text_alias_path'
 WITH (server 'lagodb_connectors_regress_s3');
-SELECT count(*) AS alias_rows
-FROM lagodb_connectors_regress.text_alias_sink;
- alias_rows 
-------------
-          2
-(1 row)
+(SELECT * FROM lagodb_connectors_regress.text_copy_sink
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.text_copy_sink);
+ id | bool_col | smallint_col | integer_col | bigint_col | real_col | double_col | numeric_col | text_col | varchar_col | char_col | name_col | bytea_col | uuid_col | date_col | time_col | timestamp_col | timestamptz_col 
+----+----------+--------------+-------------+------------+----------+------------+-------------+----------+-------------+----------+----------+-----------+----------+----------+----------+---------------+-----------------
+(0 rows)
 
 -- PostgreSQL text datum semantics include JSON values and arrays.
 COPY lagodb_connectors_regress.stream_extra_source
@@ -80,27 +80,24 @@ CREATE TABLE lagodb_connectors_regress.text_extra_sink
 COPY lagodb_connectors_regress.text_extra_sink
 FROM :'text_extra_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'text');
-SELECT count(*) AS extra_rows,
-       md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
-           AS extra_digest
-FROM lagodb_connectors_regress.text_extra_sink AS value;
- extra_rows |           extra_digest           
-------------+----------------------------------
-          2 | f35208f050f03c1f95ae5e7a2c1f3d71
-(1 row)
+SELECT * FROM lagodb_connectors_regress.text_extra_sink ORDER BY id;
+ id |              json_col              |               jsonb_col                | bool_array | int_array |            text_array            
+----+------------------------------------+----------------------------------------+------------+-----------+----------------------------------
+  1 | {"nested":[1,true],"text":"value"} | {"text": "value", "nested": [1, true]} | {t,f}      | {1,2,3}   | {a,"comma,value","quote\"value"}
+  2 |                                    |                                        | {}         |           | {""}
+(2 rows)
 
 -- An empty exact object is a valid Text object.
 COPY (
     SELECT * FROM lagodb_connectors_regress.common_source WHERE false
 ) TO :'text_empty_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'text');
-CREATE TABLE lagodb_connectors_regress.text_empty_sink
-    (:common_columns);
-COPY lagodb_connectors_regress.text_empty_sink
+TRUNCATE lagodb_connectors_regress.text_copy_sink;
+COPY lagodb_connectors_regress.text_copy_sink
 FROM :'text_empty_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'text');
 SELECT count(*) AS empty_rows
-FROM lagodb_connectors_regress.text_empty_sink;
+FROM lagodb_connectors_regress.text_copy_sink;
  empty_rows 
 ------------
           0
@@ -118,38 +115,50 @@ OPTIONS (path :'text_prefix_path', format 'text');
 CREATE FOREIGN TABLE lagodb_connectors_regress.text_inferred ()
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'text_exact_path', format 'text');
-SELECT relation, rows, matches_source
-FROM (
-    SELECT 'exact' AS relation, count(*) AS rows,
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-               AS matches_source
-    FROM lagodb_connectors_regress.text_exact AS value
-    UNION ALL
-    SELECT 'prefix', count(*),
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-    FROM lagodb_connectors_regress.text_prefix AS value
-) AS results
-ORDER BY relation;
- relation | rows | matches_source 
-----------+------+----------------
- exact    |    2 | t
- prefix   |    2 | t
-(2 rows)
+(SELECT * FROM lagodb_connectors_regress.text_exact
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.text_exact);
+ id | bool_col | smallint_col | integer_col | bigint_col | real_col | double_col | numeric_col | text_col | varchar_col | char_col | name_col | bytea_col | uuid_col | date_col | time_col | timestamp_col | timestamptz_col 
+----+----------+--------------+-------------+------------+----------+------------+-------------+----------+-------------+----------+----------+-----------+----------+----------+----------+---------------+-----------------
+(0 rows)
 
-SELECT count(*) AS inferred_columns,
-       string_agg(format_type(atttypid, atttypmod), ', ' ORDER BY attnum)
-           AS inferred_types
+(SELECT * FROM lagodb_connectors_regress.text_prefix
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.text_prefix);
+ id | bool_col | smallint_col | integer_col | bigint_col | real_col | double_col | numeric_col | text_col | varchar_col | char_col | name_col | bytea_col | uuid_col | date_col | time_col | timestamp_col | timestamptz_col 
+----+----------+--------------+-------------+------------+----------+------------+-------------+----------+-------------+----------+----------+-----------+----------+----------+----------+---------------+-----------------
+(0 rows)
+
+SELECT attname, format_type(atttypid, atttypmod) AS type
 FROM pg_attribute
 WHERE attrelid = 'lagodb_connectors_regress.text_inferred'::regclass
-  AND attnum > 0 AND NOT attisdropped;
- inferred_columns |                                                         inferred_types                                                         
-------------------+--------------------------------------------------------------------------------------------------------------------------------
-               18 | bigint, boolean, bigint, bigint, bigint, numeric, numeric, numeric, text, text, text, text, text, text, text, text, text, text
-(1 row)
+  AND attnum > 0 AND NOT attisdropped
+ORDER BY attnum;
+ attname  |  type   
+----------+---------
+ column1  | bigint
+ column2  | boolean
+ column3  | bigint
+ column4  | bigint
+ column5  | bigint
+ column6  | numeric
+ column7  | numeric
+ column8  | numeric
+ column9  | text
+ column10 | text
+ column11 | text
+ column12 | text
+ column13 | text
+ column14 | text
+ column15 | text
+ column16 | text
+ column17 | text
+ column18 | text
+(18 rows)
 
 SELECT count(*) AS inferred_rows
 FROM lagodb_connectors_regress.text_inferred;
@@ -165,16 +174,14 @@ SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'text_write_path', format 'text');
 INSERT INTO lagodb_connectors_regress.text_write
 SELECT * FROM lagodb_connectors_regress.common_source;
-SELECT count(*) AS written_rows,
-       array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-           (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-            FROM lagodb_connectors_regress.common_source AS source)
-           AS matches_source
-FROM lagodb_connectors_regress.text_write AS value;
- written_rows | matches_source 
---------------+----------------
-            2 | t
-(1 row)
+(SELECT * FROM lagodb_connectors_regress.text_write
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.text_write);
+ id | bool_col | smallint_col | integer_col | bigint_col | real_col | double_col | numeric_col | text_col | varchar_col | char_col | name_col | bytea_col | uuid_col | date_col | time_col | timestamp_col | timestamptz_col 
+----+----------+--------------+-------------+------------+----------+------------+-------------+----------+-------------+----------+----------+-----------+----------+----------+----------+---------------+-----------------
+(0 rows)
 
 -- Text represents the shared Text/CSV DelimitedScanState rescan path.
 SET enable_hashjoin = off;

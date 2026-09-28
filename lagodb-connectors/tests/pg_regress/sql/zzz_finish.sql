@@ -12,4 +12,7 @@ DROP SCHEMA IF EXISTS lagodb_regress;
 RESET client_min_messages;
 
 \setenv PGDATABASE :DBNAME
-\! ../../../scripts/pg_regress/object_storage_fixture teardown
+\! python3 ../../../scripts/pg_regress/regress_fixture.py teardown
+\set ECHO none
+\i ../../../scripts/pg_regress/fixture_command_result.sql
+\set ECHO all

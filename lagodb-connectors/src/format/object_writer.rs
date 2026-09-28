@@ -32,6 +32,8 @@ pub(crate) trait ObjectFileEncoder {
         input: &Self::Input,
     ) -> Result<FileWriteProgress, ConnectorError>;
 
+    fn bytes_written(&self) -> u64;
+
     fn finish(self) -> Result<StagedObjectWriter, ConnectorError>;
 }
 
@@ -80,6 +82,7 @@ where
     factory: F,
     current: Option<OpenObject<F::Encoder>>,
     completed_object: bool,
+    completed_bytes: u64,
 }
 
 impl<F> ObjectSetWriter<F>
@@ -92,6 +95,7 @@ where
             factory,
             current: None,
             completed_object: false,
+            completed_bytes: 0,
         }
     }
 
@@ -104,13 +108,29 @@ where
     }
 
     pub(crate) fn finish(
-        mut self,
+        self,
         empty: EmptyOutputPolicy,
     ) -> Result<(), ConnectorError> {
+        self.finish_with_bytes(empty).map(|_| ())
+    }
+
+    pub(crate) fn finish_with_bytes(
+        mut self,
+        empty: EmptyOutputPolicy,
+    ) -> Result<u64, ConnectorError> {
         if empty.should_open_empty(self.current.is_some(), self.completed_object) {
             self.open_object()?;
         }
-        self.finish_current()
+        self.finish_current()?;
+        Ok(self.completed_bytes)
+    }
+
+    pub(crate) fn bytes_written(&self) -> u64 {
+        self.completed_bytes.saturating_add(
+            self.current
+                .as_ref()
+                .map_or(0, |current| current.encoder.bytes_written()),
+        )
     }
 
     fn ensure_open(&mut self) -> Result<&mut OpenObject<F::Encoder>, ConnectorError> {
@@ -136,8 +156,10 @@ where
             return Ok(());
         };
         let writer = encoder.finish()?;
+        let bytes_written = writer.bytes_written();
         writer.finish_local()?;
         upload.finish()?;
+        self.completed_bytes = self.completed_bytes.saturating_add(bytes_written);
         self.completed_object = true;
         Ok(())
     }

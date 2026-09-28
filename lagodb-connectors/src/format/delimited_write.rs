@@ -80,10 +80,10 @@ impl FormatWriteState for DelimitedWriteState {
     }
 
     fn finish(&mut self) -> Result<(), ConnectorError> {
-        let Some(writer) = self.writer.take() else {
-            return self.encoder.finish().map_err(ConnectorError::from);
-        };
-        writer.finish(EmptyOutputPolicy::Skip)?;
-        self.encoder.finish().map_err(ConnectorError::from)
+        if let Some(writer) = self.writer.take() {
+            writer.finish(EmptyOutputPolicy::Skip)?;
+        }
+        self.encoder.finish();
+        Ok(())
     }
 }

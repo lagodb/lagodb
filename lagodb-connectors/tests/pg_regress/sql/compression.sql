@@ -56,9 +56,6 @@ WITH (
     compression 'none'
 );
 
-SET client_min_messages = warning;
-DROP TABLE IF EXISTS lagodb_connectors_regress.codec_plain_gz;
-RESET client_min_messages;
 CREATE TABLE lagodb_connectors_regress.codec_plain_gz
     (:common_columns);
 COPY lagodb_connectors_regress.codec_plain_gz
@@ -73,15 +70,10 @@ CREATE FOREIGN TABLE lagodb_connectors_regress.codec_plain_zst
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'codec_plain_zst_path', compression 'none');
 
-SELECT relation, rows
-FROM (
-    SELECT 'copy-none-gz' AS relation, count(*) AS rows
-    FROM lagodb_connectors_regress.codec_plain_gz
-    UNION ALL
-    SELECT 'foreign-none-zst', count(*)
-    FROM lagodb_connectors_regress.codec_plain_zst
-) AS explicit_none_results
-ORDER BY relation;
+SELECT count(*) AS copy_none_gz_rows
+FROM lagodb_connectors_regress.codec_plain_gz;
+SELECT count(*) AS foreign_none_zst_rows
+FROM lagodb_connectors_regress.codec_plain_zst;
 
 -- Long compression suffix aliases participate in format/compression inference.
 COPY lagodb_connectors_regress.common_source
@@ -91,9 +83,6 @@ COPY lagodb_connectors_regress.common_source
 TO :'codec_zstd_alias_path'
 WITH (server 'lagodb_connectors_regress_s3');
 
-SET client_min_messages = warning;
-DROP TABLE IF EXISTS lagodb_connectors_regress.codec_gzip_alias;
-RESET client_min_messages;
 CREATE TABLE lagodb_connectors_regress.codec_gzip_alias
     (:common_columns);
 COPY lagodb_connectors_regress.codec_gzip_alias
@@ -104,15 +93,10 @@ CREATE FOREIGN TABLE lagodb_connectors_regress.codec_zstd_alias
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'codec_zstd_alias_path');
 
-SELECT relation, rows
-FROM (
-    SELECT 'gzip-alias' AS relation, count(*) AS rows
-    FROM lagodb_connectors_regress.codec_gzip_alias
-    UNION ALL
-    SELECT 'zstd-alias', count(*)
-    FROM lagodb_connectors_regress.codec_zstd_alias
-) AS alias_results
-ORDER BY relation;
+SELECT count(*) AS gzip_alias_rows
+FROM lagodb_connectors_regress.codec_gzip_alias;
+SELECT count(*) AS zstd_alias_rows
+FROM lagodb_connectors_regress.codec_zstd_alias;
 
 -- RFC 1952 permits concatenated gzip members. The helper concatenates the raw
 -- compressed objects without decoding or recompressing either member.
@@ -130,17 +114,12 @@ WITH (server 'lagodb_connectors_regress_s3');
 \setenv OBJECT_STORAGE_KEY :codec_gzip_concatenated_key
 \! sh bin/object_storage_tool concatenate
 
-SET client_min_messages = warning;
-DROP TABLE IF EXISTS lagodb_connectors_regress.codec_concatenated_gzip;
-RESET client_min_messages;
 CREATE TABLE lagodb_connectors_regress.codec_concatenated_gzip
     (:common_columns);
 COPY lagodb_connectors_regress.codec_concatenated_gzip
 FROM :'codec_gzip_concatenated_path'
 WITH (server 'lagodb_connectors_regress_s3');
-SELECT count(*) AS concatenated_gzip_rows,
-       string_agg(id::text, ',' ORDER BY id) AS concatenated_gzip_ids
-FROM lagodb_connectors_regress.codec_concatenated_gzip;
+SELECT id FROM lagodb_connectors_regress.codec_concatenated_gzip ORDER BY id;
 
 -- One representative failure per codec protects error propagation without
 -- multiplying corruption and truncation across every stream format.
@@ -166,9 +145,6 @@ SELECT lagodb.invalidate_object_cache(
        ) AS cache_invalidated
 \gset
 
-SET client_min_messages = warning;
-DROP TABLE IF EXISTS lagodb_connectors_regress.codec_error_sink;
-RESET client_min_messages;
 CREATE TABLE lagodb_connectors_regress.codec_error_sink
     (:common_columns);
 

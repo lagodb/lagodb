@@ -60,9 +60,7 @@ WITH (
     server 'lagodb_connectors_regress_s3',
     format 'csv',
     delimiter ';',
-    null '<NULL>',
-    quote '"',
-    escape '"'
+    null '<NULL>'
 );
 COPY lagodb_connectors_regress.common_source
 TO :'csv_compressed_path'
@@ -72,62 +70,51 @@ WITH (
     compression 'gzip'
 );
 
-CREATE TABLE lagodb_connectors_regress.csv_exact_sink
-    (:common_columns);
-COPY lagodb_connectors_regress.csv_exact_sink
+-- Compare every column in both directions; ALL also checks duplicate counts.
+CREATE TABLE lagodb_connectors_regress.csv_copy_sink (:common_columns);
+COPY lagodb_connectors_regress.csv_copy_sink
 FROM :'csv_exact_path'
 WITH (server 'lagodb_connectors_regress_s3');
-CREATE TABLE lagodb_connectors_regress.csv_header_sink
-    (:common_columns);
-COPY lagodb_connectors_regress.csv_header_sink
+(SELECT * FROM lagodb_connectors_regress.csv_copy_sink
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.csv_copy_sink);
+
+TRUNCATE lagodb_connectors_regress.csv_copy_sink;
+COPY lagodb_connectors_regress.csv_copy_sink
 FROM :'csv_header_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'csv', header true);
-CREATE TABLE lagodb_connectors_regress.csv_custom_sink
-    (:common_columns);
-COPY lagodb_connectors_regress.csv_custom_sink
+(SELECT * FROM lagodb_connectors_regress.csv_copy_sink
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.csv_copy_sink);
+
+TRUNCATE lagodb_connectors_regress.csv_copy_sink;
+COPY lagodb_connectors_regress.csv_copy_sink
 FROM :'csv_custom_path'
 WITH (
     server 'lagodb_connectors_regress_s3',
     format 'csv',
     delimiter ';',
-    null '<NULL>',
-    quote '"',
-    escape '"'
+    null '<NULL>'
 );
-CREATE TABLE lagodb_connectors_regress.csv_compressed_sink
-    (:common_columns);
-COPY lagodb_connectors_regress.csv_compressed_sink
+(SELECT * FROM lagodb_connectors_regress.csv_copy_sink
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.csv_copy_sink);
+
+TRUNCATE lagodb_connectors_regress.csv_copy_sink;
+COPY lagodb_connectors_regress.csv_copy_sink
 FROM :'csv_compressed_path'
 WITH (server 'lagodb_connectors_regress_s3');
-
-SELECT relation, rows, round_trip
-FROM (
-    SELECT 'exact' AS relation, count(*) AS rows,
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-               AS round_trip
-    FROM lagodb_connectors_regress.csv_exact_sink AS value
-    UNION ALL
-    SELECT 'header', count(*),
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-    FROM lagodb_connectors_regress.csv_header_sink AS value
-    UNION ALL
-    SELECT 'custom', count(*),
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-    FROM lagodb_connectors_regress.csv_custom_sink AS value
-    UNION ALL
-    SELECT 'gzip', count(*),
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-    FROM lagodb_connectors_regress.csv_compressed_sink AS value
-) AS results
-ORDER BY relation;
+(SELECT * FROM lagodb_connectors_regress.csv_copy_sink
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.csv_copy_sink);
 
 -- CSV quoting must preserve PostgreSQL JSON and array datum representations.
 COPY lagodb_connectors_regress.stream_extra_source
@@ -138,25 +125,19 @@ CREATE TABLE lagodb_connectors_regress.csv_extra_sink
 COPY lagodb_connectors_regress.csv_extra_sink
 FROM :'csv_extra_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'csv');
-SELECT count(*) AS extra_rows,
-       array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-           (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-            FROM lagodb_connectors_regress.stream_extra_source AS source)
-           AS matches_source
-FROM lagodb_connectors_regress.csv_extra_sink AS value;
+SELECT * FROM lagodb_connectors_regress.csv_extra_sink ORDER BY id;
 
 -- An empty exact object is valid CSV input.
 COPY (
     SELECT * FROM lagodb_connectors_regress.common_source WHERE false
 ) TO :'csv_empty_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'csv');
-CREATE TABLE lagodb_connectors_regress.csv_empty_sink
-    (:common_columns);
-COPY lagodb_connectors_regress.csv_empty_sink
+TRUNCATE lagodb_connectors_regress.csv_copy_sink;
+COPY lagodb_connectors_regress.csv_copy_sink
 FROM :'csv_empty_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 SELECT count(*) AS empty_rows
-FROM lagodb_connectors_regress.csv_empty_sink;
+FROM lagodb_connectors_regress.csv_copy_sink;
 
 -- Exact/prefix foreign scans and header-aware schema inference.
 CREATE FOREIGN TABLE lagodb_connectors_regress.csv_exact
@@ -171,28 +152,23 @@ CREATE FOREIGN TABLE lagodb_connectors_regress.csv_inferred ()
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'csv_header_path', format 'csv', header 'match');
 
-SELECT relation, rows, matches_source
-FROM (
-    SELECT 'exact' AS relation, count(*) AS rows,
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-               AS matches_source
-    FROM lagodb_connectors_regress.csv_exact AS value
-    UNION ALL
-    SELECT 'prefix', count(*),
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.common_source AS source)
-    FROM lagodb_connectors_regress.csv_prefix AS value
-) AS results
-ORDER BY relation;
-SELECT count(*) AS inferred_columns,
-       string_agg(format_type(atttypid, atttypmod), ', ' ORDER BY attnum)
-           AS inferred_types
+(SELECT * FROM lagodb_connectors_regress.csv_exact
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.csv_exact);
+
+(SELECT * FROM lagodb_connectors_regress.csv_prefix
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.csv_prefix);
+
+SELECT attname, format_type(atttypid, atttypmod) AS type
 FROM pg_attribute
 WHERE attrelid = 'lagodb_connectors_regress.csv_inferred'::regclass
-  AND attnum > 0 AND NOT attisdropped;
+  AND attnum > 0 AND NOT attisdropped
+ORDER BY attnum;
 SELECT count(*) AS inferred_rows
 FROM lagodb_connectors_regress.csv_inferred;
 
@@ -247,12 +223,11 @@ SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'csv_write_path', format 'csv');
 INSERT INTO lagodb_connectors_regress.csv_write
 SELECT * FROM lagodb_connectors_regress.common_source;
-SELECT count(*) AS written_rows,
-       array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-           (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-            FROM lagodb_connectors_regress.common_source AS source)
-           AS matches_source
-FROM lagodb_connectors_regress.csv_write AS value;
+(SELECT * FROM lagodb_connectors_regress.csv_write
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.common_source)
+UNION ALL
+(SELECT * FROM lagodb_connectors_regress.common_source
+ EXCEPT ALL SELECT * FROM lagodb_connectors_regress.csv_write);
 
 -- One common malformed-row error protects CSV field-count validation.
 \setenv OBJECT_STORAGE_FILE data/malformed_csv_width.csv

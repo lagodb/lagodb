@@ -120,7 +120,8 @@ impl FormatScanState for DelimitedScanState {
     }
 
     fn end(&mut self) -> Result<(), ConnectorError> {
-        Ok(self.decoder.end()?)
+        self.decoder.end();
+        Ok(())
     }
 }
 

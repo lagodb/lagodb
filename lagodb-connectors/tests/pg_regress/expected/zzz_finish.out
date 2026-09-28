@@ -10,5 +10,6 @@ DROP TABLE IF EXISTS lagodb_regress.object_storage_fixture;
 DROP SCHEMA IF EXISTS lagodb_regress;
 RESET client_min_messages;
 \setenv PGDATABASE :DBNAME
-\! ../../../scripts/pg_regress/object_storage_fixture teardown
+\! python3 ../../../scripts/pg_regress/regress_fixture.py teardown
 object_storage_teardown: true
+\set ECHO none

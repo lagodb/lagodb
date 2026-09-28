@@ -92,6 +92,10 @@ impl ObjectFileEncoder for StreamFileEncoder {
         ))
     }
 
+    fn bytes_written(&self) -> u64 {
+        self.encoder.writer().bytes_written()
+    }
+
     fn finish(self) -> Result<StagedObjectWriter, ConnectorError> {
         self.encoder
             .finish()

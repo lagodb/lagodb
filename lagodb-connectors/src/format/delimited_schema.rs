@@ -48,11 +48,8 @@ impl DelimitedSchemaReader {
             unsafe { CopyRawFieldReader::begin(self.options, &mut source) }
                 .map_err(ConnectorError::from)?;
         let result = self.read_records(&mut reader);
-        let finish = reader.finish().map_err(ConnectorError::from);
-        match (result, finish) {
-            (Ok(schema), Ok(())) => Ok(schema),
-            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-        }
+        reader.finish();
+        result
     }
 
     fn read_records(
