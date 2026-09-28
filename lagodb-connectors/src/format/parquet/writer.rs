@@ -90,6 +90,10 @@ impl ObjectFileEncoder for ParquetFileEncoder {
         Ok(FileWriteProgress::new(estimated))
     }
 
+    fn bytes_written(&self) -> u64 {
+        self.writer.inner().bytes_written()
+    }
+
     fn finish(self) -> Result<StagedObjectWriter, ConnectorError> {
         Ok(self.writer.into_inner()?)
     }
@@ -98,6 +102,7 @@ impl ObjectFileEncoder for ParquetFileEncoder {
 /// Incremental Parquet output for one exact object or rolling prefix.
 pub(crate) struct ParquetObjectWriter {
     writer: Option<ObjectSetWriter<ParquetEncoderFactory>>,
+    completed_bytes: u64,
 }
 
 impl ParquetObjectWriter {
@@ -111,6 +116,7 @@ impl ParquetObjectWriter {
                 output,
                 ParquetEncoderFactory::new(schema, compression),
             )),
+            completed_bytes: 0,
         }
     }
 
@@ -138,6 +144,13 @@ impl ParquetObjectWriter {
         } else {
             EmptyOutputPolicy::Skip
         };
-        writer.finish(policy)
+        self.completed_bytes = writer.finish_with_bytes(policy)?;
+        Ok(())
+    }
+
+    pub(crate) fn bytes_written(&self) -> u64 {
+        self.writer
+            .as_ref()
+            .map_or(self.completed_bytes, ObjectSetWriter::bytes_written)
     }
 }

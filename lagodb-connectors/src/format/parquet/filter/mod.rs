@@ -46,7 +46,7 @@ impl ParquetFilterPlanner {
     pub(super) fn begin(
         context: &FilterPlanningContext,
     ) -> Result<Self, ConnectorError> {
-        let relation = RelationGuard::open(
+        let relation = RelationGuard::open_table(
             context.relation_oid(),
             pg_sys::NoLock as pg_sys::LOCKMODE,
         )

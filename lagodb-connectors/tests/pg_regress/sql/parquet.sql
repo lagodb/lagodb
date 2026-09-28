@@ -18,6 +18,8 @@ SELECT format('s3://%s/lagodb-connectors/parquet/exact.parquet',
               :'lagodb_regress_bucket') AS parquet_zstd_path,
        format('s3://%s/lagodb-connectors/parquet/empty.parquet',
               :'lagodb_regress_bucket') AS parquet_empty_path,
+       format('s3://%s/lagodb-connectors/parquet/empty-prefix/',
+              :'lagodb_regress_bucket') AS parquet_empty_prefix_path,
        format('s3://%s/lagodb-connectors/parquet/write/',
               :'lagodb_regress_bucket') AS parquet_write_path
 \gset
@@ -46,59 +48,56 @@ COPY (
 ) TO :'parquet_empty_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 
-CREATE TABLE lagodb_connectors_regress.parquet_copy_exact
-    (:parquet_columns);
-COPY lagodb_connectors_regress.parquet_copy_exact
+-- json and json[] require normalization for equality. Compare both
+-- directions with ALL to check every value and duplicate row count.
+CREATE TABLE lagodb_connectors_regress.parquet_copy_sink (:parquet_columns);
+COPY lagodb_connectors_regress.parquet_copy_sink
 FROM :'parquet_exact_path'
 WITH (server 'lagodb_connectors_regress_s3');
-CREATE TABLE lagodb_connectors_regress.parquet_copy_prefix
-    (:parquet_columns);
-COPY lagodb_connectors_regress.parquet_copy_prefix
+(SELECT to_jsonb(value) AS row_data FROM lagodb_connectors_regress.parquet_copy_sink AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_source AS value)
+UNION ALL
+(SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_source AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_copy_sink AS value);
+
+TRUNCATE lagodb_connectors_regress.parquet_copy_sink;
+COPY lagodb_connectors_regress.parquet_copy_sink
 FROM :'parquet_filter_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-CREATE TABLE lagodb_connectors_regress.parquet_copy_zstd
-    (:parquet_columns);
-COPY lagodb_connectors_regress.parquet_copy_zstd
+(SELECT to_jsonb(value) AS row_data FROM lagodb_connectors_regress.parquet_copy_sink AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_source AS value)
+UNION ALL
+(SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_source AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_copy_sink AS value);
+
+TRUNCATE lagodb_connectors_regress.parquet_copy_sink;
+COPY lagodb_connectors_regress.parquet_copy_sink
 FROM :'parquet_zstd_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-CREATE TABLE lagodb_connectors_regress.parquet_copy_empty
-    (:parquet_columns);
-COPY lagodb_connectors_regress.parquet_copy_empty
+(SELECT to_jsonb(value) AS row_data FROM lagodb_connectors_regress.parquet_copy_sink AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_source AS value)
+UNION ALL
+(SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_source AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_copy_sink AS value);
+
+TRUNCATE lagodb_connectors_regress.parquet_copy_sink;
+COPY lagodb_connectors_regress.parquet_copy_sink
 FROM :'parquet_empty_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
+SELECT count(*) AS empty_rows FROM lagodb_connectors_regress.parquet_copy_sink;
 
-SELECT relation, rows, round_trip
-FROM (
-    SELECT 'exact' AS relation, count(*) AS rows,
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.parquet_source AS source)
-               AS round_trip
-    FROM lagodb_connectors_regress.parquet_copy_exact AS value
-    UNION ALL
-    SELECT 'prefix', count(*),
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.parquet_source AS source)
-    FROM lagodb_connectors_regress.parquet_copy_prefix AS value
-    UNION ALL
-    SELECT 'zstd', count(*),
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.parquet_source AS source)
-    FROM lagodb_connectors_regress.parquet_copy_zstd AS value
-    UNION ALL
-    SELECT 'empty', count(*), count(*) = 0
-    FROM lagodb_connectors_regress.parquet_copy_empty
-) AS results
-ORDER BY relation;
+TRUNCATE lagodb_connectors_regress.parquet_copy_sink;
+COPY lagodb_connectors_regress.parquet_copy_sink
+FROM :'parquet_empty_prefix_path'
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
+SELECT count(*) AS empty_prefix_rows FROM lagodb_connectors_regress.parquet_copy_sink;
 
 -- Exact/prefix foreign scans and format-owned schema inference.
 CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_exact
     (:parquet_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'parquet_exact_path');
-CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_prefix
+CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_filter
     (:parquet_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'parquet_filter_path', format 'parquet');
@@ -106,28 +105,23 @@ CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_inferred ()
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'parquet_exact_path', format 'parquet');
 
-SELECT relation, rows, matches_source
-FROM (
-    SELECT 'exact' AS relation, count(*) AS rows,
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.parquet_source AS source)
-               AS matches_source
-    FROM lagodb_connectors_regress.parquet_exact AS value
-    UNION ALL
-    SELECT 'prefix', count(*),
-           array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-               (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-                FROM lagodb_connectors_regress.parquet_source AS source)
-    FROM lagodb_connectors_regress.parquet_prefix AS value
-) AS results
-ORDER BY relation;
-SELECT count(*) AS inferred_columns,
-       string_agg(format_type(atttypid, atttypmod), ', ' ORDER BY attnum)
-           AS inferred_types
+(SELECT to_jsonb(value) AS row_data FROM lagodb_connectors_regress.parquet_exact AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_source AS value)
+UNION ALL
+(SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_source AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_exact AS value);
+
+(SELECT to_jsonb(value) AS row_data FROM lagodb_connectors_regress.parquet_filter AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_source AS value)
+UNION ALL
+(SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_source AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_filter AS value);
+
+SELECT attname, format_type(atttypid, atttypmod) AS type
 FROM pg_attribute
 WHERE attrelid = 'lagodb_connectors_regress.parquet_inferred'::regclass
-  AND attnum > 0 AND NOT attisdropped;
+  AND attnum > 0 AND NOT attisdropped
+ORDER BY attnum;
 SELECT count(*) AS inferred_rows
 FROM lagodb_connectors_regress.parquet_inferred;
 
@@ -138,25 +132,21 @@ SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'parquet_write_path', format 'parquet');
 INSERT INTO lagodb_connectors_regress.parquet_write
 SELECT * FROM lagodb_connectors_regress.parquet_source;
-SELECT count(*) AS written_rows,
-       array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) =
-           (SELECT array_agg(to_jsonb(source) ORDER BY to_jsonb(source))
-            FROM lagodb_connectors_regress.parquet_source AS source)
-           AS matches_source
-FROM lagodb_connectors_regress.parquet_write AS value;
+(SELECT to_jsonb(value) AS row_data FROM lagodb_connectors_regress.parquet_write AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_source AS value)
+UNION ALL
+(SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_source AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_write AS value);
 
-CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_filter
-    (:parquet_columns)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'parquet_filter_path', format 'parquet');
 
 CREATE TABLE lagodb_connectors_regress.null_parameter_source (id integer);
 INSERT INTO lagodb_connectors_regress.null_parameter_source VALUES (NULL);
 
 -- Mirrored and ordinary integer comparisons are both evaluated by Parquet.
-SELECT coalesce(string_agg(id::text, ',' ORDER BY id), '<none>') AS ids
+SELECT id
 FROM lagodb_connectors_regress.parquet_filter
-WHERE 1 < id AND bigint_col < 0::bigint;
+WHERE 1 < id AND bigint_col < 0::bigint
+ORDER BY id;
 
 -- The ForeignScan reports provider-accepted predicates separately from local
 -- residual quals. This plan assertion verifies that filter pushdown occurred.
@@ -167,10 +157,7 @@ WHERE id = 1;
 
 -- Boolean comparison, NULL tests, AND, OR, and NOT retain PostgreSQL's
 -- three-valued logic inside the Arrow predicate.
-SELECT coalesce(
-           string_agg(inner_rel.id::text, ',' ORDER BY inner_rel.id),
-           '<none>'
-       ) AS ids
+SELECT inner_rel.id
 FROM (VALUES (true)) AS outer_rel(flag)
 CROSS JOIN LATERAL (
     SELECT id
@@ -178,42 +165,40 @@ CROSS JOIN LATERAL (
     WHERE (NOT (smallint_col IS NULL) AND bool_col = outer_rel.flag)
        OR (smallint_col IS NULL AND bool_col <> outer_rel.flag)
     OFFSET 0
-) AS inner_rel;
+) AS inner_rel
+ORDER BY inner_rel.id;
 
 -- Equality is exact for deterministic collations; ordering is restricted to
 -- byte-order C/POSIX collations.
-SELECT coalesce(string_agg(id::text, ',' ORDER BY id), '<none>') AS ids
+SELECT id
 FROM lagodb_connectors_regress.parquet_filter
 WHERE varchar_col = 'varchar-one'
-   OR text_col COLLATE "C" > 'z' COLLATE "C";
+   OR text_col COLLATE "C" > 'z' COLLATE "C"
+ORDER BY id;
 
 -- A NULL runtime value must remain UNKNOWN rather than becoming a value or a
 -- provider error. PostgreSQL WHERE semantics therefore return no rows.
-SELECT coalesce(
-           string_agg(inner_rel.id::text, ',' ORDER BY inner_rel.id),
-           '<none>'
-       ) AS ids
+SELECT inner_rel.id
 FROM lagodb_connectors_regress.null_parameter_source AS outer_rel
 CROSS JOIN LATERAL (
     SELECT id
     FROM lagodb_connectors_regress.parquet_filter
     WHERE id = outer_rel.id
     OFFSET 0
-) AS inner_rel;
+) AS inner_rel
+ORDER BY inner_rel.id;
 
 -- Metadata pruning normalizes NOT to leaf operators. NOT UNKNOWN must remain
 -- UNKNOWN rather than becoming TRUE when the runtime parameter is NULL.
-SELECT coalesce(
-           string_agg(inner_rel.id::text, ',' ORDER BY inner_rel.id),
-           '<none>'
-       ) AS ids
+SELECT inner_rel.id
 FROM lagodb_connectors_regress.null_parameter_source AS outer_rel
 CROSS JOIN LATERAL (
     SELECT id
     FROM lagodb_connectors_regress.parquet_filter
     WHERE NOT (id = outer_rel.id)
     OFFSET 0
-) AS inner_rel;
+) AS inner_rel
+ORDER BY inner_rel.id;
 
 ANALYZE lagodb_connectors_regress.parquet_filter;
 
@@ -223,7 +208,7 @@ SELECT reltuples::bigint AS reltuples, relpages > 0 AS has_pages
 FROM pg_class
 WHERE oid = 'lagodb_connectors_regress.parquet_filter'::regclass;
 
-CREATE FUNCTION lagodb_connectors_regress.explain_json(query text)
+CREATE FUNCTION lagodb_connectors_regress.parquet_explain_plan(query text)
 RETURNS jsonb
 LANGUAGE plpgsql
 AS $$
@@ -231,30 +216,33 @@ DECLARE
     plan text;
 BEGIN
     EXECUTE 'EXPLAIN (FORMAT JSON) ' || query INTO plan;
-    RETURN plan::jsonb;
+    RETURN plan::jsonb -> 0 -> 'Plan';
 END
 $$;
 
--- Representative plans pin every supported predicate capability exercised
--- above. Exact filters have no local residual; conservative pruning retains
--- the original PostgreSQL Filter by contract.
-WITH explained AS (
-    SELECT lagodb_connectors_regress.explain_json(
-        $$SELECT id
+-- Inspect the ForeignScan fields: exact predicates have no local Filter.
+SELECT (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%id > 1%'
+   AND (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%bigint_col <%'
+   AND (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%::bigint%'
+   AND NOT (plan ? 'Filter')
+       AS mirrored_and_pushdown_complete
+FROM lagodb_connectors_regress.parquet_explain_plan(
+    $$SELECT id
           FROM lagodb_connectors_regress.parquet_filter
           WHERE 1 < id AND bigint_col < 0::bigint$$
-    ) AS value
-)
-SELECT value::text LIKE '%Pushed Filter%'
-   AND value::text LIKE '%id > 1%'
-   AND value::text LIKE '%bigint_col <%'
-   AND value::text LIKE '%::bigint%'
-   AND value::text NOT LIKE '%"Filter":%'
-       AS mirrored_and_pushdown_complete
-FROM explained;
+) AS explained(plan);
 
-WITH explained AS (
-    SELECT lagodb_connectors_regress.explain_json(
+-- PostgreSQL folds comparisons with the constant true into bare boolean Vars.
+-- These remain in the local Filter; the NULL-test branches are pushed as
+-- conservative pruning and must retain that Filter.
+SELECT ((plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%smallint_col IS NOT NULL%'
+        OR (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%NOT (smallint_col IS NULL)%')
+   AND (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%smallint_col IS NULL%'
+   AND (plan ->> 'Filter') LIKE '%bool_col%'
+   AND plan ? 'Filter'
+       AS boolean_null_logic_pushdown_complete
+FROM jsonb_path_query_first(
+    lagodb_connectors_regress.parquet_explain_plan(
         $$SELECT inner_rel.id
           FROM (VALUES (true)) AS outer_rel(flag)
           CROSS JOIN LATERAL (
@@ -264,34 +252,28 @@ WITH explained AS (
                  OR (smallint_col IS NULL AND bool_col <> outer_rel.flag)
               OFFSET 0
           ) AS inner_rel$$
-    ) AS value
-)
-SELECT value::text LIKE '%Pushed Filter%'
-   AND (value::text LIKE '%smallint_col IS NOT NULL%'
-        OR value::text LIKE '%NOT (smallint_col IS NULL)%')
-   AND value::text LIKE '%smallint_col IS NULL%'
-   AND value::text LIKE '%bool_col%'
-   AND value::text LIKE '%"Filter":%'
-       AS boolean_null_logic_pushdown_complete
-FROM explained;
+    ),
+    '$.** ? (@."Node Type" == "Foreign Scan")'
+) AS explained(plan);
 
-WITH explained AS (
-    SELECT lagodb_connectors_regress.explain_json(
-        $$SELECT id
+SELECT (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%varchar_col =%'
+   AND (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%text_col >%'
+   AND NOT (plan ? 'Filter')
+       AS string_collation_pushdown_complete
+FROM lagodb_connectors_regress.parquet_explain_plan(
+    $$SELECT id
           FROM lagodb_connectors_regress.parquet_filter
           WHERE varchar_col = 'varchar-one'
              OR text_col COLLATE "C" > 'z' COLLATE "C"$$
-    ) AS value
-)
-SELECT value::text LIKE '%Pushed Filter%'
-   AND value::text LIKE '%varchar_col =%'
-   AND value::text LIKE '%text_col >%'
-   AND value::text NOT LIKE '%"Filter":%'
-       AS string_collation_pushdown_complete
-FROM explained;
+) AS explained(plan);
 
-WITH explained AS (
-    SELECT lagodb_connectors_regress.explain_json(
+-- PARAM_EXEC descriptions are persisted during planning. NULL and NOT
+-- UNKNOWN execution cases above share this parameterized EXPLAIN path.
+SELECT (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%id = $1%'
+   AND NOT (plan ? 'Filter')
+       AS null_parameter_pushdown_complete
+FROM jsonb_path_query_first(
+    lagodb_connectors_regress.parquet_explain_plan(
         $$SELECT inner_rel.id
           FROM lagodb_connectors_regress.null_parameter_source AS outer_rel
           CROSS JOIN LATERAL (
@@ -300,16 +282,16 @@ WITH explained AS (
               WHERE id = outer_rel.id
               OFFSET 0
           ) AS inner_rel$$
-    ) AS value
-)
-SELECT value::text LIKE '%Pushed Filter%'
-   AND value::text LIKE '%id = $1%'
-   AND value::text NOT LIKE '%"Filter":%'
-       AS null_parameter_pushdown_complete
-FROM explained;
+    ),
+    '$.** ? (@."Node Type" == "Foreign Scan")'
+) AS explained(plan);
 
-WITH explained AS (
-    SELECT lagodb_connectors_regress.explain_json(
+SELECT (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%id%'
+   AND (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%$1%'
+   AND NOT (plan ? 'Filter')
+       AS null_parameter_not_pushdown_complete
+FROM jsonb_path_query_first(
+    lagodb_connectors_regress.parquet_explain_plan(
         $$SELECT inner_rel.id
           FROM lagodb_connectors_regress.null_parameter_source AS outer_rel
           CROSS JOIN LATERAL (
@@ -318,72 +300,36 @@ WITH explained AS (
               WHERE NOT (id = outer_rel.id)
               OFFSET 0
           ) AS inner_rel$$
-    ) AS value
-)
-SELECT value::text LIKE '%Pushed Filter%'
-   AND value::text LIKE '%id%'
-   AND value::text LIKE '%$1%'
-   AND value::text NOT LIKE '%"Filter":%'
-       AS null_parameter_not_pushdown_complete
-FROM explained;
+    ),
+    '$.** ? (@."Node Type" == "Foreign Scan")'
+) AS explained(plan);
 
--- Unsupported arithmetic remains solely a PostgreSQL local residual.
-WITH explained AS (
-    SELECT lagodb_connectors_regress.explain_json(
-        $$SELECT id
+-- Unsupported arithmetic remains a local PostgreSQL Filter.
+SELECT (plan #> '{LagoDB Pushdown,Pushed Filter}') IS NULL AND plan ? 'Filter'
+       AS unsupported_expression_remains_local
+FROM lagodb_connectors_regress.parquet_explain_plan(
+    $$SELECT id
           FROM lagodb_connectors_regress.parquet_filter
           WHERE id + 1 = 2$$
-    ) AS value
-)
-SELECT value::text NOT LIKE '%Pushed Filter%'
-   AND value::text LIKE '%"Filter":%'
-       AS unsupported_expression_remains_local
-FROM explained;
+) AS explained(plan);
 
--- A parameterized ForeignScan must use its persisted predicate description;
--- ExplainForeignScan has no ancestor list for deparsing PARAM_EXEC expressions.
-WITH explained AS (
-    SELECT lagodb_connectors_regress.explain_json(
-        'SELECT inner_rel.id
-         FROM generate_series(1, 2) AS outer_rel(id)
-         CROSS JOIN LATERAL (
-             SELECT id
-             FROM lagodb_connectors_regress.parquet_filter
-             WHERE id = outer_rel.id
-             OFFSET 0
-         ) AS inner_rel'
-    ) AS value
-)
-SELECT value::text LIKE '%Pushed Filter%'
-   AND value::text LIKE '%$1%'
-       AS parameterized_explain_reports_pushdown
-FROM explained;
-
--- The planner consumes persisted stats and charges provider startup/filter
--- work; none of the former fixed 1000/32/zero values remain.
-WITH explained AS (
-    SELECT lagodb_connectors_regress.explain_json(
-        'SELECT * FROM lagodb_connectors_regress.parquet_filter WHERE id = 1'
-    ) AS value
-), plan AS (
-    SELECT value -> 0 -> 'Plan' AS value FROM explained
-)
-SELECT ((value ->> 'Plan Rows')::integer <> 1000)
-   AND ((value ->> 'Plan Width')::integer <> 32)
-   AND ((value ->> 'Startup Cost')::double precision > 0)
+-- ANALYZE statistics and provider costs replace the former fixed values.
+SELECT (plan ->> 'Plan Rows')::integer <> 1000
+   AND (plan ->> 'Plan Width')::integer <> 32
+   AND (plan ->> 'Startup Cost')::double precision > 0
        AS planner_uses_analyze_stats
-FROM plan;
+FROM lagodb_connectors_regress.parquet_explain_plan(
+    'SELECT * FROM lagodb_connectors_regress.parquet_filter WHERE id = 1'
+) AS explained(plan);
 
--- Object-key order and per-file row order do not establish a global ordering,
--- so a requested ORDER BY must retain PostgreSQL's Sort node.
-WITH explained AS (
-    SELECT lagodb_connectors_regress.explain_json(
-        'SELECT id FROM lagodb_connectors_regress.parquet_filter ORDER BY id'
-    ) AS value
-)
-SELECT (value -> 0 -> 'Plan' ->> 'Node Type') = 'Sort'
+-- No global object/row ordering is guaranteed; PostgreSQL must retain Sort.
+SELECT (plan ->> 'Node Type') = 'Sort'
        AS planner_retains_sort
-FROM explained;
+FROM lagodb_connectors_regress.parquet_explain_plan(
+    'SELECT id FROM lagodb_connectors_regress.parquet_filter ORDER BY id'
+) AS explained(plan);
+
+DROP FUNCTION lagodb_connectors_regress.parquet_explain_plan(text);
 
 -- Parquet array element and shape boundaries.
 
@@ -408,9 +354,6 @@ SELECT format('s3://%s/lagodb-connectors/parquet-arrays/null-elements.parquet',
        'lagodb-connectors/parquet-arrays/multidimensional/' AS multidimensional_key
 \gset array_
 
-SET client_min_messages = warning;
-DROP TABLE IF EXISTS lagodb_connectors_regress.parquet_null_array_source;
-RESET client_min_messages;
 CREATE TABLE lagodb_connectors_regress.parquet_null_array_source
     (:parquet_columns);
 INSERT INTO lagodb_connectors_regress.parquet_null_array_source
@@ -451,27 +394,15 @@ COPY lagodb_connectors_regress.parquet_null_array_source
 TO :'array_null_elements_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 
-SET client_min_messages = warning;
-DROP TABLE IF EXISTS lagodb_connectors_regress.parquet_null_array_sink;
-RESET client_min_messages;
-CREATE TABLE lagodb_connectors_regress.parquet_null_array_sink
-    (:parquet_columns);
-COPY lagodb_connectors_regress.parquet_null_array_sink
+COPY lagodb_connectors_regress.parquet_copy_sink
 FROM :'array_null_elements_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 
-SELECT bool_array[2] IS NULL AS bool_null,
-       smallint_array[2] IS NULL AS smallint_null,
-       integer_array[2] IS NULL AS integer_null,
-       bigint_array[2] IS NULL AS bigint_null,
-       real_array[2] IS NULL AS real_null,
-       double_array[2] IS NULL AS double_null,
-       text_array[2] IS NULL AS text_null,
-       varchar_array[2] IS NULL AS varchar_null,
-       bpchar_array[2] IS NULL AS bpchar_null,
-       name_array[2] IS NULL AS name_null,
-       json_array[2] IS NULL AS json_null
-FROM lagodb_connectors_regress.parquet_null_array_sink;
+(SELECT to_jsonb(value) AS row_data FROM lagodb_connectors_regress.parquet_copy_sink AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_null_array_source AS value)
+UNION ALL
+(SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_null_array_source AS value
+ EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_copy_sink AS value);
 
 -- Arrow List represents one-dimensional PostgreSQL arrays. A multidimensional
 -- value is the representative unsupported-shape boundary.
@@ -504,9 +435,6 @@ COPY (
 ) TO :'projection_reorder_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 
-SET client_min_messages = warning;
-DROP TABLE IF EXISTS lagodb_connectors_regress.scan_projection_sink;
-RESET client_min_messages;
 CREATE TABLE lagodb_connectors_regress.scan_projection_sink (
     id integer,
     text_col text
@@ -515,9 +443,6 @@ COPY lagodb_connectors_regress.scan_projection_sink (id, text_col)
 FROM :'projection_reorder_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 
-SET client_min_messages = warning;
-DROP TABLE IF EXISTS lagodb_connectors_regress.scan_reordered_sink;
-RESET client_min_messages;
 CREATE TABLE lagodb_connectors_regress.scan_reordered_sink (
     id integer,
     bool_col boolean,
@@ -531,26 +456,10 @@ COPY lagodb_connectors_regress.scan_reordered_sink (
 FROM :'projection_reorder_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 
-SELECT relation, rows, digest
-FROM (
-    SELECT 'projection' AS relation,
-           count(*) AS rows,
-           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id)) AS digest
-    FROM lagodb_connectors_regress.scan_projection_sink AS value
-    UNION ALL
-    SELECT 'reordered', count(*),
-           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
-    FROM lagodb_connectors_regress.scan_reordered_sink AS value
-    UNION ALL
-    SELECT 'source', count(*),
-           md5(string_agg(row_to_json(value)::text, E'\n' ORDER BY value.id))
-    FROM (
-        SELECT id, bool_col, text_col
-        FROM lagodb_connectors_regress.common_source
-        ORDER BY id
-    ) AS value
-) AS mapping_results
-ORDER BY relation;
+SELECT id, to_json(text_col) AS text_col
+FROM lagodb_connectors_regress.scan_projection_sink ORDER BY id;
+SELECT id, bool_col, to_json(text_col) AS text_col
+FROM lagodb_connectors_regress.scan_reordered_sink ORDER BY id;
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.scan_projection (
     id integer,

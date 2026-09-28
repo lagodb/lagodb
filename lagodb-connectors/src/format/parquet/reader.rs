@@ -8,8 +8,11 @@ use lagodb_storage::StorageFile;
 use parquet::errors::{ParquetError, Result as ParquetResult};
 use parquet::file::reader::{ChunkReader, Length};
 
+use crate::storage::ReadProgress;
+
 pub(crate) struct ParquetObjectReader {
     file: Rc<StorageFile>,
+    progress: Option<ReadProgress>,
 }
 
 // SAFETY: The connector only constructs, uses, and drops this adapter on the
@@ -24,7 +27,19 @@ impl ParquetObjectReader {
     pub(crate) fn new(file: StorageFile) -> Self {
         Self {
             file: Rc::new(file),
+            progress: None,
         }
+    }
+
+    pub(crate) fn with_progress(file: StorageFile) -> (Self, ReadProgress) {
+        let progress = ReadProgress::default();
+        (
+            Self {
+                file: Rc::new(file),
+                progress: Some(progress.clone()),
+            },
+            progress,
+        )
     }
 }
 
@@ -47,6 +62,7 @@ impl ChunkReader for ParquetObjectReader {
         Ok(ParquetObjectRange {
             file: Rc::clone(&self.file),
             position: start,
+            progress: self.progress.clone(),
         })
     }
 
@@ -78,6 +94,9 @@ impl ChunkReader for ParquetObjectReader {
                     "object ended while reading range {start}..{end}"
                 )));
             }
+            if let Some(progress) = &self.progress {
+                progress.record(read);
+            }
             position += read as u64;
             written += read;
         }
@@ -88,6 +107,7 @@ impl ChunkReader for ParquetObjectReader {
 pub(crate) struct ParquetObjectRange {
     file: Rc<StorageFile>,
     position: u64,
+    progress: Option<ReadProgress>,
 }
 
 impl Read for ParquetObjectRange {
@@ -96,6 +116,9 @@ impl Read for ParquetObjectRange {
             .file
             .read_at_into(self.position, output)
             .map_err(io::Error::other)?;
+        if let Some(progress) = &self.progress {
+            progress.record(read);
+        }
         self.position += read as u64;
         Ok(read)
     }

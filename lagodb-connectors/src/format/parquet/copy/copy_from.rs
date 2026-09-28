@@ -1,35 +1,34 @@
-//! Parquet-to-canonical-CSV source for PostgreSQL COPY FROM.
+//! Parquet-to-Datum source for PostgreSQL COPY FROM.
 
-use std::ffi::CStr;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use arrow_schema::Schema;
-use lagodb_arrow::{ColumnReader, PgColumnType, resolve_column_rule};
-use lagodb_core::copy::{CopyColumnLayout, CopyDataSource, CopyError};
+use lagodb_arrow::{ColumnReader, ColumnRule, PgColumnType, resolve_column_rule};
+use lagodb_core::copy::{
+    CopyColumnLayout, CopyDatumCoercion, CopyDatumSource, CopyError, CopyInputRow,
+    CopyRowOutcome,
+};
 use lagodb_core::diag::PgReportError;
-use lagodb_core::tuple::{ColumnDatumCodec, ColumnDatumTarget};
+use lagodb_core::tuple::{ColumnDatumCodec, ColumnDatumTarget, numeric_typmod};
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
     ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder,
 };
-use pgrx::memcxt::PgMemoryContexts;
-use pgrx::{PgTryBuilder, pg_sys};
+use pgrx::PgTryBuilder;
 
 use crate::error::ConnectorError;
 use crate::format::{FormatKind, ParquetObjectReader};
-use crate::storage::ObjectFiles;
+use crate::storage::{ObjectFiles, ReadProgress};
 
-use super::super::super::copy::{CanonicalCsv, FormatCopySource};
+use super::super::super::copy::{FormatCopyInput, FormatCopySource};
 
 const PARQUET_BATCH_SIZE: usize = 8_192;
-const BRIDGE_BUFFER_TARGET: usize = 256 * 1024;
-
 struct CopyColumnPlan {
     source: usize,
-    rule: lagodb_arrow::ColumnRule,
+    rule: ColumnRule,
     codec: ColumnDatumCodec,
-    output_function: pg_sys::Oid,
+    coercion: CopyDatumCoercion,
 }
 
 struct BoundCopyBatch {
@@ -42,17 +41,50 @@ struct CopyColumnBindings {
     columns: Box<[CopyColumnPlan]>,
 }
 
-pub(in crate::format) struct ParquetCopySource {
-    files: ObjectFiles,
-    expected_schema: Option<Arc<Schema>>,
+struct BoundParquetCopy {
+    layout: CopyColumnLayout,
+    expected_schema: Arc<Schema>,
     projection_roots: Box<[usize]>,
     columns: Box<[CopyColumnPlan]>,
+}
+
+enum ParquetCopyBinding {
+    Empty { layout: CopyColumnLayout },
+    Bound(BoundParquetCopy),
+}
+
+impl ParquetCopyBinding {
+    fn layout(&self) -> &CopyColumnLayout {
+        match self {
+            Self::Empty { layout } => layout,
+            Self::Bound(binding) => &binding.layout,
+        }
+    }
+
+    fn bound(&self) -> Option<&BoundParquetCopy> {
+        match self {
+            Self::Empty { .. } => None,
+            Self::Bound(binding) => Some(binding),
+        }
+    }
+
+    fn bound_mut(&mut self) -> Option<&mut BoundParquetCopy> {
+        match self {
+            Self::Empty { .. } => None,
+            Self::Bound(binding) => Some(binding),
+        }
+    }
+}
+
+pub(in crate::format) struct ParquetCopySource {
+    files: ObjectFiles,
+    binding: ParquetCopyBinding,
     reader: Option<ParquetRecordBatchReader>,
     batch: Option<BoundCopyBatch>,
     row: usize,
-    bytes: Vec<u8>,
-    position: usize,
-    datum_context: PgMemoryContexts,
+    logical_row: u64,
+    completed_bytes: u64,
+    current_progress: Option<ReadProgress>,
 }
 
 impl ParquetCopySource {
@@ -63,38 +95,39 @@ impl ParquetCopySource {
         let Some(first) = files.next() else {
             return Ok(Self {
                 files,
-                expected_schema: None,
-                projection_roots: Box::new([]),
-                columns: Box::new([]),
+                binding: ParquetCopyBinding::Empty {
+                    layout: layout.clone(),
+                },
                 reader: None,
                 batch: None,
                 row: 0,
-                bytes: Vec::new(),
-                position: 0,
-                datum_context: PgMemoryContexts::new(
-                    "lagodb parquet copy from bridge",
-                ),
+                logical_row: 0,
+                completed_bytes: 0,
+                current_progress: None,
             });
         };
         let first = first?;
-        let builder =
-            ParquetRecordBatchReaderBuilder::try_new(ParquetObjectReader::new(first))
-                .map_err(ConnectorError::from)?;
+        let (object, progress) = ParquetObjectReader::with_progress(first);
+        let builder = ParquetRecordBatchReaderBuilder::try_new(object)
+            .map_err(ConnectorError::from)?;
         let expected_schema = builder.schema().clone();
         let bindings = Self::bind_columns(&expected_schema, layout)?;
         let reader = Self::build_reader(builder, &bindings.projection_roots)
             .map_err(CopyError::from)?;
         Ok(Self {
             files,
-            expected_schema: Some(expected_schema),
-            projection_roots: bindings.projection_roots,
-            columns: bindings.columns,
+            binding: ParquetCopyBinding::Bound(BoundParquetCopy {
+                layout: layout.clone(),
+                expected_schema,
+                projection_roots: bindings.projection_roots,
+                columns: bindings.columns,
+            }),
             reader: Some(reader),
             batch: None,
             row: 0,
-            bytes: Vec::with_capacity(BRIDGE_BUFFER_TARGET),
-            position: 0,
-            datum_context: PgMemoryContexts::new("lagodb parquet copy from bridge"),
+            logical_row: 0,
+            completed_bytes: 0,
+            current_progress: Some(progress),
         })
     }
 
@@ -104,65 +137,71 @@ impl ParquetCopySource {
     ) -> Result<CopyColumnBindings, CopyError> {
         let mut roots = Vec::with_capacity(layout.len());
         let mut pending = Vec::with_capacity(layout.len());
-        let bind = unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                for column in layout.columns() {
-                    let name = column.name().to_str().map_err(|_| {
-                        ConnectorError::invalid_object_schema(
-                            FormatKind::Parquet,
-                            "COPY column names must be valid UTF-8 for Parquet",
-                        )
-                    })?;
-                    let source = schema.index_of(name).map_err(|_| {
-                        ConnectorError::invalid_object_schema(
-                            FormatKind::Parquet,
-                            format!(
-                                "COPY target column {:?} is missing from the Parquet schema",
-                                name
-                            ),
-                        )
-                    })?;
-                    let pg = PgColumnType::from_pg_type(column.type_oid()).ok_or_else(|| {
-                        ConnectorError::invalid_object_schema(
-                            FormatKind::Parquet,
-                            format!(
-                                "PostgreSQL type OID {} has no Arrow conversion",
-                                column.type_oid()
-                            ),
-                        )
-                    })?;
-                    let rule = resolve_column_rule(schema.field(source).data_type(), pg)?;
-                    let codec = ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(
-                        column.type_oid(),
-                    ))?;
-                    let mut output_function = pg_sys::InvalidOid;
-                    let mut variable_length = false;
-                    pg_sys::getTypeOutputInfo(
-                        column.type_oid(),
-                        &mut output_function,
-                        &mut variable_length,
-                    );
-                    roots.push(source);
-                    pending.push((source, rule, codec, output_function));
-                }
-                Ok::<(), ConnectorError>(())
-            }))
-            .catch_others(|error| Err(ConnectorError::Postgres(PgReportError::from_caught(error))))
-            .execute()
-        };
+        let bind = PgTryBuilder::new(AssertUnwindSafe(|| {
+            for column in layout.columns() {
+                let name = column.name().to_str().map_err(|_| {
+                    ConnectorError::invalid_object_schema(
+                        FormatKind::Parquet,
+                        "COPY column names must be valid UTF-8 for Parquet",
+                    )
+                })?;
+                let source = schema.index_of(name).map_err(|_| {
+                    ConnectorError::invalid_object_schema(
+                        FormatKind::Parquet,
+                        format!(
+                            "COPY target column {:?} is missing from the Parquet schema",
+                            name
+                        ),
+                    )
+                })?;
+                let pg = PgColumnType::from_pg_type(column.type_oid()).ok_or_else(|| {
+                    ConnectorError::invalid_object_schema(
+                        FormatKind::Parquet,
+                        format!(
+                            "PostgreSQL type OID {} has no Arrow conversion",
+                            column.type_oid()
+                        ),
+                    )
+                })?;
+                let rule = resolve_column_rule(schema.field(source).data_type(), pg)?;
+                let codec =
+                    ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(column.type_oid()))?;
+                // Decimal decoding already applies its schema typmod through
+                // numeric_recv. Reuse that guarantee when the target matches.
+                let source_typmod = match &rule {
+                    ColumnRule::Decimal128 { precision, scale } => {
+                        numeric_typmod(*precision, *scale as i32)
+                    }
+                    _ => -1,
+                };
+                let coercion = CopyDatumCoercion::bind(
+                    column.type_oid(),
+                    source_typmod,
+                    column.type_mod(),
+                )
+                .map_err(PgReportError::from_pg_error)?;
+                roots.push(source);
+                pending.push((source, rule, codec, coercion));
+            }
+            Ok::<(), ConnectorError>(())
+        }))
+        .catch_others(|error| {
+            Err(ConnectorError::Postgres(PgReportError::from_caught(error)))
+        })
+        .execute();
         bind.map_err(CopyError::from)?;
 
         roots.sort_unstable();
         roots.dedup();
         let columns = pending
             .into_iter()
-            .map(|(source, rule, codec, output_function)| CopyColumnPlan {
+            .map(|(source, rule, codec, coercion)| CopyColumnPlan {
                 source: roots
                     .binary_search(&source)
                     .expect("projected Parquet source was retained"),
                 rule,
                 codec,
-                output_function,
+                coercion,
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
@@ -189,28 +228,40 @@ impl ParquetCopySource {
         let Some(file) = self.files.next() else {
             return Ok(false);
         };
-        let builder =
-            ParquetRecordBatchReaderBuilder::try_new(ParquetObjectReader::new(file?))
-                .map_err(ConnectorError::from)?;
-        let expected_schema = self
-            .expected_schema
-            .as_ref()
-            .expect("a non-empty Parquet input has a bound schema");
-        if builder.schema().fields() != expected_schema.fields() {
+        let (object, progress) = ParquetObjectReader::with_progress(file?);
+        let builder = ParquetRecordBatchReaderBuilder::try_new(object)
+            .map_err(ConnectorError::from)?;
+        let binding = self
+            .binding
+            .bound()
+            .expect("only a bound Parquet source opens object readers");
+        if builder.schema().fields() != binding.expected_schema.fields() {
             return Err(ConnectorError::invalid_object_schema(
                 FormatKind::Parquet,
                 "objects under one prefix do not share the same Arrow schema",
             ));
         }
-        self.reader = Some(Self::build_reader(builder, &self.projection_roots)?);
+        self.reader = Some(Self::build_reader(builder, &binding.projection_roots)?);
+        self.current_progress = Some(progress);
         Ok(true)
+    }
+
+    fn finish_current_reader(&mut self) {
+        if let Some(progress) = self.current_progress.take() {
+            self.completed_bytes =
+                self.completed_bytes.saturating_add(progress.bytes());
+        }
     }
 
     fn bind_batch(
         &self,
         batch: arrow_array::RecordBatch,
     ) -> Result<BoundCopyBatch, ConnectorError> {
-        let columns = self
+        let binding = self
+            .binding
+            .bound()
+            .expect("only a bound Parquet source binds record batches");
+        let columns = binding
             .columns
             .iter()
             .map(|plan| {
@@ -234,105 +285,90 @@ impl ParquetCopySource {
                 return Ok(true);
             }
             self.reader = None;
+            self.finish_current_reader();
             if !self.open_next_reader()? {
                 return Ok(false);
             }
         }
     }
+}
 
-    fn fill_bytes(&mut self) -> Result<bool, CopyError> {
-        self.bytes.clear();
-        self.position = 0;
-        let datum_context = self.datum_context.value();
+impl CopyDatumSource for ParquetCopySource {
+    fn initialize(&mut self, layout: &CopyColumnLayout) -> Result<(), CopyError> {
+        if layout != self.binding.layout() {
+            return Err(CopyError::invalid_column_layout(
+                "Parquet source was bound to a different COPY layout",
+            ));
+        }
+        Ok(())
+    }
+
+    fn next_row(
+        &mut self,
+        row: CopyInputRow<'_>,
+    ) -> Result<CopyRowOutcome, CopyError> {
+        if matches!(&self.binding, ParquetCopyBinding::Empty { .. }) {
+            return Ok(CopyRowOutcome::End);
+        }
+        if self
+            .batch
+            .as_ref()
+            .is_none_or(|batch| self.row >= batch.rows)
+        {
+            self.batch = None;
+            if !self.next_batch().map_err(CopyError::from)? {
+                return Ok(CopyRowOutcome::End);
+            }
+        }
+        let mut active_column = 0;
         let result = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(|| {
-                while self.bytes.len() < BRIDGE_BUFFER_TARGET {
-                    if self
-                        .batch
-                        .as_ref()
-                        .is_none_or(|batch| self.row >= batch.rows)
-                    {
-                        self.batch = None;
-                        if !self.next_batch()? {
-                            return Ok(false);
-                        }
-                    }
-                    // Output functions can allocate varlena text. Keep that
-                    // allocation strictly row-scoped rather than retaining a
-                    // bridge-buffer-sized group of temporary values.
-                    pg_sys::MemoryContextReset(datum_context);
-                    PgMemoryContexts::For(datum_context).switch_to(|_| {
-                        let batch = self.batch.as_ref().expect("batch was loaded");
-                        for (index, (plan, column)) in
-                            self.columns.iter().zip(batch.columns.iter()).enumerate()
-                        {
-                            if index > 0 {
-                                self.bytes.push(b',');
-                            }
-                            match column.read_datum_unchecked(self.row, plan.codec)? {
-                                None => {
-                                    self.bytes.extend_from_slice(CanonicalCsv::NULL)
-                                }
-                                Some(datum) => {
-                                    // Intentional CSV bridge; see canonical_csv's
-                                    // accepted native-format performance trade-off.
-                                    let value = pg_sys::OidOutputFunctionCall(
-                                        plan.output_function,
-                                        datum,
-                                    );
-                                    let value = CStr::from_ptr(value);
-                                    CanonicalCsv::write_field(
-                                        &mut self.bytes,
-                                        value.to_bytes(),
-                                    );
-                                }
-                            }
-                        }
-                        self.bytes.push(b'\n');
-                        Ok::<(), ConnectorError>(())
-                    })?;
-                    self.row += 1;
+                let batch = self.batch.as_ref().expect("batch was loaded");
+                let binding = self
+                    .binding
+                    .bound_mut()
+                    .expect("a loaded Parquet batch has bound columns");
+                for (column_index, ((target, plan), column)) in row
+                    .columns()
+                    .zip(binding.columns.iter_mut())
+                    .zip(batch.columns.iter())
+                    .enumerate()
+                {
+                    active_column = column_index;
+                    let value = column.read_datum_unchecked(self.row, plan.codec)?;
+                    target.set(plan.coercion.apply(value));
                 }
-                Ok::<bool, ConnectorError>(true)
+                Ok::<(), ConnectorError>(())
             }))
             .catch_others(|error| {
                 Err(ConnectorError::Postgres(PgReportError::from_caught(error)))
             })
             .execute()
         };
-        unsafe { self.datum_context.reset() };
-        let more = result.map_err(CopyError::from)?;
-        Ok(more || !self.bytes.is_empty())
-    }
-}
-
-impl CopyDataSource for ParquetCopySource {
-    fn read(
-        &mut self,
-        output: &mut [u8],
-        min_read: usize,
-    ) -> Result<usize, CopyError> {
-        let mut written = 0;
-        let target = min_read.max(1).min(output.len());
-        while written < target {
-            if self.position == self.bytes.len() && !self.fill_bytes()? {
-                break;
-            }
-            let available = &self.bytes[self.position..];
-            let count = available.len().min(output.len() - written);
-            output[written..written + count].copy_from_slice(&available[..count]);
-            self.position += count;
-            written += count;
-            if written == output.len() {
-                break;
-            }
+        self.row += 1;
+        self.logical_row += 1;
+        match result {
+            Ok(()) => Ok(CopyRowOutcome::Row),
+            Err(error) => error
+                .into_copy_row_rejection(
+                    Some(active_column),
+                    format!("Parquet row {}", self.logical_row),
+                )
+                .map(CopyRowOutcome::Rejected),
         }
-        Ok(written)
+    }
+
+    fn bytes_consumed(&self) -> u64 {
+        self.completed_bytes.saturating_add(
+            self.current_progress
+                .as_ref()
+                .map_or(0, ReadProgress::bytes),
+        )
     }
 }
 
 impl FormatCopySource for ParquetCopySource {
-    fn source(&mut self) -> &mut dyn CopyDataSource {
-        self
+    fn input(&mut self) -> FormatCopyInput<'_> {
+        FormatCopyInput::Datums(self)
     }
 }
