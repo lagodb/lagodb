@@ -8,9 +8,8 @@
 use std::ffi::c_char;
 use std::ptr;
 
-use lagodb_core::diag::PgError;
 use lagodb_core::tuple::{ColumnDatumCodec, ColumnDatumTarget};
-use pgrx::{AnyNumeric, IntoDatum, PgTryBuilder, pg_sys};
+use pgrx::{AnyNumeric, IntoDatum, pg_sys};
 
 use crate::error::{ArrowConversionError, ArrowConversionResult};
 
@@ -180,7 +179,7 @@ impl DatumCodec {
                 "JSON text is too large for PostgreSQL varlena input".to_string(),
             )
         })?;
-        unsafe { Self::copy_json_text(text.as_ptr(), len) }
+        Ok(unsafe { Self::copy_json_text(text.as_ptr(), len) })
     }
 
     /// Copy bytes owned by a bound PostgreSQL JSONB varlena reader into the
@@ -194,7 +193,7 @@ impl DatumCodec {
     pub(crate) unsafe fn copy_postgres_jsonb_varlena(
         bytes: &[u8],
     ) -> ArrowConversionResult<pg_sys::Datum> {
-        unsafe { Self::copy_internal_varlena(bytes) }
+        Ok(unsafe { Self::copy_internal_varlena(bytes) })
     }
 
     /// Copy trusted complete PostgreSQL NUMERIC varlena bytes into the current
@@ -202,7 +201,7 @@ impl DatumCodec {
     pub(crate) unsafe fn copy_postgres_numeric_varlena(
         bytes: &[u8],
     ) -> ArrowConversionResult<pg_sys::Datum> {
-        unsafe { Self::copy_internal_varlena(bytes) }
+        Ok(unsafe { Self::copy_internal_varlena(bytes) })
     }
 
     pub(crate) fn numeric_datum_from_int64(
@@ -235,36 +234,23 @@ impl DatumCodec {
         )
     }
 
-    unsafe fn copy_json_text(
-        ptr: *const u8,
-        len: i32,
-    ) -> ArrowConversionResult<pg_sys::Datum> {
-        unsafe {
-            PgTryBuilder::new(move || {
-                let text_ptr =
-                    pg_sys::cstring_to_text_with_len(ptr as *const c_char, len);
-                Ok(pg_sys::Datum::from(text_ptr))
-            })
-            .catch_others(|error| Err(PgError::from(error)))
-            .execute()
-        }
-        .map_err(ArrowConversionError::Postgres)
+    unsafe fn copy_json_text(ptr: *const u8, len: i32) -> pg_sys::Datum {
+        // SAFETY: the caller provides `len` readable bytes and the current
+        // PostgreSQL memory context owns the returned allocation.
+        let text_ptr =
+            unsafe { pg_sys::cstring_to_text_with_len(ptr as *const c_char, len) };
+        pg_sys::Datum::from(text_ptr)
     }
 
-    unsafe fn copy_internal_varlena(
-        bytes: &[u8],
-    ) -> ArrowConversionResult<pg_sys::Datum> {
+    unsafe fn copy_internal_varlena(bytes: &[u8]) -> pg_sys::Datum {
         let ptr = bytes.as_ptr();
         let len = bytes.len();
+        // SAFETY: `bytes` contains `len` initialized bytes and `palloc`
+        // returns a live allocation in the current PostgreSQL memory context.
         unsafe {
-            PgTryBuilder::new(move || {
-                let new_ptr = pg_sys::palloc(len);
-                ptr::copy_nonoverlapping(ptr, new_ptr as *mut u8, len);
-                Ok(pg_sys::Datum::from(new_ptr))
-            })
-            .catch_others(|error| Err(PgError::from(error)))
-            .execute()
+            let new_ptr = pg_sys::palloc(len);
+            ptr::copy_nonoverlapping(ptr, new_ptr.cast(), len);
+            pg_sys::Datum::from(new_ptr)
         }
-        .map_err(ArrowConversionError::Postgres)
     }
 }

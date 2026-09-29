@@ -10,7 +10,7 @@ use std::mem::size_of;
 
 use pgrx::pg_sys::{self, Datum};
 use pgrx::prelude::PgSqlErrorCode;
-use pgrx::{PgTryBuilder, varlena};
+use pgrx::varlena;
 use thiserror::Error;
 
 use crate::diag::{PgError, SqlStateError};
@@ -192,18 +192,11 @@ impl JsonText {
                 target: pg_sys::JSONOID,
             }
         })?;
-        let ptr = self.text.as_ptr();
-        unsafe {
-            PgTryBuilder::new(move || {
-                Ok(Datum::from(pg_sys::cstring_to_text_with_len(
-                    ptr.cast(),
-                    len,
-                )))
-            })
-            .catch_others(|error| Err(PgError::from(error)))
-            .execute()
-        }
-        .map_err(DatumConversionError::Postgres)
+        // SAFETY: `self.text` contains `len` initialized bytes and PostgreSQL
+        // owns the returned text allocation in the current memory context.
+        Ok(Datum::from(unsafe {
+            pg_sys::cstring_to_text_with_len(self.text.as_ptr().cast(), len)
+        }))
     }
 }
 

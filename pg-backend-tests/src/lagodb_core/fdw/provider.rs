@@ -22,7 +22,11 @@ pub(super) enum IdentityMode {
 
 impl IdentityMode {
     pub(super) fn for_relation(relation: &RelationHandle<'_>) -> Self {
-        if relation.relation_name().starts_with("fdw_test_tid_") {
+        if relation
+            .relation_name()
+            .as_bytes()
+            .starts_with(b"fdw_test_tid_")
+        {
             Self::ItemPointer
         } else {
             Self::Attribute

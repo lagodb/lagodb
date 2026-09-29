@@ -21,7 +21,7 @@ unsafe extern "C" {
     ) -> bool;
 }
 
-/// PostgreSQL's exact block-sampler state for one PG17 ANALYZE scan.
+/// PostgreSQL's exact block-sampler state for one PostgreSQL ANALYZE scan.
 ///
 /// `target_rows` is the `targrows` passed to `acquire_sample_rows()`. During
 /// inherited ANALYZE PostgreSQL has already replaced it with this relation's
@@ -357,7 +357,7 @@ impl<'a> SampleScanStateHandle<'a> {
     }
 }
 
-/// PG17 ANALYZE-only wrapper for PostgreSQL's block-sampling ReadStream.
+/// ANALYZE-only wrapper for PostgreSQL's block-sampling ReadStream.
 ///
 /// Core constructs this type only for `scan_analyze_next_block`, after
 /// PostgreSQL's `acquire_sample_rows()` has installed a live
@@ -383,7 +383,7 @@ impl<'a> AnalyzeReadStreamHandle<'a> {
         }
     }
 
-    /// Copy PG17's exact ANALYZE `BlockSamplerData` state.
+    /// Copy PostgreSQL's exact ANALYZE `BlockSamplerData` state.
     ///
     /// Returns `None` if this stream is not backed by the sampler shape used by
     /// PostgreSQL's `acquire_sample_rows()`, or if the versioned C bridge finds

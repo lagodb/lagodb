@@ -190,7 +190,7 @@ impl TableProvider for ExternalTableProvider {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct ExternalTableScanExec {
     scan: ScanId,
     schema: SchemaRef,
@@ -281,6 +281,19 @@ impl ExecutionPlan for ExternalTableScanExec {
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         Vec::new()
+    }
+
+    fn reset_state(self: Arc<Self>) -> Result<Arc<dyn ExecutionPlan>> {
+        // Provider bindings are statement-owned; streams are run-owned. Only
+        // physical metrics need a fresh owner so the statement accumulator
+        // does not count a predecessor's scan counters again after a reset.
+        if self.scan_metrics.is_none() {
+            return Ok(self);
+        }
+        Ok(Arc::new(Self {
+            scan_metrics: Some(ScanExecMetrics::new()),
+            ..Self::clone(&self)
+        }))
     }
 
     fn apply_expressions(

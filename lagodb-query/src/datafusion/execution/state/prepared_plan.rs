@@ -134,6 +134,18 @@ impl PreparedPhysicalPlan {
             metrics.record(&serial.plan);
         }
     }
+
+    pub(super) fn reset_serial_for_rescan(
+        &mut self,
+    ) -> Result<(), QueryExecutionError> {
+        if let Self::Serial(serial) = self
+            && serial.executed
+        {
+            serial.plan.reset_for_rescan()?;
+            serial.executed = false;
+        }
+        Ok(())
+    }
 }
 
 impl PhysicalPlanPreparation<'_> {

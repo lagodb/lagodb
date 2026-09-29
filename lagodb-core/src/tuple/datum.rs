@@ -20,6 +20,8 @@ use crate::wrapper::PgWrapper;
 
 use super::cell::Cell;
 
+mod text;
+
 /// A relation attribute's target conversion plan.
 ///
 /// The plan is resolved once from the destination OID. Typmods are not part of
@@ -566,15 +568,8 @@ impl Cell {
                     .ok_or(DatumConversionError::invalid_input(target)),
                 _ => Err(DatumConversionError::incompatible(target)),
             },
-            ScalarKind::Text | ScalarKind::Varchar | ScalarKind::Bpchar => match self
-            {
-                Cell::String(value) => value
-                    .into_datum()
-                    .ok_or(DatumConversionError::invalid_input(target)),
-                Cell::StringView(view) => unsafe { view.as_str() }
-                    .into_datum()
-                    .ok_or(DatumConversionError::invalid_input(target)),
-                _ => Err(DatumConversionError::incompatible(target)),
+            ScalarKind::Text | ScalarKind::Varchar | ScalarKind::Bpchar => unsafe {
+                self.into_text_datum(target)
             },
             ScalarKind::Name => unsafe { self.into_name_datum(target) },
             ScalarKind::Json | ScalarKind::Jsonb => unsafe {

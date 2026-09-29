@@ -18,6 +18,7 @@ use super::contract::FdwScan;
 use super::error::{ForeignScanError, ForeignScanPhase};
 use super::plan_filter::ForeignFilterExplainValues;
 use super::private::decode_scan_explain_private;
+use super::state::ForeignScanStateWrapper;
 
 const GROUP_LABEL: &CStr = c"LagoDB Pushdown";
 const PROP_PROVIDER: &CStr = c"Provider";
@@ -280,6 +281,19 @@ pub(crate) unsafe extern "C-unwind" fn explain_foreign_scan<P: FdwScan>(
 
         let raw = unsafe { decode_scan_explain_private::<P>((*plan).fdw_private) }?;
         let explain = unsafe { ForeignScanExplain::decode(raw) }?;
+        if unsafe { (*es).analyze && (*es).verbose } {
+            // ANALYZE invokes EXPLAIN before EndForeignScan. An unstarted
+            // provider (for example, an unexecuted subplan) has no inventory.
+            let wrapper =
+                unsafe { &*((*node).fdw_state.cast::<ForeignScanStateWrapper<P>>()) };
+            if wrapper.payload.provider_state_initialized()
+                && let Some(metrics) = P::scan_task_metrics(unsafe {
+                    wrapper.payload.provider_state_unchecked()
+                })
+            {
+                unsafe { metrics.explain(es) };
+            }
+        }
         unsafe { explain.emit::<P>(es) };
         Ok::<(), ForeignScanError>(())
     })();

@@ -10,6 +10,7 @@ use datafusion::common::DataFusionError;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_expr::DynamicFilterTracking;
+use datafusion::physical_plan::execution_plan::reset_plan_states;
 use datafusion::physical_plan::{ExecutionPlan, execute_stream};
 
 pub(super) use metrics_accumulator::PhysicalPlanMetricsAccumulator;
@@ -41,6 +42,14 @@ impl CompiledPhysicalPlan {
 
     pub(super) fn schema(&self) -> SchemaRef {
         self.plan.schema()
+    }
+
+    pub(super) fn reset_for_rescan(&mut self) -> Result<(), DataFusionError> {
+        // The execution owner recompiles plans with dynamic filters. All other
+        // plans still need DataFusion's reset contract: joins retain build-side
+        // futures, visited-row bitmaps, and probe completion state after a run.
+        self.plan = reset_plan_states(Arc::clone(&self.plan))?;
+        Ok(())
     }
 
     pub(super) fn plan(&self) -> &Arc<dyn ExecutionPlan> {

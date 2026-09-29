@@ -3,6 +3,8 @@
 use crate::expr::pushdown::{FilterPlanningContext, FilterPushdown};
 use pgrx::pg_sys;
 
+use crate::runtime_api::TableScanTaskMetrics;
+
 use super::super::provider::ForeignDataWrapper;
 use super::context::{
     ForeignPathContext, ForeignPlanContext, ForeignPlanSpec, ForeignRelContext,
@@ -121,6 +123,12 @@ pub trait FdwScan: ForeignDataWrapper + FilterPushdown + 'static {
         _values: ForeignFilterExplainValues<'_>,
     ) -> Result<Option<String>, ForeignScanError> {
         Ok(None)
+    }
+
+    /// Read facts from the retained executed inventory for ANALYZE VERBOSE.
+    /// This callback must not plan tasks or open storage resources.
+    fn scan_task_metrics(_state: &Self::State) -> Option<TableScanTaskMetrics> {
+        None
     }
 
     /// Initialize stable provider state during PostgreSQL's BeginForeignScan.

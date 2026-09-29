@@ -12,7 +12,7 @@ use lagodb_core::plan_data::{PlanDataError, PlanDataReader, PlanDataWriter};
 use lagodb_core::query_contract::{ScanCost, ScanId};
 use lagodb_core::runtime_api::{
     RuntimePredicateCodecError, RuntimePredicateUpdateAction,
-    RuntimePruningPredicate, SourceWorkId, TABLE_SCAN_PROJECTION_COLUMNS,
+    RuntimePruningPredicate, TABLE_SCAN_PROJECTION_COLUMNS,
     TABLE_SCAN_PROJECTION_ROW_COUNT, TableScanPlanningRequest, TableScanRoutes,
     TableScanRuntimePredicate, TableScanStreamRequest, TableScanTaskMetrics,
     TableScanTaskPlanningRequest,
@@ -20,14 +20,14 @@ use lagodb_core::runtime_api::{
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
-/// Projection requested from a provider query source.
+/// Projection requested from a provider table scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanProjection<'a> {
     RowCount,
     Columns(&'a [pg_sys::AttrNumber]),
 }
 
-/// Borrowed provider-facing view of one query-source planning request.
+/// Borrowed provider-facing view of one table-scan planning request.
 pub struct ScanPlanningContext<'a> {
     request: &'a TableScanPlanningRequest,
     projection: ScanProjection<'a>,
@@ -168,12 +168,6 @@ impl<'a> ScanPlanningContext<'a> {
     pub fn relation_kind(&self) -> u8 {
         // SAFETY: request borrows PostgreSQL's live RangeTblEntry.
         unsafe { (*self.request.range_table_entry).relkind as u8 }
-    }
-
-    #[inline]
-    pub fn tablespace_oid(&self) -> pg_sys::Oid {
-        // SAFETY: relation_oid comes from the live planner RangeTblEntry.
-        unsafe { pg_sys::get_rel_tablespace(self.relation_oid()) }
     }
 
     #[inline]
@@ -534,101 +528,4 @@ pub trait TableScanProvider: Send + Sync + 'static {
         planned: &Self::PlannedTasks,
         options: ScanStreamOptions,
     ) -> Result<Self::Stream, Self::Error>;
-}
-
-/// Immutable provider payload copied into the parallel query protocol.
-pub struct WorkerSourcePayload {
-    bytes: Box<[u8]>,
-    work_count: u32,
-    task_metrics: TableScanTaskMetrics,
-}
-
-impl WorkerSourcePayload {
-    /// Construct a payload whose work identifiers are exactly
-    /// `0..work_count`. Empty inventories are not parallel-capable.
-    pub fn new(
-        bytes: Box<[u8]>,
-        work_count: u32,
-        task_metrics: TableScanTaskMetrics,
-    ) -> Result<Self, &'static str> {
-        if bytes.is_empty() {
-            return Err("worker source payload is empty");
-        }
-        if work_count == 0 {
-            return Err("worker source has no work units");
-        }
-        Ok(Self {
-            bytes,
-            work_count,
-            task_metrics,
-        })
-    }
-
-    #[inline]
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    #[inline]
-    pub const fn work_count(&self) -> u32 {
-        self.work_count
-    }
-
-    pub const fn task_metrics(&self) -> TableScanTaskMetrics {
-        self.task_metrics
-    }
-}
-
-/// Worker-local stream limits. Parallel execution intentionally has no
-/// evolving provider predicate slot: worker payloads are immutable for one
-/// isolated run.
-#[derive(Clone, Copy)]
-pub struct WorkerStreamOptions {
-    maximum_batch_rows: u64,
-}
-
-impl WorkerStreamOptions {
-    pub(super) const fn new(maximum_batch_rows: u64) -> Self {
-        Self { maximum_batch_rows }
-    }
-
-    #[inline]
-    pub const fn maximum_batch_rows(self) -> u64 {
-        self.maximum_batch_rows
-    }
-}
-
-/// Optional worker reconstruction capability for a [`TableScanProvider`].
-///
-/// The leader invokes `prepare_worker_source` only after normal provider task
-/// planning. A worker decodes those exact tasks and opens assigned work IDs;
-/// neither method may choose a snapshot or traverse manifests.
-pub trait TableScanWorkerProvider: TableScanProvider {
-    type WorkerSource: Send + Sync + 'static;
-    type WorkerStream: TableScanStream<Error = Self::Error> + Send + 'static;
-
-    fn prepare_worker_source(
-        &self,
-        bound: &Self::BoundScan,
-        planned: &Self::PlannedTasks,
-    ) -> Result<ScanSupport<WorkerSourcePayload>, Self::Error>;
-
-    /// Reconstruct a worker source over an immutable shared payload.
-    ///
-    /// # Safety
-    ///
-    /// The payload may be retained by `WorkerSource`. The engine guarantees
-    /// that its DSM mapping remains attached until the returned source and all
-    /// streams borrowing it have been released.
-    unsafe fn decode_worker_source(
-        &self,
-        payload: &[u8],
-    ) -> Result<Self::WorkerSource, Self::Error>;
-
-    fn open_worker_stream(
-        &self,
-        source: &Self::WorkerSource,
-        work_ids: &[SourceWorkId],
-        options: WorkerStreamOptions,
-    ) -> Result<Self::WorkerStream, Self::Error>;
 }

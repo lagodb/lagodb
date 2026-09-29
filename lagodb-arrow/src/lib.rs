@@ -1,7 +1,7 @@
 //! # lagodb-arrow
 //!
 //! PostgreSQL⇆Arrow interoperability shared by LagoDB runtimes and providers.
-//! It owns format-neutral value conversion and the typed query-source adapter
+//! It owns format-neutral value conversion and the typed table-scan adapter
 //! over LagoDB's Arrow C Stream ABI, but no table-format or DataFusion logic.
 //!
 //! - [`resolve_column_rule`] picks a [`ColumnRule`] for a column once.
@@ -25,10 +25,10 @@
 mod convert;
 mod datum;
 mod error;
-pub mod query_source;
 mod read;
 mod rule;
 mod scalar;
+pub mod scan;
 mod types;
 mod write;
 

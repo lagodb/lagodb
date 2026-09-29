@@ -18,7 +18,7 @@ const ITEM_POINTER_IDENTITY_NAME: &CStr = c"__lagodb_fdw_identity_ctid";
 ///
 /// Positive relation attributes are ordinary scan columns and therefore do
 /// not need a separate scan writer mode. Only an ItemPointer identity needs a
-/// physical tuple representation in PG17's `TTSOpsHeapTuple` slot.
+/// physical tuple representation in PostgreSQL's `TTSOpsHeapTuple` slot.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ForeignRowIdentityRequirement {
     #[default]

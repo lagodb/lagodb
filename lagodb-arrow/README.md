@@ -38,7 +38,7 @@ rewrites the conversion logic. Each consumer keeps its own schema mapping and
 column model; `lagodb-arrow` takes over the moment an Arrow schema exists and
 hands back datums (or arrays) with no knowledge of where the Arrow came from.
 
-The public `query_source` module is the provider-facing half of the same Arrow
+The public `scan` module is the provider-facing half of the same Arrow
 boundary. It converts typed provider plans, prepared handles, schemas, and
 streams into `lagodb-core`'s Arrow-independent exact-build descriptor ABI. The
 host registry remains in `lagodb-base`, and the DataFusion consumer remains in

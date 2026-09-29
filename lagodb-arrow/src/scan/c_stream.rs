@@ -1,4 +1,4 @@
-//! Arrow C Stream exporter for provider query sources.
+//! Arrow C Stream adapter for typed provider table scans.
 
 use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
@@ -11,7 +11,7 @@ use lagodb_core::diag::PgReportError;
 use lagodb_core::runtime_api::{CALLBACK_FAILED, CallbackErrorReport};
 use pgrx::prelude::PgSqlErrorCode;
 
-use super::contract::TableScanStream;
+use super::provider::TableScanStream;
 
 struct StreamState<S> {
     stream: S,

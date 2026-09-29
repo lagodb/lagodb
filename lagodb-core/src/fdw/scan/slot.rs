@@ -442,7 +442,7 @@ impl<'a> ScanSlotWriter<'a> {
 
         unsafe {
             if let Some(item_pointer) = self.item_pointer {
-                // PG17's ForeignScan slot uses TTSOpsHeapTuple.  Its system
+                // PostgreSQL's ForeignScan slot uses TTSOpsHeapTuple.  Its system
                 // attribute implementation reads ctid from the physical
                 // HeapTuple, so tts_tid alone is not a valid identity output.
                 // The slot owns this framework-created tuple.  Allocate it in

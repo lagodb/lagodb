@@ -22,11 +22,11 @@ use lagodb_core::runtime_api::{
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
-use super::contract::{
+use super::c_stream;
+use super::provider::{
     ScanPlanningContext, ScanStreamOptions, ScanSupport, ScanTaskPlanningOptions,
     TableScanProvider, decode_runtime_predicate, runtime_predicate_slot,
 };
-use super::stream_export;
 
 /// Complete C-compatible descriptor adapter for one typed provider.
 pub struct TableScanAdapter<P>(PhantomData<P>);
@@ -147,7 +147,6 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
         let filter_context = FilterPlanningContext::new(
             planning.relation_oid(),
             planning.range_table_index(),
-            planning.tablespace_oid(),
             planning.effective_user_id(),
         );
         let mut filter_planner = provider
@@ -247,7 +246,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
             unsafe {
                 output
                     .cast::<FFI_ArrowArrayStream>()
-                    .write(stream_export::export(stream, request.stream_error));
+                    .write(c_stream::export(stream, request.stream_error));
             }
             Ok(())
         };

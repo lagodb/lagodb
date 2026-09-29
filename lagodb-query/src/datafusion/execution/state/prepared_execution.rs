@@ -128,6 +128,10 @@ impl PreparedQueryExecution {
 
     fn rebuild_plan_if_required(&mut self) -> Result<(), QueryExecutionError> {
         if !self.dynamic_rebind_required && !self.physical_plan_rebuild_required {
+            if let Some(physical_metrics) = &mut self.physical_metrics {
+                self.prepared_plan.record_serial_metrics(physical_metrics);
+            }
+            self.prepared_plan.reset_serial_for_rescan()?;
             return Ok(());
         }
         if self.dynamic_rebind_required {
@@ -234,7 +238,8 @@ impl PreparedQueryExecution {
     pub(super) fn mark_dynamic_filter_plan_consumed(&mut self) {
         // A distributed plan owns execute-once network/operator state. Preserve
         // the rescan contract by rebuilding that plan after the run;
-        // serial plans rebuild only when dynamic filters require fresh state.
+        // serial plans with dynamic filters also need recompilation. Other
+        // serial plans reset operator state without recompiling the query.
         if self.prepared_plan.parallel().is_some()
             || self.prepared_plan.plan().has_dynamic_filters()
         {

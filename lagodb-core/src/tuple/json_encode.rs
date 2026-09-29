@@ -184,7 +184,7 @@ impl BoundJsonObjectEncoder {
     pub fn bind<'a>(
         columns: impl IntoIterator<Item = (&'a str, JsonDatumEncoder)>,
     ) -> Result<Self, JsonValueError> {
-        let mut buffer = JsonEncodeBuffer::new()?;
+        let mut buffer = JsonEncodeBuffer::new();
         let mut bound = Vec::new();
         for (index, (name, encoder)) in columns.into_iter().enumerate() {
             let encoder = encoder.object_encoder()?;
@@ -241,22 +241,17 @@ impl BoundJsonObjectEncoder {
 }
 
 impl JsonEncodeBuffer {
-    fn new() -> Result<Self, JsonValueError> {
-        unsafe {
-            PgTryBuilder::new(|| {
-                let mut context = PgMemoryContexts::new("lagodb JSON encode buffer");
-                let buffer = context.switch_to(|_| {
-                    // SAFETY: makeStringInfo either returns a valid allocation
-                    // or raises PostgreSQL ERROR; it never returns NULL.
-                    NonNull::new_unchecked(pg_sys::makeStringInfo())
-                });
-                Ok(Self {
-                    buffer,
-                    _context: context,
-                })
-            })
-            .catch_others(|error| Err(JsonValueError::Postgres(PgError::from(error))))
-            .execute()
+    fn new() -> Self {
+        let mut context = PgMemoryContexts::new("lagodb JSON encode buffer");
+        // SAFETY: `context` is live and remains owned by the returned object.
+        // `makeStringInfo` allocates in the active context and either returns a
+        // valid pointer or raises PostgreSQL ERROR; it never returns NULL.
+        let buffer = unsafe {
+            context.switch_to(|_| NonNull::new_unchecked(pg_sys::makeStringInfo()))
+        };
+        Self {
+            buffer,
+            _context: context,
         }
     }
 
@@ -267,16 +262,11 @@ impl JsonEncodeBuffer {
     ) -> Result<Box<[u8]>, JsonValueError> {
         let name = CString::new(name)?;
         self.reset();
-        unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                self.append_byte(if index == 0 { b'{' } else { b',' });
-                pg_sys::escape_json(self.buffer.as_ptr(), name.as_ptr());
-                self.append_byte(b':');
-                Ok::<(), JsonValueError>(())
-            }))
-            .catch_others(|error| Err(JsonValueError::Postgres(PgError::from(error))))
-            .execute()
-        }?;
+        self.append_byte(if index == 0 { b'{' } else { b',' });
+        // SAFETY: `buffer` is the live StringInfo owned by this object and
+        // `name` is a live NUL-terminated string for this call.
+        unsafe { pg_sys::escape_json(self.buffer.as_ptr(), name.as_ptr()) };
+        self.append_byte(b':');
         Ok(Box::from(self.as_bytes()))
     }
 
