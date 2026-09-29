@@ -14,7 +14,7 @@ use std::sync::Arc;
 use iceberg_lite::spec::Schema as IcebergSchema;
 
 use crate::error::IcebergError;
-use crate::schema::relation::{RelationFieldIndex, RelationFieldMap, RelationShape};
+use crate::schema::relation::{RelationFieldIndex, RelationFieldMap, RelationLayout};
 
 use super::error::IcebergFilterError;
 use super::plan::{
@@ -38,13 +38,13 @@ impl IcebergFilterPlanner {
         context: &FilterPlanningContext,
         schema: &Arc<IcebergSchema>,
     ) -> Result<Self, IcebergFilterError> {
-        let relation = RelationGuard::open(
+        let relation = RelationGuard::open_table(
             context.relation_oid(),
             pg_sys::NoLock as pg_sys::LOCKMODE,
         )
         .map_err(IcebergError::from)?;
-        let shape = RelationShape::from_relation(&relation.as_handle())?;
-        let fields = RelationFieldMap::from_shape(schema, &shape)?.into_indexed();
+        let layout = RelationLayout::from_relation(&relation.as_handle())?;
+        let fields = RelationFieldMap::bind(schema, &layout)?.into_index();
         Ok(Self {
             schema_id: schema.schema_id(),
             fields,

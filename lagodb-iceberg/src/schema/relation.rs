@@ -5,9 +5,6 @@
 //! CustomScan additionally builds a direct `attno - 1` index for predicate
 //! translation and retains it for the scan lifetime.
 
-#[cfg(feature = "pg_test")]
-mod pg_test;
-
 use iceberg_lite::spec::Schema as IcebergSchema;
 use lagodb_core::handles::RelationHandle;
 use pgrx::pg_sys;
@@ -41,13 +38,27 @@ impl LiveColumn {
 
 /// Descriptor-derived relation layout shared by read and write paths.
 #[derive(Debug)]
-pub(crate) struct RelationShape {
+pub(crate) struct RelationLayout {
     live_columns: Vec<LiveColumn>,
     slot_width: usize,
     attr_types: Vec<(pg_sys::Oid, i32)>,
 }
 
-impl RelationShape {
+impl RelationLayout {
+    /// Construct a synthetic layout for backend binding tests.
+    #[cfg(feature = "pg_test")]
+    pub(crate) fn for_test(
+        live_columns: Vec<LiveColumn>,
+        slot_width: usize,
+        attr_types: Vec<(pg_sys::Oid, i32)>,
+    ) -> Self {
+        Self {
+            live_columns,
+            slot_width,
+            attr_types,
+        }
+    }
+
     pub(crate) fn from_relation(rel: &RelationHandle) -> IcebergResult<Self> {
         let live_columns = rel
             .live_columns()
@@ -147,25 +158,25 @@ pub(crate) struct RelationFieldMap {
 
 impl RelationFieldMap {
     /// Resolve every live relation column against the current Iceberg schema.
-    pub(crate) fn from_shape(
+    pub(crate) fn bind(
         schema: &IcebergSchema,
-        shape: &RelationShape,
+        layout: &RelationLayout,
     ) -> IcebergResult<Self> {
-        let mut fields = Vec::with_capacity(shape.live_columns().len());
-        for col in shape.live_columns() {
+        let mut fields = Vec::with_capacity(layout.live_columns().len());
+        for col in layout.live_columns() {
             let field = schema
                 .field_by_name(&col.name)
                 .ok_or_else(|| IcebergError::ColumnNotFound(col.name.clone()))?;
             fields.push(RelationFieldBinding {
                 attno: col.attno,
-                destination: Self::attribute_offset(col.attno, shape.slot_width())?,
+                destination: Self::attribute_offset(col.attno, layout.slot_width())?,
                 field_id: field.id,
                 debug_name: col.name.clone(),
             });
         }
         Ok(Self {
             fields,
-            relation_width: shape.slot_width(),
+            relation_width: layout.slot_width(),
         })
     }
 
@@ -195,7 +206,7 @@ impl RelationFieldMap {
     }
 
     /// Add the direct user-attno lookup needed by CustomScan predicates.
-    pub(crate) fn into_indexed(self) -> RelationFieldIndex {
+    pub(crate) fn into_index(self) -> RelationFieldIndex {
         RelationFieldIndex::new(self)
     }
 
@@ -238,11 +249,8 @@ impl RelationFieldMap {
     }
 }
 
-/// Scan-lifetime direct lookup over one compact relation field map.
-///
-/// Only CustomScan constructs this index. TableAM, ANALYZE, and write paths
-/// consume the ordered bindings while building their plans and then release
-/// them.
+/// Direct attribute lookup for projection binding and predicate planning.
+/// Predicate planners retain the index; projection binding consumes it locally.
 #[derive(Debug)]
 pub(crate) struct RelationFieldIndex {
     field_map: RelationFieldMap,
@@ -257,7 +265,7 @@ impl RelationFieldIndex {
     fn new(field_map: RelationFieldMap) -> Self {
         let mut by_attno = vec![Self::UNMAPPED_FIELD; field_map.relation_width];
         for (index, binding) in field_map.fields.iter().enumerate() {
-            // `from_shape` validates every attno against `relation_width`, and
+            // `bind` validates every attno against `relation_width`, and
             // `project` only copies bindings originating from such a map.
             let offset = (binding.attno as usize) - 1;
             by_attno[offset] = index;

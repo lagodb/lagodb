@@ -185,10 +185,7 @@ impl SchemaEvolutionUpdate {
         rel: &RelationHandle<'_>,
         register_modify: bool,
     ) -> IcebergResult<(FileIO, Table)> {
-        let ctx = StorageContext::for_tablespace_with_wal(
-            rel.locator().spc_oid,
-            rel.needs_wal(),
-        )?;
+        let ctx = StorageContext::for_write(rel)?;
         let file_io = ctx.into_file_io();
         let tx_metadata = TxMetadata::current();
         let loaded = if register_modify {

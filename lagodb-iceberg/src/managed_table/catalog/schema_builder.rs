@@ -489,7 +489,7 @@ mod tests {
     /// Guards the consistency of the two halves of the PG↔Iceberg type
     /// correspondence, which live in different layers: PG→Iceberg here
     /// ([`PgType::primitive_type`]) and Iceberg→PG in
-    /// [`crate::schema::type_mapping`] ([`IcebergTypeExt::pg_column_type`]).
+    /// [`crate::schema::type_mapping`] ([`IcebergTypeExt::canonical_column_type`]).
     /// They are coarse logical companions and must agree on the canonical
     /// target type, but nothing structural forces it — so this round-trips
     /// every supported scalar built-in and asserts it lands back on the
@@ -538,7 +538,7 @@ mod tests {
                 .primitive_type()
                 .unwrap_or_else(|e| panic!("PG->Iceberg for {oid:?} failed: {e}"));
             assert_eq!(
-                iceberg.pg_column_type(),
+                iceberg.canonical_column_type(),
                 Some(expected),
                 "PG->Iceberg->PG round-trip mismatch for {oid:?}",
             );
