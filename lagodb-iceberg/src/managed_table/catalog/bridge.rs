@@ -28,7 +28,7 @@
 //! type that implements `Catalog`. Inside this crate that path is exactly
 //! one: mutation rebases pending appends and commits via [`StagedCatalog`].
 //!
-//! The other path — `CREATE TABLE` writing the very first metadata file —
+//! The other path — CREATE or local TRUNCATE writing initial metadata —
 //! does **not** go through `Transaction::commit`. It just needs to stamp out
 //! a metadata file from a `TableCreation` and return a `Table`. Earlier this
 //! was done through a `BootstrapCatalog: Catalog` adapter that left 13 of 14
@@ -106,10 +106,12 @@ impl IcebergTableId {
 }
 
 // ---------------------------------------------------------------------------
-// BootstrapWriter — `CREATE TABLE` writes the very first metadata file.
+// BootstrapWriter — CREATE and private local TRUNCATE write initial metadata.
 // ---------------------------------------------------------------------------
 
 /// Writes the initial Iceberg metadata file for a brand-new table.
+/// Local TRUNCATE deliberately uses the same bootstrap to reset Iceberg UUID,
+/// snapshot history and row lineage; this policy belongs to managed-table DDL.
 ///
 /// This is not a `Catalog`: bootstrap never goes through
 /// `Transaction::commit`, so there is no need to satisfy the upstream
@@ -132,7 +134,7 @@ impl BootstrapWriter {
     /// `creation.location` is required; this writer does not make up storage
     /// locations. `creation.name` is overwritten with the canonical name
     /// from `id` so call sites do not have to supply (or invent) a separate
-    /// table name — `IcebergTableId` is the single source of identity.
+    /// table name — `IcebergTableId` is the single source of the catalog name.
     pub(crate) fn write_initial_metadata(
         &self,
         id: IcebergTableId,
@@ -150,8 +152,8 @@ impl BootstrapWriter {
         // required by the upstream typed builder, but `from_table_creation`
         // discards it (the ident is set when the `Table` is constructed
         // below). Overwriting here keeps the bookkeeping consistent and
-        // makes "no two `Table`s ever disagree on identity for the same OID"
-        // a local invariant.
+        // keeps the catalog name consistent for one PG OID even when a private
+        // local TRUNCATE creates a new Iceberg UUID.
         creation.name = id.as_table_ident().name().to_string();
 
         let metadata = TableMetadataBuilder::from_table_creation(creation)?

@@ -17,6 +17,8 @@
 
 mod commit;
 mod loaded_metadata;
+mod read;
+mod state;
 #[cfg(test)]
 mod tests;
 
@@ -26,7 +28,7 @@ use std::rc::Rc;
 
 use iceberg_lite::io::FileIO;
 use iceberg_lite::overlay::DeleteFileIdentity;
-use iceberg_lite::spec::{DataFile, TableMetadata};
+use iceberg_lite::spec::DataFile;
 use iceberg_lite::transaction::{PreparedSchemaUpdate, RowDeltaValidation};
 use lagodb_core::diag::PgReportError;
 use lagodb_core::transaction::{self, TransactionResource, TransactionResult};
@@ -39,8 +41,8 @@ use crate::managed_table::maintenance::{
     AutomaticMaintenanceNotifier, PreparedVacuum,
 };
 use crate::write::{
-    PreparedTablePropertyUpdate, RelationRowRegistry, TableTransactionState,
-    TxTableActionLog as SharedActionLog,
+    ExclusiveTransactionAction, PreparedTablePropertyUpdate, RelationRowRegistry,
+    TableTransactionState, TxTableActionLog as SharedActionLog,
 };
 
 pub use self::loaded_metadata::LoadedTableMetadata;
@@ -48,20 +50,7 @@ pub use self::loaded_metadata::LoadedTableMetadata;
 type ManagedTableActionLog = SharedActionLog<PreparedVacuum, String>;
 type ManagedTableTransaction = TableTransactionState<PreparedVacuum, String>;
 
-#[derive(Debug)]
-struct ManagedTableState {
-    transaction: ManagedTableTransaction,
-    file_io: Option<FileIO>,
-}
-
-impl ManagedTableState {
-    fn new() -> Self {
-        Self {
-            transaction: ManagedTableTransaction::new(),
-            file_io: None,
-        }
-    }
-}
+use state::ManagedTableState;
 
 /// AM-owned commit input detached before local metadata I/O begins.
 ///
@@ -110,7 +99,7 @@ impl TxMetadata {
                     .borrow()
                     .tables
                     .get(&relid)
-                    .is_some_and(|state| !state.transaction.actions.is_empty())
+                    .is_some_and(ManagedTableState::has_changes)
             })
         })
     }
@@ -259,9 +248,47 @@ impl TxMetadata {
         vacuum: PreparedVacuum,
         file_io: &FileIO,
     ) -> IcebergResult<()> {
+        self.register_table(relid);
+        if self
+            .inner
+            .borrow()
+            .tables
+            .get(&relid)
+            .is_some_and(ManagedTableState::was_rebuilt)
+        {
+            return Err(vacuum.conflict_error());
+        }
         self.stage_table_mutation(relid, file_io, |state, nest_level| {
             state.record_exclusive_action(nest_level, vacuum)
         })
+    }
+
+    /// Check exclusivity and return whether the current subtransaction owns
+    /// the local generation, allowing it to be cleared in place on TRUNCATE.
+    pub(crate) fn prepare_local_rebuild(
+        &self,
+        relid: pg_sys::Oid,
+    ) -> IcebergResult<bool> {
+        self.register_table(relid);
+        let inner = self.inner.borrow();
+        let state = inner.tables.get(&relid).expect("registered table");
+        if let Some(error) = state.transaction.actions.exclusive_conflict_error() {
+            return Err(error);
+        }
+        Ok(state.owns_local_generation_at(current_nest_level()))
+    }
+
+    /// A rebuilt table is already published in the transactional PG catalog.
+    /// Discard the retired generation's actions but keep a savepoint restore
+    /// point and a lifecycle marker even when the new action log is empty.
+    pub(crate) fn record_local_rebuild(&self, relid: pg_sys::Oid, file_io: &FileIO) {
+        self.register_table(relid);
+        let mut inner = self.inner.borrow_mut();
+        inner
+            .tables
+            .get_mut(&relid)
+            .expect("registered table")
+            .record_rebuild(current_nest_level(), file_io);
     }
 
     /// Stage a full-table truncate against the metadata location visible when
@@ -321,69 +348,6 @@ impl TxMetadata {
         mutation(&mut state.transaction, nest_level)
     }
 
-    /// Read-side entry point for scans and planner statistics.
-    ///
-    /// Reads the latest committed metadata location every time, then attaches
-    /// any transaction-local schema update and file delta for this relation.
-    /// That gives Read Committed behavior without writing statement-time
-    /// metadata files.
-    pub fn current_table_metadata(
-        &self,
-        relid: pg_sys::Oid,
-        file_io: &FileIO,
-    ) -> IcebergResult<LoadedTableMetadata> {
-        let actions = {
-            let mut inner = self.inner.borrow_mut();
-            match inner.tables.get_mut(&relid) {
-                Some(state) => {
-                    if state.file_io.is_none() {
-                        state.file_io = Some(file_io.clone());
-                    }
-                    Some(Rc::clone(&state.transaction.actions))
-                }
-                None => None,
-            }
-        };
-
-        let catalog_metadata = IcebergMetadata::get(relid)?;
-        let location = catalog_metadata
-            .metadata_location
-            .ok_or(IcebergError::MetadataLocationNull)?;
-        let mut metadata = TableMetadata::read_from(file_io, &location)?;
-        let delta = if let Some(actions) = actions {
-            metadata = actions.overlay_metadata(metadata)?;
-            actions.combined_delta()?
-        } else {
-            None
-        };
-        Ok(LoadedTableMetadata {
-            location,
-            maintenance_due_at: catalog_metadata.maintenance_due_at,
-            metadata,
-            delta,
-        })
-    }
-
-    /// Write-side entry point for mutation.
-    ///
-    /// Registers the relation with this transaction's tracker (idempotent),
-    /// then returns the latest committed metadata plus any prior
-    /// transaction-local schema update and file delta for statement-local
-    /// reads.
-    ///
-    /// This is the single supported way for a writer to obtain its base
-    /// snapshot: it bundles `register_table` with the metadata read so a
-    /// caller cannot accidentally observe metadata without enrolling the
-    /// table in the tracker.
-    pub fn begin_table_modify(
-        &self,
-        relid: pg_sys::Oid,
-        file_io: &FileIO,
-    ) -> IcebergResult<LoadedTableMetadata> {
-        self.register_table(relid);
-        self.current_table_metadata(relid, file_io)
-    }
-
     /// Return the transaction-scoped physical-row registry for one relation.
     ///
     /// The clone is a single-backend `Rc` handle. Callers retain it across row
@@ -401,7 +365,7 @@ impl TxMetadata {
         inner
             .tables
             .get(&relid)
-            .map(|state| state.transaction.row_registry.clone())
+            .map(|state| state.row_registry.clone())
             .ok_or_else(|| {
                 IcebergError::MetadataTracker(format!(
                     "table {relid} has no row registry"
@@ -450,7 +414,7 @@ impl TxMetadata {
     fn rollback_to_level(&self, target_level: i32) {
         let mut inner = self.inner.borrow_mut();
         for state in inner.tables.values_mut() {
-            state.transaction.rollback_to_level(target_level);
+            state.rollback_to_level(target_level);
         }
     }
 
@@ -465,7 +429,7 @@ impl TxMetadata {
     fn promote_to_level(&self, from_level: i32) {
         let mut inner = self.inner.borrow_mut();
         for state in inner.tables.values_mut() {
-            state.transaction.promote_to_level(from_level);
+            state.promote_to_level(from_level);
         }
     }
 }
@@ -502,7 +466,7 @@ impl TransactionResource for TxMetadata {
             .borrow()
             .tables
             .values()
-            .any(|state| !state.transaction.actions.is_empty());
+            .any(ManagedTableState::has_changes);
         if has_staged_actions {
             return Err(PgReportError::from_message(
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -513,6 +477,10 @@ impl TransactionResource for TxMetadata {
     }
 
     fn on_commit(&self) {
+        CURRENT.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    fn on_prepare(&self) {
         CURRENT.with(|slot| *slot.borrow_mut() = None);
     }
 

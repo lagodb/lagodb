@@ -14,6 +14,8 @@
 //! );
 //! ```
 
+mod rebuild;
+
 use std::ffi::CStr;
 
 use lagodb_core::catalog::{
@@ -25,9 +27,9 @@ use lagodb_core::handles::HeapTupleGuard;
 use pgrx::prelude::TimestampWithTimeZone;
 use pgrx::{FromDatum, IntoDatum, pg_sys};
 
-use crate::error::{
-    IcebergError, IcebergResult, MetadataCatalogOperation as CatalogOp,
-};
+use crate::error::{IcebergError, IcebergResult};
+
+use super::error::{MetadataCatalogError, MetadataCatalogOperation as CatalogOp};
 
 // ---------------------------------------------------------------------------
 // Internal constants
@@ -56,7 +58,7 @@ mod column {
 /// Adapt a [`PgError`]-returning catalog call to [`IcebergResult`] by tagging
 /// it with a [`CatalogOp`].
 ///
-/// This is the single point where `PgError -> IcebergError::MetadataCatalog`
+/// This is the single point where `PgError -> MetadataCatalogError::Operation`
 /// happens in this module, in line with the policy in `error.rs` ("keep that
 /// inside meaningful Iceberg object methods"). Every catalog call uses
 /// `.map_catalog_err(CatalogOp::*)?` instead of an inline closure.
@@ -67,7 +69,13 @@ trait CatalogResultExt<T> {
 impl<T> CatalogResultExt<T> for Result<T, PgError> {
     #[inline]
     fn map_catalog_err(self, op: CatalogOp) -> IcebergResult<T> {
-        self.map_err(|source| IcebergError::metadata_catalog(op, source))
+        self.map_err(|source| {
+            MetadataCatalogError::Operation {
+                operation: op,
+                source,
+            }
+            .into()
+        })
     }
 }
 
@@ -82,7 +90,7 @@ impl<T> CatalogResultExt<T> for Result<T, PgError> {
 fn iceberg_relation_oid(name: &CStr) -> IcebergResult<pg_sys::Oid> {
     let schema = get_namespace_oid(ICEBERG_SCHEMA, false)
         .map_catalog_err(CatalogOp::Access)?;
-    get_relation_oid(name, schema).map_catalog_err(CatalogOp::Access)
+    Ok(get_relation_oid(name, schema))
 }
 
 // ---------------------------------------------------------------------------
@@ -116,7 +124,7 @@ unsafe fn get_attr<T: FromDatum>(
     }
 }
 
-/// Like [`get_attr`] but returns an `IcebergError::MetadataCatalogInvalidRecord`
+/// Like [`get_attr`] but returns a [`MetadataCatalogError::InvalidRecord`]
 /// when the column is NULL or fails to decode.
 ///
 /// # Safety
@@ -131,9 +139,9 @@ unsafe fn get_attr_required<T: FromDatum>(
     // SAFETY: this function has the same caller requirements as `get_attr` and
     // forwards the tuple, descriptor, attribute number, and target type unchanged.
     unsafe { get_attr::<T>(tuple, tup_desc, attno) }.ok_or_else(|| {
-        IcebergError::MetadataCatalogInvalidRecord(format!(
+        IcebergError::MetadataCatalog(MetadataCatalogError::InvalidRecord(format!(
             "{field_name} (attno {attno}) is null or undecodable"
-        ))
+        )))
     })
 }
 
@@ -410,10 +418,11 @@ impl IcebergMetadata {
         Ok(Some(row))
     }
 
-    /// Look up by relid; returns `MetadataCatalogNotFound` when absent.
+    /// Look up by relid; returns [`MetadataCatalogError::NotFound`] when absent.
     pub fn get(relid: pg_sys::Oid) -> IcebergResult<Self> {
-        Self::find_by_relid(relid)?
-            .ok_or(IcebergError::MetadataCatalogNotFound(relid))
+        Self::find_by_relid(relid)?.ok_or(IcebergError::MetadataCatalog(
+            MetadataCatalogError::NotFound(relid),
+        ))
     }
 
     /// Existence probe.
@@ -576,7 +585,7 @@ impl IcebergMetadata {
             .map_catalog_err(CatalogOp::Update)?;
         let Some(old_tuple) = scan.get_next().map_catalog_err(CatalogOp::Update)?
         else {
-            return Err(IcebergError::MetadataCatalogNotFound(relid));
+            return Err(MetadataCatalogError::NotFound(relid).into());
         };
         let tuple_desc = table_guard.as_handle().tuple_desc();
         // SAFETY: `old_tuple` comes from this open relation's scan, the
@@ -585,7 +594,7 @@ impl IcebergMetadata {
             get_attr(old_tuple.as_raw(), tuple_desc, column::METADATA_LOCATION)
         };
         if current_location.as_deref() != Some(expected_location) {
-            return Err(IcebergError::MetadataCatalogConflict);
+            return Err(MetadataCatalogError::Conflict.into());
         }
         // SAFETY: `tuple_desc` belongs to the live open relation.
         let mut replacement = unsafe { TupleReplacement::new(tuple_desc) };
@@ -623,7 +632,7 @@ impl IcebergMetadata {
         {
             CatalogUpdateResult::Success => Ok(()),
             CatalogUpdateResult::Conflict => {
-                Err(IcebergError::MetadataCatalogConflict)
+                Err(MetadataCatalogError::Conflict.into())
             }
         }
     }
@@ -638,7 +647,7 @@ impl IcebergMetadata {
     /// are preserved as-is, which is what lets us avoid an extra row
     /// fetch for columns we never modify on this path.
     ///
-    /// Returns [`IcebergError::MetadataCatalogConflict`] for both the
+    /// Returns [`MetadataCatalogError::Conflict`] for both the
     /// logical CAS mismatch and PostgreSQL's tuple-version conflict
     /// (`heap_update` returning `TM_Updated`/`TM_Deleted`). The caller's
     /// retry loop handles both as "rebase and try again".
@@ -662,7 +671,7 @@ impl IcebergMetadata {
 
         let Some(old_tuple) = scan.get_next().map_catalog_err(CatalogOp::Update)?
         else {
-            return Err(IcebergError::MetadataCatalogNotFound(relid));
+            return Err(MetadataCatalogError::NotFound(relid).into());
         };
 
         let tup_desc = table_guard.as_handle().tuple_desc();
@@ -679,7 +688,7 @@ impl IcebergMetadata {
             )
         };
         if current_location.as_deref() != expected_previous_location {
-            return Err(IcebergError::MetadataCatalogConflict);
+            return Err(MetadataCatalogError::Conflict.into());
         }
 
         // SAFETY: `tup_desc` belongs to the live open relation.
@@ -733,7 +742,7 @@ impl IcebergMetadata {
         {
             CatalogUpdateResult::Success => Ok(maintenance_deadline_advanced),
             CatalogUpdateResult::Conflict => {
-                Err(IcebergError::MetadataCatalogConflict)
+                Err(MetadataCatalogError::Conflict.into())
             }
         }
     }

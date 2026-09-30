@@ -15,6 +15,7 @@ use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::catalog::bridge::{IcebergTableId, StagedCatalog};
+use crate::managed_table::catalog::error::MetadataCatalogError;
 use crate::managed_table::catalog::metadata_table::{
     CasUpdate, IcebergMetadata, MaintenanceScheduleUpdate,
 };
@@ -161,7 +162,9 @@ impl<'a> TableCommitCoordinator<'a> {
                                     .register_cleanup(relid, &file_io)?;
                             }
                         }
-                        Err(IcebergError::MetadataCatalogConflict) => {
+                        Err(IcebergError::MetadataCatalog(
+                            MetadataCatalogError::Conflict,
+                        )) => {
                             diag::report_notice(
                                 "Concurrent Iceberg update detected, rebasing...",
                             );
@@ -208,7 +211,9 @@ impl<'a> TableCommitCoordinator<'a> {
                     );
                     break maintenance_deadline_advanced;
                 }
-                Err(IcebergError::MetadataCatalogConflict) => {
+                Err(IcebergError::MetadataCatalog(
+                    MetadataCatalogError::Conflict,
+                )) => {
                     metadata_attempt.discard()?;
                     diag::report_notice(
                         "Concurrent Iceberg update detected, rebasing...",
