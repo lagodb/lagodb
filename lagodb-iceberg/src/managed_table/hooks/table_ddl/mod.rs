@@ -1,8 +1,10 @@
+mod index;
 mod planning;
+mod topology;
 
 use crate::managed_table::catalog::metadata_table::IcebergMetadata;
 use crate::managed_table::catalog::schema_evolution::SchemaEvolutionUpdate;
-use crate::managed_table::catalog::table_lifecycle::IcebergTableLifecycle;
+use crate::managed_table::catalog::table_creation::ManagedTableCreation;
 use crate::managed_table::catalog::table_properties::ManagedTablePropertyUpdate;
 use crate::managed_table::catalog::{IcebergAccessMethod, IcebergRelationExt};
 use crate::managed_table::hooks::column_drop_guard::ControlledColumnDrops;
@@ -15,16 +17,19 @@ use lagodb_core::handles::RelationGuard;
 use lagodb_core::hooks::{
     AlterTableMoveAllStmtNode, AlterTableStmtNode, CreateStmtNode,
     CreateTableAsStmtNode, HookError, PostUtilityContext, RenameStmtNode,
-    UtilityHook, UtilityHookError, UtilityNode, register_utility_hook,
+    UtilityHook, UtilityHookError, UtilityNode, register_object_access_hook,
+    register_utility_hook,
 };
 use lagodb_core::options::{TableOptionAlterations, TableOptions};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 use std::ffi::CStr;
 
+use self::index::IcebergPartitionedTableIndexGuard;
 use self::planning::{
     AlterTableIcebergOperations, IcebergStmtProbe, SchemaEvolutionTarget,
 };
+use self::topology::IcebergPartitionTopologyGuard;
 
 struct IcebergTableHook;
 
@@ -45,6 +50,13 @@ impl UtilityHook for IcebergTableHook {
 
         if !IcebergStmtProbe::create_stmt_may_use_iceberg(stmt)? {
             return Ok(());
+        }
+
+        if !stmt.partbound.is_null() {
+            return Err(HookError::with_code(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                "managed Iceberg partitioned tables do not use PostgreSQL child partitions",
+            ));
         }
 
         if stmt.oncommit == pg_sys::OnCommitAction::ONCOMMIT_DELETE_ROWS {
@@ -76,8 +88,10 @@ impl UtilityHook for IcebergTableHook {
             )
         }?;
 
-        let guard =
-            RelationGuard::open(oid, pg_sys::AccessShareLock as pg_sys::LOCKMODE)?;
+        let guard = RelationGuard::open_table(
+            oid,
+            pg_sys::AccessShareLock as pg_sys::LOCKMODE,
+        )?;
         let rel = guard.as_handle();
 
         if !rel.is_iceberg() {
@@ -88,39 +102,23 @@ impl UtilityHook for IcebergTableHook {
             return Ok(());
         }
 
-        // Partitioned roots carry a table access method in PostgreSQL catalog
-        // state, but they do not own physical storage. Iceberg metadata is
-        // initialized only for physical child relations.
-        if rel.relkind() as u8 == pg_sys::RELKIND_PARTITIONED_TABLE {
-            return Ok(());
-        }
-
-        if !Self::relkind_has_physical_storage(rel.relkind()) {
+        if !Self::is_managed_table_relkind(rel.relkind()) {
             return Ok(());
         }
 
         let table_options =
             TableOptions::read_from_stmt(stmt, ICEBERG_TABLE_OPTIONS)?;
-        let creation_options =
-            ResolvedIcebergOptions::from_table_options(table_options.as_ref())?;
-        if let Some(opts) = table_options.as_ref() {
-            opts.persist_to_catalog(oid)?;
-        }
-
-        let metadata_location =
-            IcebergTableLifecycle::new(&rel)?.init(creation_options)?;
-
-        IcebergMetadata::new(oid)
-            .with_metadata_location(metadata_location)
-            .with_default_spec_id(0)
-            .insert()?;
+        ManagedTableCreation::execute(&rel, table_options)?;
         Ok(())
     }
 }
 
 impl IcebergTableHook {
-    fn relkind_has_physical_storage(relkind: i8) -> bool {
-        relkind as u8 == pg_sys::RELKIND_RELATION
+    fn is_managed_table_relkind(relkind: i8) -> bool {
+        matches!(
+            relkind as u8,
+            pg_sys::RELKIND_RELATION | pg_sys::RELKIND_PARTITIONED_TABLE
+        )
     }
 }
 
@@ -182,7 +180,8 @@ impl UtilityHook for IcebergAlterTableGuard {
             return Ok(());
         }
 
-        let guard = RelationGuard::open(oid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
+        let guard =
+            RelationGuard::open_table(oid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
         let rel = guard.as_handle();
         let current_is_iceberg = rel.is_iceberg();
 
@@ -223,12 +222,6 @@ impl UtilityHook for IcebergAlterTableGuard {
                 );
             }
             if ops.alters_table_options {
-                if rel.relkind() as u8 == pg_sys::RELKIND_PARTITIONED_TABLE {
-                    return Err(HookError::with_code(
-                        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                        "ALTER TABLE options on partitioned Iceberg roots are not supported",
-                    ));
-                }
                 let alterations = unsafe {
                     TableOptionAlterations::extract_from_commands(
                         stmt.cmds,
@@ -273,7 +266,8 @@ impl UtilityHook for IcebergAlterTableGuard {
             return Ok(());
         }
 
-        let guard = RelationGuard::open(oid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
+        let guard =
+            RelationGuard::open_table(oid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
         let rel = guard.as_handle();
         if ops.alters_table_options {
             let options = TableOptions::load_from_catalog(oid)?;
@@ -331,7 +325,8 @@ impl IcebergRenameColumnHook {
             return Ok(None);
         }
 
-        let guard = RelationGuard::open(oid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
+        let guard =
+            RelationGuard::open_table(oid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
         if guard.as_handle().is_iceberg() {
             Ok(Some(guard))
         } else {
@@ -523,6 +518,8 @@ fn optional_string_from_ptr(ptr: *const std::ffi::c_char) -> Option<String> {
 }
 
 pub fn init_hook() {
+    register_object_access_hook(Box::new(IcebergPartitionedTableIndexGuard));
+    register_object_access_hook(Box::new(IcebergPartitionTopologyGuard));
     register_utility_hook(pg_sys::NodeTag::T_CreateStmt, Box::new(IcebergTableHook));
     register_utility_hook(
         pg_sys::NodeTag::T_CreateTableAsStmt,

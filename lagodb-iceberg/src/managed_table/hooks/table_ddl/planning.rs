@@ -2,7 +2,7 @@
 
 use std::ffi::CStr;
 
-use lagodb_core::catalog::{find_all_inheritors, range_var_get_relid};
+use lagodb_core::catalog::range_var_get_relid;
 use lagodb_core::handles::{RelationGuard, RelationHandle};
 use lagodb_core::hooks::{HookError, UtilityHookError};
 use lagodb_core::options::TableOptionAlterations;
@@ -50,8 +50,7 @@ struct AlterTableSchemaPlan {
 }
 
 pub(super) enum SchemaEvolutionTarget {
-    Physical(pg_sys::Oid),
-    PartitionedRoot { descendant_relids: Vec<pg_sys::Oid> },
+    ManagedRelation(pg_sys::Oid),
 }
 
 /// Parse-tree probes that decide whether a DDL statement targets the Iceberg
@@ -89,44 +88,46 @@ impl IcebergStmtProbe {
     pub(super) fn create_stmt_may_use_iceberg(
         stmt: &pg_sys::CreateStmt,
     ) -> Result<bool, UtilityHookError> {
+        if !stmt.partbound.is_null() {
+            if stmt.inhRelations.is_null()
+                || unsafe { pg_sys::list_length(stmt.inhRelations) } == 0
+            {
+                return Ok(false);
+            }
+            let parent = unsafe {
+                pg_sys::list_nth(stmt.inhRelations, 0) as *mut pg_sys::RangeVar
+            };
+            if parent.is_null() {
+                return Ok(false);
+            }
+
+            let parent_oid = unsafe {
+                range_var_get_relid(
+                    parent,
+                    pg_sys::AccessExclusiveLock as pg_sys::LOCKMODE,
+                    true,
+                )
+            }?;
+            if parent_oid == pg_sys::InvalidOid {
+                return Ok(false);
+            }
+
+            // A child of a managed partitioned table is forbidden regardless of an
+            // explicitly requested child AM. Checking the parent before the
+            // child accessMethod prevents `PARTITION OF ... USING heap` from
+            // bypassing the partitioned table topology invariant.
+            return Ok(IcebergAccessMethod::matches_oid(unsafe {
+                pg_sys::get_rel_relam(parent_oid)
+            }));
+        }
+
         if !stmt.accessMethod.is_null() {
             return Ok(IcebergAccessMethod::matches_name(unsafe {
                 CStr::from_ptr(stmt.accessMethod)
             }));
         }
 
-        if stmt.partbound.is_null() {
-            return Ok(Self::default_is_iceberg());
-        }
-
-        if stmt.inhRelations.is_null() {
-            return Ok(false);
-        }
-        let parent = unsafe {
-            if pg_sys::list_length(stmt.inhRelations) == 0 {
-                return Ok(false);
-            }
-            pg_sys::list_nth(stmt.inhRelations, 0) as *mut pg_sys::RangeVar
-        };
-
-        if parent.is_null() {
-            return Ok(false);
-        }
-
-        let parent_oid = unsafe {
-            range_var_get_relid(
-                parent,
-                pg_sys::AccessExclusiveLock as pg_sys::LOCKMODE,
-                true,
-            )
-        }?;
-        if parent_oid == pg_sys::InvalidOid {
-            return Ok(false);
-        }
-
-        Ok(IcebergAccessMethod::matches_oid(unsafe {
-            pg_sys::get_rel_relam(parent_oid)
-        }))
+        Ok(Self::default_is_iceberg())
     }
 
     pub(super) fn create_table_as_stmt_uses_iceberg(
@@ -187,14 +188,9 @@ impl SchemaEvolutionTarget {
         }
 
         match rel.relkind() as u8 {
-            pg_sys::RELKIND_RELATION => Ok(Some(Self::Physical(rel.oid()))),
-            pg_sys::RELKIND_PARTITIONED_TABLE => {
-                let descendant_relids =
-                    find_all_inheritors(rel.oid(), descendant_lockmode)?
-                        .into_iter()
-                        .filter(|relid| *relid != rel.oid())
-                        .collect();
-                Ok(Some(Self::PartitionedRoot { descendant_relids }))
+            pg_sys::RELKIND_RELATION | pg_sys::RELKIND_PARTITIONED_TABLE => {
+                let _ = descendant_lockmode;
+                Ok(Some(Self::ManagedRelation(rel.oid())))
             }
             _ => Err(HookError::with_code(
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -211,42 +207,11 @@ impl SchemaEvolutionTarget {
         // target, matching PostgreSQL's ALTER TABLE recursion path. Open with
         // NoLock here so we do not introduce a weaker pre-lock or a lock
         // upgrade path that differs from tablecmds.c.
-        match self {
-            Self::Physical(relid) => {
-                let guard =
-                    RelationGuard::open(*relid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
-                let rel = guard.as_handle();
-                f(&rel)
-            }
-            Self::PartitionedRoot { descendant_relids } => {
-                for relid in descendant_relids {
-                    let guard = RelationGuard::open(
-                        *relid,
-                        pg_sys::NoLock as pg_sys::LOCKMODE,
-                    )?;
-                    let rel = guard.as_handle();
-                    match rel.relkind() as u8 {
-                        pg_sys::RELKIND_RELATION => {
-                            if !rel.is_iceberg() {
-                                return Err(HookError::with_code(
-                                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                                    "partitioned Iceberg schema evolution requires every physical partition to use the Iceberg access method",
-                                ));
-                            }
-                            f(&rel)?;
-                        }
-                        pg_sys::RELKIND_PARTITIONED_TABLE => {}
-                        _ => {
-                            return Err(HookError::with_code(
-                                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                                "partitioned Iceberg schema evolution found an unsupported partition relation kind",
-                            ));
-                        }
-                    }
-                }
-                Ok(())
-            }
-        }
+        let Self::ManagedRelation(relid) = self;
+        let guard =
+            RelationGuard::open_table(*relid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
+        let rel = guard.as_handle();
+        f(&rel)
     }
 
     pub(super) fn preflight(
@@ -291,7 +256,7 @@ impl SchemaEvolutionTarget {
                             format!(
                                 "column \"{}\" does not exist on Iceberg relation \"{}\"",
                                 name,
-                                rel.relation_name()
+                                rel.relation_name().as_c_str().to_string_lossy()
                             ),
                         )
                     })?;
@@ -411,6 +376,14 @@ impl AlterTableIcebergOperations {
                     result.require_lock(pg_sys::AccessExclusiveLock as _);
                     result.reject_schema_operation(
                         "column constraints, identity, and generated columns are not supported for Iceberg relations",
+                    );
+                }
+                pg_sys::AlterTableType::AT_AttachPartition
+                | pg_sys::AlterTableType::AT_DetachPartition
+                | pg_sys::AlterTableType::AT_DetachPartitionFinalize => {
+                    result.require_lock(pg_sys::AccessExclusiveLock as _);
+                    result.reject_schema_operation(
+                        "managed Iceberg partitioned tables do not use PostgreSQL ATTACH or DETACH PARTITION",
                     );
                 }
                 _ => {}

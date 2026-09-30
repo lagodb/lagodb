@@ -126,6 +126,10 @@ impl TransactionResource for ColumnDropAuthorizationResource {
         CURRENT.with(|slot| *slot.borrow_mut() = None);
     }
 
+    fn on_prepare(&self) {
+        CURRENT.with(|slot| *slot.borrow_mut() = None);
+    }
+
     fn on_commit_sub(&self, current_nest_level: i32) {
         for frame in self.frames.borrow_mut().iter_mut() {
             if frame.nest_level >= current_nest_level {

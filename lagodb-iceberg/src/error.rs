@@ -15,7 +15,6 @@
 //! type transparently and delegate [`SqlStateError`] to the source.
 
 use std::error::Error as StdError;
-use std::fmt::{Display, Formatter};
 
 use iceberg_lite::catalog::rest::{RestError, RestErrorKind};
 use lagodb_core::diag::{PgError, SqlStateError, domain_error_report};
@@ -29,88 +28,15 @@ use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
-// ============================================================================
-//  Metadata Catalog Operation
-// ============================================================================
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetadataCatalogOperation {
-    Access,
-    Insert,
-    Read,
-    Update,
-    Delete,
-}
-
-impl Display for MetadataCatalogOperation {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Access => f.write_str("access"),
-            Self::Insert => f.write_str("insert"),
-            Self::Read => f.write_str("read"),
-            Self::Update => f.write_str("update"),
-            Self::Delete => f.write_str("delete"),
-        }
-    }
-}
-
-// ============================================================================
-//  Iceberg Error
-// ============================================================================
-
-#[derive(Error, Debug)]
-pub enum IcebergVacuumError {
-    #[error("gc.enabled must be true")]
-    GcDisabled,
-    #[error(
-        "VACUUM cannot be combined with DML, DDL, TRUNCATE, or DROP for the same relation"
-    )]
-    ActionConflict,
-    #[error("invalid Iceberg VACUUM policy: {0}")]
-    InvalidPolicy(String),
-    #[error("Iceberg VACUUM path is outside the relation-owned table root: {0}")]
-    UnsafePath(String),
-    #[error("resource limit exceeded: {0}")]
-    ResourceLimit(String),
-    #[error("Iceberg relation {relid} unexpectedly owns a PostgreSQL TOAST relation")]
-    UnexpectedToastRelation { relid: pg_sys::Oid },
-}
-
-impl SqlStateError for IcebergVacuumError {
-    fn sql_error_code(&self) -> PgSqlErrorCode {
-        match self {
-            Self::InvalidPolicy(_) => PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-            Self::GcDisabled
-            | Self::ActionConflict
-            | Self::UnsafePath(_)
-            | Self::UnexpectedToastRelation { .. } => {
-                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
-            }
-            Self::ResourceLimit(_) => PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-        }
-    }
-}
+pub use crate::managed_table::catalog::error::{
+    MetadataCatalogError, MetadataCatalogOperation,
+};
+pub use crate::managed_table::maintenance::error::IcebergVacuumError;
 
 #[derive(Error, Debug)]
 pub enum IcebergError {
-    #[error("failed to {operation} iceberg.iceberg_metadata catalog: {source}")]
-    MetadataCatalog {
-        operation: MetadataCatalogOperation,
-        #[source]
-        source: PgError,
-    },
-
-    #[error("metadata catalog record not found for relid: {0}")]
-    MetadataCatalogNotFound(pg_sys::Oid),
-
-    #[error("metadata catalog record already exists for relid: {0}")]
-    MetadataCatalogAlreadyExists(pg_sys::Oid),
-
-    #[error("invalid metadata catalog record: {0}")]
-    MetadataCatalogInvalidRecord(String),
-
-    #[error("optimistic locking failed: metadata location changed concurrently")]
-    MetadataCatalogConflict,
+    #[error(transparent)]
+    MetadataCatalog(#[from] MetadataCatalogError),
 
     #[error("Iceberg VACUUM failed: {source}")]
     Vacuum {
@@ -166,8 +92,20 @@ pub enum IcebergError {
         source: WorkerNotificationError,
     },
 
-    #[error("storage target is still being cleaned by maintenance")]
-    ActiveMaintenanceTarget,
+    #[error("managed Iceberg table {relid} has no persisted storage location")]
+    ManagedTableLocationMissing { relid: pg_sys::Oid },
+
+    #[error("local Iceberg partitioned table {relid} has no valid relfilenumber")]
+    InvalidLocalStorageIdentity { relid: pg_sys::Oid },
+
+    #[error("invalid managed Iceberg table location {location:?}: {reason}")]
+    InvalidManagedTableLocation { location: String, reason: String },
+
+    #[error("managed Iceberg table location {location:?} is not empty")]
+    ManagedTableLocationNotEmpty { location: String },
+
+    #[error("managed Iceberg table location {location:?} is still pending deletion")]
+    ManagedTableLocationCleanupPending { location: String },
 
     #[error("postgres error: {0}")]
     PgError(#[from] PgError),
@@ -186,6 +124,12 @@ pub enum IcebergError {
 
     #[error("schema build error: {0}")]
     SchemaBuildError(String),
+
+    #[error("invalid managed Iceberg partition definition: {0}")]
+    InvalidPartitionDefinition(String),
+
+    #[error("unsupported managed Iceberg partition definition: {0}")]
+    UnsupportedPartitionDefinition(String),
 
     #[error("column {0} is not found in source")]
     ColumnNotFound(String),
@@ -255,25 +199,9 @@ pub enum IcebergError {
 impl SqlStateError for IcebergError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
-            IcebergError::MetadataCatalog { source, .. } => source.sql_error_code(),
-
-            IcebergError::MetadataCatalogNotFound(_) => {
-                PgSqlErrorCode::ERRCODE_NO_DATA_FOUND
-            }
-
-            IcebergError::MetadataCatalogAlreadyExists(_) => {
-                PgSqlErrorCode::ERRCODE_UNIQUE_VIOLATION
-            }
-
-            IcebergError::MetadataCatalogConflict => {
-                PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
-            }
+            IcebergError::MetadataCatalog(error) => error.sql_error_code(),
 
             IcebergError::Vacuum { source } => source.sql_error_code(),
-
-            IcebergError::MetadataCatalogInvalidRecord(_) => {
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
-            }
 
             IcebergError::TablespaceError(error) => error.sql_error_code(),
 
@@ -289,7 +217,20 @@ impl SqlStateError for IcebergError {
                 PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
             }
 
-            IcebergError::ActiveMaintenanceTarget => {
+            IcebergError::ManagedTableLocationMissing { .. }
+            | IcebergError::InvalidLocalStorageIdentity { .. } => {
+                PgSqlErrorCode::ERRCODE_DATA_CORRUPTED
+            }
+
+            IcebergError::InvalidManagedTableLocation { .. } => {
+                PgSqlErrorCode::ERRCODE_DATA_CORRUPTED
+            }
+
+            IcebergError::ManagedTableLocationNotEmpty { .. } => {
+                PgSqlErrorCode::ERRCODE_DUPLICATE_FILE
+            }
+
+            IcebergError::ManagedTableLocationCleanupPending { .. } => {
                 PgSqlErrorCode::ERRCODE_OBJECT_IN_USE
             }
 
@@ -322,6 +263,14 @@ impl SqlStateError for IcebergError {
 
             IcebergError::SchemaBuildError(_) => {
                 PgSqlErrorCode::ERRCODE_INVALID_OBJECT_DEFINITION
+            }
+
+            IcebergError::InvalidPartitionDefinition(_) => {
+                PgSqlErrorCode::ERRCODE_INVALID_OBJECT_DEFINITION
+            }
+
+            IcebergError::UnsupportedPartitionDefinition(_) => {
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
             }
 
             IcebergError::ColumnNotFound(_) => {
@@ -384,13 +333,6 @@ impl From<IcebergError> for lagodb_core::table_maintenance::TableMaintenanceErro
 }
 
 impl IcebergError {
-    pub fn metadata_catalog(
-        operation: MetadataCatalogOperation,
-        source: PgError,
-    ) -> Self {
-        Self::MetadataCatalog { operation, source }
-    }
-
     pub fn schema_evolution_conflict(source: iceberg_lite::Error) -> Self {
         Self::SchemaEvolutionConflict { source }
     }
@@ -475,241 +417,5 @@ fn iceberg_lite_sql_error_code(error: &iceberg_lite::Error) -> PgSqlErrorCode {
         // `Unexpected` and any future `#[non_exhaustive]` kind: an opaque
         // internal error with no more specific SQLSTATE.
         _ => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn metadata_catalog_sqlstate_survives_iceberg_error_boundary() {
-        let conflict = IcebergError::MetadataCatalogConflict;
-        assert_eq!(
-            conflict.sql_error_code(),
-            PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
-        );
-
-        let not_found = IcebergError::MetadataCatalogNotFound(pg_sys::Oid::from(42));
-        assert_eq!(
-            not_found.sql_error_code(),
-            PgSqlErrorCode::ERRCODE_NO_DATA_FOUND
-        );
-    }
-
-    #[test]
-    fn retry_exhaustion_reports_serialization_failure() {
-        let error = IcebergError::MetadataCommitConflict {
-            relid: pg_sys::Oid::from(42),
-            max_retries: 3,
-        };
-
-        assert_eq!(
-            error.sql_error_code(),
-            PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
-        );
-    }
-
-    #[test]
-    fn iceberg_lite_feature_unsupported_reports_feature_not_supported() {
-        let error = IcebergError::IcebergLiteError(iceberg_lite::Error::new(
-            iceberg_lite::ErrorKind::FeatureUnsupported,
-            "catalog method not implemented",
-        ));
-
-        assert_eq!(
-            error.sql_error_code(),
-            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
-        );
-    }
-
-    #[test]
-    fn iceberg_data_conflict_requires_client_transaction_retry() {
-        let source = iceberg_lite::Error::new(
-            iceberg_lite::ErrorKind::DataConflict,
-            "concurrent row delta conflict",
-        );
-        assert!(!source.retryable());
-        let error = IcebergError::IcebergLiteError(source);
-
-        assert_eq!(
-            error.sql_error_code(),
-            PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
-        );
-    }
-
-    #[test]
-    fn non_retryable_iceberg_precondition_preserves_prerequisite_state() {
-        let error = IcebergError::IcebergLiteError(iceberg_lite::Error::new(
-            iceberg_lite::ErrorKind::PreconditionFailed,
-            "invalid operation state",
-        ));
-
-        assert_eq!(
-            error.sql_error_code(),
-            PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
-        );
-    }
-
-    #[test]
-    fn schema_evolution_conflict_reports_serialization_failure() {
-        let error =
-            IcebergError::schema_evolution_conflict(iceberg_lite::Error::new(
-                iceberg_lite::ErrorKind::PreconditionFailed,
-                "prepared schema update base changed",
-            ));
-
-        assert_eq!(
-            error.sql_error_code(),
-            PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
-        );
-    }
-
-    /// Every representative `ArrowConversionError` variant must report the same SQLSTATE
-    /// before and after being wrapped in `IcebergError::ArrowConversion`.
-    #[test]
-    fn conv_error_sqlstate_survives_iceberg_error_boundary() {
-        use pgrx::datum::datetime_support::DateTimeConversionError;
-        use pgrx::datum::numeric_support::error::Error as PgNumericError;
-
-        let representatives = [
-            // DATATYPE_MISMATCH group
-            lagodb_arrow::ArrowConversionError::UnsupportedColumnType(
-                "Decimal256(76, 10)".into(),
-            ),
-            lagodb_arrow::ArrowConversionError::IncompatibleColumnType(
-                "FixedSizeBinary(16)".into(),
-                "expected uuid".into(),
-            ),
-            lagodb_arrow::ArrowConversionError::ArrowTypeMismatch(
-                "Int32Array".into(),
-            ),
-            // DATA_EXCEPTION group
-            lagodb_arrow::ArrowConversionError::ValueOutOfRange(
-                "value out of range".into(),
-            ),
-            lagodb_arrow::ArrowConversionError::NumericError(
-                PgNumericError::Invalid("not a numeric".into()),
-            ),
-            lagodb_arrow::ArrowConversionError::DatetimeConversionError(
-                DateTimeConversionError::FieldOverflow,
-            ),
-            // INTERNAL_ERROR group
-            lagodb_arrow::ArrowConversionError::ArrowError(
-                arrow_schema::ArrowError::SchemaError("bad schema".into()),
-            ),
-            lagodb_arrow::ArrowConversionError::DecimalCodec(
-                lagodb_core::tuple::DecimalCodecError::InvalidBinaryRepresentation {
-                    message: "malformed numeric bytes".into(),
-                },
-            ),
-        ];
-
-        for conv in representatives {
-            let expected = conv.sql_error_code();
-            let wrapped = IcebergError::from(conv);
-            assert_eq!(
-                wrapped.sql_error_code(),
-                expected,
-                "IcebergError::ArrowConversion must preserve the inner ArrowConversionError SQLSTATE"
-            );
-        }
-    }
-
-    /// A `ArrowConversionError` must cross into `IcebergError` through plain `?`
-    /// propagation, since the write path relies on the `#[from]` conversion to
-    /// surface conversion failures without manual mapping.
-    #[test]
-    fn conv_error_propagates_into_iceberg_error_via_question_mark() {
-        fn boundary() -> IcebergResult<()> {
-            Err(lagodb_arrow::ArrowConversionError::ValueOutOfRange(
-                "value out of range".into(),
-            ))?;
-            Ok(())
-        }
-
-        let err = boundary()
-            .expect_err("ArrowConversionError should propagate as IcebergError");
-        assert!(matches!(err, IcebergError::ArrowConversion(_)));
-    }
-
-    /// A decode-path `ArrowConversionError` (here the physical-array mismatch the column
-    /// decoder raises) must reach the scan boundary through plain `?`, so the
-    /// decoder needs no bespoke mapping to surface failures as `IcebergError`.
-    #[test]
-    fn decode_conv_error_propagates_into_iceberg_error_via_question_mark() {
-        fn boundary() -> IcebergResult<()> {
-            Err(lagodb_arrow::ArrowConversionError::ArrowTypeMismatch(
-                "expected Int32Array".into(),
-            ))?;
-            Ok(())
-        }
-
-        let err = boundary().expect_err(
-            "decode ArrowConversionError should propagate as IcebergError",
-        );
-        assert!(matches!(err, IcebergError::ArrowConversion(_)));
-    }
-
-    /// The UUID-conversion arm needs a real `uuid::Error`, constructed here so
-    /// the representative set above stays free of fallible setup.
-    #[test]
-    fn conv_uuid_error_sqlstate_survives_iceberg_error_boundary() {
-        let uuid_err = uuid::Uuid::parse_str("not-a-uuid").unwrap_err();
-        let conv = lagodb_arrow::ArrowConversionError::UuidConversionError(uuid_err);
-
-        let expected = conv.sql_error_code();
-        assert_eq!(expected, PgSqlErrorCode::ERRCODE_DATA_EXCEPTION);
-        assert_eq!(IcebergError::from(conv).sql_error_code(), expected);
-    }
-
-    /// Each `DecimalCodecError` arm, routed through `ArrowConversionError` and wrapped in
-    /// `IcebergError`, must land on its expected SQLSTATE class. The codec
-    /// error reaches `IcebergError` only via `lagodb_arrow::ArrowConversionError` (the
-    /// AM no longer routes `DecimalCodecError` directly), so this is the one
-    /// routing that must hold.
-    #[test]
-    fn decimal_codec_error_sqlstate_classes_survive_the_boundary() {
-        use lagodb_core::tuple::DecimalCodecError;
-
-        let cases: [(DecimalCodecError, PgSqlErrorCode); 4] = [
-            (
-                DecimalCodecError::PrecisionOutOfRange { precision: 40 },
-                PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH,
-            ),
-            (
-                DecimalCodecError::ScaleOutOfRange {
-                    precision: 10,
-                    scale: 20,
-                },
-                PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH,
-            ),
-            (
-                DecimalCodecError::ValueOutOfRange {
-                    precision: 10,
-                    scale: 2,
-                    message: "value exceeds NUMERIC(10, 2)".into(),
-                },
-                PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-            ),
-            (
-                DecimalCodecError::InvalidBinaryRepresentation {
-                    message: "numeric_recv rejected wire bytes".into(),
-                },
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-            ),
-        ];
-
-        for (codec_err, expected_class) in cases {
-            // DecimalCodecError -> ArrowConversionError -> IcebergError.
-            let conv: lagodb_arrow::ArrowConversionError = codec_err.into();
-            let via_conv = IcebergError::from(conv);
-
-            assert_eq!(
-                via_conv.sql_error_code(),
-                expected_class,
-                "DecimalCodecError -> ArrowConversionError -> IcebergError must preserve the SQLSTATE class"
-            );
-        }
     }
 }

@@ -15,7 +15,7 @@ use lagodb_core::handles::RelationHandle;
 use lagodb_core::options::table::{
     AmCache, AmCacheRef, AmCacheValue, AmCacheable, TableOptionError, TableOptions,
 };
-use lagodb_core::options::{OptionDef, OptionKind, OptionMutability};
+use lagodb_core::options::{OptionAccess, OptionDef, OptionKind};
 use parquet::basic::{Compression as ParquetCompression, ZstdLevel};
 use std::collections::HashMap;
 
@@ -80,15 +80,37 @@ pub const OPT_MANIFEST_MIN_COUNT_DEFAULT: &str = "100";
 pub const OPT_MANIFEST_MERGE: &str = TableProperties::PROPERTY_MANIFEST_MERGE_ENABLED;
 pub const OPT_MANIFEST_MERGE_DEFAULT: bool = true;
 
+/// Stable object-storage identity generated and owned by the access method.
+pub const OPT_LOCATION: &str = "location";
+
+pub const LOCATION_OPTION_DEF: OptionDef = OptionDef {
+    name: OPT_LOCATION,
+    access: OptionAccess::AccessMethodManaged,
+    kind: OptionKind::String { default: None },
+    description: "Iceberg table storage location managed by the access method",
+};
+
+/// PostgreSQL-allocated file-number reservation for a local provider-owned partitioned table.
+pub const OPT_RELFILENUMBER: &str = "relfilenumber";
+
+pub const RELFILENUMBER_OPTION_DEF: OptionDef = OptionDef {
+    name: OPT_RELFILENUMBER,
+    access: OptionAccess::AccessMethodManaged,
+    kind: OptionKind::String { default: None },
+    description: "Local Iceberg partitioned table storage file number managed by the access method",
+};
+
 // ============================================================================
 //  Option Definitions
 // ============================================================================
 
 /// Iceberg-specific table options definition.
 pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
+    LOCATION_OPTION_DEF,
+    RELFILENUMBER_OPTION_DEF,
     OptionDef {
         name: OPT_FORMAT_VERSION,
-        mutability: OptionMutability::CreateOnly,
+        access: OptionAccess::UserCreateOnly,
         kind: OptionKind::Int {
             default: OPT_FORMAT_VERSION_DEFAULT,
             min: Some(OPT_FORMAT_VERSION_MIN),
@@ -98,7 +120,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_COMPRESSION_CODEC,
-        mutability: OptionMutability::Mutable,
+        access: OptionAccess::UserMutable,
         kind: OptionKind::Enum {
             default: OPT_COMPRESSION_CODEC_DEFAULT,
             values: OPT_COMPRESSION_CODEC_VALUES,
@@ -107,7 +129,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_WRITE_FORMAT,
-        mutability: OptionMutability::Mutable,
+        access: OptionAccess::UserMutable,
         kind: OptionKind::Enum {
             default: OPT_WRITE_FORMAT_DEFAULT,
             values: OPT_WRITE_FORMAT_VALUES,
@@ -116,7 +138,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_WRITE_DELETE_ISOLATION_LEVEL,
-        mutability: OptionMutability::Mutable,
+        access: OptionAccess::UserMutable,
         kind: OptionKind::Enum {
             default: OPT_WRITE_ISOLATION_LEVEL_DEFAULT,
             values: OPT_WRITE_ISOLATION_LEVEL_VALUES,
@@ -125,7 +147,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_WRITE_UPDATE_ISOLATION_LEVEL,
-        mutability: OptionMutability::Mutable,
+        access: OptionAccess::UserMutable,
         kind: OptionKind::Enum {
             default: OPT_WRITE_ISOLATION_LEVEL_DEFAULT,
             values: OPT_WRITE_ISOLATION_LEVEL_VALUES,
@@ -134,7 +156,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_WRITE_MERGE_ISOLATION_LEVEL,
-        mutability: OptionMutability::Mutable,
+        access: OptionAccess::UserMutable,
         kind: OptionKind::Enum {
             default: OPT_WRITE_ISOLATION_LEVEL_DEFAULT,
             values: OPT_WRITE_ISOLATION_LEVEL_VALUES,
@@ -143,7 +165,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_TARGET_FILE_SIZE,
-        mutability: OptionMutability::Mutable,
+        access: OptionAccess::UserMutable,
         kind: OptionKind::String {
             default: Some(OPT_TARGET_FILE_SIZE_DEFAULT),
         },
@@ -151,7 +173,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_MAX_SNAPSHOT_AGE,
-        mutability: OptionMutability::Mutable,
+        access: OptionAccess::UserMutable,
         kind: OptionKind::String {
             default: Some(OPT_MAX_SNAPSHOT_AGE_DEFAULT),
         },
@@ -159,7 +181,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_MIN_SNAPSHOTS,
-        mutability: OptionMutability::Mutable,
+        access: OptionAccess::UserMutable,
         kind: OptionKind::String {
             default: Some(OPT_MIN_SNAPSHOTS_DEFAULT),
         },
@@ -167,7 +189,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_MAX_REF_AGE,
-        mutability: OptionMutability::Mutable,
+        access: OptionAccess::UserMutable,
         kind: OptionKind::String {
             default: Some(OPT_MAX_REF_AGE_DEFAULT),
         },
@@ -175,7 +197,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_METADATA_VERSIONS,
-        mutability: OptionMutability::Mutable,
+        access: OptionAccess::UserMutable,
         kind: OptionKind::String {
             default: Some(OPT_METADATA_VERSIONS_DEFAULT),
         },
@@ -183,7 +205,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_MANIFEST_TARGET_SIZE,
-        mutability: OptionMutability::Mutable,
+        access: OptionAccess::UserMutable,
         kind: OptionKind::String {
             default: Some(OPT_MANIFEST_TARGET_SIZE_DEFAULT),
         },
@@ -191,7 +213,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_MANIFEST_MIN_COUNT,
-        mutability: OptionMutability::Mutable,
+        access: OptionAccess::UserMutable,
         kind: OptionKind::String {
             default: Some(OPT_MANIFEST_MIN_COUNT_DEFAULT),
         },
@@ -199,7 +221,7 @@ pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     },
     OptionDef {
         name: OPT_MANIFEST_MERGE,
-        mutability: OptionMutability::Mutable,
+        access: OptionAccess::UserMutable,
         kind: OptionKind::Bool {
             default: OPT_MANIFEST_MERGE_DEFAULT,
         },
@@ -841,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_root_rejects_location_and_gc_overrides() {
+    fn managed_partitioned_table_rejects_location_and_gc_overrides() {
         for option in [
             "write.data.path",
             "write.metadata.path",

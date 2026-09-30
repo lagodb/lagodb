@@ -31,10 +31,7 @@ impl ManagedTablePropertyUpdate {
         self,
         rel: &RelationHandle<'_>,
     ) -> IcebergResult<()> {
-        let ctx = StorageContext::for_tablespace_with_wal(
-            rel.locator().spc_oid,
-            rel.needs_wal(),
-        )?;
+        let ctx = StorageContext::for_write(rel)?;
         let file_io = ctx.into_file_io();
         let tracker = TxMetadata::current();
         let loaded = tracker.begin_table_modify(rel.oid(), &file_io)?;

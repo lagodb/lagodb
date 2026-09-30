@@ -11,19 +11,21 @@ mod constants;
 mod customscan;
 mod gucs;
 mod hooks;
-mod maintenance;
+pub(crate) mod maintenance;
 mod options;
 mod provider;
-mod source;
+mod read_view;
 pub(crate) mod storage;
 
 pub(crate) use constants::ICEBERG_AM_NAME;
-pub(crate) use source::{ManagedAnalyzeSnapshot, ManagedTableSnapshot};
+pub(crate) use read_view::ManagedTableReadView;
 pub(crate) use storage::StorageContext;
 
+pub(crate) use provider::IcebergTableProvider;
 pub use provider::{IcebergTableAm, get_iceberg_am_routine_ptr};
 
 use crate::storage::local_file_wal;
+use lagodb_core::table_provider::register_provider;
 
 pub(crate) fn initialize_configuration_and_hooks() {
     gucs::init();
@@ -35,8 +37,6 @@ pub(crate) fn register_scan_provider() {
     customscan::register();
 }
 
-pub(crate) fn register_maintenance_provider() {
-    lagodb_core::table_maintenance::register_provider::<
-        maintenance::IcebergTableMaintenanceProvider,
-    >();
+pub(crate) fn register_table_provider() {
+    register_provider::<IcebergTableProvider>();
 }

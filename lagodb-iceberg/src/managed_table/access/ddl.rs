@@ -1,34 +1,38 @@
+use crate::error::IcebergError;
 use crate::managed_table::IcebergTableAm;
-use crate::managed_table::catalog::metadata_tracker::TxMetadata;
-use crate::managed_table::storage::StorageContext;
+use crate::managed_table::catalog::table_truncate::ManagedTableTruncate;
+use lagodb_core::options::get_tablespace;
 use lagodb_core::prelude::*;
 use pgrx::pg_sys;
 
-impl IcebergTableAm {
-    fn stage_truncate(rel: &RelationHandle<'_>) -> AmResult<()> {
-        let file_io = StorageContext::for_tablespace_with_wal(
-            rel.locator().spc_oid,
-            rel.needs_wal(),
-        )?
-        .into_file_io();
-        TxMetadata::current().stage_truncate(rel.oid(), &file_io)?;
+impl AmDdl for IcebergTableAm {
+    fn truncate(rel: &RelationHandle<'_>) -> AmResult<()> {
+        ManagedTableTruncate::execute(rel, None)?;
         Ok(())
     }
-}
 
-impl AmDdl for IcebergTableAm {
     fn relation_set_new_filelocator(
         rel: &RelationHandle,
-        _newrlocator: &RelFileLocator,
-        _persistence: u8,
+        newrlocator: &RelFileLocator,
+        persistence: u8,
     ) -> AmResult<(pg_sys::TransactionId, pg_sys::MultiXactId)> {
+        if get_tablespace(rel.tablespace().resolved_oid())
+            .map_err(IcebergError::from)?
+            .is_none()
+        {
+            // Create the native main fork for PG locator ownership and abort
+            // cleanup. Intentionally omit an init fork for UNLOGGED: Iceberg
+            // uses that persistence only to disable file WAL, without PG's
+            // crash-time reset. See StorageContext's UNLOGGED contract.
+            newrlocator.create_storage(persistence)?;
+        }
         if !rel.is_being_created_in_current_subtransaction() {
-            Self::stage_truncate(rel)?;
+            ManagedTableTruncate::execute(rel, Some(*newrlocator))?;
         }
         Ok((pg_sys::InvalidTransactionId, 0u32.into()))
     }
 
     fn relation_nontransactional_truncate(rel: &RelationHandle) -> AmResult<()> {
-        Self::stage_truncate(rel)
+        Self::truncate(rel)
     }
 }
