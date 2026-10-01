@@ -29,9 +29,18 @@
 //! - Dropping [`PgFileWrite`] only closes the VFD. Callers must drive the normal
 //!   `FileWrite::close`/`OutputFileWriter::finish` path to observe `FileSync`
 //!   errors.
+//!
+//! # Local durability limitation
+//!
+//! Local Iceberg tables are private to PostgreSQL. This adapter syncs files,
+//! but intentionally does not fsync their directories. FileSync alone does not
+//! make newly-created file or directory entries durable: an OS crash or power
+//! loss can leave committed catalog metadata referencing missing paths. Primary
+//! crash recovery skips WRITE_FILE redo and does not repair this gap. Keeping
+//! the tables private and rebuilding them on TRUNCATE does not remove it.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -45,6 +54,7 @@ use bytes::Bytes;
 use pgrx::pg_sys;
 
 use crate::storage::local_file_wal::log_write_file;
+use crate::storage::local_file_wal::record::DirectoryHeader;
 use crate::storage::transaction_resources::register_local_file_created;
 use iceberg_lite::Result;
 use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
@@ -112,17 +122,43 @@ impl LocalStorage {
         self.needs_wal
     }
 
+    /// Reserve a PostgreSQL-allocated number with an AM-owned empty file.
+    /// Creation and abort cleanup use VFD storage rather than smgr. Committed
+    /// WAL-enabled retirement keeps this empty file until PostgreSQL's checkpoint
+    /// unlink queue can safely release the number. WAL-free files, including
+    /// temporary reservations, are unlinked directly.
+    pub(crate) fn reserve_file(&self, path: &str) -> Result<()> {
+        let mut writer = self.writer(path)?;
+        writer.close()?;
+        if self.needs_wal {
+            // Empty writes normally produce no WAL. An explicit offset-zero
+            // record creates this empty reservation on standby/archive replay.
+            log_write_file(path, 0, &[]);
+        }
+        Ok(())
+    }
+
+    /// Clear a transaction-local generation selected by PostgreSQL's
+    /// nontransactional-truncate callback. Abort discards this whole generation.
+    pub(crate) fn truncate_directory(&self, path: &str) -> Result<()> {
+        self.remove_dir_all(path)?;
+        if self.needs_wal {
+            DirectoryHeader::log_truncate(path);
+        }
+        Ok(())
+    }
+
     pub(crate) fn list_older_than(
         &self,
         table_location: &str,
         cutoff_ms: i64,
-    ) -> Result<std::collections::HashSet<String>> {
+    ) -> Result<HashSet<String>> {
         let (prefix, root) = match table_location.strip_prefix("file://") {
             Some(path) => ("file://", Path::new(path)),
             None => ("", Path::new(table_location)),
         };
         let mut pending = vec![root.to_path_buf()];
-        let mut paths = std::collections::HashSet::new();
+        let mut paths = HashSet::new();
         while let Some(directory) = pending.pop() {
             for entry in fs::read_dir(&directory)? {
                 let entry = entry?;
@@ -149,12 +185,27 @@ impl LocalStorage {
                         .with_source(error)
                     })?
                     .as_millis();
-                if modified_ms < u128::try_from(cutoff_ms).unwrap_or(0) {
-                    paths.insert(format!("{prefix}{}", entry.path().display()));
+                if modified_ms >= u128::try_from(cutoff_ms).unwrap_or(0) {
+                    continue;
                 }
+                paths.insert(format!("{prefix}{}", entry.path().display()));
             }
         }
         Ok(paths)
+    }
+
+    pub(crate) fn location_is_empty(&self, location: &str) -> Result<bool> {
+        let mut entries = match fs::read_dir(location) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(true);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotADirectory => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        Ok(entries.next().transpose()?.is_none())
     }
 }
 
@@ -201,7 +252,7 @@ impl Storage for LocalStorage {
     }
 
     fn writer(&self, path: &str) -> Result<Box<dyn FileWrite>> {
-        // Create parent directories if they don't exist
+        // Create parent directories if they don't exist.
         if let Some(parent) = Path::new(path).parent()
             && !parent.exists()
         {
@@ -469,8 +520,9 @@ impl Seek for PgFileRead {
 ///   replayed to restore the file
 ///
 /// Local crash recovery does not replay `WRITE_FILE` records; successful
-/// explicit close calls `FileSync`. Distributed storage (S3, etc.) provides its
-/// own durability guarantees and does not use this WAL path.
+/// explicit close calls `FileSync`. Directory entries are not synced; see the
+/// module's local durability limitation. Distributed storage provides its own
+/// durability guarantees and does not use this WAL path.
 struct PgFileWrite {
     /// Path to the file (for error reporting and WAL logging)
     path: String,

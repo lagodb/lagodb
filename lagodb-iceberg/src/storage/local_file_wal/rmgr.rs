@@ -1,8 +1,7 @@
 use super::record::{
-    DeleteDirectoryHeader, DeleteFilesHeader, IcebergWalOp,
-    MAX_DELETE_FILES_PAYLOAD_BYTES, MAX_DELETE_FILES_PER_RECORD,
-    SIZE_OF_DELETE_DIRECTORY, SIZE_OF_DELETE_FILES, SIZE_OF_WRITE_FILE,
-    WriteFileHeader,
+    DeleteFilesHeader, DirectoryHeader, IcebergWalOp, MAX_DELETE_FILES_PAYLOAD_BYTES,
+    MAX_DELETE_FILES_PER_RECORD, SIZE_OF_DELETE_FILES, SIZE_OF_DIRECTORY,
+    SIZE_OF_WRITE_FILE, WriteFileHeader,
 };
 use lagodb_core::wal::{RmgrId, WalRecord, WalResourceManager, WalRmgrError};
 use lagodb_core::{diag, wal};
@@ -37,18 +36,21 @@ pub const ICEBERG_RMGR_ID: RmgrId = RmgrId::new(ICEBERG_RMGR_ID_U8);
 /// the WAL.
 ///
 /// Invariants:
-/// - Local crash-only recovery does not replay `WRITE_FILE` records. The normal
-///   write path performs `FileSync` during explicit writer close, so committed
-///   local files are already durable on the primary.
+/// - Local crash-only recovery does not replay `WRITE_FILE` records. It requires
+///   the write path to make files and publishing directory entries durable
+///   before commit; see the module's known design debt.
 /// - Standby WAL replay or archive recovery replays `WRITE_FILE` records on a
 ///   best-effort basis because the target system may not have local Iceberg
 ///   files. Missing base files are skipped in lossy mode rather than aborting
 ///   PostgreSQL recovery.
 /// - Directory and canceled-file deletes are post-commit cleanup records.
 ///   PostgreSQL does not let an extension attach arbitrary paths to core
-///   transaction commit/abort records, and PG17 `smgr` is not
+///   transaction commit/abort records, and PostgreSQL's `smgr` is not
 ///   extension-customizable, so delete WAL is emitted only after commit is
 ///   known to have succeeded.
+/// - In-place truncation clears only a disposable transaction-local generation.
+///   Its separate record is skipped during primary crash recovery; replaying
+///   it there would delete the already-synced replacement table.
 /// - Distributed storage (S3, GCS, Azure) doesn't need WAL-based redo because:
 /// 1. The storage layer guarantees durability after successful write
 /// 2. Orphaned files should be cleaned via garbage collection
@@ -78,9 +80,18 @@ impl WalResourceManager for IcebergRmgr {
         ));
 
         match op {
-            IcebergWalOp::DeleteDirectory => self.redo_delete_directory(record),
+            IcebergWalOp::DeleteDirectory => self.redo_remove_directory(record),
             IcebergWalOp::WriteFile => self.redo_write_file(record),
             IcebergWalOp::DeleteFiles => self.redo_delete_files(record),
+            IcebergWalOp::TruncateDirectory => {
+                // Replaying a historical in-place truncate on the primary
+                // would erase the new files that close has already synced.
+                if wal::is_crash_recovery_only() {
+                    Ok(())
+                } else {
+                    self.redo_remove_directory(record)
+                }
+            }
         }
     }
 
@@ -91,8 +102,9 @@ impl WalResourceManager for IcebergRmgr {
             // Try to extract and display the path from the record
             if let Some(data) = record.main_data() {
                 match op {
-                    IcebergWalOp::DeleteDirectory => {
-                        if let Some(path) = self.extract_delete_directory_path(data) {
+                    IcebergWalOp::DeleteDirectory
+                    | IcebergWalOp::TruncateDirectory => {
+                        if let Some(path) = self.extract_directory_path(data) {
                             let _ =
                                 std::fmt::write(buf, format_args!(" path={}", path));
                         }
@@ -165,21 +177,21 @@ impl IcebergRmgr {
     // Redo Functions (Local Storage Only)
     // ========================================================================
 
-    /// Redo a DELETE_DIRECTORY operation.
+    /// Redo directory retirement or transaction-local truncation.
     ///
     /// Directory deletion is cleanup, not file reconstruction. In lossy replay
     /// mode failures are reported but do not stop PostgreSQL recovery.
-    fn redo_delete_directory(&self, record: &WalRecord) -> Result<(), WalRmgrError> {
+    fn redo_remove_directory(&self, record: &WalRecord) -> Result<(), WalRmgrError> {
         let data = record
             .main_data()
             .ok_or_else(|| WalRmgrError::InvalidRecord("Missing main data".into()))?;
 
-        let path = self.extract_delete_directory_path(data).ok_or_else(|| {
+        let path = self.extract_directory_path(data).ok_or_else(|| {
             WalRmgrError::InvalidRecord("Failed to extract directory path".into())
         })?;
 
         diag::log_debug1(format_args!(
-            "Iceberg DELETE_DIRECTORY redo: path={}",
+            "Iceberg directory removal redo: path={}",
             path
         ));
 
@@ -263,9 +275,11 @@ impl IcebergRmgr {
         // fsync (FileSync) is performed by the explicit writer close path
         // before a successful file write is reported.
         //
-        // This is safe because:
-        // 1. If the transaction committed, the file is already synced to disk.
-        // 2. If the transaction aborted, we don't care about the file state.
+        // Known limitation: writers sync files but not their directories.
+        // FileSync does not guarantee newly-created directory entries survive
+        // an OS crash or power loss, even after the catalog commits. Skipping
+        // redo here leaves missing committed paths unrepaired. Aborted files
+        // need not survive; see the module's known design debt.
         //
         // Standby WAL replay or archive recovery still needs redo because the
         // target system may not have the local Iceberg files. This is
@@ -416,9 +430,9 @@ impl IcebergRmgr {
     // Helper Functions for Parsing WAL Records
     // ========================================================================
 
-    /// Extract directory path from DeleteDirectoryHeader + data
-    fn extract_delete_directory_path(&self, data: &[u8]) -> Option<String> {
-        if data.len() < SIZE_OF_DELETE_DIRECTORY {
+    /// Extract directory path from DirectoryHeader + data
+    fn extract_directory_path(&self, data: &[u8]) -> Option<String> {
+        if data.len() < SIZE_OF_DIRECTORY {
             return None;
         }
 
@@ -427,10 +441,10 @@ impl IcebergRmgr {
         // alignment, and the header consists entirely of integer fields for
         // which every bit pattern is valid.
         let header = unsafe {
-            std::ptr::read_unaligned(data.as_ptr() as *const DeleteDirectoryHeader)
+            std::ptr::read_unaligned(data.as_ptr() as *const DirectoryHeader)
         };
 
-        let path_start = SIZE_OF_DELETE_DIRECTORY;
+        let path_start = SIZE_OF_DIRECTORY;
         let path_end = path_start.checked_add(header.path_len as usize)?;
 
         if data.len() < path_end {
@@ -530,7 +544,7 @@ mod tests {
     }
 
     fn delete_directory_record(path: &[u8], path_len: u32) -> Vec<u8> {
-        let header = DeleteDirectoryHeader { path_len };
+        let header = DirectoryHeader { path_len };
         let mut data = Vec::new();
         data.extend_from_slice(header_bytes(&header));
         data.extend_from_slice(path);
@@ -580,7 +594,11 @@ mod tests {
             IcebergWalOp::from_info(IcebergWalOp::DeleteFiles as u8 | 0x0f),
             Some(IcebergWalOp::DeleteFiles)
         );
-        assert_eq!(IcebergWalOp::from_info(0x30), None);
+        assert_eq!(
+            IcebergWalOp::from_info(IcebergWalOp::TruncateDirectory as u8 | 0x0f),
+            Some(IcebergWalOp::TruncateDirectory)
+        );
+        assert_eq!(IcebergWalOp::from_info(0x40), None);
     }
 
     #[test]
@@ -589,7 +607,7 @@ mod tests {
         let data = delete_directory_record(b"base/1/2_iceberg", 16);
 
         assert_eq!(
-            rmgr.extract_delete_directory_path(&data),
+            rmgr.extract_directory_path(&data),
             Some("base/1/2_iceberg".to_string())
         );
     }
@@ -598,20 +616,17 @@ mod tests {
     fn rejects_malformed_delete_directory_records() {
         let rmgr = IcebergRmgr;
 
-        assert_eq!(rmgr.extract_delete_directory_path(&[]), None);
+        assert_eq!(rmgr.extract_directory_path(&[]), None);
         assert_eq!(
-            rmgr.extract_delete_directory_path(&delete_directory_record(b"abc", 4)),
+            rmgr.extract_directory_path(&delete_directory_record(b"abc", 4)),
             None
         );
         assert_eq!(
-            rmgr.extract_delete_directory_path(&delete_directory_record(
-                b"",
-                u32::MAX
-            )),
+            rmgr.extract_directory_path(&delete_directory_record(b"", u32::MAX)),
             None
         );
         assert_eq!(
-            rmgr.extract_delete_directory_path(&delete_directory_record(&[0xff], 1)),
+            rmgr.extract_directory_path(&delete_directory_record(&[0xff], 1)),
             None
         );
     }

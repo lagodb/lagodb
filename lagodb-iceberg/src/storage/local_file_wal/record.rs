@@ -14,21 +14,27 @@ use lagodb_core::wal::{WalRecordBuilder, XLogRecPtr};
 ///   offset is 0)
 /// - DeleteDirectory: Remove a directory and its contents after the PostgreSQL
 ///   transaction has committed
-/// - DeleteFiles: Remove transaction-created files canceled by the final commit
+/// - DeleteFiles: Remove canceled transaction-created files, VACUUM cleanup
+///   files, or retired partitioned-table reservations after commit
+/// - TruncateDirectory: Clear a disposable transaction-local storage generation
 ///
 /// Invariants:
 /// - These WAL records are only for local file systems. Distributed storage
 ///   (S3, GCS, Azure) guarantees durability after successful writes and does
 ///   not use WAL-based redo.
 /// - `WRITE_FILE` redo is skipped during local crash recovery because
-///   successful explicit writer close performs `FileSync`.
+///   successful explicit writer close syncs the file. Directory entries are
+///   not synced; see the WAL module's known design debt.
 /// - Standby WAL replay or archive recovery uses these records for best-effort,
 ///   lossy reconstruction because local Iceberg files may not exist on the
 ///   target system.
 /// - `DELETE_DIRECTORY` and `DELETE_FILES` are post-commit cleanup. PostgreSQL
 ///   extensions cannot add arbitrary AM paths to core commit/abort records, and
 ///   PostgreSQL's `smgr` switch is not extension-customizable, so we must never
-///   log a delete record before the transaction outcome is known.
+///   log those retirement records before the transaction outcome is known.
+/// - `TRUNCATE_DIRECTORY` only clears a transaction-local generation selected
+///   by PostgreSQL. It can precede commit because rollback discards that
+///   generation, and its redo is skipped during primary crash recovery.
 /// - Orphaned files on distributed storage should be cleaned up via a separate
 ///   garbage collection mechanism (e.g., Iceberg's remove_orphan_files).
 #[repr(u8)]
@@ -38,8 +44,11 @@ pub enum IcebergWalOp {
     DeleteDirectory = 0x00,
     /// Write data to a file (creates file and parent directories if offset is 0)
     WriteFile = 0x10,
-    /// Delete bounded batches of canceled transaction-created files after commit.
+    /// Delete bounded batches of local files after commit.
     DeleteFiles = 0x20,
+    /// Clear a transaction-local generation before rebuilding an empty table.
+    /// Primary crash recovery skips this record, just as it skips file writes.
+    TruncateDirectory = 0x30,
 }
 
 impl IcebergWalOp {
@@ -54,6 +63,7 @@ impl IcebergWalOp {
             0x00 => Some(Self::DeleteDirectory),
             0x10 => Some(Self::WriteFile),
             0x20 => Some(Self::DeleteFiles),
+            0x30 => Some(Self::TruncateDirectory),
             _ => None,
         }
     }
@@ -64,6 +74,7 @@ impl IcebergWalOp {
             Self::DeleteDirectory => "DELETE_DIRECTORY",
             Self::WriteFile => "WRITE_FILE",
             Self::DeleteFiles => "DELETE_FILES",
+            Self::TruncateDirectory => "TRUNCATE_DIRECTORY",
         }
     }
 }
@@ -72,21 +83,42 @@ impl IcebergWalOp {
 // WAL Record Data Structures
 // ============================================================================
 
-/// WAL record header for DeleteDirectory operation
+/// Shared path header for directory retirement and in-place truncation.
 ///
 /// Layout in WAL record:
-/// - DeleteDirectoryHeader (this struct)
+/// - DirectoryHeader (this struct)
 /// - path bytes (path_len bytes)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct DeleteDirectoryHeader {
+pub struct DirectoryHeader {
     /// Length of the directory path (not including null terminator)
     pub path_len: u32,
 }
 
-/// Size of DeleteDirectoryHeader in bytes
-pub const SIZE_OF_DELETE_DIRECTORY: usize =
-    std::mem::size_of::<DeleteDirectoryHeader>();
+/// Size of DirectoryHeader in bytes
+pub const SIZE_OF_DIRECTORY: usize = std::mem::size_of::<DirectoryHeader>();
+
+impl DirectoryHeader {
+    /// Only for a disposable generation selected by PG's nontransactional
+    /// truncate path. Unlike retirement, this can be logged before commit.
+    pub(crate) fn log_truncate(path: &str) -> XLogRecPtr {
+        Self::insert(path, IcebergWalOp::TruncateDirectory)
+    }
+
+    fn insert(path: &str, op: IcebergWalOp) -> XLogRecPtr {
+        let header = Self {
+            path_len: path.len() as u32,
+        };
+        let mut builder = WalRecordBuilder::begin();
+        // SAFETY: the integer-only header remains live until insert consumes
+        // the record builder, which copies the registered bytes into WAL.
+        unsafe {
+            builder.register_data_as(&header);
+        }
+        builder.register_data(path.as_bytes());
+        builder.insert(ICEBERG_RMGR_ID.as_u8(), op as u8)
+    }
+}
 
 /// Header for one bounded batch of file paths.
 ///
@@ -153,21 +185,10 @@ pub const SIZE_OF_WRITE_FILE: usize = std::mem::size_of::<WriteFileHeader>();
 /// # Returns
 /// The LSN of the WAL record
 pub fn log_delete_directory(path: &str) -> XLogRecPtr {
-    let header = DeleteDirectoryHeader {
-        path_len: path.len() as u32,
-    };
-
-    let mut builder = WalRecordBuilder::begin();
-
-    unsafe {
-        builder.register_data_as(&header);
-    }
-    builder.register_data(path.as_bytes());
-
-    builder.insert(ICEBERG_RMGR_ID.as_u8(), IcebergWalOp::DeleteDirectory as u8)
+    DirectoryHeader::insert(path, IcebergWalOp::DeleteDirectory)
 }
 
-/// Log bounded batches of local canceled-file deletions after commit.
+/// Log bounded batches of local file deletions after commit.
 ///
 /// Returns the last inserted LSN so the caller can flush every preceding batch
 /// before deleting the files on the primary. Paths that cannot fit the record
