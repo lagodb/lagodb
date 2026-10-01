@@ -442,6 +442,11 @@ impl TransactionResource for StorageTransactionResource {
         CURRENT.with(|slot| *slot.borrow_mut() = None);
     }
 
+    fn on_prepare(&self) {
+        // Detach backend-local bookkeeping without commit/abort file cleanup.
+        CURRENT.with(|slot| *slot.borrow_mut() = None);
+    }
+
     fn on_commit_sub(&self, current_nest_level: i32) {
         self.inner
             .borrow_mut()

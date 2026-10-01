@@ -1,10 +1,9 @@
-//! Best-effort deletion of independent exact files after PostgreSQL commit.
+//! Best-effort exact-file deletion after PostgreSQL commit and lock release.
 //!
-//! The batch owns the common execution policy used by VACUUM cleanup and by
-//! transaction-created files canceled by the final metadata action. Local
-//! WAL-enabled storage records and flushes every representable delete before
-//! primary unlink begins. Object storage and WAL-free local storage proceed
-//! directly to deletion.
+//! The batch owns the common execution policy used by VACUUM cleanup and
+//! canceled transaction-created files. Local WAL-enabled storage records and
+//! flushes every representable delete before primary unlink begins. Object
+//! storage and WAL-free local storage proceed directly to deletion.
 
 use std::fmt;
 

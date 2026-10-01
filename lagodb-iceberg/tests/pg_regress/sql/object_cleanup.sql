@@ -29,8 +29,8 @@ DROP TABLESPACE IF EXISTS regress_object;
 CREATE TABLE test_lifecycle (id int) USING iceberg;
 INSERT INTO test_lifecycle VALUES (1), (2), (3);
 
--- capture path info while table exists (pg_relation_filepath returns null after drop)
-SELECT pg_relation_filepath('test_lifecycle') || '_iceberg' AS path_1 \gset
+-- Capture the PG relation-file root while the table exists.
+SELECT pg_relation_filepath('test_lifecycle'::regclass) || '_iceberg' AS path_1 \gset
 -- Verify directory exists
 SELECT (pg_stat_file(:'path_1')).isdir as directory_found;
 SELECT EXISTS (
@@ -95,12 +95,30 @@ SELECT generate_series(1, 1000);
 
 SELECT :'volume_id' AS volume_id,
        :'lagodb_regress_bucket' AS object_namespace,
-       :'effective_root' || '/'
-       || (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
-       || '/' || (SELECT oid::text FROM pg_database WHERE datname = current_database())
-       || '/' || pg_relation_filenode('remote_cleanup_drop')::text
-       || '_iceberg/' AS object_path
+       value AS remote_location,
+       regexp_replace(value,
+                      '^[^:]+://[^/]+/', '') || '/' AS object_path
+FROM lagodb.table_option_values
+WHERE relid = 'remote_cleanup_drop'::regclass AND name = 'location'
 \gset
+
+SELECT :'object_path' = :'effective_root' || '/' || current_database()
+           || '/public/remote_cleanup_drop/'
+           || 'remote_cleanup_drop'::regclass::oid || '/'
+           AS readable_oid_remote_location;
+SELECT relfilenode::text AS remote_old_relfilenode
+FROM pg_class WHERE oid = 'remote_cleanup_drop'::regclass \gset
+TRUNCATE remote_cleanup_drop;
+SELECT count(*) = 0 AS remote_truncate_empty,
+       (SELECT value
+        FROM lagodb.table_option_values
+        WHERE relid = 'remote_cleanup_drop'::regclass
+          AND name = 'location') = :'remote_location'
+           AS remote_location_unchanged,
+       (SELECT relfilenode FROM pg_class
+        WHERE oid = 'remote_cleanup_drop'::regclass)
+           <> :'remote_old_relfilenode'::oid AS remote_relfilenode_changed
+FROM remote_cleanup_drop;
 
 \setenv LAGODB_REGRESS_VOLUME_ID :volume_id
 \setenv LAGODB_REGRESS_OBJECT_NAMESPACE :object_namespace
@@ -132,11 +150,10 @@ FROM remote_cleanup_rollback;
 
 SELECT :'volume_id' AS volume_id,
        :'lagodb_regress_bucket' AS object_namespace,
-       :'effective_root' || '/'
-       || (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
-       || '/' || (SELECT oid::text FROM pg_database WHERE datname = current_database())
-       || '/' || pg_relation_filenode('remote_cleanup_rollback')::text
-       || '_iceberg/' AS object_path
+       regexp_replace(value,
+                      '^[^:]+://[^/]+/', '') || '/' AS object_path
+FROM lagodb.table_option_values
+WHERE relid = 'remote_cleanup_rollback'::regclass AND name = 'location'
 \gset
 \setenv LAGODB_REGRESS_VOLUME_ID :volume_id
 \setenv LAGODB_REGRESS_OBJECT_NAMESPACE :object_namespace

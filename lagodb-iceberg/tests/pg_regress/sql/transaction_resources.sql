@@ -12,7 +12,7 @@ CREATE SCHEMA transaction_resources;
 --
 -- After a rolled-back INSERT, newly created data files must be removed.
 CREATE TABLE transaction_resources.abort_insert (id integer) USING iceberg;
-SELECT pg_relation_filepath('transaction_resources.abort_insert') || '_iceberg' AS tbl_dir \gset
+SELECT pg_relation_filepath('transaction_resources.abort_insert'::regclass) || '_iceberg' AS tbl_dir \gset
 
 -- Verify table dir exists but data dir has no parquet files yet
 \! find :"tbl_dir" -name '*.parquet' 2>/dev/null | wc -l | tr -d ' '
@@ -60,7 +60,7 @@ SELECT * FROM transaction_resources.savepoint_cleanup ORDER BY id;
 -- Test 4: Savepoint release + outer abort cleans all merged entries
 --
 CREATE TABLE transaction_resources.release_abort (id integer) USING iceberg;
-SELECT pg_relation_filepath('transaction_resources.release_abort') || '_iceberg' AS ra_dir \gset
+SELECT pg_relation_filepath('transaction_resources.release_abort'::regclass) || '_iceberg' AS ra_dir \gset
 
 BEGIN;
 SAVEPOINT s2;

@@ -9,9 +9,9 @@ setup
   INSERT INTO vacuum_orphan_iso.t VALUES (1);
   DO $$
   DECLARE
-    relative_path text :=
-      pg_relation_filepath('vacuum_orphan_iso.t') ||
-      '_iceberg/data/orphan.parquet';
+    relative_path text := (
+      SELECT pg_relation_filepath('vacuum_orphan_iso.t'::regclass) || '_iceberg/data/orphan.parquet'
+    );
     absolute_path text :=
       current_setting('data_directory') || '/' || relative_path;
   BEGIN
@@ -48,8 +48,7 @@ step s2_verify {
   SELECT (SELECT array_agg(id ORDER BY id) FROM vacuum_orphan_iso.t)
            = ARRAY[1] AS rows_preserved,
          pg_stat_file(
-           pg_relation_filepath('vacuum_orphan_iso.t') ||
-           '_iceberg/data/orphan.parquet',
+           (SELECT pg_relation_filepath('vacuum_orphan_iso.t'::regclass) || '_iceberg/data/orphan.parquet'),
            true
          ) IS NULL AS orphan_deleted,
          (SELECT maintenance_due_at = 'infinity'

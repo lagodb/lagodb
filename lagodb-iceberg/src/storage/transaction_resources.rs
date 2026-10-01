@@ -12,15 +12,13 @@
 //! storage resource is recorded.
 //!
 //! **Commit behaviour:**
-//! - `DroppedLocalTableRoot` → after PostgreSQL commit, WAL-log local deletion only
-//!   when the relation WAL policy requires it, then remove the table directory
-//!   recursively.
 //! - `ObjectFile(Uploaded)` → unlink the staging file (best-effort).
 //! - `ObjectFile(Staged)` → warn, then unlink the staging file (best-effort).
 //! - unresolved metadata-materialization resources → abort-style cleanup instead
 //!   of preserving files that no successful catalog publication references.
 //! - final-action-canceled data/delete files → one aggregated post-commit
-//!   cleanup resource; local WAL-enabled storage flushes `DELETE_FILES` first.
+//!   cleanup resource executed after transaction lock release; local WAL-enabled
+//!   storage flushes `DELETE_FILES` first.
 //! - Everything else → no-op.
 //!
 //! **Abort behaviour:**
@@ -28,7 +26,11 @@
 //! - `CreatedTableDir` → remove the table directory.
 //! - `ObjectFile(Staged)` → unlink the staging file.
 //! - `ObjectFile(Uploaded)` → delete the remote object, then unlink the staging file.
-//! - `DroppedLocalTableRoot` → no-op (table survived).
+//!
+//! Retired local generations and their reservations belong to
+//! [`super::LocalTableRetirement`], whose savepoint-aware collection transfers
+//! one owned batch to core's committed cleanup at transaction commit, separate
+//! from this registry of created resources.
 //!
 //! This abort behaviour is what makes a mid-statement writer failure safe with
 //! respect to remote orphan files. A rolling writer can upload one batch before
@@ -49,8 +51,8 @@ use iceberg_lite::io::FileIO;
 use lagodb_core::storage::service::BackendStorageService;
 use lagodb_storage::ObjectLocation;
 
-use super::{LocalStorage, PostCommitDeletePurpose, PostCommitFileDeleteBatch};
-use crate::error::{IcebergError, IcebergResult};
+use super::{PostCommitDeletePurpose, PostCommitFileDeleteBatch};
+use crate::error::IcebergResult;
 
 use self::registry::{MetadataAttemptId, StorageTransactionResource};
 use self::resource::{ObjectFileState, StorageResource};
@@ -135,31 +137,6 @@ pub(crate) fn register_canceled_files_for_commit(
 pub(crate) fn register_table_dir_created(location: String, file_io: FileIO) {
     StorageTransactionResource::current()
         .track(StorageResource::CreatedTableDir { location, file_io });
-}
-
-/// Register a local table root to be removed on commit (DROP TABLE).
-///
-/// # Errors
-///
-/// Returns an invariant error if a remote `FileIO` crosses this local-only
-/// boundary.
-pub(crate) fn register_local_table_root_dropped(
-    location: String,
-    file_io: FileIO,
-) -> IcebergResult<()> {
-    if file_io
-        .storage()
-        .as_any()
-        .downcast_ref::<LocalStorage>()
-        .is_none()
-    {
-        return Err(IcebergError::InvariantViolated(
-            "remote storage passed to local table-root cleanup",
-        ));
-    }
-    StorageTransactionResource::current()
-        .track(StorageResource::DroppedLocalTableRoot { location, file_io });
-    Ok(())
 }
 
 /// Register a staging file for an object-storage write.

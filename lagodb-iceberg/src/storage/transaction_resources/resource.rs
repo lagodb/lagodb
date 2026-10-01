@@ -2,12 +2,7 @@ use std::path::{Path, PathBuf};
 
 use iceberg_lite::io::FileIO;
 use lagodb_core::storage::service::BackendStorageService;
-use lagodb_core::wal::flush_wal;
 use lagodb_storage::{ObjectLocation, StorageErrorKind};
-
-use crate::storage::local_file_wal::record::log_delete_directory;
-
-use super::super::LocalStorage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ObjectFileState {
@@ -20,10 +15,6 @@ pub(super) enum StorageResource {
         path: PathBuf,
     },
     CreatedTableDir {
-        location: String,
-        file_io: FileIO,
-    },
-    DroppedLocalTableRoot {
         location: String,
         file_io: FileIO,
     },
@@ -46,10 +37,6 @@ impl std::fmt::Debug for StorageResource {
                 .debug_struct("CreatedTableDir")
                 .field("location", location)
                 .finish(),
-            Self::DroppedLocalTableRoot { location, .. } => f
-                .debug_struct("DroppedLocalTableRoot")
-                .field("location", location)
-                .finish(),
             Self::ObjectFile {
                 location,
                 staging_path,
@@ -68,37 +55,6 @@ impl std::fmt::Debug for StorageResource {
 impl StorageResource {
     pub(super) fn on_commit(self) {
         match self {
-            Self::DroppedLocalTableRoot {
-                ref location,
-                ref file_io,
-            } => {
-                if Self::local_needs_wal(file_io) {
-                    // PostgreSQL does not let extensions attach arbitrary paths
-                    // to core commit/abort records, and PG17 smgr is not
-                    // extension-customizable. XACT_EVENT_COMMIT is invoked
-                    // after RecordTransactionCommit(), so this delete WAL is a
-                    // separate post-commit cleanup fact and cannot be embedded
-                    // in the transaction commit record.
-                    //
-                    // Flush the delete WAL before removing the primary
-                    // directory. With synchronous_commit=off, this flush may
-                    // also force the preceding commit WAL. If XLogFlush panics
-                    // because of an I/O failure, crash recovery either loses the
-                    // async commit together with the cleanup, or replays the
-                    // committed transaction while missing this cleanup fact. The
-                    // latter is the documented cleanup gap; it is preferable to
-                    // deleting the primary directory before standby WAL replay or
-                    // archive recovery can learn about the deletion.
-                    let lsn = log_delete_directory(location);
-                    flush_wal(lsn);
-                }
-                if let Err(error) = file_io.remove_dir_all(location) {
-                    lagodb_core::diag::report_warning(format_args!(
-                        "failed to delete table directory '{}': {}",
-                        location, error
-                    ));
-                }
-            }
             Self::ObjectFile {
                 ref staging_path,
                 state: ObjectFileState::Uploaded,
@@ -164,18 +120,8 @@ impl StorageResource {
                 let staging_unlinked = Self::unlink_file(staging_path);
                 remote_deleted && staging_unlinked
             }
-            Self::DroppedLocalTableRoot { .. } => true,
         };
         (!cleaned).then_some(self)
-    }
-
-    fn local_needs_wal(file_io: &FileIO) -> bool {
-        file_io
-            .storage()
-            .as_any()
-            .downcast_ref::<LocalStorage>()
-            .map(LocalStorage::needs_wal)
-            .unwrap_or(false)
     }
 
     fn unlink_file(path: &Path) -> bool {

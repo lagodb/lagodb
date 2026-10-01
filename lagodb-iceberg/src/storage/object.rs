@@ -131,6 +131,23 @@ impl ObjectStorage {
         }
         Ok(paths)
     }
+
+    pub(crate) fn location_is_empty(&self, location: &str) -> Result<bool> {
+        let relative = resolve_object_uri(&self.effective_base_uri, location)?;
+        let prefix = format!("{}/", location[relative..].trim_end_matches('/'));
+        let mut listing = self
+            .service
+            .list_session(self.bucket.as_ref(), Some(&prefix), 1)
+            .map_err(storage_err)?;
+        loop {
+            match listing.next_page().map_err(storage_err)? {
+                Some(entries) if !entries.is_empty() => return Ok(false),
+                Some(_) if listing.is_exhausted() => return Ok(true),
+                Some(_) => {}
+                None => return Ok(true),
+            }
+        }
+    }
 }
 
 impl Storage for ObjectStorage {

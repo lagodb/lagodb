@@ -1,7 +1,7 @@
 use iceberg_lite::{Error, ErrorKind, Result};
 
 /// Resolve an Iceberg URI to its namespace-relative, volume-rooted key offset.
-pub(super) fn resolve_object_uri(
+pub(crate) fn resolve_object_uri(
     effective_base_uri: &str,
     uri: &str,
 ) -> Result<usize> {

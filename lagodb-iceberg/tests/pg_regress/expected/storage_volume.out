@@ -13,11 +13,15 @@ public_binding_alter_rejected: t
 internal_binding_alter_rejected: t
 native_alter_rejected: t
 native_reset_rejected: t
+volume_local_table_rejected: t
+volume_local_ctas_rejected: t
+volume_existing_table_move_rejected: t
 internal_id_unchanged: t
 internal_id_only: t
 binding_visible: t
 retirement_visible_after_drop: t
 object_store_ready: true
+object_tablespace_dependency_visible: t
 cleanup_drop_reached: true
 cleanup_socket_wait_reached: true
 cleanup_cancel_sent: true

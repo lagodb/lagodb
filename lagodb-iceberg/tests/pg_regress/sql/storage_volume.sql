@@ -206,12 +206,16 @@ WHERE volume.storage_volume_name = :'volume_name'
 \gset
 \echo rename_allowed: :rename_allowed
 
--- Public, internal and native options are all immutable after binding.
+-- Binding options are immutable, and native relations cannot enter a volume.
+CREATE TABLE storage_volume_move_candidate (id integer);
 CREATE TEMP TABLE guard_results (
     public_alter_rejected boolean,
     internal_alter_rejected boolean,
     native_alter_rejected boolean,
-    native_reset_rejected boolean
+    native_reset_rejected boolean,
+    local_table_rejected boolean,
+    local_ctas_rejected boolean,
+    table_move_rejected boolean
 );
 DO $guard$
 DECLARE
@@ -219,6 +223,9 @@ DECLARE
     internal_rejected boolean := false;
     native_rejected boolean := false;
     reset_rejected boolean := false;
+    table_rejected boolean := false;
+    ctas_rejected boolean := false;
+    move_rejected boolean := false;
 BEGIN
     BEGIN
         EXECUTE 'ALTER TABLESPACE iceberg_guard_dist_renamed SET '
@@ -244,24 +251,54 @@ BEGIN
     EXCEPTION WHEN feature_not_supported THEN
         reset_rejected := true;
     END;
+    BEGIN
+        EXECUTE 'CREATE TABLE storage_volume_local_table (id integer) '
+                'TABLESPACE iceberg_guard_dist_renamed';
+    EXCEPTION WHEN feature_not_supported THEN
+        table_rejected := true;
+    END;
+    BEGIN
+        EXECUTE 'CREATE TABLE storage_volume_local_ctas '
+                'TABLESPACE iceberg_guard_dist_renamed AS SELECT 1 AS id';
+    EXCEPTION WHEN feature_not_supported THEN
+        ctas_rejected := true;
+    END;
+    BEGIN
+        EXECUTE 'ALTER TABLE storage_volume_move_candidate '
+                'SET TABLESPACE iceberg_guard_dist_renamed';
+    EXCEPTION WHEN feature_not_supported THEN
+        move_rejected := true;
+    END;
     INSERT INTO guard_results VALUES (
         public_rejected,
         internal_rejected,
         native_rejected,
-        reset_rejected
+        reset_rejected,
+        table_rejected,
+        ctas_rejected,
+        move_rejected
     );
 END
 $guard$;
+DROP TABLE IF EXISTS storage_volume_local_table;
+DROP TABLE IF EXISTS storage_volume_local_ctas;
+DROP TABLE storage_volume_move_candidate;
 SELECT public_alter_rejected AS public_binding_alter_rejected,
        internal_alter_rejected AS internal_binding_alter_rejected,
        native_alter_rejected,
-       native_reset_rejected
+       native_reset_rejected,
+       local_table_rejected,
+       local_ctas_rejected,
+       table_move_rejected
 FROM guard_results
 \gset
 \echo public_binding_alter_rejected: :public_binding_alter_rejected
 \echo internal_binding_alter_rejected: :internal_binding_alter_rejected
 \echo native_alter_rejected: :native_alter_rejected
 \echo native_reset_rejected: :native_reset_rejected
+\echo volume_local_table_rejected: :local_table_rejected
+\echo volume_local_ctas_rejected: :local_ctas_rejected
+\echo volume_existing_table_move_rejected: :table_move_rejected
 
 -- Native tablespaces continue to use PostgreSQL's SET/RESET path.
 ALTER TABLESPACE iceberg_guard_native SET (seq_page_cost = 1.25);
@@ -392,6 +429,19 @@ WHERE storage_volume_name = :'volume_name'
 CREATE TABLE storage_socket_cancel_contexts_t (id integer)
 USING iceberg
 TABLESPACE regress_storage_socket_cancel_contexts;
+SELECT count(*) = 1 AS object_tablespace_dependency_visible
+FROM pg_catalog.pg_shdepend AS dependency
+WHERE dependency.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+  AND dependency.classid = 'pg_catalog.pg_class'::regclass
+  AND dependency.objid = 'storage_socket_cancel_contexts_t'::regclass
+  AND dependency.refclassid = 'pg_catalog.pg_tablespace'::regclass
+  AND dependency.refobjid = (
+      SELECT oid FROM pg_tablespace
+      WHERE spcname = 'regress_storage_socket_cancel_contexts'
+  )
+  AND dependency.deptype = 't'
+\gset
+\echo object_tablespace_dependency_visible: :object_tablespace_dependency_visible
 INSERT INTO storage_socket_cancel_contexts_t VALUES (1);
 
 \! sh bin/storage_socket_cancel_contexts

@@ -39,12 +39,39 @@ INSERT INTO remote_cleanup_drop
 SELECT generate_series(1, 1000);
 SELECT :'volume_id' AS volume_id,
        :'lagodb_regress_bucket' AS object_namespace,
-       :'effective_root' || '/'
-       || (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
-       || '/' || (SELECT oid::text FROM pg_database WHERE datname = current_database())
-       || '/' || pg_relation_filenode('remote_cleanup_drop')::text
-       || '_iceberg/' AS object_path
+       value AS remote_location,
+       regexp_replace(value,
+                      '^[^:]+://[^/]+/', '') || '/' AS object_path
+FROM lagodb.table_option_values
+WHERE relid = 'remote_cleanup_drop'::regclass AND name = 'location'
 \gset
+SELECT :'object_path' = :'effective_root' || '/' || current_database()
+           || '/public/remote_cleanup_drop/'
+           || 'remote_cleanup_drop'::regclass::oid || '/'
+           AS readable_oid_remote_location;
+ readable_oid_remote_location 
+------------------------------
+ t
+(1 row)
+
+SELECT relfilenode::text AS remote_old_relfilenode
+FROM pg_class WHERE oid = 'remote_cleanup_drop'::regclass \gset
+TRUNCATE remote_cleanup_drop;
+SELECT count(*) = 0 AS remote_truncate_empty,
+       (SELECT value
+        FROM lagodb.table_option_values
+        WHERE relid = 'remote_cleanup_drop'::regclass
+          AND name = 'location') = :'remote_location'
+           AS remote_location_unchanged,
+       (SELECT relfilenode FROM pg_class
+        WHERE oid = 'remote_cleanup_drop'::regclass)
+           <> :'remote_old_relfilenode'::oid AS remote_relfilenode_changed
+FROM remote_cleanup_drop;
+ remote_truncate_empty | remote_location_unchanged | remote_relfilenode_changed 
+-----------------------+---------------------------+----------------------------
+ t                     | t                         | t
+(1 row)
+
 \setenv LAGODB_REGRESS_VOLUME_ID :volume_id
 \setenv LAGODB_REGRESS_OBJECT_NAMESPACE :object_namespace
 \setenv LAGODB_REGRESS_OBJECT_PATH :object_path
@@ -91,11 +118,10 @@ FROM remote_cleanup_rollback;
 
 SELECT :'volume_id' AS volume_id,
        :'lagodb_regress_bucket' AS object_namespace,
-       :'effective_root' || '/'
-       || (SELECT oid::text FROM pg_tablespace WHERE spcname = 'regress_object')
-       || '/' || (SELECT oid::text FROM pg_database WHERE datname = current_database())
-       || '/' || pg_relation_filenode('remote_cleanup_rollback')::text
-       || '_iceberg/' AS object_path
+       regexp_replace(value,
+                      '^[^:]+://[^/]+/', '') || '/' AS object_path
+FROM lagodb.table_option_values
+WHERE relid = 'remote_cleanup_rollback'::regclass AND name = 'location'
 \gset
 \setenv LAGODB_REGRESS_VOLUME_ID :volume_id
 \setenv LAGODB_REGRESS_OBJECT_NAMESPACE :object_namespace
