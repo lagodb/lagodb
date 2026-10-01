@@ -1,15 +1,15 @@
 use crate::error::IcebergResult;
-use crate::managed_table::IcebergTableAm;
 use crate::managed_table::catalog::metadata_tracker::TxMetadata;
 use crate::managed_table::storage::StorageContext;
+use crate::managed_table::{IcebergTableAm, IcebergTableProvider};
 use lagodb_core::diag::PgReportError;
 use lagodb_core::diag::report_warning;
 use lagodb_core::prelude::*;
 use lagodb_core::table_maintenance::{
-    LagodbTableMaintenanceProvider, TableMaintenanceBudget,
-    TableMaintenanceCommandTime, TableMaintenanceMode, TableMaintenanceOptions,
-    TableMaintenanceRequest,
+    TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
+    TableMaintenanceOptions, TableMaintenanceRequest,
 };
+use lagodb_core::table_provider::LagodbTableProvider;
 use pgrx::pg_sys;
 
 impl AmRelation for IcebergTableAm {
@@ -53,15 +53,13 @@ impl AmRelation for IcebergTableAm {
         }
         let command_time = TableMaintenanceCommandTime::now()
             .map_err(PgReportError::from_domain_error)?;
-        <crate::managed_table::maintenance::IcebergTableMaintenanceProvider as LagodbTableMaintenanceProvider>::execute(
-            TableMaintenanceRequest {
-                relation: rel,
-                mode: TableMaintenanceMode::Routine,
-                options,
-                budget: TableMaintenanceBudget::configured(),
-                command_time,
-            },
-        )
+        IcebergTableProvider::execute_maintenance(TableMaintenanceRequest {
+            relation: rel,
+            mode: TableMaintenanceMode::Routine,
+            options,
+            budget: TableMaintenanceBudget::configured(),
+            command_time,
+        })
         .map_err(PgReportError::from_domain_error)?;
         Ok(())
     }
@@ -95,7 +93,7 @@ impl RelationStats {
     }
 
     fn try_load(rel: &RelationHandle) -> IcebergResult<Self> {
-        let ctx = StorageContext::for_tablespace(rel.tablespace_oid())?;
+        let ctx = StorageContext::for_read(rel)?;
         let loaded =
             TxMetadata::current().current_table_metadata(rel.oid(), ctx.file_io())?;
         let (rows, bytes) = loaded.relation_stats(ctx.file_io())?;

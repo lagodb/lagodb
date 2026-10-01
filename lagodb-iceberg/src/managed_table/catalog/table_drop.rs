@@ -4,18 +4,18 @@ use lagodb_core::handles::RelationHandle;
 use lagodb_core::object_cleanup::{
     ObjectCleanupContext, ObjectCleanupItemRef, ObjectCleanupQueue, ObjectTreeTarget,
 };
-use lagodb_core::options::{TableOptions, get_tablespace};
+use lagodb_core::options::TableOptions;
 
+use super::local_storage::LocalTableRoot;
 use super::metadata_table::IcebergMetadata;
 use super::metadata_tracker::TxMetadata;
-use super::table_lifecycle::{compute_table_location, distributed_table_key};
+use super::table_location::ManagedTableLocation;
 use crate::error::IcebergResult;
 use crate::managed_table::storage::StorageContext;
-use crate::storage::transaction_resources::register_local_table_root_dropped;
 
 enum TableRootCleanup {
     Local {
-        location: String,
+        root: LocalTableRoot,
         context: StorageContext,
     },
     Remote(ObjectTreeTarget),
@@ -23,21 +23,16 @@ enum TableRootCleanup {
 
 impl TableRootCleanup {
     fn resolve(rel: &RelationHandle<'_>) -> IcebergResult<Self> {
-        if let Some(opts) = get_tablespace(rel.tablespace_oid())? {
-            let object_path = opts.rooted_object_key(&distributed_table_key(rel));
-            return Ok(Self::Remote(ObjectTreeTarget::new(
-                opts.volume_id(),
-                opts.object_namespace(),
-                object_path,
-            )?));
+        let location = ManagedTableLocation::for_relation(rel)?;
+        match location {
+            ManagedTableLocation::Remote { cleanup_target, .. } => {
+                Ok(Self::Remote(cleanup_target))
+            }
+            ManagedTableLocation::Local(root) => Ok(Self::Local {
+                root,
+                context: StorageContext::for_write(rel)?,
+            }),
         }
-
-        let context = StorageContext::for_tablespace_with_wal(
-            rel.tablespace_oid(),
-            rel.needs_wal(),
-        )?;
-        let location = compute_table_location(rel, context.base_path(), false);
-        Ok(Self::Local { location, context })
     }
 }
 
@@ -58,11 +53,15 @@ impl<'a> IcebergTableDrop<'a> {
         TxMetadata::stage_drop(self.rel.oid())?;
 
         match self.cleanup {
-            TableRootCleanup::Local { location, context } => {
-                register_local_table_root_dropped(location, context.into_file_io())?;
+            TableRootCleanup::Local { root, context } => {
+                root.retire(context.into_file_io())?;
             }
             TableRootCleanup::Remote(target) => {
-                let source_name = self.rel.relation_name();
+                // TODO(drop-database): this queue is database-local, so DROP
+                // DATABASE needs a cluster-visible handoff that survives
+                // removal of the source database before remote cleanup runs.
+                let relation_name = self.rel.relation_name();
+                let source_name = relation_name.as_c_str().to_string_lossy();
                 let _ =
                     ObjectCleanupQueue::enqueue(ObjectCleanupItemRef::DeleteTree {
                         target: &target,
