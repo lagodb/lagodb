@@ -1,4 +1,4 @@
-//! Query-offload source binding and statement-stable task planning.
+//! Columnar scan source binding and statement-stable task planning.
 
 use std::sync::Arc;
 
@@ -9,24 +9,24 @@ use iceberg_lite::table::Table;
 
 use crate::error::IcebergResult;
 
-/// Query-Offload statement binding with no PostgreSQL row decoder.
-pub(crate) struct QuerySourceBinding {
+/// Statement-bound columnar scan source with no PostgreSQL row decoder.
+pub(crate) struct ScanSourceBinding {
     pub(crate) scan: TableScan,
     pub(crate) arrow_schema: arrow_schema::SchemaRef,
     pub(crate) row_filter: Option<Predicate>,
-    pub(crate) task_planner: QueryTaskPlanner,
+    pub(crate) task_planner: ScanTaskPlanner,
 }
 
 /// Statement-bound task planner used after DataFusion optimization.
 #[derive(Debug)]
-pub(crate) struct QueryTaskPlanner {
+pub(crate) struct ScanTaskPlanner {
     table: Table,
     field_ids: Box<[i32]>,
     planning_filter: Option<Predicate>,
     delta: Option<Arc<SnapshotDelta>>,
 }
 
-impl QueryTaskPlanner {
+impl ScanTaskPlanner {
     pub(crate) fn new(
         table: Table,
         field_ids: Box<[i32]>,

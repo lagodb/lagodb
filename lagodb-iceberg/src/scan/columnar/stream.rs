@@ -8,7 +8,7 @@ use iceberg_lite::expr::Predicate;
 use iceberg_lite::scan::{
     ArrowRecordBatchIterator, FileScanTask, SharedTaskArrowReader,
 };
-use lagodb_arrow::query_source::{
+use lagodb_arrow::scan::{
     RuntimePredicateUpdate, ScanStreamOptions, TableScanStream,
 };
 

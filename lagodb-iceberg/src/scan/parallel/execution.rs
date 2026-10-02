@@ -11,7 +11,7 @@ use crate::scan::{PgRowCursor, PreparedRowScan, ScanError};
 /// PostgreSQL DSM attachment, task inventory, and worker-local cursor.
 pub(crate) struct PostgresParallelExecution {
     cursor: ParallelCursorState,
-    source: Option<WorkerSource>,
+    source: ScanSource,
     coordinator: ParallelScanCoordinator,
 }
 
@@ -20,11 +20,17 @@ enum ParallelCursorState {
     Open(PgRowCursor),
 }
 
+enum ScanSource {
+    Unattached,
+    Shared(WorkerSource),
+    SerialComplete,
+}
+
 impl PostgresParallelExecution {
     pub(crate) fn new() -> Self {
         Self {
             cursor: ParallelCursorState::Idle,
-            source: None,
+            source: ScanSource::Unattached,
             coordinator: ParallelScanCoordinator::default(),
         }
     }
@@ -70,23 +76,23 @@ impl PostgresParallelExecution {
         self.attach_source(read)
     }
 
-    /// Reattach to the leader coordinate and reset only shared claim state.
-    /// Backend-local source and cursor state are reset by `ReScan` through
-    /// [`Self::reset_local`], independently of PostgreSQL's callback ordering.
+    /// Reattach after shutdown and reset shared claims and the local source.
+    /// PostgreSQL can call this before or after `ReScan`.
     pub(crate) unsafe fn reinitialize_shared(
         &mut self,
         coordinate: *mut core::ffi::c_void,
+        read: &PreparedRowScan,
     ) -> Result<(), ScanError> {
         unsafe { self.coordinator.attach(coordinate) }?;
         self.coordinator.reinitialize()?;
-        Ok(())
+        self.attach_source(read)
     }
 
-    pub(crate) fn reset_local(
-        &mut self,
-        read: &PreparedRowScan,
-    ) -> Result<(), ScanError> {
-        self.attach_source(read)
+    pub(crate) fn reset_local(&mut self) {
+        self.cursor = ParallelCursorState::Idle;
+        if matches!(self.source, ScanSource::SerialComplete) {
+            self.source = ScanSource::Unattached;
+        }
     }
 
     pub(crate) fn cursor(&mut self) -> Option<&mut PgRowCursor> {
@@ -103,18 +109,26 @@ impl PostgresParallelExecution {
     /// Claim and open the next task group. Returns `false` at global EOF.
     pub(crate) fn open_next(
         &mut self,
-        read: &PreparedRowScan,
+        read: &mut PreparedRowScan,
     ) -> Result<bool, ScanError> {
-        let source = self.source.as_ref().ok_or_else(|| {
-            ScanError::WorkerPayload(
-                "parallel Iceberg source is not attached".to_owned(),
-            )
-        })?;
         if matches!(self.cursor, ParallelCursorState::Open(_)) {
             return Err(ScanError::WorkerPayload(
                 "parallel Iceberg cursor is already open".to_owned(),
             ));
         }
+        let source = match &self.source {
+            ScanSource::Shared(source) => source,
+            ScanSource::SerialComplete => return Ok(false),
+            ScanSource::Unattached => {
+                // PostgreSQL can execute a parallel-aware plan without
+                // entering parallel mode (including SPI and zero-worker
+                // execution). No InitializeDSM callback runs in that case;
+                // the leader must scan the complete input exactly once.
+                self.cursor = ParallelCursorState::Open(read.open_row_cursor()?);
+                self.source = ScanSource::SerialComplete;
+                return Ok(true);
+            }
+        };
         let Some(work_id) = self.coordinator.claim()? else {
             return Ok(false);
         };
@@ -127,7 +141,7 @@ impl PostgresParallelExecution {
 
     pub(crate) fn shutdown(&mut self) {
         self.cursor = ParallelCursorState::Idle;
-        self.source = None;
+        self.source = ScanSource::Unattached;
         self.coordinator.detach();
     }
 
@@ -145,7 +159,7 @@ impl PostgresParallelExecution {
             ));
         }
         self.cursor = ParallelCursorState::Idle;
-        self.source = Some(source);
+        self.source = ScanSource::Shared(source);
         Ok(())
     }
 }

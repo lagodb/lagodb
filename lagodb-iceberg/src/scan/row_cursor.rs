@@ -1,4 +1,4 @@
-//! PostgreSQL row-materialization cursor shared by query scan adapters.
+//! PostgreSQL row-materialization cursor shared by scan adapters.
 
 use arrow_array::RecordBatch;
 use lagodb_arrow::{ArrowColumnDecoder, BoundBatch};
@@ -35,7 +35,7 @@ where
         out: &mut SlotColumns<'_>,
     ) -> AmResult<bool> {
         self.next_with(|decoder, bound, row_index| {
-            // SAFETY: PgRowProjection compiled the decoder from the relation
+            // SAFETY: PgReadPlan compiled the decoder from the relation
             // layout used by this cursor and validated every destination
             // against the same slot width.
             unsafe { decoder.write_row_unchecked(bound, row_index, out) }?;

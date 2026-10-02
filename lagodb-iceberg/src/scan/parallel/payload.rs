@@ -289,6 +289,10 @@ impl WorkerFileRecord {
                 .unified_partition_type
                 .as_ref()
                 .map(Arc::clone),
+            // Sort metadata is not consumed by the worker reader. Keep it out
+            // of DSM until execution has semantics that require it.
+            sort_order_id: None,
+            sort_order: None,
             name_mapping: metadata.name_mapping.as_ref().map(Arc::clone),
             case_sensitive: metadata.case_sensitive,
             key_metadata: self.key_metadata,

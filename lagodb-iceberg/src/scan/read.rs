@@ -10,18 +10,19 @@ use iceberg_lite::scan::{ArrowRecordBatchIterator, FileScanTask, TableScan};
 use iceberg_lite::spec::Schema as IcebergSchema;
 use iceberg_lite::table::Table;
 use lagodb_arrow::{ArrowBatchSource, ArrowColumnDecoder};
+use lagodb_core::runtime_api::TableScanTaskMetrics;
 use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult};
-use crate::schema::column_mapping::{PgRowProjection, ReadProjection};
-use crate::schema::relation::RelationShape;
+use crate::schema::column_plan::PgReadPlan;
+use crate::schema::projection::{SlotProjection, StorageProjection};
+use crate::schema::relation::RelationLayout;
 
-use super::PgRowCursor;
 use super::batch::{
     AnalyzeBatchSource, ArrowBatches, InterruptibleArrowBatches, ScanBatchSource,
 };
-use super::projection::Projection;
-use super::query::{QuerySourceBinding, QueryTaskPlanner};
+use super::columnar::{ScanSourceBinding, ScanTaskPlanner};
+use super::{IcebergTaskMetrics, PgRowCursor};
 
 /// Iceberg transaction view captured once for a statement.
 pub(crate) struct IcebergReadSnapshot {
@@ -92,7 +93,7 @@ impl ScanPredicates {
 /// bind field ids and Arrow schema without constructing a decoder it discards.
 pub(crate) struct PreparedIcebergRead {
     table: Table,
-    projection: ReadProjection,
+    projection: StorageProjection,
     predicates: ScanPredicates,
     delta: Option<Arc<SnapshotDelta>>,
     query_tasks: Option<Arc<[FileScanTask]>>,
@@ -102,8 +103,8 @@ pub(crate) struct PreparedIcebergRead {
 pub(crate) struct CountRowsRead(PreparedIcebergRead);
 
 impl CountRowsRead {
-    pub(crate) fn bind_query_source(self) -> IcebergResult<QuerySourceBinding> {
-        self.0.bind_query_source()
+    pub(crate) fn bind_scan_source(self) -> IcebergResult<ScanSourceBinding> {
+        self.0.bind_scan_source()
     }
 }
 
@@ -114,7 +115,7 @@ impl PreparedIcebergRead {
     /// delete descriptors and the transaction overlay; only output columns and
     /// PostgreSQL datum materialization are omitted.
     pub(crate) fn count_rows(snapshot: IcebergReadSnapshot) -> CountRowsRead {
-        let projection = ReadProjection::row_only(snapshot.schema().clone());
+        let projection = StorageProjection::empty(snapshot.schema().clone());
         CountRowsRead(Self::from_parts(
             snapshot,
             projection,
@@ -127,7 +128,7 @@ impl PreparedIcebergRead {
         project_field_ids: Box<[i32]>,
         predicates: ScanPredicates,
     ) -> Self {
-        let projection = ReadProjection::from_field_ids(
+        let projection = StorageProjection::from_field_ids(
             snapshot.schema().clone(),
             project_field_ids,
         );
@@ -136,7 +137,7 @@ impl PreparedIcebergRead {
 
     fn from_parts(
         snapshot: IcebergReadSnapshot,
-        projection: ReadProjection,
+        projection: StorageProjection,
         predicates: ScanPredicates,
     ) -> Self {
         Self {
@@ -198,7 +199,7 @@ impl PreparedIcebergRead {
     pub(crate) fn query_arrow_schema(
         &self,
     ) -> IcebergResult<arrow_schema::SchemaRef> {
-        Ok(Arc::new(self.projection.query_arrow_schema()?))
+        Ok(Arc::new(self.projection.to_arrow_schema()?))
     }
 
     pub(crate) fn table_properties(&self) -> &HashMap<String, String> {
@@ -213,20 +214,20 @@ impl PreparedIcebergRead {
         self.table.metadata().current_snapshot_id()
     }
 
-    pub(crate) fn bind_query_source(self) -> IcebergResult<QuerySourceBinding> {
-        let arrow_schema = Arc::new(self.projection.query_arrow_schema()?);
-        let field_ids = self.projection.project_field_ids().into();
+    pub(crate) fn bind_scan_source(self) -> IcebergResult<ScanSourceBinding> {
+        let arrow_schema = Arc::new(self.projection.to_arrow_schema()?);
+        let field_ids = self.projection.field_ids().into();
         let scan = self.build_scan(
             RowLocationProjection::Exclude,
             self.predicates.stable_pruning.0.as_ref(),
         )?;
-        let task_planner = QueryTaskPlanner::new(
+        let task_planner = ScanTaskPlanner::new(
             self.table,
             field_ids,
             self.predicates.stable_pruning.0,
             self.delta,
         );
-        Ok(QuerySourceBinding {
+        Ok(ScanSourceBinding {
             scan,
             arrow_schema,
             row_filter: self.predicates.current_reader.0,
@@ -241,18 +242,50 @@ impl PreparedIcebergRead {
     ) -> IcebergResult<TableScan> {
         let mut builder = self.table.scan();
         builder = match row_locations {
-            RowLocationProjection::Exclude => builder.select_field_ids(
-                self.projection.project_field_ids().iter().copied(),
-            ),
+            RowLocationProjection::Exclude => {
+                builder.select_field_ids(self.projection.field_ids().iter().copied())
+            }
             RowLocationProjection::Include => builder.select_field_ids(
                 self.projection
-                    .project_field_ids()
+                    .field_ids()
                     .iter()
                     .copied()
                     .chain([RESERVED_FIELD_ID_FILE, RESERVED_FIELD_ID_POS]),
             ),
         };
         if let Some(predicate) = filter {
+            // This limitation is also present in upstream iceberg-rust. The
+            // predicate and inclusive partition projection use the scan schema,
+            // but partition tuples use each manifest's embedded schema. After
+            // identity-source promotion int -> long, StructAccessor pairs the
+            // historical Int literal with the scan's Long type without converting
+            // it. ExpressionEvaluator compares that Datum with the predicate's
+            // Long literal: equality is false and PartialOrd returns None, so
+            // equality/range visitors can discard a live data file.
+            // Upstream uses the snapshot schema, so this occurs when a snapshot
+            // uses the promoted schema and retains old manifests. iceberg-lite
+            // defaults to the current table schema, exposing it after schema-only
+            // evolution too. Neither coerces values at this pruning boundary.
+            //
+            // A separate upstream fallback checks whether any source id in a
+            // spec is absent from the current schema before projection. On the
+            // first miss it caches AlwaysTrue by spec id, so both manifest
+            // summary pruning and data-file partition-tuple pruning are disabled
+            // for every field in that spec. Data-file metrics and reader filters
+            // remain active, so this is conservative but can scan extra files.
+            // PR #2845 introduced the fallback; PR #2869 moved it into the
+            // per-spec cache and made the whole-spec behavior persistent.
+            // Related issue #3122 and PR #3123 cover Arrow reader/page-index
+            // promotion, not this manifest partition/metrics pruning boundary.
+            // No upstream issue currently tracks this exact manifest-pruning
+            // defect; the linked issue and PR must not be treated as its fix.
+            // Do not add a LagoDB-only coercion here. Wait for iceberg-rust to
+            // make these evaluators promotion-aware, then merge that upstream
+            // change into iceberg-lite and remove this limitation.
+            // https://github.com/apache/iceberg-rust/pull/2845
+            // https://github.com/apache/iceberg-rust/pull/2869
+            // https://github.com/apache/iceberg-rust/issues/3122
+            // https://github.com/apache/iceberg-rust/pull/3123
             builder = builder.with_filter(predicate.clone());
         }
         if let Some(delta) = self.delta.as_ref() {
@@ -276,35 +309,35 @@ impl PreparedRowScan {
     pub(crate) fn full(
         snapshot: IcebergReadSnapshot,
         predicates: ScanPredicates,
-        shape: &RelationShape,
+        layout: &RelationLayout,
     ) -> IcebergResult<Self> {
-        let projection = PgRowProjection::full(snapshot.schema().clone(), shape)?;
-        Ok(Self::from_projection(snapshot, projection, predicates))
+        let plan = PgReadPlan::bind_full(snapshot.schema().clone(), layout)?;
+        Ok(Self::from_plan(snapshot, plan, predicates))
     }
 
     pub(crate) fn projected(
         snapshot: IcebergReadSnapshot,
-        projection: Projection,
+        projection: SlotProjection,
         predicates: ScanPredicates,
-        shape: &RelationShape,
+        layout: &RelationLayout,
         scan_attr_types: &[(pg_sys::Oid, i32)],
     ) -> IcebergResult<Self> {
-        let projection = PgRowProjection::projected(
+        let plan = PgReadPlan::bind_projection(
             snapshot.schema().clone(),
-            shape,
+            layout,
             &projection,
             scan_attr_types.len(),
             scan_attr_types,
         )?;
-        Ok(Self::from_projection(snapshot, projection, predicates))
+        Ok(Self::from_plan(snapshot, plan, predicates))
     }
 
-    fn from_projection(
+    fn from_plan(
         snapshot: IcebergReadSnapshot,
-        projection: PgRowProjection,
+        plan: PgReadPlan,
         predicates: ScanPredicates,
     ) -> Self {
-        let (projection, decoder) = projection.into_parts();
+        let (projection, decoder) = plan.into_parts();
         Self {
             read: PreparedIcebergRead::from_parts(snapshot, projection, predicates),
             decoder,
@@ -332,6 +365,15 @@ impl PreparedRowScan {
     pub(crate) fn open_row_cursor(&mut self) -> IcebergResult<PgRowCursor> {
         let tasks = self.read.planned_query_tasks()?;
         self.open_row_cursor_with_tasks(tasks)
+    }
+
+    /// Summarize the retained inventory selected with rescan-stable predicates.
+    /// Runtime reader filters do not replace this inventory on rescan.
+    pub(crate) fn query_task_metrics(&self) -> Option<TableScanTaskMetrics> {
+        self.read
+            .query_tasks
+            .as_ref()
+            .map(|tasks| tasks.as_ref().task_metrics())
     }
 
     pub(crate) fn open_analyze_row_cursor(

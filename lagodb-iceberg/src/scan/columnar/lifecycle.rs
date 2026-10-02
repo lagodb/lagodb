@@ -1,20 +1,21 @@
 //! Statement binding and run-local task plans for Iceberg scans.
 
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use arrow_schema::SchemaRef;
 use iceberg_lite::Result as IcebergLiteResult;
 use iceberg_lite::expr::Predicate;
 use iceberg_lite::scan::{ArrowRecordBatchIterator, FileScanTask, TableScan};
-use lagodb_arrow::query_source::ScanStreamOptions;
+use lagodb_arrow::scan::ScanStreamOptions;
 use lagodb_core::expr::pushdown::PredicatePlan;
 use lagodb_core::runtime_api::{RuntimePruningPredicate, TableScanTaskMetrics};
 
 use super::{ArrowStream, runtime_predicate::IcebergPredicatePlanner};
 use crate::error::{IcebergError, IcebergResult};
 use crate::scan::parallel::{TaskGrouping, TaskGroupingConfig};
-use crate::scan::{QuerySourceBinding, QueryTaskPlanner, ScanError};
+use crate::scan::{
+    IcebergTaskMetrics, ScanError, ScanSourceBinding, ScanTaskPlanner,
+};
 
 /// Immutable statement snapshot and schema binding. Physical tasks are
 /// deliberately absent and are planned only after DataFusion optimization.
@@ -23,7 +24,7 @@ pub(super) struct StatementScan {
     pub(super) scan: TableScan,
     pub(super) arrow_schema: SchemaRef,
     pub(super) row_filter: Option<Predicate>,
-    task_planner: QueryTaskPlanner,
+    task_planner: ScanTaskPlanner,
     planned_tasks: Mutex<Option<CachedTaskSet>>,
 }
 
@@ -69,7 +70,7 @@ pub(crate) struct BoundScan {
 
 impl BoundScan {
     pub(crate) fn new(
-        input: QuerySourceBinding,
+        input: ScanSourceBinding,
         task_grouping: TaskGroupingConfig,
     ) -> Self {
         let scan = StatementScan {
@@ -131,7 +132,7 @@ impl BoundScan {
         // the most recently requested inventory can be reused across rescans.
         let mut cached = self.scan.planned_tasks.lock().map_err(|_| {
             IcebergError::InvariantViolated(
-                "Iceberg query task-plan cache was poisoned",
+                "Iceberg scan task-plan cache was poisoned",
             )
         })?;
         let task_set = match cached.as_ref() {
@@ -229,19 +230,7 @@ struct TaskSet {
 
 impl TaskSet {
     fn new(tasks: Arc<[FileScanTask]>) -> Self {
-        let planned_files = tasks
-            .iter()
-            .map(FileScanTask::data_file_path)
-            .collect::<HashSet<_>>()
-            .len() as u64;
-        let planned_bytes = tasks
-            .iter()
-            .fold(0_u64, |bytes, task| bytes.saturating_add(task.length));
-        let metrics = TableScanTaskMetrics {
-            planned_tasks: tasks.len() as u64,
-            planned_files,
-            planned_bytes,
-        };
+        let metrics = tasks.as_ref().task_metrics();
         Self { tasks, metrics }
     }
 }

@@ -11,7 +11,7 @@ use arrow_schema::SchemaRef;
 use iceberg_lite::arrow::ArrowReaderBuilder;
 use iceberg_lite::io::FileIO;
 use iceberg_lite::scan::{ArrowRecordBatchIterator, FileScanTask};
-use lagodb_arrow::query_source::TableScanStream;
+use lagodb_arrow::scan::TableScanStream;
 use lagodb_core::runtime_api::SourceWorkId;
 
 use super::ScanError;
