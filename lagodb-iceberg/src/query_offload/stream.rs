@@ -2,10 +2,10 @@
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
-use lagodb_arrow::query_source::TableScanStream;
+use lagodb_arrow::scan::TableScanStream;
 
+use crate::scan::columnar::ArrowStream;
 use crate::scan::parallel::WorkerStream as ScanWorkerStream;
-use crate::scan::query::ArrowStream;
 
 use super::error::Error;
 

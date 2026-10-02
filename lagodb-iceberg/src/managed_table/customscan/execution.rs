@@ -12,6 +12,7 @@ use lagodb_core::access::mutation::ModifyScanBinding;
 use lagodb_core::customscan::provider::{
     CustomScanError, NextSlotAttempt, NextSlotEmitter, NextSlotResult,
 };
+use lagodb_core::runtime_api::TableScanTaskMetrics;
 use pgrx::pg_sys;
 
 /// Serial PostgreSQL CustomScan execution.
@@ -22,9 +23,15 @@ pub(super) struct SerialScan {
 }
 
 impl SerialScan {
+    pub(super) fn task_metrics(&self) -> Option<TableScanTaskMetrics> {
+        self.prepared.query_task_metrics()
+    }
+
     pub(super) fn new(
         mut prepared: PreparedRowScan,
+        predicate: ReaderPredicate,
     ) -> Result<Self, CustomScanError> {
+        prepared.rebind_reader_filter(predicate);
         let cursor = prepared.open_row_cursor()?;
         Ok(Self { cursor, prepared })
     }
@@ -58,6 +65,10 @@ pub(super) struct PostgresParallelScan {
 }
 
 impl PostgresParallelScan {
+    pub(super) fn task_metrics(&self) -> Option<TableScanTaskMetrics> {
+        self.prepared.query_task_metrics()
+    }
+
     pub(super) fn new(
         mut prepared: PreparedRowScan,
     ) -> Result<Self, CustomScanError> {
@@ -69,6 +80,12 @@ impl PostgresParallelScan {
             execution,
             prepared,
         })
+    }
+
+    pub(super) fn start(&mut self, predicate: ReaderPredicate) {
+        // DSM task inventory uses Begin's stable pruning predicate. Dynamic
+        // values affect only the local reader, not shared task ownership.
+        self.prepared.rebind_reader_filter(predicate);
     }
 
     #[inline]
@@ -86,7 +103,7 @@ impl PostgresParallelScan {
                 }
                 self.execution.finish_cursor();
             }
-            if !self.execution.open_next(&self.prepared)? {
+            if !self.execution.open_next(&mut self.prepared)? {
                 return Ok(emitter.finish_eof());
             }
         }
@@ -99,7 +116,7 @@ impl PostgresParallelScan {
         if let Some(predicate) = replacement {
             self.prepared.rebind_reader_filter(predicate);
         }
-        self.execution.reset_local(&self.prepared)?;
+        self.execution.reset_local();
         Ok(())
     }
 
@@ -119,7 +136,11 @@ impl PostgresParallelScan {
         &mut self,
         coordinate: *mut c_void,
     ) -> Result<(), CustomScanError> {
-        unsafe { self.execution.reinitialize_shared(coordinate) }.map_err(Into::into)
+        unsafe {
+            self.execution
+                .reinitialize_shared(coordinate, &self.prepared)
+        }
+        .map_err(Into::into)
     }
 
     pub(super) unsafe fn initialize_worker(
@@ -146,15 +167,18 @@ pub(super) struct MutationTargetScan {
 
 impl MutationTargetScan {
     pub(super) fn new(
-        cursor: ManagedMutationCursor,
-        prepared: PreparedManagedMutationScan,
+        mut prepared: PreparedManagedMutationScan,
         binding: ModifyScanBinding<IcebergModifyQueryState>,
-    ) -> Self {
-        Self {
+        predicate: ReaderPredicate,
+        relation_oid: pg_sys::Oid,
+    ) -> Result<Self, CustomScanError> {
+        prepared.rebind_reader_filter(predicate);
+        let cursor = prepared.open_cursor(binding.clone(), relation_oid)?;
+        Ok(Self {
             cursor,
             prepared,
             binding,
-        }
+        })
     }
 
     pub(super) fn binding(&self) -> &ModifyScanBinding<IcebergModifyQueryState> {

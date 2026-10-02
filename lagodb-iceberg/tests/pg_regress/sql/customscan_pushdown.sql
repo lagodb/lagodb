@@ -69,7 +69,7 @@ SELECT a, b FROM customscan_where_eq_t WHERE a = 1 ORDER BY a, b;
 -- ============================================================================
 -- Test 3: EXPLAIN VERBOSE carries the provider identity and the
 -- classified labeled predicate lines.
--- Under `force` and VERBOSE, the output carries `Scan Purpose: Query` and a `Provider:` line
+-- Under `force` and VERBOSE, the output carries `Scan Purpose: Read` and a `Provider:` line
 -- plus the deparsed predicate text on labeled lines `Pushed Filter
 -- Exact:` and `Recheck:` (both non-empty for this plan). The empty
 -- classes (`Pushed Filter Conservative:`, and any local residual) are

@@ -2,7 +2,7 @@
 
 use arrow_schema::SchemaRef;
 use iceberg_lite::expr::Predicate;
-use lagodb_arrow::query_source::{
+use lagodb_arrow::scan::{
     PlannedScan, PlannedScanTasks, ScanPlanningContext, ScanProjection,
     ScanStreamOptions, ScanSupport, ScanTaskPlanningOptions, TableScanAdapter,
     TableScanProvider, TableScanWorkerAdapter, TableScanWorkerProvider,
@@ -22,8 +22,8 @@ use crate::error::IcebergError;
 use crate::foreign_table::{ForeignPlanningSource, LagodbIceberg};
 use crate::managed_table::ICEBERG_AM_NAME;
 use crate::scan::ScanError;
+use crate::scan::columnar::PlannedScan as PlannedQueryScan;
 use crate::scan::parallel::WorkerSource;
-use crate::scan::query::PlannedScan as PlannedQueryScan;
 
 use super::error::Error;
 use super::filter::{Filter, FilterPlanner};
@@ -118,11 +118,9 @@ impl TableScanProvider for Provider {
             ScanProjection::Columns(attnos) => PlanProjection::Columns(attnos.into()),
         };
         let plan = match context.relation_kind() {
-            pg_sys::RELKIND_RELATION => Plan::managed(
-                context.relation_oid(),
-                context.tablespace_oid(),
-                projection,
-            ),
+            pg_sys::RELKIND_RELATION => {
+                Plan::managed(context.relation_oid(), projection)
+            }
             pg_sys::RELKIND_FOREIGN_TABLE => Plan::foreign(
                 context.relation_oid(),
                 context.check_as_user_id(),

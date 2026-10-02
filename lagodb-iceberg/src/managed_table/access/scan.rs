@@ -1,9 +1,9 @@
 //! PostgreSQL TableAM scan lifecycle for Iceberg tables.
 //!
-//! Query scans keep two lifecycle layers:
+//! Regular scans keep two lifecycle layers:
 //!
 //! - [`PreparedRowScan`] owns the statement snapshot, projection, predicates,
-//!   decoder, and query task cache. It is built once in
+//!   decoder, and scan task cache. It is built once in
 //!   [`AmScanSession::scan_begin`] and
 //!   preserved across `scan_rescan`, so the visible snapshot is frozen for the
 //!   scan's duration. This matches the Read Committed contract: every
@@ -24,11 +24,9 @@ use pgrx::pg_sys;
 
 use crate::error::IcebergError;
 use crate::managed_table::access::analyze::{AnalyzePreparation, AnalyzeScanState};
-use crate::managed_table::{
-    IcebergTableAm, ManagedAnalyzeSnapshot, ManagedTableSnapshot,
-};
+use crate::managed_table::{IcebergTableAm, ManagedTableReadView};
 use crate::scan::{AnalyzeScanInput, PgRowCursor, PreparedRowScan, ScanPredicates};
-use crate::schema::relation::RelationShape;
+use crate::schema::relation::RelationLayout;
 
 /// PostgreSQL-facing scan session for the Iceberg table AM.
 pub struct IcebergScan {
@@ -40,45 +38,41 @@ pub struct IcebergScan {
 /// borrow ends.
 struct ScanRelation {
     oid: pg_sys::Oid,
-    tablespace_oid: pg_sys::Oid,
-    shape: RelationShape,
+    layout: RelationLayout,
 }
 
 impl ScanRelation {
     fn from_relation(relation: &RelationHandle) -> Result<Self, IcebergError> {
         Ok(Self {
             oid: relation.oid(),
-            tablespace_oid: relation.tablespace_oid(),
-            shape: RelationShape::from_relation(relation)?,
+            layout: RelationLayout::from_relation(relation)?,
         })
     }
 }
 
-enum ScanPurpose {
-    Query,
+enum ScanKind {
+    Regular,
     Analyze,
 }
 
-impl ScanPurpose {
+impl ScanKind {
     fn begin(
         self,
         relation: &ScanRelation,
         keys: &OwnedScanKeys,
     ) -> AmResult<IcebergScanState> {
         match self {
-            Self::Query => Ok(IcebergScanState::Query(QueryScanState::begin(
+            Self::Regular => Ok(IcebergScanState::Regular(RegularScanState::begin(
                 relation, keys,
             )?)),
             Self::Analyze => {
-                let loaded = ManagedAnalyzeSnapshot::load(
-                    relation.oid,
-                    relation.tablespace_oid,
-                )?;
-                let (snapshot, storage_bytes) = loaded.into_parts();
+                let view = ManagedTableReadView::load(relation.oid)?;
+                let storage_bytes = view.storage_bytes()?;
+                let snapshot = view.into_read_snapshot()?;
                 let prepared = PreparedRowScan::full(
                     snapshot,
                     ScanPredicates::unfiltered(),
-                    &relation.shape,
+                    &relation.layout,
                 )?;
                 let AnalyzeScanInput {
                     scan,
@@ -96,7 +90,7 @@ impl ScanPurpose {
     }
 }
 
-struct QueryScanState {
+struct RegularScanState {
     prepared: PreparedRowScan,
     cursor: TableScanCursor,
 }
@@ -126,15 +120,14 @@ impl ScanBatchDriver for TableScanCursor {
     }
 }
 
-impl QueryScanState {
+impl RegularScanState {
     fn begin(relation: &ScanRelation, _keys: &OwnedScanKeys) -> AmResult<Self> {
         let snapshot =
-            ManagedTableSnapshot::load_query(relation.oid, relation.tablespace_oid)?
-                .into_read_snapshot();
+            ManagedTableReadView::load(relation.oid)?.into_read_snapshot()?;
         let mut prepared = PreparedRowScan::full(
             snapshot,
             ScanPredicates::unfiltered(),
-            &relation.shape,
+            &relation.layout,
         )?;
         let cursor = TableScanCursor::new(prepared.open_row_cursor()?);
         Ok(Self { prepared, cursor })
@@ -150,13 +143,13 @@ impl QueryScanState {
     }
 }
 
-// Query state stays inline intentionally: boxing it would add an allocation
+// Regular state stays inline intentionally: boxing it would add an allocation
 // per ordinary scan and an indirection on every scan_getnextslot call merely
 // to shrink this once-per-scan state object.
 #[allow(clippy::large_enum_variant)]
 enum IcebergScanState {
-    Pending(ScanPurpose),
-    Query(QueryScanState),
+    Pending(ScanKind),
+    Regular(RegularScanState),
     Analyze(Box<AnalyzeScanState>),
     Ended,
 }
@@ -180,16 +173,16 @@ impl AmScanSession for IcebergScan {
         Ok(IcebergScan {
             relation: ScanRelation::from_relation(rel)?,
             state: IcebergScanState::Pending(if flags.is_analyze() {
-                ScanPurpose::Analyze
+                ScanKind::Analyze
             } else {
-                ScanPurpose::Query
+                ScanKind::Regular
             }),
         })
     }
 
     fn scan_begin(&mut self, keys: &OwnedScanKeys) -> AmResult<()> {
-        let purpose = match mem::replace(&mut self.state, IcebergScanState::Ended) {
-            IcebergScanState::Pending(purpose) => purpose,
+        let kind = match mem::replace(&mut self.state, IcebergScanState::Ended) {
+            IcebergScanState::Pending(kind) => kind,
             state => {
                 self.state = state;
                 return Err(IcebergError::InvariantViolated(
@@ -198,7 +191,7 @@ impl AmScanSession for IcebergScan {
                 .into());
             }
         };
-        self.state = purpose.begin(&self.relation, keys)?;
+        self.state = kind.begin(&self.relation, keys)?;
         Ok(())
     }
 
@@ -209,8 +202,8 @@ impl AmScanSession for IcebergScan {
         // `scan_begin` builds the cursor before the executor fetches any row,
         // so it is always present by the time the framework calls this.
         match &mut self.state {
-            IcebergScanState::Query(state) => &mut state.cursor,
-            _ => panic!("scan_driver called outside a query scan"),
+            IcebergScanState::Regular(state) => &mut state.cursor,
+            _ => panic!("scan_driver called outside a regular scan"),
         }
     }
 
@@ -230,7 +223,7 @@ impl AmScanSession for IcebergScan {
         _allow_pagemode: bool,
     ) -> AmResult<()> {
         match &mut self.state {
-            IcebergScanState::Query(state) => state.rescan(keys),
+            IcebergScanState::Regular(state) => state.rescan(keys),
             IcebergScanState::Pending(_) => Ok(()),
             IcebergScanState::Analyze(_) => Err(IcebergError::InvariantViolated(
                 "PostgreSQL attempted to rescan an ANALYZE session",

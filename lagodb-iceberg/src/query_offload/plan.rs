@@ -8,14 +8,14 @@ use crate::foreign_table::{
     ForeignSchemaBinding, ForeignTableIdentity, ForeignTransaction, IcebergFdwError,
     PlanSourceIdentity, RestForeignTable,
 };
-use crate::managed_table::ManagedTableSnapshot;
+use crate::managed_table::ManagedTableReadView;
+use crate::scan::columnar::BoundScan as BoundQueryScan;
 use crate::scan::parallel::TaskGroupingConfig;
-use crate::scan::query::BoundScan as BoundQueryScan;
 use crate::scan::{
-    CountRowsRead, IcebergReadSnapshot, PreparedIcebergRead, QuerySourceBinding,
-    ScanPredicates,
+    CountRowsRead, IcebergReadSnapshot, PreparedIcebergRead, ScanPredicates,
+    ScanSourceBinding,
 };
-use crate::schema::relation::RelationShape;
+use crate::schema::relation::RelationLayout;
 
 use super::error::Error;
 use super::worker::ReopenPlan;
@@ -72,38 +72,36 @@ impl PlanProjection {
         }
     }
 
-    fn bind_count(
-        snapshot: IcebergReadSnapshot,
-    ) -> Result<QuerySourceBinding, Error> {
+    fn bind_count(snapshot: IcebergReadSnapshot) -> Result<ScanSourceBinding, Error> {
         let read: CountRowsRead = PreparedIcebergRead::count_rows(snapshot);
-        Ok(read.bind_query_source()?)
+        Ok(read.bind_scan_source()?)
     }
 
     fn bind_columns(
         attnos: &[pg_sys::AttrNumber],
         snapshot: IcebergReadSnapshot,
-        shape: &RelationShape,
-    ) -> Result<QuerySourceBinding, Error> {
+        layout: &RelationLayout,
+    ) -> Result<ScanSourceBinding, Error> {
         let mut attnos = attnos.to_vec();
         attnos.sort_unstable();
         let project_field_ids =
-            shape.project_field_ids(snapshot.schema(), attnos.into_iter())?;
+            layout.project_field_ids(snapshot.schema(), attnos.into_iter())?;
         Ok(PreparedIcebergRead::projected_fields(
             snapshot,
             project_field_ids,
             ScanPredicates::unfiltered(),
         )
-        .bind_query_source()?)
+        .bind_scan_source()?)
     }
 
-    fn bind_with_shape(
+    fn bind_with_layout(
         &self,
         snapshot: IcebergReadSnapshot,
-        shape: &RelationShape,
-    ) -> Result<QuerySourceBinding, Error> {
+        layout: &RelationLayout,
+    ) -> Result<ScanSourceBinding, Error> {
         match self {
             Self::CountRows => Self::bind_count(snapshot),
-            Self::Columns(attnos) => Self::bind_columns(attnos, snapshot, shape),
+            Self::Columns(attnos) => Self::bind_columns(attnos, snapshot, layout),
         }
     }
 }
@@ -111,31 +109,29 @@ impl PlanProjection {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ManagedScanPlan {
     relation_oid: pg_sys::Oid,
-    tablespace_oid: pg_sys::Oid,
     projection: PlanProjection,
 }
 
 impl ManagedScanPlan {
     fn bind(&self) -> Result<BoundScan, Error> {
-        let loaded =
-            ManagedTableSnapshot::load_query(self.relation_oid, self.tablespace_oid)?;
-        let task_grouping = TaskGroupingConfig::from_properties(loaded.properties());
-        let snapshot = loaded.into_read_snapshot();
+        let view = ManagedTableReadView::load(self.relation_oid)?;
+        let task_grouping = TaskGroupingConfig::from_properties(view.properties());
+        let snapshot = view.into_read_snapshot()?;
         let scan = match &self.projection {
             PlanProjection::CountRows => PlanProjection::bind_count(snapshot)?,
             PlanProjection::Columns(attnos) => {
-                let relation = RelationGuard::open(
+                let relation = RelationGuard::open_table(
                     self.relation_oid,
                     pg_sys::NoLock as pg_sys::LOCKMODE,
                 )?;
-                let shape = RelationShape::from_relation(&relation.as_handle())?;
-                PlanProjection::bind_columns(attnos, snapshot, &shape)?
+                let layout = RelationLayout::from_relation(&relation.as_handle())?;
+                PlanProjection::bind_columns(attnos, snapshot, &layout)?
             }
         };
         Ok(BoundScan {
             scan: BoundQueryScan::new(scan, task_grouping),
             worker: ReopenPlan::Managed {
-                tablespace_oid: self.tablespace_oid,
+                relation_oid: self.relation_oid,
             },
         })
     }
@@ -171,17 +167,17 @@ impl ForeignScanPlan {
         let generation = PlanSourceIdentity::from_table(&view.table);
         let task_grouping =
             TaskGroupingConfig::from_properties(view.table.metadata().properties());
-        let relation = RelationGuard::open(
+        let relation = RelationGuard::open_table(
             self.relation_oid,
             pg_sys::NoLock as pg_sys::LOCKMODE,
         )?;
-        let shape = ForeignSchemaBinding::bind(
+        let layout = ForeignSchemaBinding::bind(
             &relation.as_handle(),
             view.table.metadata().current_schema(),
         )?
-        .into_relation_shape();
+        .into_relation_layout();
         let snapshot = IcebergReadSnapshot::new(view.table, view.delta);
-        let scan = self.projection.bind_with_shape(snapshot, &shape)?;
+        let scan = self.projection.bind_with_layout(snapshot, &layout)?;
         Ok(BoundScan {
             scan: BoundQueryScan::new(scan, task_grouping),
             worker: ReopenPlan::Foreign {
@@ -203,12 +199,10 @@ pub(super) enum Plan {
 impl Plan {
     pub(super) fn managed(
         relation_oid: pg_sys::Oid,
-        tablespace_oid: pg_sys::Oid,
         projection: PlanProjection,
     ) -> Self {
         Self::Managed(ManagedScanPlan {
             relation_oid,
-            tablespace_oid,
             projection,
         })
     }
@@ -232,8 +226,7 @@ impl Plan {
             Self::Managed(plan) => {
                 writer
                     .append_i32(PLAN_MANAGED)
-                    .append_oid(plan.relation_oid)
-                    .append_oid(plan.tablespace_oid);
+                    .append_oid(plan.relation_oid);
                 plan.projection.encode(writer);
             }
             Self::Foreign(plan) => {
@@ -250,7 +243,6 @@ impl Plan {
     pub(super) fn decode(reader: &mut PlanDataReader<'_>) -> Result<Self, Error> {
         match reader.read_i32()? {
             PLAN_MANAGED => Ok(Self::managed(
-                reader.read_oid()?,
                 reader.read_oid()?,
                 PlanProjection::decode(reader)?,
             )),

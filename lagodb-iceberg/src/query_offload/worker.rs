@@ -2,6 +2,7 @@
 
 use bincode::Options;
 use iceberg_lite::io::FileIO;
+use lagodb_core::handles::RelationGuard;
 use pgrx::pg_sys;
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +23,7 @@ const HEADER_BYTES: usize = 24;
 #[derive(Debug, Clone)]
 pub(super) enum ReopenPlan {
     Managed {
-        tablespace_oid: pg_sys::Oid,
+        relation_oid: pg_sys::Oid,
     },
     Foreign {
         relation_oid: pg_sys::Oid,
@@ -35,7 +36,7 @@ pub(super) enum ReopenPlan {
 #[derive(Serialize)]
 enum EncodedWorkerPlan<'a> {
     Managed {
-        tablespace_oid: u32,
+        relation_oid: u32,
     },
     Foreign {
         relation_oid: u32,
@@ -52,7 +53,7 @@ enum EncodedWorkerPlan<'a> {
 #[derive(Deserialize)]
 enum DecodedWorkerPlan {
     Managed {
-        tablespace_oid: u32,
+        relation_oid: u32,
     },
     Foreign {
         relation_oid: u32,
@@ -69,8 +70,8 @@ enum DecodedWorkerPlan {
 impl ReopenPlan {
     pub(super) fn encode_prefix(&self) -> Result<Vec<u8>, Error> {
         let encoded = match self {
-            Self::Managed { tablespace_oid } => EncodedWorkerPlan::Managed {
-                tablespace_oid: u32::from(*tablespace_oid),
+            Self::Managed { relation_oid } => EncodedWorkerPlan::Managed {
+                relation_oid: u32::from(*relation_oid),
             },
             Self::Foreign {
                 relation_oid,
@@ -143,8 +144,8 @@ impl ReopenPlan {
             .map_err(IcebergError::from)
             .map_err(Error::from)?
         {
-            DecodedWorkerPlan::Managed { tablespace_oid } => Self::Managed {
-                tablespace_oid: pg_sys::Oid::from(tablespace_oid),
+            DecodedWorkerPlan::Managed { relation_oid } => Self::Managed {
+                relation_oid: pg_sys::Oid::from(relation_oid),
             },
             DecodedWorkerPlan::Foreign {
                 relation_oid,
@@ -176,8 +177,15 @@ impl ReopenPlan {
 
     pub(super) fn file_io(&self) -> Result<FileIO, Error> {
         match self {
-            Self::Managed { tablespace_oid } => {
-                Ok(StorageContext::for_tablespace(*tablespace_oid)?.into_file_io())
+            Self::Managed { relation_oid } => {
+                // PostgreSQL parallel workers take their own local relation
+                // lock even after joining the leader's lock group, so the
+                // relation remains protected if the leader exits first.
+                let relation = RelationGuard::open_table(
+                    *relation_oid,
+                    pg_sys::AccessShareLock as pg_sys::LOCKMODE,
+                )?;
+                Ok(StorageContext::for_read(&relation.as_handle())?.into_file_io())
             }
             Self::Foreign {
                 relation_oid,

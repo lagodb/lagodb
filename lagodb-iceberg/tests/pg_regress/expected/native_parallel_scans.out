@@ -57,6 +57,61 @@ ORDER BY id;
 (3 rows)
 
 SET max_parallel_workers_per_gather = 2;
+-- Managed roots use their own partial path and DSM task inventory. PG
+-- forbids native parallel_workers storage parameters on partition roots.
+-- Small Snappy files with distinct payloads provide physical page estimates;
+-- 63 selected files also form multiple groups at the default 4 MiB open cost.
+SET min_parallel_table_scan_size = 0;
+CREATE TABLE native_parallel_root (
+    id integer,
+    region integer,
+    payload text
+) PARTITION BY LIST (region) USING iceberg
+WITH ("write.parquet.compression-codec" = 'snappy');
+INSERT INTO native_parallel_root
+SELECT id, id, (SELECT string_agg(md5(id::text || ':' || part::text), '')
+               FROM generate_series(1, 32) AS part)
+FROM generate_series(1, 64) AS id;
+ANALYZE native_parallel_root;
+DO $$
+DECLARE
+    document jsonb;
+    gather jsonb;
+    scan jsonb;
+    rows_actual jsonb;
+    rows_expected jsonb;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
+             SELECT id FROM native_parallel_root WHERE region >= 2 ORDER BY id'
+        INTO document;
+    gather := jsonb_path_query_first(document,
+        '$[0].Plan.** ? (@."Node Type" == "Gather" || @."Node Type" == "Gather Merge")');
+    scan := jsonb_path_query_first(document,
+        '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")');
+    IF coalesce((gather->>'Workers Launched')::integer, 0) < 1
+       OR (gather->>'Actual Rows')::bigint IS DISTINCT FROM 63
+       OR (scan->>'Parallel Aware')::boolean IS DISTINCT FROM true
+       OR NOT coalesce(jsonb_path_exists(scan, '$.Workers[*] ? (@."Actual Rows" > 0)'), false)
+       OR (scan->>'Data Files Selected')::bigint IS DISTINCT FROM 63
+       OR coalesce(strpos(scan #>> '{LagoDB Pushdown,Pushed Filter Exact}', 'region >= 2'), 0) = 0 THEN
+        RAISE EXCEPTION 'partitioned partial path, worker execution or filtered inventory failed';
+    END IF;
+    SELECT to_jsonb(array_agg(id ORDER BY id)) INTO rows_expected
+    FROM generate_series(2, 64) AS id;
+    SELECT to_jsonb(array_agg(id ORDER BY id)) INTO rows_actual
+    FROM native_parallel_root WHERE region >= 2;
+    IF rows_actual IS DISTINCT FROM rows_expected THEN
+        RAISE EXCEPTION 'parallel partitioned root returned incorrect rows';
+    END IF;
+    PERFORM set_config('max_parallel_workers_per_gather', '0', true);
+    SELECT to_jsonb(array_agg(id ORDER BY id)) INTO rows_actual
+    FROM native_parallel_root WHERE region >= 2;
+    IF rows_actual IS DISTINCT FROM rows_expected THEN
+        RAISE EXCEPTION 'serial partitioned baseline returned incorrect rows';
+    END IF;
+END;
+$$;
+DROP TABLE native_parallel_root;
 -- A read-only foreign relation reconstructs its remote Iceberg reader in the
 -- launched worker. This query also protects pushed-filter transfer.
 SET min_parallel_table_scan_size = 0;
@@ -74,8 +129,8 @@ CREATE FOREIGN TABLE native_parallel_fdw.filters (
 SERVER native_parallel_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'read_filters',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'filter_rows_v2',
     mode 'read_only'
 );
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)

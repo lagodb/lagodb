@@ -5,6 +5,9 @@
 -- preserves PostgreSQL results.
 
 \set ECHO none
+\setenv PGDATABASE :DBNAME
+\set iceberg_fixture query-offload-writes
+\i include/iceberg_fixture.sql
 SELECT rest_uri AS regress_rest_uri
 FROM lagodb_regress.object_storage_fixture
 \gset
@@ -30,7 +33,7 @@ CREATE FOREIGN TABLE query_offload_foreign.left_source (
 SERVER query_offload_foreign_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'query_offload_regress',
+    catalog_namespace 'query_offload_reads',
     catalog_table_name 'left_source',
     mode 'read_only'
 );
@@ -44,7 +47,7 @@ CREATE FOREIGN TABLE query_offload_foreign.right_source (
 SERVER query_offload_foreign_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'query_offload_regress',
+    catalog_namespace 'query_offload_reads',
     catalog_table_name 'right_source',
     mode 'read_only'
 );
@@ -58,7 +61,7 @@ CREATE FOREIGN TABLE query_offload_foreign.writable_source (
 SERVER query_offload_foreign_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'query_offload_regress',
+    catalog_namespace 'query_offload_writes',
     catalog_table_name 'left_source',
     mode 'read_write'
 );
@@ -72,7 +75,7 @@ CREATE FOREIGN TABLE query_offload_foreign.parallel_source (
 SERVER query_offload_foreign_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'query_offload_regress',
+    catalog_namespace 'query_offload_writes',
     catalog_table_name 'parallel_source',
     mode 'read_write'
 );

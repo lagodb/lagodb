@@ -1629,6 +1629,75 @@ RESET plan_cache_mode;
 RESET lagodb.customscan_mode;
 RESET lagodb.query_offload_mode;
 
+-- InitPlan parameters are installed after BeginCustomScan. Unlike the
+-- nestloop parameters above, they must first be evaluated at scan startup.
+\pset format unaligned
+\pset footer off
+SET lagodb.query_offload_mode = 'off';
+SET lagodb.customscan_mode = 'force';
+SET max_parallel_workers_per_gather = 0;
+
+-- Follow PostgreSQL's explain.sql: expose the relevant JSON properties as
+-- ordinary SELECT results, leaving result comparison to pg_regress.
+CREATE FUNCTION pg_temp.customscan_parameter_plan(query text) RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE query INTO plan;
+    RETURN plan;
+END;
+$$;
+
+WITH document AS (
+    SELECT pg_temp.customscan_parameter_plan(
+        'EXPLAIN (COSTS OFF, FORMAT JSON)
+         SELECT id FROM customscan_null_param_lake
+         WHERE id = (SELECT max(value) FROM (VALUES (2), (3)) AS input(value))'
+    ) AS plan
+)
+SELECT plan #>> '{0,Plan,Custom Plan Provider}' AS provider,
+       jsonb_path_exists(plan,
+           '$[0].Plan.** ? (@."Parent Relationship" == "InitPlan")') AS has_initplan
+FROM document;
+
+SELECT id FROM customscan_null_param_lake
+WHERE id = (SELECT max(value) FROM (VALUES (2), (3)) AS input(value));
+SELECT count(*) AS null_initplan_rows FROM customscan_null_param_lake
+WHERE id = (SELECT max(value) FROM (VALUES (NULL::integer)) AS input(value));
+
+-- The mutation cursor receives its modify binding before Start, but opens
+-- only after the same InitPlan parameter is available.
+UPDATE customscan_null_param_lake SET payload = 'updated'
+WHERE id = (SELECT max(value) FROM (VALUES (2), (3)) AS input(value))
+RETURNING id, payload;
+
+-- An empty nestloop outer initializes and ends the inner scan without
+-- executing it. A nonmatching outer row would still call Start.
+TRUNCATE customscan_null_param_outer;
+WITH document AS (
+    SELECT pg_temp.customscan_parameter_plan(
+        'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
+         SELECT inner_rel.id FROM customscan_null_param_outer AS outer_rel
+         CROSS JOIN LATERAL (
+             SELECT id FROM customscan_null_param_lake
+             WHERE id = outer_rel.id OFFSET 0
+         ) AS inner_rel'
+    ) AS plan
+)
+SELECT scan->>'Custom Plan Provider' AS provider,
+       (scan->>'Actual Loops')::integer AS inner_loops
+FROM document
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Custom Plan Provider" == "lagodb-iceberg")') AS scan;
+
+DROP FUNCTION pg_temp.customscan_parameter_plan(text);
+RESET max_parallel_workers_per_gather;
+RESET lagodb.customscan_mode;
+RESET lagodb.query_offload_mode;
+\pset format aligned
+\pset footer on
+
 -- ============================================================================
 -- Cleanup
 -- ============================================================================

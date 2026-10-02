@@ -10,7 +10,7 @@ use pgrx::pg_sys;
 
 use crate::error::IcebergError;
 use crate::foreign_table::ForeignPlanningSource;
-use crate::managed_table::ManagedTableSnapshot;
+use crate::managed_table::ManagedTableReadView;
 use crate::predicate::{
     BoundIcebergPredicate, IcebergFilterPlanner, PlannedIcebergPredicate,
 };
@@ -23,13 +23,10 @@ pub(super) struct FilterPlanner(IcebergFilterPlanner);
 
 impl FilterPlanner {
     pub(super) fn managed(context: &FilterPlanningContext) -> Result<Self, Error> {
-        let metadata = ManagedTableSnapshot::load_query(
-            context.relation_oid(),
-            context.tablespace_oid(),
-        )?;
+        let view = ManagedTableReadView::load(context.relation_oid())?;
         Ok(Self(IcebergFilterPlanner::from_schema(
             context,
-            metadata.schema(),
+            view.schema(),
         )?))
     }
 

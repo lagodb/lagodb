@@ -174,6 +174,115 @@ EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*) FILTER (WHERE random() >= 0)
 FROM query_offload_explain_left;
 
+-- Runtime filter diagnostics must use complete binding expressions and the
+-- scan's PlannerInfo scope. Reuse the JSON adapter and join fixtures above.
+\pset format unaligned
+\pset footer off
+
+-- varchar -> text is a binary-compatible RelabelType around the generic
+-- Param. Both the display binding and execution retain that boundary.
+CREATE TABLE query_offload_explain_labels (label text COLLATE "C") USING iceberg;
+INSERT INTO query_offload_explain_labels VALUES ('east'), ('west'), ('east');
+SET plan_cache_mode = force_generic_plan;
+PREPARE query_offload_explain_relabel (varchar) AS
+SELECT count(*) FROM query_offload_explain_labels WHERE label = $1;
+WITH document AS (
+    SELECT query_offload_explain_json(
+        'VERBOSE, COSTS OFF',
+        'EXECUTE query_offload_explain_relabel(''east'')'
+    ) AS plan
+)
+SELECT plan #>> '{0,Plan,Custom Plan Provider}' AS provider,
+       jsonb_path_query_first(plan,
+           '$[0].Plan.** ? (@."Node Type" == "Table Scan")')->>'Filter'
+           LIKE '%$1%' AS has_binding
+FROM document;
+EXECUTE query_offload_explain_relabel('east');
+EXECUTE query_offload_explain_relabel(NULL);
+DEALLOCATE query_offload_explain_relabel;
+RESET plan_cache_mode;
+DROP TABLE query_offload_explain_labels;
+
+-- Identical PARAM_EXTERN expressions in the main query and lifted NOT IN
+-- SubPlan belong to separate PlannerInfo scopes and binding slots. Both
+-- displays must use their own slot rather than the first structural match.
+SET plan_cache_mode = force_generic_plan;
+PREPARE query_offload_explain_scoped (int) AS
+SELECT l.id FROM query_offload_explain_left AS l
+WHERE l.id >= $1 AND l.id NOT IN (
+    SELECT scoped.id FROM query_offload_explain_left AS scoped
+    WHERE scoped.id > $1
+) ORDER BY l.id;
+WITH document AS (
+    SELECT query_offload_explain_json(
+        'VERBOSE, COSTS OFF', 'EXECUTE query_offload_explain_scoped(2)'
+    ) AS plan
+)
+SELECT (scan->>'Filter') LIKE '%id > $2%' AS scoped_filter,
+       (scan->>'Pushed Filter Conservative') LIKE '%id > $2%' AS scoped_pruning
+FROM document
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Node Type" == "Table Scan" && @."Alias" == "scoped")') AS scan;
+EXECUTE query_offload_explain_scoped(2);
+EXECUTE query_offload_explain_scoped(1);
+DEALLOCATE query_offload_explain_scoped;
+RESET plan_cache_mode;
+
+-- PostgreSQL pulls up this LATERAL subquery. The unparameterized offload
+-- becomes a Nested Loop inner and must restart its null-aware hash join on
+-- each rescan. Its lifted SubPlan's local column stays a column in EXPLAIN.
+CREATE TEMP TABLE query_offload_explain_outer (id integer);
+INSERT INTO query_offload_explain_outer VALUES (1), (2);
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SET enable_material = off;
+WITH document AS (
+    SELECT query_offload_explain_json(
+        'ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF',
+        'SELECT nested.id FROM query_offload_explain_outer AS o
+         CROSS JOIN LATERAL (
+             SELECT l.id FROM query_offload_explain_left AS l
+             JOIN query_offload_explain_right AS r ON l.key = r.key
+             WHERE l.id = o.id AND l.id NOT IN (
+                 SELECT scoped.id FROM query_offload_explain_left AS scoped
+                 WHERE scoped.id > 2
+             )
+         ) AS nested ORDER BY nested.id'
+    ) AS plan
+)
+SELECT (scan->>'Filter') LIKE '%id > 2%'
+           AND (scan->>'Filter') NOT LIKE '%$%' AS scoped_filter,
+       (scan->>'Pushed Filter Conservative') LIKE '%id > 2%'
+           AND (scan->>'Pushed Filter Conservative') NOT LIKE '%$%' AS scoped_pruning,
+       (jsonb_path_query_first(plan,
+           '$[0].Plan.** ? (@."Custom Plan Provider" == "LagoDB Query Offload")')
+           ->>'Actual Loops')::int > 1 AS rescanned,
+       (SELECT sum((node->>'Metric: planned_files')::int)
+        FROM jsonb_path_query(plan,
+            'strict $[0].Plan.** ? (@."Node Type" == "ExternalTableScanExec")') AS node)
+       = (SELECT sum((node->>'Data Files Selected')::int)
+          FROM jsonb_path_query(plan,
+              'strict $[0].Plan.** ? (@."Node Type" == "Table Scan")') AS node)
+           AS scan_metrics_match
+FROM document
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Node Type" == "Table Scan" && @."Alias" == "scoped")') AS scan;
+SELECT nested.id FROM query_offload_explain_outer AS o
+CROSS JOIN LATERAL (
+    SELECT l.id FROM query_offload_explain_left AS l
+    JOIN query_offload_explain_right AS r ON l.key = r.key
+    WHERE l.id = o.id AND l.id NOT IN (
+        SELECT scoped.id FROM query_offload_explain_left AS scoped
+        WHERE scoped.id > 2
+    )
+) AS nested ORDER BY nested.id;
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+RESET enable_material;
+DROP TABLE query_offload_explain_outer;
+\pset format aligned
+\pset footer on
+
 DROP FUNCTION query_offload_explain_json(text, text);
 DROP TABLE query_offload_explain_right;
 DROP TABLE query_offload_explain_left;

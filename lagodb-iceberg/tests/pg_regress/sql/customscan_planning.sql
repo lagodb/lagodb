@@ -57,9 +57,9 @@ SELECT COUNT(*) AS lake_rows FROM customscan_dml_lake;
 -- PG sets `root->parse->commandType` to `CMD_UPDATE` /
 -- `CMD_DELETE` / `CMD_MERGE` and records the `lake` rel in
 -- `root->all_result_relids`. The framework classifies that base scan as
--- `ScanPurpose::Modify`. Modify-purpose CustomScan is mandatory correctness
+-- `ScanPurpose::ModifyTarget`. ModifyTarget-purpose CustomScan is mandatory correctness
 -- infrastructure, so both `force` and `off` select it; the GUC only controls
--- Query-purpose scans. PG17 DML wraps the input with LagoDBModifyTable.
+-- Read-purpose scans. PG17 DML wraps the input with LagoDBModifyTable.
 
 -- UPDATE lake
 SET lagodb.customscan_mode = 'force';
@@ -100,7 +100,7 @@ WHEN MATCHED THEN UPDATE SET v = s.v;
 -- For `UPDATE other SET v = lake.v FROM lake WHERE other.k = lake.k`
 -- the `lake` rel is an `RTE_RELATION` *source*, not the result rel.
 -- `bms_is_member(lake_rti, root->all_result_relids)` is FALSE on
--- `lake`, so it is classified as `ScanPurpose::Query`, not `Modify`.
+-- `lake`, so it is classified as `ScanPurpose::Read`, not `ModifyTarget`.
 -- The active rejection is the rowmark gate: `preprocess_rowmarks`
 -- (PG17 `planner.c:2295`) adds a `PlanRowMark` for every
 -- non-target base rel in any UPDATE/DELETE/MERGE plan, so

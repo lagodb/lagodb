@@ -9,6 +9,7 @@ mod pg_test;
 
 use core::ffi::CStr;
 
+use lagodb_core::api::TableAccessMethod;
 use lagodb_core::customscan::modify::{
     LagodbCustomModifyProvider, ModifyBindContext, ModifyCapabilities,
     register_provider as register_modify_provider,
@@ -17,19 +18,20 @@ use lagodb_core::customscan::provider::{
     BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
     CustomScanError, EndContext, LagodbCustomScanProvider, NextSlotContext,
     NextSlotResult, NoPrivateData, PathContext, PathVariant, ReScanContext,
-    RelationContext, register_provider as register_scan_provider,
+    RelationContext, StartContext, register_provider as register_scan_provider,
 };
 use lagodb_core::expr::RuntimeValueBindings;
 use lagodb_core::expr::pushdown::{
     FilterBindResult, FilterPlanningContext, FilterPushdown,
 };
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
+use lagodb_core::runtime_api::TableScanTaskMetrics;
 use pgrx::pg_sys;
 
 use crate::config::scan_fraction;
 use crate::error::IcebergError;
 use crate::managed_table::IcebergTableAm;
-use crate::managed_table::ManagedTableSnapshot;
+use crate::managed_table::ManagedTableReadView;
 use crate::managed_table::access::mutation::IcebergModifyScanContext;
 use crate::managed_table::catalog::IcebergAccessMethod;
 use crate::managed_table::catalog::metadata_tracker::TxMetadata;
@@ -52,11 +54,8 @@ impl FilterPushdown for IcebergCustomScanProvider {
     fn begin_filter_planning(
         context: &FilterPlanningContext,
     ) -> Result<Self::Planner, Self::Error> {
-        let metadata = ManagedTableSnapshot::load_query(
-            context.relation_oid(),
-            context.tablespace_oid(),
-        )?;
-        IcebergFilterPlanner::from_schema(context, metadata.schema())
+        let view = ManagedTableReadView::load(context.relation_oid())?;
+        IcebergFilterPlanner::from_schema(context, view.schema())
     }
 
     fn encode_planned(
@@ -98,6 +97,7 @@ impl LagodbCustomScanProvider for IcebergCustomScanProvider {
     const NAME: &'static CStr = c"lagodb-iceberg";
     const NATIVE_PARALLEL: bool = true;
     const SUPPRESS_TABLE_AM_PARALLEL_SCAN: bool = true;
+    const OWNS_PARTITIONED_TABLE: bool = IcebergTableAm::OWNS_PARTITIONED_TABLE;
 
     type PrivateData = NoPrivateData;
     type State = IcebergScanState;
@@ -137,6 +137,10 @@ impl LagodbCustomScanProvider for IcebergCustomScanProvider {
         IcebergScanState::begin(ctx)
     }
 
+    fn start(ctx: StartContext<'_, Self>) -> Result<(), CustomScanError> {
+        IcebergScanState::start(ctx)
+    }
+
     fn next_slot<'a>(
         ctx: NextSlotContext<'a, Self>,
     ) -> Result<NextSlotResult<'a>, CustomScanError> {
@@ -149,6 +153,10 @@ impl LagodbCustomScanProvider for IcebergCustomScanProvider {
 
     fn end(ctx: EndContext<'_, Self>) -> Result<(), CustomScanError> {
         IcebergScanState::end(ctx)
+    }
+
+    fn scan_task_metrics(state: &Self::State) -> Option<TableScanTaskMetrics> {
+        state.task_metrics()
     }
 
     fn estimate_dsm(

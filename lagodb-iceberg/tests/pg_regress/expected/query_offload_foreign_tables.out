@@ -4,6 +4,7 @@
 -- verifies that each basic operator family accepts foreign scan providers and
 -- preserves PostgreSQL results.
 \set ECHO none
+iceberg_fixture_provisioned: query-offload-writes
 CREATE FOREIGN TABLE query_offload_foreign.left_source (
     id integer,
     group_key integer,
@@ -13,7 +14,7 @@ CREATE FOREIGN TABLE query_offload_foreign.left_source (
 SERVER query_offload_foreign_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'query_offload_regress',
+    catalog_namespace 'query_offload_reads',
     catalog_table_name 'left_source',
     mode 'read_only'
 );
@@ -26,7 +27,7 @@ CREATE FOREIGN TABLE query_offload_foreign.right_source (
 SERVER query_offload_foreign_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'query_offload_regress',
+    catalog_namespace 'query_offload_reads',
     catalog_table_name 'right_source',
     mode 'read_only'
 );
@@ -39,7 +40,7 @@ CREATE FOREIGN TABLE query_offload_foreign.writable_source (
 SERVER query_offload_foreign_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'query_offload_regress',
+    catalog_namespace 'query_offload_writes',
     catalog_table_name 'left_source',
     mode 'read_write'
 );
@@ -52,7 +53,7 @@ CREATE FOREIGN TABLE query_offload_foreign.parallel_source (
 SERVER query_offload_foreign_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'query_offload_regress',
+    catalog_namespace 'query_offload_writes',
     catalog_table_name 'parallel_source',
     mode 'read_write'
 );

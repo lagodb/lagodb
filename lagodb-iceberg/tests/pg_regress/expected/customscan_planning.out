@@ -53,9 +53,9 @@ SELECT COUNT(*) AS lake_rows FROM customscan_dml_lake;
 -- PG sets `root->parse->commandType` to `CMD_UPDATE` /
 -- `CMD_DELETE` / `CMD_MERGE` and records the `lake` rel in
 -- `root->all_result_relids`. The framework classifies that base scan as
--- `ScanPurpose::Modify`. Modify-purpose CustomScan is mandatory correctness
+-- `ScanPurpose::ModifyTarget`. ModifyTarget-purpose CustomScan is mandatory correctness
 -- infrastructure, so both `force` and `off` select it; the GUC only controls
--- Query-purpose scans. PG17 DML wraps the input with LagoDBModifyTable.
+-- Read-purpose scans. PG17 DML wraps the input with LagoDBModifyTable.
 -- UPDATE lake
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -66,7 +66,7 @@ UPDATE customscan_dml_lake SET v = v + 1 WHERE k = 1;
    Executor: PG17 LagoDB ModifyTable fork
    ->  Update on customscan_dml_lake
          ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake
-               Scan Purpose: Modify
+               Scan Purpose: ModifyTarget
                Pushed Filter: (k = 1)
 (6 rows)
 
@@ -79,7 +79,7 @@ UPDATE customscan_dml_lake SET v = v + 1 WHERE k = 1;
    Executor: PG17 LagoDB ModifyTable fork
    ->  Update on customscan_dml_lake
          ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake
-               Scan Purpose: Modify
+               Scan Purpose: ModifyTarget
                Pushed Filter: (k = 1)
 (6 rows)
 
@@ -93,7 +93,7 @@ DELETE FROM customscan_dml_lake WHERE k = 1;
    Executor: PG17 LagoDB ModifyTable fork
    ->  Delete on customscan_dml_lake
          ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake
-               Scan Purpose: Modify
+               Scan Purpose: ModifyTarget
                Pushed Filter: (k = 1)
 (6 rows)
 
@@ -106,7 +106,7 @@ DELETE FROM customscan_dml_lake WHERE k = 1;
    Executor: PG17 LagoDB ModifyTable fork
    ->  Delete on customscan_dml_lake
          ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake
-               Scan Purpose: Modify
+               Scan Purpose: ModifyTarget
                Pushed Filter: (k = 1)
 (6 rows)
 
@@ -123,7 +123,7 @@ WHEN MATCHED THEN UPDATE SET v = s.v;
    Executor: PG17 LagoDB ModifyTable fork
    ->  Merge on customscan_dml_lake t
          ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake t
-               Scan Purpose: Modify
+               Scan Purpose: ModifyTarget
                Pushed Filter: (k = 1)
 (6 rows)
 
@@ -139,7 +139,7 @@ WHEN MATCHED THEN UPDATE SET v = s.v;
    Executor: PG17 LagoDB ModifyTable fork
    ->  Merge on customscan_dml_lake t
          ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake t
-               Scan Purpose: Modify
+               Scan Purpose: ModifyTarget
                Pushed Filter: (k = 1)
 (6 rows)
 
@@ -149,7 +149,7 @@ WHEN MATCHED THEN UPDATE SET v = s.v;
 -- For `UPDATE other SET v = lake.v FROM lake WHERE other.k = lake.k`
 -- the `lake` rel is an `RTE_RELATION` *source*, not the result rel.
 -- `bms_is_member(lake_rti, root->all_result_relids)` is FALSE on
--- `lake`, so it is classified as `ScanPurpose::Query`, not `Modify`.
+-- `lake`, so it is classified as `ScanPurpose::Read`, not `ModifyTarget`.
 -- The active rejection is the rowmark gate: `preprocess_rowmarks`
 -- (PG17 `planner.c:2295`) adds a `PlanRowMark` for every
 -- non-target base rel in any UPDATE/DELETE/MERGE plan, so

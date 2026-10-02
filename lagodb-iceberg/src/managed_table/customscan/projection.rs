@@ -1,11 +1,11 @@
-//! Projection policy for Iceberg CustomScan tuple production.
+//! Slot projection policy for Iceberg CustomScan tuple production.
 
 use lagodb_core::customscan::provider::{
     CustomScanError, NeededColumns, ScanTupleDescriptor,
 };
 use pgrx::pg_sys;
 
-use crate::scan::projection::{ProjectedField, Projection};
+use crate::schema::projection::{ProjectedAttribute, SlotProjection};
 
 /// Resolves core's referenced-column set into the Iceberg scan projection.
 pub(super) struct ProjectionResolver;
@@ -15,7 +15,7 @@ impl ProjectionResolver {
         &self,
         needed: NeededColumns<'_>,
         scan_tuple: ScanTupleDescriptor<'_>,
-    ) -> Result<Option<Projection>, CustomScanError> {
+    ) -> Result<Option<SlotProjection>, CustomScanError> {
         self.resolve_with(needed, |attno| scan_tuple.destination_for_attno(attno))
             .map_err(Into::into)
     }
@@ -26,7 +26,7 @@ impl ProjectionResolver {
         &self,
         needed: NeededColumns<'_>,
         resolve_destination: D,
-    ) -> Result<Option<Projection>, ProjectionError>
+    ) -> Result<Option<SlotProjection>, ProjectionError>
     where
         D: Fn(pg_sys::AttrNumber) -> Option<usize>,
     {
@@ -39,12 +39,12 @@ impl ProjectionResolver {
         for &attno in attnos {
             let destination = resolve_destination(attno)
                 .ok_or(ProjectionError::UnmappedAttno(attno))?;
-            columns.push(ProjectedField::new(attno, destination));
+            columns.push(ProjectedAttribute::new(attno, destination));
         }
         // Keep the storage request in base-schema order. Destination remains
         // independent, so the compact custom tuple can still follow targetlist
         // order while Arrow/Parquet sees a stable physical-field order.
-        Ok(Some(Projection::from_outputs(columns)))
+        Ok(Some(SlotProjection::from_outputs(columns)))
     }
 }
 
@@ -72,7 +72,7 @@ mod tests {
         fn run(
             &self,
             needed: NeededColumns<'_>,
-        ) -> Result<Option<Projection>, ProjectionError> {
+        ) -> Result<Option<SlotProjection>, ProjectionError> {
             ProjectionResolver.resolve_with(needed, |attno| {
                 self.destinations
                     .iter()
@@ -81,7 +81,7 @@ mod tests {
         }
     }
 
-    fn pairs(proj: &Projection) -> Vec<(pg_sys::AttrNumber, usize)> {
+    fn pairs(proj: &SlotProjection) -> Vec<(pg_sys::AttrNumber, usize)> {
         proj.columns()
             .iter()
             .map(|c| (c.attno, c.destination))
