@@ -1,7 +1,9 @@
--- Writable Iceberg FDW lifecycle against the shared REST/MinIO fixture.
+-- Writable Iceberg FDW lifecycle against consumer-owned REST/MinIO tables.
 
 \set ECHO none
 \setenv PGDATABASE :DBNAME
+\set iceberg_fixture fdw-writes
+\i include/iceberg_fixture.sql
 
 SELECT rest_uri AS regress_rest_uri,
        fallback_rest_uri AS regress_fallback_rest_uri,
@@ -96,8 +98,8 @@ CREATE FOREIGN TABLE iceberg_fdw_regress.writable (
 SERVER iceberg_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'writable',
+    catalog_namespace 'fdw_writes',
+    catalog_table_name 'rows_v2',
     mode 'read_write'
 );
 
@@ -113,8 +115,8 @@ CREATE FOREIGN TABLE iceberg_fdw_regress.v3_mutations (
 SERVER iceberg_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'v3_mutations',
+    catalog_namespace 'fdw_writes',
+    catalog_table_name 'deletion_vectors_v3',
     mode 'read_write'
 );
 SELECT * FROM iceberg_fdw_regress.v3_mutations ORDER BY id;
@@ -130,13 +132,50 @@ SELECT * FROM iceberg_fdw_regress.v3_mutations ORDER BY id;
 COMMIT;
 SELECT * FROM iceberg_fdw_regress.v3_mutations ORDER BY id;
 
+-- The foreign table consumes the remote default spec directly. Existing data
+-- spans two specs; UPDATE writes new data with the current spec while v2
+-- position deletes retain each target file's original spec and partition.
+CREATE FOREIGN TABLE iceberg_fdw_regress.partition_evolution_v2 ()
+SERVER iceberg_rest
+OPTIONS (
+    catalog_name 'regress',
+    catalog_namespace 'fdw_writes',
+    catalog_table_name 'partition_evolution_v2',
+    mode 'read_write'
+);
+SELECT array_agg(id ORDER BY id) AS initial_partitioned_rows
+FROM iceberg_fdw_regress.partition_evolution_v2;
+BEGIN;
+INSERT INTO iceberg_fdw_regress.partition_evolution_v2
+VALUES (7, NULL, NULL, 'seven');
+UPDATE iceberg_fdw_regress.partition_evolution_v2
+SET category = 'delta', event_date = DATE '2024-02-01', payload = 'one-updated'
+WHERE id = 1
+RETURNING id, category, payload;
+WITH deleted AS (
+    DELETE FROM iceberg_fdw_regress.partition_evolution_v2
+    WHERE id IN (2, 5)
+    RETURNING id
+)
+SELECT array_agg(id ORDER BY id) AS deleted_partitioned_rows FROM deleted;
+SELECT array_agg(id ORDER BY id) AS transaction_partitioned_rows,
+       max(payload) FILTER (WHERE id = 1) AS updated_partitioned_payload
+FROM iceberg_fdw_regress.partition_evolution_v2;
+COMMIT;
+COPY iceberg_fdw_regress.partition_evolution_v2 FROM stdin WITH (FORMAT csv);
+8,theta,2024-03-01,copy-eight
+9,iota,2024-03-02,copy-nine
+\.
+SELECT array_agg(id ORDER BY id) AS committed_partitioned_rows
+FROM iceberg_fdw_regress.partition_evolution_v2;
+
 -- An empty local column list is populated from the remote Iceberg schema.
 CREATE FOREIGN TABLE iceberg_fdw_regress.inferred ()
 SERVER iceberg_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'second',
+    catalog_namespace 'fdw_writes',
+    catalog_table_name 'import_rows_v2',
     mode 'read_only'
 );
 SELECT * FROM iceberg_fdw_regress.inferred ORDER BY id;
@@ -150,8 +189,8 @@ CREATE FOREIGN TABLE iceberg_fdw_regress.fallback_writable (
 SERVER iceberg_rest_fallback
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'writable',
+    catalog_namespace 'fdw_writes',
+    catalog_table_name 'rows_v2',
     mode 'read_write'
 );
 SELECT * FROM iceberg_fdw_regress.fallback_writable ORDER BY id;
@@ -160,8 +199,8 @@ CREATE FOREIGN TABLE iceberg_fdw_regress.fallback_second_bucket ()
 SERVER iceberg_rest_fallback
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'second_bucket',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'second_bucket_v2',
     mode 'read_only'
 );
 SELECT * FROM iceberg_fdw_regress.fallback_second_bucket ORDER BY id;
@@ -170,14 +209,14 @@ VALUES (101, 'client-fallback');
 SELECT * FROM iceberg_fdw_regress.fallback_writable ORDER BY id;
 
 CREATE SCHEMA iceberg_fdw_import;
-IMPORT FOREIGN SCHEMA fdw_regress
-LIMIT TO (second)
+IMPORT FOREIGN SCHEMA fdw_writes
+LIMIT TO (import_rows_v2)
 FROM SERVER iceberg_rest
 INTO iceberg_fdw_import
 OPTIONS (mode 'read_write');
-INSERT INTO iceberg_fdw_import.second VALUES (15, 'fifteen');
+INSERT INTO iceberg_fdw_import.import_rows_v2 VALUES (15, 'fifteen');
 SELECT array_agg(id ORDER BY id) AS imported_write_rows
-FROM iceberg_fdw_import.second;
+FROM iceberg_fdw_import.import_rows_v2;
 
 -- Mismatched explicit columns are rejected and leave no local catalog entry.
 \set VERBOSITY terse
@@ -188,8 +227,8 @@ CREATE FOREIGN TABLE iceberg_fdw_regress.invalid_schema (
 SERVER iceberg_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'writable',
+    catalog_namespace 'fdw_writes',
+    catalog_table_name 'rows_v2',
     mode 'read_write'
 );
 SELECT to_regclass('iceberg_fdw_regress.invalid_schema') IS NULL
@@ -244,8 +283,8 @@ CREATE FOREIGN TABLE iceberg_fdw_regress.second (
 SERVER iceberg_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'second',
+    catalog_namespace 'fdw_writes',
+    catalog_table_name 'import_rows_v2',
     mode 'read_write'
 );
 BEGIN;
@@ -266,8 +305,8 @@ CREATE FOREIGN TABLE iceberg_fdw_regress.second_server_table (
 SERVER iceberg_rest_second
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'second',
+    catalog_namespace 'fdw_writes',
+    catalog_table_name 'import_rows_v2',
     mode 'read_write'
 );
 BEGIN;
@@ -361,8 +400,8 @@ CREATE FOREIGN TABLE iceberg_fdw_regress.rebound ()
 SERVER iceberg_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'writable',
+    catalog_namespace 'fdw_writes',
+    catalog_table_name 'rows_v2',
     mode 'read_only'
 );
 SELECT array_agg(id ORDER BY id) AS remote_rows_survive_local_drop
@@ -378,8 +417,8 @@ CREATE FOREIGN TABLE iceberg_fdw_regress.failure_writable (
 SERVER iceberg_rest_failure
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'writable',
+    catalog_namespace 'fdw_writes',
+    catalog_table_name 'rows_v2',
     mode 'read_write'
 );
 BEGIN;

@@ -42,15 +42,15 @@ impl FdwAnalyze for LagodbIceberg {
         context: &mut ForeignSampleContext<'_>,
     ) -> Result<ForeignSampleStatistics, ForeignTableMaintenanceError> {
         let view = analyze_view(context.relation().oid())?;
-        let shape = ForeignSchemaBinding::bind(
+        let layout = ForeignSchemaBinding::bind(
             context.relation(),
             view.table.metadata().current_schema(),
         )?
-        .into_relation_shape();
+        .into_relation_layout();
         let mut prepared = PreparedRowScan::full(
             IcebergReadSnapshot::new(view.table, view.delta),
             ScanPredicates::unfiltered(),
-            &shape,
+            &layout,
         )?;
         let mut cursor = prepared.open_analyze_row_cursor()?;
         let tuple_desc = context.relation().tuple_desc();

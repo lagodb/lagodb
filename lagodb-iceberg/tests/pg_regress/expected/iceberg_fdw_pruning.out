@@ -1,0 +1,121 @@
+-- Physical partition pruning across historical/current remote partition specs.
+-- The immutable Spark fixture has write.metadata.metrics.default=none:
+-- column bounds and null counts cannot mask a partition-projection regression.
+\set ECHO none
+CREATE FOREIGN TABLE iceberg_fdw_pruning.source ()
+SERVER iceberg_pruning_rest
+OPTIONS (
+    catalog_name 'regress',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'partition_evolution_v2',
+    mode 'read_only'
+);
+CREATE FOREIGN TABLE iceberg_fdw_pruning.inventory ()
+SERVER iceberg_pruning_rest
+OPTIONS (
+    catalog_name 'regress',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'partition_pruning_inventory',
+    mode 'read_only'
+);
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'off';
+SET max_parallel_workers_per_gather = 0;
+\pset format unaligned
+\pset footer off
+-- As in PostgreSQL's explain.sql, use a short EXECUTE adapter to expose
+-- stable EXPLAIN JSON fields. Test assertions remain ordinary SELECT results.
+CREATE FUNCTION pg_temp.partition_query_json(query text) RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE
+    result jsonb;
+BEGIN
+    EXECUTE query INTO result;
+    RETURN result;
+END;
+$$;
+-- Both historical/current specs must be populated and have no column metrics.
+SELECT count(*) FILTER (WHERE case_name = 'all') AS populated_specs,
+       bool_and(file_count > 0) FILTER (WHERE case_name = 'all') AS nonempty_specs,
+       bool_and(metrics_absent IS NOT DISTINCT FROM true) AS metrics_absent
+FROM iceberg_fdw_pruning.inventory;
+populated_specs|nonempty_specs|metrics_absent
+2|t|t
+CREATE TEMP TABLE pruning_cases (
+    ordinal integer, case_name text, predicate text, pushed_first text, pushed_second text
+);
+INSERT INTO pruning_cases VALUES
+    (1, 'all', 'true', '', ''),
+    (2, 'old_day', 'event_date = DATE ''2024-01-01''', 'event_date =', ''),
+    (3, 'new_day', 'event_date = DATE ''2024-01-03''', 'event_date =', ''),
+    (4, 'new_range', 'event_date >= DATE ''2024-01-03'' AND event_date < DATE ''2024-01-05''', 'event_date >=', 'event_date <'),
+    (5, 'cross_range', 'event_date >= DATE ''2024-01-02'' AND event_date < DATE ''2024-01-04''', 'event_date >=', 'event_date <'),
+    (6, 'category', 'category = ''alpha''', 'category =', ''),
+    (7, 'bucket', 'id = 4', 'id =', ''),
+    (8, 'null_day', 'event_date IS NULL', 'event_date IS NULL', '');
+-- Old/new day cases isolate each spec; mixed cases preserve truncate/bucket
+-- collisions. Expected counts come from Spark's physical files inventory.
+CREATE TEMP VIEW pruning_results AS
+WITH plans AS MATERIALIZED (
+    SELECT c.*, pg_temp.partition_query_json(
+        'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
+         SELECT count(*) FROM iceberg_fdw_pruning.source WHERE ' || predicate) AS plan
+    FROM pruning_cases c
+), scans AS (
+    SELECT *, jsonb_path_query_first(plan,
+        '$[0].Plan.** ? (@."Node Type" == "Table Scan" || @."Node Type" == "Foreign Scan")') AS scan
+    FROM plans
+), filters AS (
+    SELECT *, concat_ws(' ', scan->>'Pushed Filter Exact', scan->>'Pushed Filter Conservative',
+                            scan #>> '{LagoDB Pushdown,Pushed Filter Exact}',
+                            scan #>> '{LagoDB Pushdown,Pushed Filter Conservative}') AS pushed
+    FROM scans
+)
+SELECT ordinal, case_name, scan->>'Node Type' AS scan_type,
+       (scan->>'Data Files Selected')::bigint =
+           (SELECT sum(file_count) FROM iceberg_fdw_pruning.inventory i
+            WHERE i.case_name = filters.case_name) AS files_match,
+       strpos(pushed, pushed_first) > 0 AND strpos(pushed, pushed_second) > 0 AS filter_bound,
+       pg_temp.partition_query_json(
+           'SELECT to_jsonb(array_agg(id ORDER BY id)) FROM iceberg_fdw_pruning.source WHERE ' || predicate) AS ids
+FROM filters;
+-- Offload supported predicates; DATE values retain native FDW execution
+-- because ExecutionScalarRepr does not admit DATE runtime bindings.
+-- Both routes must bind and physically prune the same predicates.
+SET lagodb.query_offload_mode = 'force';
+SELECT case_name, scan_type, files_match, filter_bound, ids
+FROM pruning_results ORDER BY ordinal;
+case_name|scan_type|files_match|filter_bound|ids
+all|Table Scan|t|t|[1, 2, 3, 4, 5, 6]
+old_day|Foreign Scan|t|t|[1, 2]
+new_day|Foreign Scan|t|t|[4]
+new_range|Foreign Scan|t|t|[4, 5]
+cross_range|Foreign Scan|t|t|[3, 4]
+category|Table Scan|t|t|[1, 4]
+bucket|Table Scan|t|t|[4]
+null_day|Table Scan|t|t|[6]
+-- Native FDW must independently bind and prune the same predicates.
+SET lagodb.query_offload_mode = 'off';
+SELECT case_name, scan_type, files_match, filter_bound, ids
+FROM pruning_results ORDER BY ordinal;
+case_name|scan_type|files_match|filter_bound|ids
+all|Foreign Scan|t|t|[1, 2, 3, 4, 5, 6]
+old_day|Foreign Scan|t|t|[1, 2]
+new_day|Foreign Scan|t|t|[4]
+new_range|Foreign Scan|t|t|[4, 5]
+cross_range|Foreign Scan|t|t|[3, 4]
+category|Foreign Scan|t|t|[1, 4]
+bucket|Foreign Scan|t|t|[4]
+null_day|Foreign Scan|t|t|[6]
+DROP VIEW pruning_results;
+DROP TABLE pruning_cases;
+DROP FUNCTION pg_temp.partition_query_json(text);
+SET client_min_messages = warning;
+DROP SCHEMA iceberg_fdw_pruning CASCADE;
+DROP SERVER iceberg_pruning_rest CASCADE;
+RESET client_min_messages;
+RESET max_parallel_workers_per_gather;
+RESET lagodb.query_offload_mode;
+RESET lagodb.customscan_mode;
+\pset format aligned
+\pset footer on

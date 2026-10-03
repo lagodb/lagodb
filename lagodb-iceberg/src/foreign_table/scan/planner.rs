@@ -10,6 +10,7 @@ use lagodb_core::fdw::{
     ForeignScanError, ForeignScanResult, ReScanForeignScanContext, ScanSlotWriter,
     StartForeignScanContext,
 };
+use lagodb_core::runtime_api::TableScanTaskMetrics;
 use pgrx::pg_sys;
 
 use crate::config::scan_fraction;
@@ -159,6 +160,10 @@ impl FdwScan for LagodbIceberg {
         context: BeginForeignScanContext<'_, Self>,
     ) -> Result<Self::State, ForeignScanError> {
         IcebergFdwScanState::begin(context)
+    }
+
+    fn scan_task_metrics(state: &Self::State) -> Option<TableScanTaskMetrics> {
+        state.task_metrics()
     }
 
     fn next_slot<'a>(

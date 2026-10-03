@@ -9,7 +9,7 @@ use super::super::options::ForeignTableIdentity;
 use super::super::relation::RemoteTableKey;
 use crate::error::IcebergResult;
 use crate::scan::{PreparedRowScan, RowLocationScanInput};
-use crate::schema::relation::RelationShape;
+use crate::schema::relation::RelationLayout;
 use crate::write::PlannedMutationTasks;
 
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ struct ForeignMutationScanInner {
     identity: ForeignTableIdentity,
     key: RemoteTableKey,
     table: Table,
-    shape: RelationShape,
+    layout: RelationLayout,
     starting_snapshot_id: Option<i64>,
     tasks: Rc<PlannedMutationTasks>,
 }
@@ -32,7 +32,7 @@ impl ForeignMutationScan {
         identity: ForeignTableIdentity,
         key: RemoteTableKey,
         table: Table,
-        shape: RelationShape,
+        layout: RelationLayout,
         starting_snapshot_id: Option<i64>,
         tasks: Vec<FileScanTask>,
     ) -> Self {
@@ -41,7 +41,7 @@ impl ForeignMutationScan {
                 identity,
                 key,
                 table,
-                shape,
+                layout,
                 starting_snapshot_id,
                 tasks: Rc::new(PlannedMutationTasks::new(tasks)),
             }),
@@ -60,8 +60,8 @@ impl ForeignMutationScan {
         &self.inner.table
     }
 
-    pub(crate) fn shape(&self) -> &RelationShape {
-        &self.inner.shape
+    pub(crate) fn layout(&self) -> &RelationLayout {
+        &self.inner.layout
     }
 
     pub(crate) fn starting_snapshot_id(&self) -> Option<i64> {

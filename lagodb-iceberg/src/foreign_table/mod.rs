@@ -1,4 +1,24 @@
 //! Iceberg foreign-data-wrapper integration.
+//!
+//! # Upstream partition metadata boundaries
+//!
+//! REST table metadata is deserialized by iceberg-lite before LagoDB receives a
+//! `Table`. Its transform parser maps only the literal `"unknown"` to
+//! `Transform::Unknown`; an actual unrecognized transform name fails metadata
+//! deserialization first, so the local predicate-projection fallback for
+//! `Transform::Unknown` cannot handle future transforms. Upstream issue #2789
+//! and PR #2790 track preserving and accepting the original unknown transform.
+//!
+//! Iceberg v3 partition fields may also use `source-ids` for multi-source
+//! transforms, while the current iceberg-lite metadata model accepts only the
+//! single `source-id` form. Such metadata fails at the same load boundary.
+//! Upstream issue #2801 and PR #2802 track that model change. Both fixes belong
+//! in iceberg-rust/iceberg-lite rather than REST JSON preprocessing in LagoDB.
+//!
+//! https://github.com/apache/iceberg-rust/issues/2789
+//! https://github.com/apache/iceberg-rust/pull/2790
+//! https://github.com/apache/iceberg-rust/issues/2801
+//! https://github.com/apache/iceberg-rust/pull/2802
 
 use std::sync::OnceLock;
 

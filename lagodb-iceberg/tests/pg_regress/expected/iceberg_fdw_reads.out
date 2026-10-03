@@ -8,8 +8,8 @@ CREATE FOREIGN TABLE iceberg_fdw_read.filters (
 SERVER iceberg_read_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'read_filters',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'filter_rows_v2',
     mode 'read_only'
 );
 -- Projection and zero-column aggregation use the remote schema contract.
@@ -36,8 +36,8 @@ CREATE FOREIGN TABLE iceberg_fdw_read.v3_mutations (
 SERVER iceberg_read_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'v3_mutations',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'deletion_vectors_v3',
     mode 'read_only'
 );
 SELECT * FROM iceberg_fdw_read.v3_mutations ORDER BY id;
@@ -47,6 +47,57 @@ SELECT * FROM iceberg_fdw_read.v3_mutations ORDER BY id;
   3 | three-spark
   4 | four
 (3 rows)
+
+-- Partition specs are discovered from Iceberg metadata; no PostgreSQL table
+-- option duplicates the partition columns or transforms. The remote table has
+-- files written with two specs, so both predicates exercise per-manifest
+-- projection while PostgreSQL still rechecks the row predicate.
+CREATE FOREIGN TABLE iceberg_fdw_read.partition_evolution_v2 ()
+SERVER iceberg_read_rest
+OPTIONS (
+    catalog_name 'regress',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'partition_evolution_v2',
+    mode 'read_only'
+);
+SELECT array_agg(id ORDER BY id) AS partitioned_all_rows
+FROM iceberg_fdw_read.partition_evolution_v2;
+ partitioned_all_rows 
+----------------------
+ {1,2,3,4,5,6}
+(1 row)
+
+SELECT array_agg(id ORDER BY id) AS partitioned_category_rows
+FROM iceberg_fdw_read.partition_evolution_v2
+WHERE category = 'alpha';
+ partitioned_category_rows 
+---------------------------
+ {1,4}
+(1 row)
+
+SELECT array_agg(id ORDER BY id) AS partitioned_id_rows
+FROM iceberg_fdw_read.partition_evolution_v2
+WHERE id >= 4;
+ partitioned_id_rows 
+---------------------
+ {4,5,6}
+(1 row)
+
+-- Historical partition files remain readable after their source column is dropped.
+CREATE FOREIGN TABLE iceberg_fdw_read.dropped_partition_source_v2 ()
+SERVER iceberg_read_rest
+OPTIONS (
+    catalog_name 'regress',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'dropped_partition_source_v2',
+    mode 'read_only'
+);
+SELECT array_agg(id ORDER BY id) AS dropped_source_rows
+FROM iceberg_fdw_read.dropped_partition_source_v2;
+ dropped_source_rows 
+---------------------
+ {1,2}
+(1 row)
 
 -- Exact, conservative and unsupported filters must remain distinguishable in
 -- both the plan and result.
@@ -189,18 +240,25 @@ ORDER BY wanted.id;
 (2 rows)
 
 RESET plan_cache_mode;
--- A predicate-bearing cached plan is bound to the remote table UUID/schema
--- generation. Recreate the same remote names and reject the stale predicate.
+-- Only this testcase owns the replaceable remote UUID. Read fixtures stay intact.
+CREATE FOREIGN TABLE iceberg_fdw_read.cached_plan ()
+SERVER iceberg_read_rest
+OPTIONS (
+    catalog_name 'regress',
+    catalog_namespace 'fdw_cached_plan',
+    catalog_table_name 'filter_rows_v2',
+    mode 'read_only'
+);
 PREPARE iceberg_stale_read AS
-SELECT payload FROM iceberg_fdw_read.filters WHERE id = 2;
+SELECT payload FROM iceberg_fdw_read.cached_plan WHERE id = 2;
 EXECUTE iceberg_stale_read;
  payload 
 ---------
  two
 (1 row)
 
-\! ../../../scripts/pg_regress/object_storage_fixture reprovision
-object_storage_reprovisioned: true
+\set ECHO none
+iceberg_fixture_provisioned: cached-plan
 \set VERBOSITY terse
 EXECUTE iceberg_stale_read;
 ERROR:  FDW "lagodb_iceberg" BeginForeignScan callback failed: FDW provider error: the Iceberg table generation or schema changed after planning
@@ -209,8 +267,12 @@ DEALLOCATE iceberg_stale_read;
 DEALLOCATE iceberg_read_by_id;
 -- IMPORT ALL/EXCEPT and inferred local columns exercise read-only DDL binding.
 CREATE SCHEMA iceberg_fdw_read_import;
-IMPORT FOREIGN SCHEMA fdw_regress
-EXCEPT (writable, v3_mutations)
+IMPORT FOREIGN SCHEMA fdw_reads
+EXCEPT (
+    deletion_vectors_v3,
+    partition_evolution_v2,
+    dropped_partition_source_v2
+)
 FROM SERVER iceberg_read_rest
 INTO iceberg_fdw_read_import
 OPTIONS (mode 'read_only');
@@ -218,13 +280,14 @@ SELECT foreign_table_name
 FROM information_schema.foreign_tables
 WHERE foreign_table_schema = 'iceberg_fdw_read_import'
 ORDER BY foreign_table_name;
- foreign_table_name 
---------------------
- read_filters
- second
-(2 rows)
+     foreign_table_name      
+-----------------------------
+ filter_rows_v2
+ import_rows_v2
+ partition_pruning_inventory
+(3 rows)
 
-SELECT * FROM iceberg_fdw_read_import.second ORDER BY id;
+SELECT * FROM iceberg_fdw_read_import.import_rows_v2 ORDER BY id;
  id | payload 
 ----+---------
  10 | ten
@@ -236,16 +299,16 @@ CREATE FOREIGN TABLE iceberg_fdw_read.fallback_main ()
 SERVER iceberg_read_fallback
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'writable',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'rows_v2',
     mode 'read_only'
 );
 CREATE FOREIGN TABLE iceberg_fdw_read.fallback_second_bucket ()
 SERVER iceberg_read_fallback
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'second_bucket',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'second_bucket_v2',
     mode 'read_only'
 );
 SELECT * FROM iceberg_fdw_read.fallback_main ORDER BY id;
@@ -278,7 +341,7 @@ OPTIONS (
 );
 \set VERBOSITY terse
 SELECT * FROM iceberg_fdw_read.fallback_main;
-ERROR:  FDW "lagodb_iceberg" BeginForeignScan callback failed: FDW provider error: iceberg error: DataInvalid => failed to resolve PostgreSQL storage profile, source: storage profile "iceberg_read_storage_ambiguous" is ambiguous with "iceberg_read_storage_narrow" for scope "s3://lagodb-regress-iceberg-fallback-a/iceberg-fallback/fdw_regress/"
+ERROR:  FDW "lagodb_iceberg" BeginForeignScan callback failed: FDW provider error: iceberg error: DataInvalid => failed to resolve PostgreSQL storage profile, source: storage profile "iceberg_read_storage_ambiguous" is ambiguous with "iceberg_read_storage_narrow" for scope "s3://lagodb-regress-iceberg-fallback-a/iceberg-fallback/fdw_reads/"
 \set VERBOSITY default
 SET client_min_messages = warning;
 DROP SCHEMA iceberg_fdw_read CASCADE;

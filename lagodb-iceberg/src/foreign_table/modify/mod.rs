@@ -131,7 +131,7 @@ impl LagodbIceberg {
                 scan.key(),
                 operation,
                 scan.table(),
-                scan.shape(),
+                scan.layout(),
                 Some(scan),
                 command_id,
             );
@@ -142,16 +142,16 @@ impl LagodbIceberg {
             return Err(super::error::IcebergFdwError::PlanIdentityChanged.into());
         }
         let view = ForeignTransaction::begin_write(resolved)?;
-        let shape = ForeignSchemaBinding::bind(
+        let layout = ForeignSchemaBinding::bind(
             relation,
             view.table.metadata().current_schema(),
         )?
-        .into_relation_shape();
+        .into_relation_layout();
         IcebergFdwModifyState::new(
             &view.key,
             operation,
             &view.table,
-            &shape,
+            &layout,
             None,
             command_id,
         )

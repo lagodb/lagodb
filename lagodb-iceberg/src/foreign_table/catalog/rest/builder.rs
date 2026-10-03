@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use iceberg_lite::catalog::rest::auth::AuthManager;
 use iceberg_lite::catalog::rest::{RestCatalog, RestCatalogBuilder};
 use iceberg_lite::catalog::{CatalogBuilder, SessionContext};
 use iceberg_lite::encryption::kms::KmsClientFactory;
@@ -16,18 +15,12 @@ use super::storage::PgStorageFactory;
 #[derive(Debug, Default)]
 pub struct PgRestCatalogBuilder {
     session_context: Option<SessionContext>,
-    auth_manager: Option<Arc<dyn AuthManager>>,
     kms_client_factory: Option<Arc<dyn KmsClientFactory>>,
 }
 
 impl PgRestCatalogBuilder {
     pub fn with_session_context(mut self, context: SessionContext) -> Self {
         self.session_context = Some(context);
-        self
-    }
-
-    pub fn with_auth_manager(mut self, auth_manager: Arc<dyn AuthManager>) -> Self {
-        self.auth_manager = Some(auth_manager);
         self
     }
 
@@ -77,9 +70,6 @@ impl PgRestCatalogBuilder {
             .with_storage_factory(Arc::new(storage_factory));
         if let Some(context) = self.session_context {
             builder = builder.with_session_context(context);
-        }
-        if let Some(auth_manager) = self.auth_manager {
-            builder = builder.with_auth_manager(auth_manager);
         }
         if let Some(kms_client_factory) = self.kms_client_factory {
             builder = builder.with_kms_client_factory(kms_client_factory);

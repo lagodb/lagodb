@@ -18,7 +18,7 @@ use super::super::scan::ForeignMutationScan;
 use super::super::transaction::ForeignTransaction;
 use crate::config::mutation_buffer_flush_bytes;
 use crate::error::IcebergError;
-use crate::schema::relation::RelationShape;
+use crate::schema::relation::RelationLayout;
 use crate::write::{
     DataFileSink, IcebergRowIdentity, MutationSinks, PgTransactionIsolation,
     RowDeleteClaim, RowDeleteState,
@@ -37,7 +37,7 @@ impl IcebergFdwModifyState {
         key: &RemoteTableKey,
         operation: ForeignModifyOperation,
         table: &Table,
-        shape: &RelationShape,
+        layout: &RelationLayout,
         mutation_scan: Option<&ForeignMutationScan>,
         command_id: pg_sys::CommandId,
     ) -> Result<Self, ForeignModifyError> {
@@ -68,7 +68,7 @@ impl IcebergFdwModifyState {
                 DataFileSink::new(
                     table.file_io(),
                     table.metadata().current_schema(),
-                    shape,
+                    layout,
                     table.metadata(),
                     &writer_properties,
                     mutation_buffer_flush_bytes(),
@@ -77,7 +77,6 @@ impl IcebergFdwModifyState {
             .transpose()?;
         let deletes = if writes_deletes {
             let registry = ForeignTransaction::row_registry(key)?;
-            let state_id = registry.begin_modify_state()?;
             let scan = mutation_scan
                 .as_ref()
                 .expect("delete-producing operation retains its scan");
@@ -87,9 +86,7 @@ impl IcebergFdwModifyState {
                 table.metadata(),
                 &writer_properties,
                 registry,
-                state_id,
-                (table.metadata().format_version() == FormatVersion::V3)
-                    .then(|| scan.tasks()),
+                scan.tasks(),
             )?)
         } else {
             None
@@ -98,25 +95,27 @@ impl IcebergFdwModifyState {
         let validation = match operation {
             ForeignModifyOperation::Insert => None,
             ForeignModifyOperation::Update => {
-                let properties = table
+                let table_isolation = table
                     .metadata()
                     .table_properties()
+                    .write_update_isolation_level()
                     .map_err(IcebergError::from)?;
                 Some((
                     RowLevelCommand::Update,
                     PgTransactionIsolation::current()?
-                        .effective_iceberg(properties.write_update_isolation_level),
+                        .effective_iceberg(table_isolation),
                 ))
             }
             ForeignModifyOperation::Delete => {
-                let properties = table
+                let table_isolation = table
                     .metadata()
                     .table_properties()
+                    .write_delete_isolation_level()
                     .map_err(IcebergError::from)?;
                 Some((
                     RowLevelCommand::Delete,
                     PgTransactionIsolation::current()?
-                        .effective_iceberg(properties.write_delete_isolation_level),
+                        .effective_iceberg(table_isolation),
                 ))
             }
         };

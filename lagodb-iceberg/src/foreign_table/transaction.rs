@@ -47,6 +47,7 @@ impl ExclusiveTransactionAction for NoExclusiveAction {
 struct ForeignTableState {
     base: Table,
     transaction: ForeignTableTransaction,
+    row_registry: RelationRowRegistry,
 }
 
 impl ForeignTableState {
@@ -54,7 +55,18 @@ impl ForeignTableState {
         Self {
             base,
             transaction: ForeignTableTransaction::new(),
+            row_registry: RelationRowRegistry::default(),
         }
+    }
+
+    fn rollback_to_level(&mut self, level: i32) {
+        self.transaction.rollback_to_level(level);
+        self.row_registry.rollback_to_level(level);
+    }
+
+    fn promote_to_level(&mut self, level: i32) {
+        self.transaction.promote_to_level(level);
+        self.row_registry.promote_to_level(level);
     }
 }
 
@@ -274,7 +286,7 @@ impl ForeignTransaction {
             .catalogs
             .get(key.catalog_binding())
             .and_then(|binding| binding.tables.get(key))
-            .map(|state| state.transaction.row_registry.clone())
+            .map(|state| state.row_registry.clone())
             .ok_or(IcebergError::InvariantViolated(
                 "foreign table was not enrolled before row identity registration",
             ))
@@ -423,7 +435,7 @@ impl ForeignTransaction {
     fn rollback_to_level(&self, level: i32) {
         for binding in self.inner.borrow_mut().catalogs.values_mut() {
             for state in binding.tables.values_mut() {
-                state.transaction.rollback_to_level(level);
+                state.rollback_to_level(level);
             }
         }
     }
@@ -431,7 +443,7 @@ impl ForeignTransaction {
     fn promote_to_level(&self, level: i32) {
         for binding in self.inner.borrow_mut().catalogs.values_mut() {
             for state in binding.tables.values_mut() {
-                state.transaction.promote_to_level(level);
+                state.promote_to_level(level);
             }
         }
     }
@@ -498,6 +510,10 @@ impl TransactionResource for ForeignTransaction {
     }
 
     fn on_abort(&self) {
+        Self::reset_current();
+    }
+
+    fn on_prepare(&self) {
         Self::reset_current();
     }
 

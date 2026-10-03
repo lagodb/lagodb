@@ -14,7 +14,7 @@ SELECT rest_uri AS regress_rest_uri,
 FROM lagodb_regress.object_storage_fixture
 \gset
 \set regress_bucket_a_scope 's3://' :regress_fallback_bucket '/'
-\set regress_bucket_a_narrow_scope 's3://' :regress_fallback_bucket '/iceberg-fallback/fdw_regress/'
+\set regress_bucket_a_narrow_scope 's3://' :regress_fallback_bucket '/iceberg-fallback/fdw_reads/'
 \set regress_bucket_b_scope 's3://' :regress_fallback_second_bucket '/'
 
 SET client_min_messages = warning;
@@ -94,8 +94,8 @@ CREATE FOREIGN TABLE iceberg_fdw_read.filters (
 SERVER iceberg_read_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'read_filters',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'filter_rows_v2',
     mode 'read_only'
 );
 
@@ -113,11 +113,44 @@ CREATE FOREIGN TABLE iceberg_fdw_read.v3_mutations (
 SERVER iceberg_read_rest
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'v3_mutations',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'deletion_vectors_v3',
     mode 'read_only'
 );
 SELECT * FROM iceberg_fdw_read.v3_mutations ORDER BY id;
+
+-- Partition specs are discovered from Iceberg metadata; no PostgreSQL table
+-- option duplicates the partition columns or transforms. The remote table has
+-- files written with two specs, so both predicates exercise per-manifest
+-- projection while PostgreSQL still rechecks the row predicate.
+CREATE FOREIGN TABLE iceberg_fdw_read.partition_evolution_v2 ()
+SERVER iceberg_read_rest
+OPTIONS (
+    catalog_name 'regress',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'partition_evolution_v2',
+    mode 'read_only'
+);
+SELECT array_agg(id ORDER BY id) AS partitioned_all_rows
+FROM iceberg_fdw_read.partition_evolution_v2;
+SELECT array_agg(id ORDER BY id) AS partitioned_category_rows
+FROM iceberg_fdw_read.partition_evolution_v2
+WHERE category = 'alpha';
+SELECT array_agg(id ORDER BY id) AS partitioned_id_rows
+FROM iceberg_fdw_read.partition_evolution_v2
+WHERE id >= 4;
+
+-- Historical partition files remain readable after their source column is dropped.
+CREATE FOREIGN TABLE iceberg_fdw_read.dropped_partition_source_v2 ()
+SERVER iceberg_read_rest
+OPTIONS (
+    catalog_name 'regress',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'dropped_partition_source_v2',
+    mode 'read_only'
+);
+SELECT array_agg(id ORDER BY id) AS dropped_source_rows
+FROM iceberg_fdw_read.dropped_partition_source_v2;
 
 -- Exact, conservative and unsupported filters must remain distinguishable in
 -- both the plan and result.
@@ -174,12 +207,22 @@ CROSS JOIN LATERAL (
 ORDER BY wanted.id;
 RESET plan_cache_mode;
 
--- A predicate-bearing cached plan is bound to the remote table UUID/schema
--- generation. Recreate the same remote names and reject the stale predicate.
+-- Only this testcase owns the replaceable remote UUID. Read fixtures stay intact.
+CREATE FOREIGN TABLE iceberg_fdw_read.cached_plan ()
+SERVER iceberg_read_rest
+OPTIONS (
+    catalog_name 'regress',
+    catalog_namespace 'fdw_cached_plan',
+    catalog_table_name 'filter_rows_v2',
+    mode 'read_only'
+);
 PREPARE iceberg_stale_read AS
-SELECT payload FROM iceberg_fdw_read.filters WHERE id = 2;
+SELECT payload FROM iceberg_fdw_read.cached_plan WHERE id = 2;
 EXECUTE iceberg_stale_read;
-\! ../../../scripts/pg_regress/object_storage_fixture reprovision
+\set ECHO none
+\set iceberg_fixture cached-plan
+\i include/iceberg_fixture.sql
+\set ECHO all
 \set VERBOSITY terse
 EXECUTE iceberg_stale_read;
 \set VERBOSITY default
@@ -188,8 +231,12 @@ DEALLOCATE iceberg_read_by_id;
 
 -- IMPORT ALL/EXCEPT and inferred local columns exercise read-only DDL binding.
 CREATE SCHEMA iceberg_fdw_read_import;
-IMPORT FOREIGN SCHEMA fdw_regress
-EXCEPT (writable, v3_mutations)
+IMPORT FOREIGN SCHEMA fdw_reads
+EXCEPT (
+    deletion_vectors_v3,
+    partition_evolution_v2,
+    dropped_partition_source_v2
+)
 FROM SERVER iceberg_read_rest
 INTO iceberg_fdw_read_import
 OPTIONS (mode 'read_only');
@@ -197,7 +244,7 @@ SELECT foreign_table_name
 FROM information_schema.foreign_tables
 WHERE foreign_table_schema = 'iceberg_fdw_read_import'
 ORDER BY foreign_table_name;
-SELECT * FROM iceberg_fdw_read_import.second ORDER BY id;
+SELECT * FROM iceberg_fdw_read_import.import_rows_v2 ORDER BY id;
 
 -- The no-vending path selects the longest normalized scope and supports a
 -- second bucket through an independent profile.
@@ -205,16 +252,16 @@ CREATE FOREIGN TABLE iceberg_fdw_read.fallback_main ()
 SERVER iceberg_read_fallback
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'writable',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'rows_v2',
     mode 'read_only'
 );
 CREATE FOREIGN TABLE iceberg_fdw_read.fallback_second_bucket ()
 SERVER iceberg_read_fallback
 OPTIONS (
     catalog_name 'regress',
-    catalog_namespace 'fdw_regress',
-    catalog_table_name 'second_bucket',
+    catalog_namespace 'fdw_reads',
+    catalog_table_name 'second_bucket_v2',
     mode 'read_only'
 );
 SELECT * FROM iceberg_fdw_read.fallback_main ORDER BY id;

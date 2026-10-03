@@ -6,6 +6,7 @@ use lagodb_core::fdw::{
     BeginForeignScanContext, ForeignRowIdentityRequirement, ForeignScanError,
     ReScanForeignScanContext, ScanSlotWriter, StartForeignScanContext,
 };
+use lagodb_core::runtime_api::TableScanTaskMetrics;
 use pgrx::pg_sys;
 
 use super::super::error::IcebergFdwError;
@@ -18,11 +19,11 @@ use super::ForeignMutationScan;
 use super::cursor::ForeignMutationCursor;
 use crate::predicate::BoundIcebergPredicate;
 use crate::scan::parallel::PostgresParallelExecution;
-use crate::scan::projection::{ProjectedField, Projection};
 use crate::scan::{
     IcebergReadSnapshot, PgRowCursor, PreparedRowScan, ReaderPredicate,
     ScanPredicates, StablePruningPredicate,
 };
+use crate::schema::projection::{ProjectedAttribute, SlotProjection};
 use crate::write::RelationRowRegistry;
 
 pub(crate) struct IcebergFdwScanState {
@@ -56,6 +57,16 @@ enum ForeignScanPhase {
 }
 
 impl IcebergFdwScanState {
+    pub(crate) fn task_metrics(&self) -> Option<TableScanTaskMetrics> {
+        match &self.phase {
+            ForeignScanPhase::SerialQuery { prepared, .. }
+            | ForeignScanPhase::ParallelQuery { prepared, .. } => {
+                prepared.query_task_metrics()
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn begin(
         context: BeginForeignScanContext<'_, LagodbIceberg>,
     ) -> Result<Self, ForeignScanError> {
@@ -93,15 +104,15 @@ impl IcebergFdwScanState {
         let table = view.table;
         let mutation_table = mutation.then(|| table.clone());
         let schema = table.metadata().current_schema();
-        let shape = ForeignSchemaBinding::bind(&context.relation, schema)?
-            .into_relation_shape();
-        let projection = Projection::from_outputs(
+        let layout = ForeignSchemaBinding::bind(&context.relation, schema)?
+            .into_relation_layout();
+        let projection = SlotProjection::from_outputs(
             context
                 .output_layout
                 .columns()
                 .iter()
                 .map(|column| {
-                    ProjectedField::new(column.attno(), column.destination())
+                    ProjectedAttribute::new(column.attno(), column.destination())
                 })
                 .collect(),
         );
@@ -115,7 +126,7 @@ impl IcebergFdwScanState {
             IcebergReadSnapshot::new(table, view.delta),
             projection,
             predicates,
-            &shape,
+            &layout,
             context.output_layout.slot_types(),
         )
         .map_err(IcebergFdwError::from)?;
@@ -133,7 +144,7 @@ impl IcebergFdwScanState {
                 context.private_data.identity().clone(),
                 view.key,
                 mutation_table,
-                shape,
+                layout,
                 prepared.starting_snapshot_id(),
                 tasks,
             );
@@ -309,9 +320,7 @@ impl IcebergFdwScanState {
                 if let Some(predicate) = replacement {
                     prepared.rebind_reader_filter(predicate);
                 }
-                execution
-                    .reset_local(prepared)
-                    .map_err(ForeignScanError::provider)?;
+                execution.reset_local();
             }
             ForeignScanPhase::ForeignMutation {
                 cursor,
@@ -367,7 +376,14 @@ impl IcebergFdwScanState {
         &mut self,
         coordinate: *mut core::ffi::c_void,
     ) -> Result<(), ForeignScanError> {
-        unsafe { self.parallel_mut()?.reinitialize_shared(coordinate) }
+        let ForeignScanPhase::ParallelQuery {
+            execution,
+            prepared,
+        } = &mut self.phase
+        else {
+            return Err(Self::parallel_state_error());
+        };
+        unsafe { execution.reinitialize_shared(coordinate, prepared) }
             .map_err(ForeignScanError::provider)
     }
 
@@ -420,16 +436,6 @@ impl IcebergFdwScanState {
 
     fn parallel(&self) -> Result<&PostgresParallelExecution, ForeignScanError> {
         let ForeignScanPhase::ParallelQuery { execution, .. } = &self.phase else {
-            return Err(Self::parallel_state_error());
-        };
-        Ok(execution)
-    }
-
-    fn parallel_mut(
-        &mut self,
-    ) -> Result<&mut PostgresParallelExecution, ForeignScanError> {
-        let ForeignScanPhase::ParallelQuery { execution, .. } = &mut self.phase
-        else {
             return Err(Self::parallel_state_error());
         };
         Ok(execution)

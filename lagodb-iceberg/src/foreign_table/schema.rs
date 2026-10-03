@@ -9,13 +9,13 @@ use pgrx::pg_sys;
 
 use super::error::IcebergFdwError;
 use crate::error::IcebergError;
-use crate::schema::relation::RelationShape;
-use crate::schema::type_mapping::{IcebergTypeExt, ValidateSupported};
+use crate::schema::relation::RelationLayout;
+use crate::schema::type_mapping::IcebergTypeExt;
 
 /// A strict, statement-lifetime contract between the local foreign relation
 /// and the current remote Iceberg schema.
 pub(crate) struct ForeignSchemaBinding {
-    shape: RelationShape,
+    layout: RelationLayout,
 }
 
 impl ForeignSchemaBinding {
@@ -23,20 +23,20 @@ impl ForeignSchemaBinding {
         relation: &RelationHandle<'_>,
         schema: &IcebergSchema,
     ) -> Result<Self, IcebergFdwError> {
-        let shape = RelationShape::from_relation(relation)?;
+        let layout = RelationLayout::from_relation(relation)?;
         let remote_fields = schema.as_struct().fields();
-        if shape.live_columns().len() != remote_fields.len() {
+        if layout.live_columns().len() != remote_fields.len() {
             return Err(IcebergFdwError::SchemaContractMismatch {
                 detail: format!(
                     "local relation has {} live columns but Iceberg schema {} has {} fields",
-                    shape.live_columns().len(),
+                    layout.live_columns().len(),
                     schema.schema_id(),
                     remote_fields.len(),
                 ),
             });
         }
 
-        for (local, remote) in shape.live_columns().iter().zip(remote_fields) {
+        for (local, remote) in layout.live_columns().iter().zip(remote_fields) {
             if local.name != remote.name {
                 return Err(IcebergFdwError::SchemaContractMismatch {
                     detail: format!(
@@ -46,10 +46,11 @@ impl ForeignSchemaBinding {
                 });
             }
             remote.field_type.validate_supported()?;
-            let canonical = remote.field_type.postgres_type().ok_or_else(|| {
-                IcebergError::UnsupportedColumnType(remote.field_type.to_string())
-            })?;
-            let local_type = shape.attr_types()[(local.attno - 1) as usize];
+            let canonical =
+                remote.field_type.canonical_pg_type().ok_or_else(|| {
+                    IcebergError::UnsupportedColumnType(remote.field_type.to_string())
+                })?;
+            let local_type = layout.attr_types()[(local.attno - 1) as usize];
             if local_type != (canonical.oid(), canonical.typmod()) {
                 return Err(IcebergFdwError::SchemaContractMismatch {
                     detail: format!(
@@ -71,11 +72,11 @@ impl ForeignSchemaBinding {
                 });
             }
         }
-        Ok(Self { shape })
+        Ok(Self { layout })
     }
 
-    pub(crate) fn into_relation_shape(self) -> RelationShape {
-        self.shape
+    pub(crate) fn into_relation_layout(self) -> RelationLayout {
+        self.layout
     }
 }
 
@@ -97,7 +98,7 @@ impl ForeignTableSchema {
         let mut columns = Vec::with_capacity(schema.as_struct().fields().len());
         for field in schema.as_struct().fields() {
             field.field_type.validate_supported()?;
-            let postgres = field.field_type.postgres_type().ok_or_else(|| {
+            let postgres = field.field_type.canonical_pg_type().ok_or_else(|| {
                 IcebergError::UnsupportedColumnType(field.field_type.to_string())
             })?;
             if field.name.len() >= pg_sys::NAMEDATALEN as usize {
