@@ -3,30 +3,16 @@
 use std::sync::Arc;
 
 use iceberg_lite::io::FileIO;
-use iceberg_lite::spec::{
-    DataFile, DataFileFormat, Schema as IcebergSchema, TableMetadata,
-};
-use iceberg_lite::writer::base_writer::data_file_writer::{
-    DataFileWriter, DataFileWriterBuilder,
-};
-use iceberg_lite::writer::file_writer::ParquetWriterBuilder;
-use iceberg_lite::writer::file_writer::location_generator::{
-    DefaultFileNameGenerator, DefaultLocationGenerator,
-};
-use iceberg_lite::writer::file_writer::rolling_writer::RollingFileWriterBuilder;
-use iceberg_lite::writer::{IcebergWriter, IcebergWriterBuilder};
+use iceberg_lite::spec::{DataFile, Schema as IcebergSchema, TableMetadata};
+use lagodb_arrow::BoundWriteBuffer;
+use lagodb_core::batch::BatchBuffer;
 use lagodb_core::prelude::TupleSlotRow;
 use parquet::file::properties::WriterProperties;
 
 use crate::error::{IcebergError, IcebergResult};
-use crate::schema::column_mapping::WriteColumns;
-use crate::schema::relation::RelationShape;
-
-type ParquetDataFileWriter = DataFileWriter<
-    ParquetWriterBuilder,
-    DefaultLocationGenerator,
-    DefaultFileNameGenerator,
->;
+use crate::schema::column_plan::WriteColumnPlan;
+use crate::schema::relation::RelationLayout;
+use crate::write::table_data_writer::TableDataWriter;
 
 /// Buffers PostgreSQL tuple slots into Arrow columns and turns them into
 /// Iceberg [`DataFile`]s through a rolling Parquet writer.
@@ -35,34 +21,33 @@ type ParquetDataFileWriter = DataFileWriter<
 /// context resets cannot clobber it. Exits via [`Self::finish`] (success) or
 /// [`Self::abort`] (failure).
 pub(crate) struct DataFileSink {
-    /// Relation-bound columnar write buffer: owns the per-column Arrow encoders
-    /// and the name-resolved source-slot mapping, so each output column pulls
-    /// from the correct slot index. See [`WriteColumns`].
-    ///
-    /// A Rust-heap session field (never in a PG memory context), so per-tuple
-    /// context resets cannot clobber it.
-    columns: WriteColumns,
+    /// Runtime encoders and source positions consumed from the schema binding.
+    columns: BoundWriteBuffer,
     /// Row-buffer memory threshold for this modify state.
     flush_threshold_bytes: usize,
-    /// Active rolling Parquet writer. `None` only after [`Self::close_writer`]
-    /// consumes it (during `finish` / `abort`).
-    writer: Option<ParquetDataFileWriter>,
+    /// Active table writer. Partitioned tables fan out to one rolling Parquet
+    /// writer per touched partition; unpartitioned tables retain one writer.
+    /// `None` only after [`Self::close_writer`] consumes it during `finish` or
+    /// `abort`.
+    writer: Option<TableDataWriter>,
 }
 
 impl DataFileSink {
-    /// Resolve the write-side column plan / buffer and build the rolling Parquet
-    /// writer. Fails fast on unsupported columns or a column/field desync before
-    /// any row is accepted.
+    /// Resolve the write-side column plan / buffer and build the table writer.
+    /// Fails fast on unsupported columns, partition transforms, table write
+    /// properties, or a column/field desync before any row is accepted.
     pub(crate) fn new(
         file_io: &FileIO,
         iceberg_schema: &Arc<IcebergSchema>,
-        relation_shape: &RelationShape,
+        relation_layout: &RelationLayout,
         table_metadata: &TableMetadata,
         writer_properties: &WriterProperties,
         flush_threshold_bytes: usize,
     ) -> IcebergResult<Self> {
-        let columns = WriteColumns::resolve(iceberg_schema, relation_shape)?;
-        let writer = Self::build_writer(
+        let (arrow_schema, column_plans) =
+            WriteColumnPlan::bind(iceberg_schema, relation_layout)?.into_parts();
+        let columns = BoundWriteBuffer::new(arrow_schema, column_plans)?;
+        let writer = TableDataWriter::new(
             file_io,
             iceberg_schema,
             table_metadata,
@@ -88,7 +73,7 @@ impl DataFileSink {
         row: TupleSlotRow<'_>,
     ) -> IcebergResult<()> {
         // SAFETY: the caller's relation-local callback supplies the layout
-        // captured by `WriteColumns::resolve` during sink construction.
+        // captured by `WriteColumnPlan::bind` during sink construction.
         unsafe { self.columns.append_slot_row(row)? };
         self.flush_if_needed()
     }
@@ -142,43 +127,8 @@ impl DataFileSink {
 
     fn close_writer(&mut self) -> IcebergResult<Vec<DataFile>> {
         match self.writer.take() {
-            Some(mut writer) => Ok(writer.close()?),
+            Some(writer) => Ok(writer.close()?),
             None => Ok(Vec::new()),
         }
-    }
-
-    /// Build the rolling Parquet data file writer for this sink.
-    fn build_writer(
-        file_io: &FileIO,
-        schema: &Arc<IcebergSchema>,
-        table_metadata: &TableMetadata,
-        writer_properties: &WriterProperties,
-    ) -> IcebergResult<ParquetDataFileWriter> {
-        let location_generator = DefaultLocationGenerator::new(table_metadata)?;
-        let file_name_generator = DefaultFileNameGenerator::new(
-            format!("insert-{}", uuid::Uuid::now_v7()),
-            None,
-            DataFileFormat::Parquet,
-        );
-
-        let parquet_writer_builder =
-            ParquetWriterBuilder::new(writer_properties.clone(), schema.clone());
-
-        let rolling_writer_builder =
-            RollingFileWriterBuilder::new_with_default_file_size(
-                parquet_writer_builder,
-                file_io.clone(),
-                location_generator,
-                file_name_generator,
-            );
-
-        let data_file_writer_builder =
-            DataFileWriterBuilder::new(rolling_writer_builder);
-        // TODO: Support partitioned Iceberg writes by splitting each batch by
-        // the table's partition spec and passing the corresponding PartitionKey
-        // to each writer. `None` is correct only for unpartitioned tables; using
-        // this sink for a partitioned table produces staged data files without
-        // the partition tuple required by overlay scans and commits.
-        Ok(data_file_writer_builder.build(None)?)
     }
 }

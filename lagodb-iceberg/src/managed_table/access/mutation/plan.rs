@@ -64,25 +64,26 @@ impl ModifyCommand {
 
     pub(super) fn table_isolation_level(
         self,
-        table_properties: &TableProperties,
-    ) -> Option<IsolationLevel> {
-        match self {
+        table_properties: TableProperties<'_>,
+    ) -> IcebergResult<Option<IsolationLevel>> {
+        Ok(match self {
             Self::Insert => None,
-            Self::Delete => Some(table_properties.write_delete_isolation_level),
-            Self::Update => Some(table_properties.write_update_isolation_level),
-            Self::Merge => Some(table_properties.write_merge_isolation_level),
-        }
+            Self::Delete => Some(table_properties.write_delete_isolation_level()?),
+            Self::Update => Some(table_properties.write_update_isolation_level()?),
+            Self::Merge => Some(table_properties.write_merge_isolation_level()?),
+        })
     }
 
     fn effective_isolation_level(
         self,
-        table_properties: &TableProperties,
+        table_properties: TableProperties<'_>,
         transaction_isolation: PgTransactionIsolation,
-    ) -> Option<IsolationLevel> {
-        self.table_isolation_level(table_properties)
+    ) -> IcebergResult<Option<IsolationLevel>> {
+        Ok(self
+            .table_isolation_level(table_properties)?
             .map(|table_isolation| {
                 transaction_isolation.effective_iceberg(table_isolation)
-            })
+            }))
     }
 }
 
@@ -124,12 +125,12 @@ impl ValidationPlan {
     pub(super) fn new(
         command: ModifyCommand,
         target_dependency: TargetDependency,
-        table_properties: &TableProperties,
+        table_properties: TableProperties<'_>,
         transaction_isolation: PgTransactionIsolation,
         scan_context: Option<&IcebergModifyScanContext>,
-    ) -> Self {
+    ) -> IcebergResult<Self> {
         let isolation_level = command
-            .effective_isolation_level(table_properties, transaction_isolation);
+            .effective_isolation_level(table_properties, transaction_isolation)?;
         let conflict_scope = if command.validation_command().is_some() {
             scan_context.map(|context| {
                 ConflictValidationScope::from_predicate(
@@ -139,12 +140,12 @@ impl ValidationPlan {
         } else {
             None
         };
-        Self {
+        Ok(Self {
             command,
             target_dependency,
             isolation_level,
             conflict_scope,
-        }
+        })
     }
 }
 
@@ -179,11 +180,11 @@ mod tests {
         ];
 
         for (snapshot_property, snapshot_command) in cases {
-            let properties = TableProperties::try_from(&HashMap::from([(
+            let raw_properties = HashMap::from([(
                 snapshot_property.to_owned(),
                 "snapshot".to_owned(),
-            )]))
-            .unwrap();
+            )]);
+            let properties = TableProperties::new(&raw_properties);
 
             for command in [
                 ModifyCommand::Delete,
@@ -196,7 +197,7 @@ mod tests {
                     IsolationLevel::Serializable
                 };
                 assert_eq!(
-                    command.table_isolation_level(&properties),
+                    command.table_isolation_level(properties).unwrap(),
                     Some(expected)
                 );
             }

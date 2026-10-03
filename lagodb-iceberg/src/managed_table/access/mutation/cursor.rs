@@ -109,7 +109,7 @@ impl MutationBatchCursor {
                 && self.row_index < self.decoder.num_rows(&bound.decoded)
             {
                 let row_index = self.row_index;
-                // SAFETY: PgRowProjection compiled the decoder from the relation
+                // SAFETY: PgReadPlan compiled the decoder from the relation
                 // layout used by this cursor and validated every destination
                 // against the same slot width.
                 unsafe {

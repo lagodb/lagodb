@@ -1,4 +1,4 @@
-//! Per-table transaction-local state and savepoint history.
+//! Per-table recoverable action state and savepoint history.
 
 use std::rc::Rc;
 
@@ -8,7 +8,6 @@ use iceberg_lite::transaction::{PreparedSchemaUpdate, RowDeltaValidation};
 
 use crate::error::IcebergResult;
 
-use super::super::registry::RelationRowRegistry;
 use super::PreparedTablePropertyUpdate;
 use super::action_log::{
     ExclusiveTransactionAction, TxTableActionLog, TxTableActionLogMarker,
@@ -28,8 +27,11 @@ struct HistoryFrame {
     marker: TxTableActionLogMarker,
 }
 
-/// Catalog-independent state for one Iceberg table inside a PostgreSQL
-/// top-level transaction.
+/// Catalog-independent action state for one Iceberg table.
+///
+/// Catalog adapters retain this state when a storage generation must be
+/// restored on rollback. Transaction-scoped row identities belong to the
+/// enclosing table state and survive generation changes.
 #[derive(Debug)]
 pub(crate) struct TableTransactionState<E, G> {
     /// Ordered transaction-local schema/data actions.
@@ -42,10 +44,6 @@ pub(crate) struct TableTransactionState<E, G> {
     /// Top-level writes do not need frames: top-level abort drops the whole
     /// tracker, and top-level commit never rolls back through this stack.
     level_history: Vec<HistoryFrame>,
-
-    /// Physical-row claims used to reproduce PostgreSQL `TM_SelfModified`
-    /// semantics across sibling ModifyTable nodes and nested SPI executions.
-    pub(crate) row_registry: RelationRowRegistry,
 }
 
 impl<E, G> TableTransactionState<E, G>
@@ -57,7 +55,6 @@ where
         Self {
             actions: Rc::new(TxTableActionLog::default()),
             level_history: Vec::new(),
-            row_registry: RelationRowRegistry::default(),
         }
     }
 
@@ -234,7 +231,6 @@ where
             let frame = self.level_history.pop().unwrap();
             Rc::make_mut(&mut self.actions).truncate(frame.marker);
         }
-        self.row_registry.rollback_to_level(target_level);
     }
 
     /// Promote every nest level `>= from_level` down to `from_level - 1`.
@@ -258,6 +254,5 @@ where
         // drops the whole tracker, and sibling savepoints must not roll them
         // back.
         self.level_history.retain(|frame| frame.nest_level > 1);
-        self.row_registry.promote_to_level(from_level);
     }
 }

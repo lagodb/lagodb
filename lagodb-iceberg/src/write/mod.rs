@@ -11,6 +11,7 @@ mod registry;
 mod row_delete;
 mod row_identity;
 mod scan_tasks;
+mod table_data_writer;
 mod transaction;
 
 pub(crate) use data_file_sink::DataFileSink;

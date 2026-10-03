@@ -17,7 +17,7 @@ use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::catalog::metadata_tracker::TxMetadata;
 use crate::managed_table::options::IcebergTableOptions;
 use crate::managed_table::storage::StorageContext;
-use crate::schema::relation::RelationShape;
+use crate::schema::relation::RelationLayout;
 use crate::write::PgTransactionIsolation;
 use crate::write::{
     DataFileSink, IcebergRowIdentity, MutationSinks, RowDeleteClaim, RowDeleteOutput,
@@ -206,12 +206,7 @@ impl IcebergModifyState {
         let target_dependency = TargetDependency::from_context(scan_context.as_ref());
         let transaction_isolation = PgTransactionIsolation::current()?;
         let rel_oid = rel.oid();
-        // `locator().spc_oid` is the resolved physical tablespace (default
-        // tablespaces resolve here), unlike `reltablespace`.
-        let ctx = StorageContext::for_tablespace_with_wal(
-            rel.locator().spc_oid,
-            rel.needs_wal(),
-        )?;
+        let ctx = StorageContext::for_write(rel)?;
         let file_io = ctx.into_file_io();
 
         // Registers the relation with the per-transaction tracker, rebases
@@ -228,31 +223,27 @@ impl IcebergModifyState {
             .into());
         }
         let iceberg_schema = loaded.metadata.current_schema().clone();
-        let table_properties = loaded
-            .metadata
-            .table_properties()
-            .map_err(IcebergError::from)?;
         let validation = ValidationPlan::new(
             command,
             target_dependency,
-            &table_properties,
+            loaded.metadata.table_properties(),
             transaction_isolation,
             scan_context.as_ref(),
-        );
+        )?;
         let write_options = IcebergTableOptions::for_relation(rel)?;
         let writer_properties = WriterProperties::builder()
             .set_compression(write_options.parquet_compression())
             .build();
 
         let data_sink = if actions.writes_rows() {
-            // The shared relation shape drives the read and write column
+            // The shared relation layout drives the read and write column
             // mappings, keeping dropped-column and type-position handling
             // consistent. DELETE-only sessions do not allocate it.
-            let relation_shape = RelationShape::from_relation(rel)?;
+            let relation_layout = RelationLayout::from_relation(rel)?;
             Some(DataFileSink::new(
                 &file_io,
                 &iceberg_schema,
-                &relation_shape,
+                &relation_layout,
                 &loaded.metadata,
                 &writer_properties,
                 mutation_buffer_flush_bytes(),
@@ -264,22 +255,18 @@ impl IcebergModifyState {
         let row_delete_state = if writes_position_deletes {
             let row_registry =
                 query_state.update(|state| state.relation_registry(rel_oid))?;
-            let modify_state_id = row_registry.begin_modify_state()?;
-            let scan_tasks = if loaded.metadata.format_version() == FormatVersion::V3
-            {
-                scan_context
-                    .as_ref()
-                    .map(IcebergModifyScanContext::scan_tasks)
-            } else {
-                None
-            };
+            let scan_tasks = scan_context
+                .as_ref()
+                .ok_or(IcebergError::InvariantViolated(
+                    "position-delete write has no mutation scan context",
+                ))?
+                .scan_tasks();
             Some(RowDeleteState::new(
                 loaded.metadata.format_version(),
                 &file_io,
                 &loaded.metadata,
                 &writer_properties,
                 row_registry,
-                modify_state_id,
                 scan_tasks,
             )?)
         } else {

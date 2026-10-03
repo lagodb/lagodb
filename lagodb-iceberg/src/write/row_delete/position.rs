@@ -9,7 +9,9 @@ use arrow_schema::{DataType, Schema as ArrowSchema};
 use iceberg_lite::arrow::schema_to_arrow_schema;
 use iceberg_lite::io::FileIO;
 use iceberg_lite::metadata_columns::{delete_file_path_field, delete_file_pos_field};
-use iceberg_lite::spec::{DataFileFormat, Schema as IcebergSchema, TableMetadata};
+use iceberg_lite::spec::{
+    DataFileFormat, PartitionKey, Schema as IcebergSchema, TableMetadata,
+};
 use iceberg_lite::writer::base_writer::position_delete_writer::{
     PositionDeleteFileWriter, PositionDeleteFileWriterBuilder,
     PositionDeleteWriterConfig,
@@ -24,7 +26,7 @@ use parquet::file::properties::WriterProperties;
 
 use super::{PositionDeleteAccumulator, RowDeleteOutput};
 use crate::error::{IcebergError, IcebergResult};
-use crate::write::RelationRowRegistry;
+use crate::write::{PlannedMutationTasks, RelationRowRegistry};
 
 type ParquetPositionDeleteFileWriter = PositionDeleteFileWriter<
     ParquetWriterBuilder,
@@ -87,11 +89,15 @@ impl PositionDeleteSink {
         &self,
         deletes: &PositionDeleteAccumulator,
         row_registry: &RelationRowRegistry,
+        scan_tasks: &PlannedMutationTasks,
     ) -> IcebergResult<Vec<RowDeleteOutput>> {
         let mut outputs = Vec::new();
         for (file_id, positions) in deletes.files() {
             let referenced_data_file = row_registry.file_path(file_id)?;
-            let mut writer = self.build_writer(&referenced_data_file)?;
+            let partition_key =
+                scan_tasks.partition_key_for_path(&referenced_data_file)?;
+            let mut writer =
+                self.build_writer(&referenced_data_file, partition_key)?;
             let mut chunk = Vec::with_capacity(POSITION_DELETE_BATCH_ROWS);
             let positions = positions.borrow()?;
             for position in positions.iter() {
@@ -121,6 +127,7 @@ impl PositionDeleteSink {
     fn build_writer(
         &self,
         referenced_data_file: &str,
+        partition_key: Option<PartitionKey>,
     ) -> IcebergResult<ParquetPositionDeleteFileWriter> {
         let file_name_generator = DefaultFileNameGenerator::new(
             format!("delete-{}", uuid::Uuid::now_v7()),
@@ -142,7 +149,7 @@ impl PositionDeleteSink {
             rolling_writer_builder,
             PositionDeleteWriterConfig::new(referenced_data_file),
         );
-        Ok(builder.build(None)?)
+        Ok(builder.build(partition_key)?)
     }
 
     fn record_batch(

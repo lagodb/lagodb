@@ -245,7 +245,7 @@ COPY (
     WHERE id = 5
 ) TO STDOUT WITH (FORMAT csv);
 
--- Repeat with query CustomScan optimization disabled. Modify-purpose
+-- Repeat with query CustomScan optimization disabled. ModifyTarget-purpose
 -- CustomScan remains mandatory correctness infrastructure.
 SET lagodb.customscan_mode = 'off';
 

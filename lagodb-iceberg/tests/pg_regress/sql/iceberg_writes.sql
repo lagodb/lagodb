@@ -293,7 +293,7 @@ UPDATE dml_lifecycle.upd_target
 SET label = label
 WHERE id = 999;
 
--- The GUC controls query optimization only. Modify-purpose CustomScan remains
+-- The GUC controls query optimization only. ModifyTarget-purpose CustomScan remains
 -- mandatory so row identity and OCC context cannot be disabled.
 SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)

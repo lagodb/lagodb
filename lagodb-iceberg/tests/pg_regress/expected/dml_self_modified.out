@@ -242,7 +242,7 @@ COPY (
     WHERE id = 5
 ) TO STDOUT WITH (FORMAT csv);
 5,after_rollback
--- Repeat with query CustomScan optimization disabled. Modify-purpose
+-- Repeat with query CustomScan optimization disabled. ModifyTarget-purpose
 -- CustomScan remains mandatory correctness infrastructure.
 SET lagodb.customscan_mode = 'off';
 CREATE TABLE dml_self_modified.seqscan_target (

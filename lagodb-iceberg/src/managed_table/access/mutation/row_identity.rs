@@ -12,7 +12,7 @@ use crate::write::{
     IcebergFileId, IcebergRowIdentity, PlannedMutationTasks, RelationRowRegistry,
 };
 
-/// Iceberg metadata captured once by a Modify-purpose target scan and consumed
+/// Iceberg metadata captured once by a ModifyTarget-purpose target scan and consumed
 /// when the corresponding relation-local modify state is opened.
 #[derive(Debug, Clone)]
 pub struct IcebergModifyScanContext {
