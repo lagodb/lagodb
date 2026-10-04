@@ -115,10 +115,8 @@ DELETE FROM vacuum_correctness_test.t_full WHERE id = 3;
 UPDATE vacuum_correctness_test.t_v3_full
 SET payload = 'two-updated' WHERE id = 2;
 DELETE FROM vacuum_correctness_test.t_v3_full WHERE id = 3;
-SELECT pg_relation_filepath('vacuum_correctness_test.t') || '_iceberg'
-    AS v2_root \gset
-SELECT pg_relation_filepath('vacuum_correctness_test.t_full') || '_iceberg'
-    AS full_root \gset
+SELECT pg_relation_filepath('vacuum_correctness_test.t'::regclass) || '_iceberg' AS v2_root \gset
+SELECT pg_relation_filepath('vacuum_correctness_test.t_full'::regclass) || '_iceberg' AS full_root \gset
 SELECT count(*) AS v2_parquet_before
 FROM pg_ls_dir(:'v2_root' || '/data', true, false)
 WHERE pg_ls_dir LIKE '%.parquet'
@@ -268,8 +266,7 @@ SELECT count(*) AS rows_before,
            AS digest_before
 FROM vacuum_failure_recovery_t
 \gset
-SELECT pg_relation_filepath('vacuum_failure_recovery_t') || '_iceberg'
-       AS failure_root
+SELECT pg_relation_filepath('vacuum_failure_recovery_t'::regclass) || '_iceberg' AS failure_root
 \gset
 SELECT count(*) AS objects_before_failure
 FROM pg_ls_dir(:'failure_root', true, false)
@@ -320,76 +317,93 @@ FROM lagodb.table_maintenance_stats('vacuum_failure_recovery_t');
 DROP TABLE vacuum_failure_recovery_t;
 DROP EXTENSION lagodb_iceberg CASCADE;
 DROP EXTENSION injection_points;
--- FULL routing: partition expansion, mixed native/provider, ANALYZE, and
--- database-wide expansion must preserve data and process each provider leaf.
+-- A provider-owned partitioned table is one logical Iceberg table. Routine and
+-- FULL maintenance must target the partitioned table itself, not nonexistent PG leaves.
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION lagodb_iceberg;
 CREATE SCHEMA vacuum_full_routing_test;
-CREATE TABLE vacuum_full_routing_test.partitioned_t (id integer)
-PARTITION BY RANGE (id) USING iceberg;
-CREATE TABLE vacuum_full_routing_test.partitioned_t_a
-PARTITION OF vacuum_full_routing_test.partitioned_t
-FOR VALUES FROM (0) TO (100) USING iceberg;
-CREATE TABLE vacuum_full_routing_test.partitioned_t_b
-PARTITION OF vacuum_full_routing_test.partitioned_t
-FOR VALUES FROM (100) TO (200) USING iceberg;
-INSERT INTO vacuum_full_routing_test.partitioned_t VALUES (1);
-INSERT INTO vacuum_full_routing_test.partitioned_t VALUES (2);
-INSERT INTO vacuum_full_routing_test.partitioned_t VALUES (3);
-INSERT INTO vacuum_full_routing_test.partitioned_t VALUES (101);
-INSERT INTO vacuum_full_routing_test.partitioned_t VALUES (102);
-INSERT INTO vacuum_full_routing_test.partitioned_t VALUES (103);
-INSERT INTO vacuum_full_routing_test.partitioned_t VALUES (4);
-INSERT INTO vacuum_full_routing_test.partitioned_t VALUES (5);
-INSERT INTO vacuum_full_routing_test.partitioned_t VALUES (104);
-INSERT INTO vacuum_full_routing_test.partitioned_t VALUES (105);
+CREATE TABLE vacuum_full_routing_test.partitioned_table_t (
+    id integer,
+    region text
+) PARTITION BY LIST (region) USING iceberg WITH (
+    "history.expire.max-snapshot-age-ms" = '0',
+    "history.expire.min-snapshots-to-keep" = '1'
+);
+INSERT INTO vacuum_full_routing_test.partitioned_table_t VALUES (1, 'east');
+INSERT INTO vacuum_full_routing_test.partitioned_table_t VALUES (2, 'west');
+INSERT INTO vacuum_full_routing_test.partitioned_table_t VALUES (3, 'east');
+INSERT INTO vacuum_full_routing_test.partitioned_table_t VALUES (4, 'west');
+INSERT INTO vacuum_full_routing_test.partitioned_table_t VALUES (5, 'east');
+INSERT INTO vacuum_full_routing_test.partitioned_table_t VALUES (6, 'west');
+INSERT INTO vacuum_full_routing_test.partitioned_table_t VALUES (7, 'east');
+INSERT INTO vacuum_full_routing_test.partitioned_table_t VALUES (8, 'west');
+INSERT INTO vacuum_full_routing_test.partitioned_table_t VALUES (9, 'east');
+INSERT INTO vacuum_full_routing_test.partitioned_table_t VALUES (10, 'west');
+INSERT INTO vacuum_full_routing_test.partitioned_table_t VALUES (11, 'east');
+INSERT INTO vacuum_full_routing_test.partitioned_table_t VALUES (12, 'west');
+SELECT relkind = 'p' AND NOT relhassubclass AS partitioned_table_has_no_pg_leaves
+FROM pg_class
+WHERE oid = 'vacuum_full_routing_test.partitioned_table_t'::regclass;
+ partitioned_table_has_no_pg_leaves 
+------------------------------------
+ t
+(1 row)
+
+SET lagodb.vacuum_max_group_objects = 1;
+VACUUM vacuum_full_routing_test.partitioned_table_t;
+SELECT current_data_objects = 12 AS constrained_routine_preserved_files
+FROM lagodb.table_maintenance_stats(
+    'vacuum_full_routing_test.partitioned_table_t'
+);
+ constrained_routine_preserved_files 
+-------------------------------------
+ t
+(1 row)
+
+RESET lagodb.vacuum_max_group_objects;
+VACUUM vacuum_full_routing_test.partitioned_table_t;
+SELECT current_data_objects = 2 AS routine_partitioned_table_compacted_per_partition
+FROM lagodb.table_maintenance_stats(
+    'vacuum_full_routing_test.partitioned_table_t'
+);
+ routine_partitioned_table_compacted_per_partition 
+---------------------------------------------------
+ t
+(1 row)
+
+INSERT INTO vacuum_full_routing_test.partitioned_table_t
+VALUES (13, 'east'), (14, 'west'), (15, 'east'), (16, 'west');
 CREATE TABLE vacuum_full_routing_test.heap_t (id integer);
 INSERT INTO vacuum_full_routing_test.heap_t VALUES (10), (20);
 VACUUM (FULL, ANALYZE)
     vacuum_full_routing_test.heap_t,
-    vacuum_full_routing_test.partitioned_t;
-SELECT bool_and(current_data_objects = 1) AS full_analyze_compacted_each_leaf
-FROM (VALUES
-    ('vacuum_full_routing_test.partitioned_t_a'::regclass),
-    ('vacuum_full_routing_test.partitioned_t_b'::regclass)
-) AS leaves(relid)
-CROSS JOIN LATERAL lagodb.table_maintenance_stats(leaves.relid);
- full_analyze_compacted_each_leaf 
-----------------------------------
+    vacuum_full_routing_test.partitioned_table_t;
+SELECT current_data_objects = 2 AS full_analyze_compacted_per_partition
+FROM lagodb.table_maintenance_stats(
+    'vacuum_full_routing_test.partitioned_table_t'
+);
+ full_analyze_compacted_per_partition 
+--------------------------------------
  t
 (1 row)
 
-SELECT bool_and(reltuples::bigint = 5) AS full_analyze_updated_each_leaf
+SELECT reltuples::bigint = 16 AS full_analyze_updated_partitioned_table
 FROM pg_class
-WHERE oid IN (
-    'vacuum_full_routing_test.partitioned_t_a'::regclass,
-    'vacuum_full_routing_test.partitioned_t_b'::regclass
-);
- full_analyze_updated_each_leaf 
---------------------------------
+WHERE oid = 'vacuum_full_routing_test.partitioned_table_t'::regclass;
+ full_analyze_updated_partitioned_table 
+----------------------------------------
  t
 (1 row)
 
 VACUUM (FULL)
     vacuum_full_routing_test.heap_t,
-    vacuum_full_routing_test.partitioned_t;
+    vacuum_full_routing_test.partitioned_table_t;
 SELECT array_agg(id ORDER BY id)
-       = ARRAY[1, 2, 3, 4, 5, 101, 102, 103, 104, 105]
-       AS partition_rows_preserved
-FROM vacuum_full_routing_test.partitioned_t;
- partition_rows_preserved 
---------------------------
- t
-(1 row)
-
-SELECT bool_and(current_data_objects = 1) AS each_leaf_compacted
-FROM (VALUES
-    ('vacuum_full_routing_test.partitioned_t_a'::regclass),
-    ('vacuum_full_routing_test.partitioned_t_b'::regclass)
-) AS leaves(relid)
-CROSS JOIN LATERAL lagodb.table_maintenance_stats(leaves.relid);
- each_leaf_compacted 
----------------------
+       = ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+       AS partitioned_table_rows_preserved
+FROM vacuum_full_routing_test.partitioned_table_t;
+ partitioned_table_rows_preserved 
+----------------------------------
  t
 (1 row)
 
@@ -397,6 +411,16 @@ SELECT array_agg(id ORDER BY id) = ARRAY[10, 20] AS heap_rows_preserved
 FROM vacuum_full_routing_test.heap_t;
  heap_rows_preserved 
 ---------------------
+ t
+(1 row)
+
+VACUUM (ANALYZE, BUFFER_USAGE_LIMIT '128kB')
+    vacuum_full_routing_test.partitioned_table_t;
+SELECT reltuples::bigint = 16 AS routine_vacuum_analyze_updated_partitioned_table
+FROM pg_class
+WHERE oid = 'vacuum_full_routing_test.partitioned_table_t'::regclass;
+ routine_vacuum_analyze_updated_partitioned_table 
+--------------------------------------------------
  t
 (1 row)
 

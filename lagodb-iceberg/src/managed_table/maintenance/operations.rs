@@ -1,29 +1,26 @@
 use std::collections::{HashMap, HashSet};
-use std::ffi::CStr;
 use std::time::Instant;
 
 use iceberg_lite::spec::TableMetadata;
 use iceberg_lite::table::Table;
 use lagodb_core::handles::RelationHandle;
 use lagodb_core::table_maintenance::{
-    LagodbTableMaintenanceProvider, TableMaintenanceError, TableMaintenanceMode,
-    TableMaintenanceReport, TableMaintenanceRequest, TableMaintenanceStats,
+    TableMaintenanceMode, TableMaintenanceReport, TableMaintenanceRequest,
+    TableMaintenanceStats,
 };
 use parquet::file::properties::WriterProperties;
-use pgrx::pg_sys;
 
-use crate::error::{IcebergError, IcebergResult, IcebergVacuumError};
-use crate::managed_table::catalog::IcebergAccessMethod;
+use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::catalog::bridge::IcebergTableId;
 use crate::managed_table::catalog::metadata_table::{
     IcebergMetadata, MaintenanceCandidate, MaintenanceCompletionToken,
 };
 use crate::managed_table::catalog::metadata_tracker::TxMetadata;
-use crate::managed_table::catalog::table_lifecycle::compute_table_location;
-use crate::managed_table::constants::ICEBERG_AM_NAME;
+use crate::managed_table::catalog::table_location::ManagedTableLocation;
 use crate::managed_table::options::IcebergTableOptions;
 use crate::managed_table::storage::StorageContext;
 
+use super::error::IcebergVacuumError;
 use super::planner::VacuumPlanner;
 use super::types::{
     ManagedTableRoot, PreparedExpiration, PreparedManifestRewrite,
@@ -32,14 +29,16 @@ use super::types::{
 };
 use super::writer::RewriteGroupWriter;
 
-pub(crate) struct IcebergTableMaintenanceProvider;
-
 pub(crate) enum MaintenanceExecution {
     Executed(TableMaintenanceReport),
     StaleCandidate,
 }
 
-impl IcebergTableMaintenanceProvider {
+/// Iceberg maintenance execution and storage statistics shared by the provider
+/// and the automatic maintenance worker.
+pub(crate) struct IcebergTableMaintenance;
+
+impl IcebergTableMaintenance {
     fn checked_count(value: usize, description: &'static str) -> IcebergResult<u64> {
         u64::try_from(value).map_err(|_| IcebergError::Vacuum {
             source: IcebergVacuumError::ResourceLimit(format!(
@@ -48,7 +47,7 @@ impl IcebergTableMaintenanceProvider {
         })
     }
 
-    fn execute_iceberg(
+    pub(crate) fn execute(
         request: TableMaintenanceRequest<'_>,
         expected_candidate: Option<&MaintenanceCandidate>,
     ) -> IcebergResult<MaintenanceExecution> {
@@ -60,15 +59,9 @@ impl IcebergTableMaintenanceProvider {
             });
         }
 
-        let storage = StorageContext::for_tablespace_with_wal(
-            request.relation.locator().spc_oid,
-            request.relation.needs_wal(),
-        )?;
-        let expected_table_location = compute_table_location(
-            request.relation,
-            storage.base_path(),
-            storage.is_distributed(),
-        );
+        let expected_table_location =
+            ManagedTableLocation::for_relation(request.relation)?.into_string();
+        let storage = StorageContext::for_write(request.relation)?;
         let file_io = storage.into_file_io();
         let tracker = TxMetadata::current();
         let loaded = tracker.begin_table_modify(request.relation.oid(), &file_io)?;
@@ -287,10 +280,10 @@ impl IcebergTableMaintenanceProvider {
             )?;
         }
         let manifest_rewrite = if request.mode == TableMaintenanceMode::Full {
-            let properties = table.metadata().table_properties()?;
+            let properties = table.metadata().table_properties();
             Some(PreparedManifestRewrite {
-                min_count_to_merge: properties.manifest_min_count_to_merge,
-                target_size_bytes: properties.manifest_target_size_bytes,
+                min_count_to_merge: properties.manifest_min_count_to_merge()?,
+                target_size_bytes: properties.manifest_target_size_bytes()?,
             })
         } else {
             None
@@ -318,13 +311,13 @@ impl IcebergTableMaintenanceProvider {
         request: TableMaintenanceRequest<'_>,
         candidate: &MaintenanceCandidate,
     ) -> IcebergResult<MaintenanceExecution> {
-        Self::execute_iceberg(request, Some(candidate))
+        Self::execute(request, Some(candidate))
     }
 
-    fn inspect_iceberg(
+    pub(crate) fn inspect(
         relation: &RelationHandle<'_>,
     ) -> IcebergResult<TableMaintenanceStats> {
-        let storage = StorageContext::for_tablespace(relation.locator().spc_oid)?;
+        let storage = StorageContext::for_read(relation)?;
         let location = IcebergMetadata::get(relation.oid())?
             .metadata_location
             .ok_or(IcebergError::MetadataLocationNull)?;
@@ -444,38 +437,5 @@ impl IcebergTableMaintenanceProvider {
             )?,
             retained_data_bytes,
         })
-    }
-}
-
-impl LagodbTableMaintenanceProvider for IcebergTableMaintenanceProvider {
-    const NAME: &'static CStr = c"iceberg";
-    const EXTENSION_NAME: &'static CStr = c"lagodb_iceberg";
-    const LIBRARY_NAME: &'static CStr = c"lagodb_iceberg";
-    const ACCESS_METHOD_NAME: &'static CStr = ICEBERG_AM_NAME;
-    const SUPPORTS_ANALYZE: bool = true;
-
-    fn access_method_oid() -> Option<pg_sys::Oid> {
-        IcebergAccessMethod::oid()
-    }
-
-    fn execute(
-        request: TableMaintenanceRequest<'_>,
-    ) -> Result<TableMaintenanceReport, TableMaintenanceError> {
-        match Self::execute_iceberg(request, None)
-            .map_err(TableMaintenanceError::from)?
-        {
-            MaintenanceExecution::Executed(report) => Ok(report),
-            MaintenanceExecution::StaleCandidate => Err(TableMaintenanceError::from(
-                IcebergError::InvariantViolated(
-                    "explicit Iceberg maintenance cannot have a stale scheduler candidate",
-                ),
-            )),
-        }
-    }
-
-    fn inspect(
-        relation: &RelationHandle<'_>,
-    ) -> Result<TableMaintenanceStats, TableMaintenanceError> {
-        Self::inspect_iceberg(relation).map_err(TableMaintenanceError::from)
     }
 }

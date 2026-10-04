@@ -8,16 +8,15 @@ use lagodb_core::extension_worker::{
 };
 use lagodb_core::handles::RelationGuard;
 use lagodb_core::table_maintenance::{
-    LagodbTableMaintenanceProvider, TableMaintenanceBudget,
-    TableMaintenanceCommandTime, TableMaintenanceMode, TableMaintenanceOptions,
-    TableMaintenanceRequest,
+    TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
+    TableMaintenanceOptions, TableMaintenanceRequest,
 };
 use pgrx::datum::Internal;
 use pgrx::prelude::*;
 
-use super::IcebergTableMaintenanceProvider;
-use super::provider::MaintenanceExecution;
+use super::operations::{IcebergTableMaintenance, MaintenanceExecution};
 use crate::error::IcebergError;
+use crate::managed_table::catalog::IcebergRelationExt;
 use crate::managed_table::catalog::metadata_table::{
     IcebergMetadata, MaintenanceCandidate, MaintenanceScheduleUpdate,
 };
@@ -77,12 +76,11 @@ fn maintain_relation(
     if !locked {
         return Ok(MaintenanceAttempt::LockSkipped);
     }
-    let relation = RelationGuard::open(relid, pg_sys::NoLock as pg_sys::LOCKMODE)
-        .map_err(PgReportError::from_domain_error)?;
+    let relation =
+        RelationGuard::open_table(relid, pg_sys::NoLock as pg_sys::LOCKMODE)
+            .map_err(PgReportError::from_domain_error)?;
     let relation = relation.as_handle();
-    let expected_am =
-        <IcebergTableMaintenanceProvider as LagodbTableMaintenanceProvider>::access_method_oid();
-    if expected_am != Some(relation.access_method_oid()) {
+    if !relation.is_iceberg() {
         IcebergMetadata::finish_maintenance(
             relid,
             metadata_location,
@@ -93,7 +91,7 @@ fn maintain_relation(
     }
     let command_time = TableMaintenanceCommandTime::now()
         .map_err(PgReportError::from_domain_error)?;
-    match IcebergTableMaintenanceProvider::execute_scheduled(
+    match IcebergTableMaintenance::execute_scheduled(
         TableMaintenanceRequest {
             relation: &relation,
             mode: TableMaintenanceMode::Routine,

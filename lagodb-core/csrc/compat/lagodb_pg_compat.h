@@ -4,7 +4,7 @@
 #include "postgres.h"
 
 /*
- * Central PostgreSQL-version boundary for LagoDB C forks.
+ * Central PostgreSQL-version boundary for lagodb-core C forks and adapters.
  *
  * Keep one compiled fork per feature and put PostgreSQL-internal differences
  * behind these predicates. Adding a new major version requires auditing all

@@ -6,6 +6,7 @@ use iceberg_lite::table::Table;
 use crate::error::IcebergResult;
 use crate::storage::{LocalStorage, ObjectStorage};
 
+use super::error::IcebergVacuumError;
 use super::types::ManagedTableRoot;
 
 /// Java-compatible incremental reachable-file cleanup.
@@ -189,7 +190,7 @@ impl IcebergReachabilityPlanner {
             };
             *counter = counter.checked_add(1).ok_or_else(|| {
                 crate::error::IcebergError::Vacuum {
-                    source: crate::error::IcebergVacuumError::ResourceLimit(
+                    source: IcebergVacuumError::ResourceLimit(
                         "reachability candidate count overflow".to_owned(),
                     ),
                 }

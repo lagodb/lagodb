@@ -3,5 +3,5 @@
 void
 lagodb_injection_point_run(const char *name)
 {
-    LAGODB_INJECTION_POINT(name);
+	LAGODB_INJECTION_POINT(name);
 }

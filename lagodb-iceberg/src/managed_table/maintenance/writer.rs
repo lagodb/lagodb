@@ -20,8 +20,9 @@ use iceberg_lite::writer::file_writer::rolling_writer::RollingFileWriterBuilder;
 use iceberg_lite::writer::{IcebergWriter, IcebergWriterBuilder};
 use parquet::file::properties::WriterProperties;
 
-use crate::error::{IcebergError, IcebergResult, IcebergVacuumError};
+use crate::error::{IcebergError, IcebergResult};
 
+use super::error::IcebergVacuumError;
 use super::types::RewriteGroup;
 
 type VacuumDataWriter = DataFileWriter<
@@ -102,17 +103,28 @@ impl RewriteGroupWriter {
                     first.file.partition_spec_id()
                 )),
             })?;
-        let partition_key = (!spec.is_unpartitioned()).then(|| {
-            PartitionKey::new(
-                spec.as_ref().clone(),
-                schema.clone(),
-                first.file.partition().clone(),
-            )
-        });
+        // Rewrite tasks retain the historical spec and manifest tuple but use
+        // the current rewrite schema. The shared upstream iceberg-rust and
+        // iceberg-lite path formatter pairs a historical identity/truncate Int
+        // literal with Unknown when its source was removed, or Long after
+        // int -> long promotion. Both pairs reach `Datum::fmt`'s unreachable
+        // arm. Related read-side issues #2842 and #2844 are fixed upstream,
+        // but #2530 still tracks binding a
+        // partition spec to its schema. Do not duplicate that resolver here:
+        // wait for the upstream manifest-bound partition identity fix, merge it
+        // into iceberg-lite, and then remove this limitation.
+        // https://github.com/apache/iceberg-rust/issues/2530
+        // https://github.com/apache/iceberg-rust/issues/2842
+        // https://github.com/apache/iceberg-rust/issues/2844
+        let partition_key = PartitionKey::new(
+            spec.as_ref().clone(),
+            schema.clone(),
+            first.file.partition().clone(),
+        );
         let target_size = table
             .metadata()
-            .table_properties()?
-            .write_target_file_size_bytes;
+            .table_properties()
+            .write_target_file_size_bytes()?;
         let location_generator = DefaultLocationGenerator::new(table.metadata())?;
         let file_name_generator = DefaultFileNameGenerator::new(
             format!("vacuum-{}", uuid::Uuid::now_v7()),
@@ -128,6 +140,6 @@ impl RewriteGroupWriter {
             location_generator,
             file_name_generator,
         );
-        Ok(DataFileWriterBuilder::new(rolling_writer).build(partition_key)?)
+        Ok(DataFileWriterBuilder::new(rolling_writer).build(Some(partition_key))?)
     }
 }

@@ -12,8 +12,9 @@ use iceberg_lite::table::Table;
 use iceberg_lite::transaction::{ApplyTransactionAction, Transaction};
 use lagodb_core::table_maintenance::TableMaintenanceReport;
 
-use crate::error::{IcebergError, IcebergResult, IcebergVacuumError};
+use crate::error::{IcebergError, IcebergResult};
 
+use super::error::IcebergVacuumError;
 use super::{
     IcebergReachabilityPlanner, PreparedVacuum, ReachabilityDeletionCandidates,
     VacuumCleanup, record_metric,

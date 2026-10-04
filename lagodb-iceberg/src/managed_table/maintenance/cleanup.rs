@@ -8,7 +8,7 @@ use lagodb_core::object_cleanup::{
 use lagodb_core::table_maintenance::TableMaintenanceReport;
 use pgrx::pg_sys;
 
-use crate::error::{IcebergError, IcebergResult, IcebergVacuumError};
+use crate::error::{IcebergError, IcebergResult};
 use crate::storage::local_file_wal::record::{
     MAX_DELETE_FILES_PAYLOAD_BYTES, MAX_DELETE_FILES_PER_RECORD, delete_file_fits_wal,
 };
@@ -16,6 +16,7 @@ use crate::storage::{
     LocalStorage, ObjectStorage, PostCommitDeletePurpose, PostCommitFileDeleteBatch,
 };
 
+use super::error::IcebergVacuumError;
 use super::record_metric;
 
 #[derive(Clone, Copy, Debug, Default)]

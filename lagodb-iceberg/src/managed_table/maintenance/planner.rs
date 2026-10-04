@@ -2,11 +2,13 @@ use std::collections::{HashMap, HashSet};
 
 use iceberg_lite::overlay::DeleteFileIdentity;
 use iceberg_lite::scan::FileScanTask;
-use iceberg_lite::spec::DataFile;
+use iceberg_lite::spec::{DataFile, TableProperties};
 use iceberg_lite::table::Table;
+use lagodb_core::table_maintenance::TableMaintenanceMode;
 
-use crate::error::{IcebergError, IcebergResult, IcebergVacuumError};
+use crate::error::{IcebergError, IcebergResult};
 
+use super::error::IcebergVacuumError;
 use super::types::{
     ManagedTableRoot, RewriteGroup, RewriteInput, VacuumPlan, VacuumPlanningMetrics,
     VacuumPolicy,
@@ -64,13 +66,13 @@ impl VacuumPlanner {
         owned_table_root: &ManagedTableRoot,
     ) -> IcebergResult<VacuumPlan> {
         Self::validate_budget(policy)?;
-        let properties = table.metadata().table_properties()?;
-        if !properties.gc_enabled {
+        let properties = table.metadata().table_properties();
+        if !properties.gc_enabled()? {
             return Err(IcebergError::Vacuum {
                 source: IcebergVacuumError::GcDisabled,
             });
         }
-        Self::validate_properties(&properties)?;
+        let target_file_size_bytes = Self::validate_properties(properties)?;
         for property in [
             "write.data.path",
             "write.folder-storage.path",
@@ -107,12 +109,13 @@ impl VacuumPlanner {
             });
         }
 
-        let target_bytes = u64::try_from(properties.write_target_file_size_bytes)
-            .map_err(|_| IcebergError::Vacuum {
+        let target_bytes = u64::try_from(target_file_size_bytes).map_err(|_| {
+            IcebergError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(
                     "write.target-file-size-bytes does not fit u64".to_owned(),
                 ),
-            })?;
+            }
+        })?;
         let scan_plan = table
             .scan()
             .select_empty()
@@ -139,14 +142,6 @@ impl VacuumPlanner {
         }
         metrics.scanned_delete_files =
             Self::count(scanned_delete_paths.len(), "scanned delete-file count")?;
-        if target_bytes == 0 {
-            return Err(IcebergError::Vacuum {
-                source: IcebergVacuumError::ResourceLimit(
-                    "write.target-file-size-bytes must be greater than zero"
-                        .to_owned(),
-                ),
-            });
-        }
         let mut candidates = Vec::new();
         let mut planned_paths = HashSet::new();
         for planned in scan_plan.files {
@@ -241,48 +236,47 @@ impl VacuumPlanner {
         })
     }
 
-    fn validate_properties(
-        properties: &iceberg_lite::spec::TableProperties,
-    ) -> IcebergResult<()> {
+    fn validate_properties(properties: TableProperties<'_>) -> IcebergResult<usize> {
         let invalid = |message: &'static str| IcebergError::Vacuum {
             source: IcebergVacuumError::InvalidPolicy(message.to_owned()),
         };
-        if properties.write_target_file_size_bytes == 0 {
+        let target_file_size_bytes = properties.write_target_file_size_bytes()?;
+        if target_file_size_bytes == 0 {
             return Err(invalid(
                 "write.target-file-size-bytes must be greater than zero",
             ));
         }
-        if properties.max_snapshot_age_ms < 0 {
+        if properties.max_snapshot_age_ms()? < 0 {
             return Err(invalid(
                 "history.expire.max-snapshot-age-ms must not be negative",
             ));
         }
-        if properties.min_snapshots_to_keep == 0 {
+        if properties.min_snapshots_to_keep()? == 0 {
             return Err(invalid(
                 "history.expire.min-snapshots-to-keep must be greater than zero",
             ));
         }
-        if properties.max_ref_age_ms < 0 {
+        if properties.max_ref_age_ms()? < 0 {
             return Err(invalid(
                 "history.expire.max-ref-age-ms must not be negative",
             ));
         }
-        if properties.metadata_previous_versions_max == 0 {
+        if properties.metadata_previous_versions_max()? == 0 {
             return Err(invalid(
                 "write.metadata.previous-versions-max must be greater than zero",
             ));
         }
-        if properties.manifest_min_count_to_merge == 0 {
+        if properties.manifest_min_count_to_merge()? == 0 {
             return Err(invalid(
                 "commit.manifest.min-count-to-merge must be greater than zero",
             ));
         }
-        if properties.manifest_target_size_bytes == 0 {
+        if properties.manifest_target_size_bytes()? == 0 {
             return Err(invalid(
                 "commit.manifest.target-size-bytes must be greater than zero",
             ));
         }
-        Ok(())
+        Ok(target_file_size_bytes)
     }
 
     fn validate_budget(policy: VacuumPolicy) -> IcebergResult<()> {
@@ -424,7 +418,9 @@ impl VacuumPlanner {
                     input_count.saturating_sub(expected_outputs);
                 if repairs_oversize
                     || group.delete_heavy
-                    || (group.inputs.len() >= MIN_INPUT_FILES && reduces_files)
+                    || (reduces_files
+                        && (policy.mode == TableMaintenanceMode::Full
+                            || group.inputs.len() >= MIN_INPUT_FILES))
                 {
                     accepted.push(group);
                 }
@@ -437,7 +433,7 @@ impl VacuumPlanner {
         groups: &mut Vec<RewriteGroup>,
         policy: VacuumPolicy,
     ) -> IcebergResult<()> {
-        if policy.mode == lagodb_core::table_maintenance::TableMaintenanceMode::Full {
+        if policy.mode == TableMaintenanceMode::Full {
             return Ok(());
         }
         let mut selected_objects = 0_u64;

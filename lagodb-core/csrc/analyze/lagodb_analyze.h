@@ -2,23 +2,26 @@
 #define LAGODB_ANALYZE_H
 
 #include "postgres.h"
-#include "storage/read_stream.h"
+#include "commands/vacuum.h"
+#include "nodes/parsenodes.h"
+#include "storage/buf.h"
+
+typedef bool (*LagodbAnalyzeRouteCallback) (Relation relation,
+											VacuumParams *params);
 
 /*
- * Snapshot of the BlockSamplerData owned by PostgreSQL's
- * acquire_sample_rows(). Values are copied while its stack frame and the
- * ReadStream callback-private pointer are both live.
+ * PostgreSQL's analyze_rel() skips RELKIND_PARTITIONED_TABLE before it can invoke
+ * table-AM sampling.  This derived entry point resolves provider ownership
+ * from the live Relation after ShareUpdateExclusiveLock has been acquired;
+ * its false route follows PostgreSQL's native relation semantics in the same
+ * PostgreSQL-derived executor. The runtime maintenance command scope must be active;
+ * recursion protection belongs to that command, not this relation entry point.
  */
-typedef struct LagodbAnalyzeSamplerState
-{
-    BlockNumber population_blocks;
-    int target_rows;
-    BlockNumber visited_blocks;
-    int selected_blocks;
-} LagodbAnalyzeSamplerState;
-
-extern bool lagodb_read_stream_analyze_sampler_state(
-    ReadStream *stream,
-    LagodbAnalyzeSamplerState *state);
+extern void lagodb_analyze_relation(
+									VacuumRelation *vrel,
+									VacuumParams *params,
+									bool in_outer_xact,
+									BufferAccessStrategy bstrategy,
+									LagodbAnalyzeRouteCallback route_callback);
 
 #endif
