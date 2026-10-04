@@ -3,6 +3,73 @@
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION lagodb_iceberg;
 
+-- UNLOGGED disables Iceberg file WAL while retaining ordinary transaction
+-- and cleanup behavior, including partitioned tables and the default AM.
+CREATE UNLOGGED TABLE unlogged_iceberg (id integer) USING iceberg;
+CREATE UNLOGGED TABLE unlogged_partitioned_iceberg (id integer)
+PARTITION BY LIST (id) USING iceberg;
+SET default_table_access_method = 'iceberg';
+CREATE UNLOGGED TABLE unlogged_default_iceberg (id integer);
+RESET default_table_access_method;
+INSERT INTO unlogged_iceberg VALUES (10), (20);
+INSERT INTO unlogged_partitioned_iceberg VALUES (1), (2);
+INSERT INTO unlogged_default_iceberg VALUES (9);
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM pg_class AS c
+        JOIN iceberg.iceberg_metadata AS m ON m.relid = c.oid
+        WHERE c.oid IN ('unlogged_iceberg'::regclass,
+                        'unlogged_partitioned_iceberg'::regclass,
+                        'unlogged_default_iceberg'::regclass)
+          AND c.relpersistence = 'u' AND m.metadata_location IS NOT NULL) <> 3 THEN
+        RAISE EXCEPTION 'UNLOGGED Iceberg catalog bootstrap failed';
+    END IF;
+    IF (SELECT array_agg(id ORDER BY id) FROM unlogged_iceberg) IS DISTINCT FROM ARRAY[10, 20]
+       OR (SELECT array_agg(id ORDER BY id) FROM unlogged_partitioned_iceberg) IS DISTINCT FROM ARRAY[1, 2]
+       OR (SELECT array_agg(id ORDER BY id) FROM unlogged_default_iceberg) IS DISTINCT FROM ARRAY[9] THEN
+        RAISE EXCEPTION 'UNLOGGED Iceberg rows were not published';
+    END IF;
+END;
+$$;
+BEGIN;
+SAVEPOINT unlogged_change;
+INSERT INTO unlogged_iceberg VALUES (30);
+TRUNCATE unlogged_iceberg, unlogged_partitioned_iceberg;
+INSERT INTO unlogged_iceberg VALUES (99);
+INSERT INTO unlogged_partitioned_iceberg VALUES (99);
+DROP TABLE unlogged_default_iceberg;
+ROLLBACK TO SAVEPOINT unlogged_change;
+COMMIT;
+DO $$
+BEGIN
+    IF (SELECT array_agg(id ORDER BY id) FROM unlogged_iceberg) IS DISTINCT FROM ARRAY[10, 20]
+       OR (SELECT array_agg(id ORDER BY id) FROM unlogged_partitioned_iceberg) IS DISTINCT FROM ARRAY[1, 2]
+       OR (SELECT array_agg(id ORDER BY id) FROM unlogged_default_iceberg) IS DISTINCT FROM ARRAY[9] THEN
+        RAISE EXCEPTION 'UNLOGGED Iceberg savepoint rollback lost rows';
+    END IF;
+END;
+$$;
+TRUNCATE unlogged_iceberg, unlogged_partitioned_iceberg, unlogged_default_iceberg;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM unlogged_iceberg
+               UNION ALL SELECT 1 FROM unlogged_partitioned_iceberg
+               UNION ALL SELECT 1 FROM unlogged_default_iceberg) THEN
+        RAISE EXCEPTION 'UNLOGGED Iceberg TRUNCATE retained rows';
+    END IF;
+END;
+$$;
+SELECT pg_read_file(metadata_location)::jsonb->>'location' AS unlogged_table_root
+FROM iceberg.iceberg_metadata WHERE relid = 'unlogged_iceberg'::regclass \gset
+SELECT pg_read_file(metadata_location)::jsonb->>'location' AS unlogged_partitioned_root
+FROM iceberg.iceberg_metadata WHERE relid = 'unlogged_partitioned_iceberg'::regclass \gset
+SELECT pg_read_file(metadata_location)::jsonb->>'location' AS unlogged_default_root
+FROM iceberg.iceberg_metadata WHERE relid = 'unlogged_default_iceberg'::regclass \gset
+DROP TABLE unlogged_iceberg, unlogged_partitioned_iceberg, unlogged_default_iceberg;
+SELECT pg_stat_file(:'unlogged_table_root', true) IS NULL
+       AND pg_stat_file(:'unlogged_partitioned_root', true) IS NULL
+       AND pg_stat_file(:'unlogged_default_root', true) IS NULL AS storage_removed;
+
 --
 -- Section A: Transaction Lifecycle
 --
@@ -13,7 +80,7 @@ SAVEPOINT s1;
 CREATE TABLE test_sub_create (id int) USING iceberg;
 
 -- capture path info inside sub-xact so we can check it after rollback
-SELECT pg_relation_filepath('test_sub_create') || '_iceberg' AS path_sub_1 \gset
+SELECT pg_relation_filepath('test_sub_create'::regclass) || '_iceberg' AS path_sub_1 \gset
 
 -- Verify directory exists inside sub-xact
 SELECT (pg_stat_file(:'path_sub_1')).isdir as directory_found_in_sub;
@@ -31,7 +98,7 @@ SELECT (pg_stat_file(:'path_sub_1', true)) is null as directory_missing_after_ro
 CREATE TABLE test_sub_drop (id int) USING iceberg;
 INSERT INTO test_sub_drop VALUES (10), (20);
 -- capture path now because we need to verify it still exists after rollback
-SELECT pg_relation_filepath('test_sub_drop') || '_iceberg' AS path_sub_2 \gset
+SELECT pg_relation_filepath('test_sub_drop'::regclass) || '_iceberg' AS path_sub_2 \gset
 
 BEGIN;
 SAVEPOINT s2;
@@ -52,7 +119,7 @@ DROP TABLE test_sub_drop;
 --
 CREATE TABLE test_sub_drop_commit (id int) USING iceberg;
 -- capture path now to verify it is gone after commit
-SELECT pg_relation_filepath('test_sub_drop_commit') || '_iceberg' AS path_sub_3 \gset
+SELECT pg_relation_filepath('test_sub_drop_commit'::regclass) || '_iceberg' AS path_sub_3 \gset
 
 BEGIN;
 SAVEPOINT s3;
@@ -77,9 +144,12 @@ CREATE TABLE iceberg_default_test (
     name text
 ) USING iceberg;
 
--- Verify: No options should be stored (or empty options)
-SELECT relid::regclass::text AS table_name, options
-FROM lagodb.table_options
+-- Local physical tables derive storage from PG and need no internal option.
+SELECT count(*) FILTER (WHERE name IN ('location', 'relfilenumber')) = 0
+           AS has_no_storage_option,
+       count(*) FILTER (WHERE name <> 'location') = 0
+           AS has_no_user_overrides
+FROM lagodb.table_option_values
 WHERE relid = 'iceberg_default_test'::regclass;
 
 DROP TABLE iceberg_default_test;
@@ -94,10 +164,11 @@ CREATE TABLE iceberg_format_test (
     "format-version" = 1
 );
 
--- Verify the option is stored
-SELECT relid::regclass::text AS table_name, options
-FROM lagodb.table_options
-WHERE relid = 'iceberg_format_test'::regclass;
+-- Verify the option is stored.
+SELECT value AS format_version
+FROM lagodb.table_option_values
+WHERE relid = 'iceberg_format_test'::regclass
+  AND name = 'format-version';
 
 DROP TABLE iceberg_format_test;
 
@@ -113,10 +184,16 @@ CREATE TABLE iceberg_multi_opts_test (
     "write.format.default" = 'parquet'
 );
 
--- Verify all options are stored correctly
-SELECT relid::regclass::text AS table_name, options
-FROM lagodb.table_options
-WHERE relid = 'iceberg_multi_opts_test'::regclass;
+-- Verify all user options are stored correctly.
+SELECT name, value
+FROM lagodb.table_option_values
+WHERE relid = 'iceberg_multi_opts_test'::regclass
+  AND name IN (
+      'format-version',
+      'write.parquet.compression-codec',
+      'write.format.default'
+  )
+ORDER BY name;
 
 DROP TABLE iceberg_multi_opts_test;
 
@@ -130,10 +207,11 @@ CREATE TABLE iceberg_compression_test (
     "write.parquet.compression-codec" = 'snappy'
 );
 
--- Verify the compression option
-SELECT relid::regclass::text AS table_name, options
-FROM lagodb.table_options
-WHERE relid = 'iceberg_compression_test'::regclass;
+-- Verify the compression option.
+SELECT value AS compression
+FROM lagodb.table_option_values
+WHERE relid = 'iceberg_compression_test'::regclass
+  AND name = 'write.parquet.compression-codec';
 
 DROP TABLE iceberg_compression_test;
 
@@ -146,10 +224,11 @@ CREATE TABLE iceberg_enum_opt_test (
     "write.format.default" = 'parquet'
 );
 
--- Verify the enum option
-SELECT relid::regclass::text AS table_name, options
-FROM lagodb.table_options
-WHERE relid = 'iceberg_enum_opt_test'::regclass;
+-- Verify the enum option.
+SELECT value AS write_format
+FROM lagodb.table_option_values
+WHERE relid = 'iceberg_enum_opt_test'::regclass
+  AND name = 'write.format.default';
 
 DROP TABLE iceberg_enum_opt_test;
 
@@ -164,15 +243,15 @@ CREATE TABLE iceberg_isolation_opts_test (
     "write.merge.isolation-level" = 'snapshot'
 );
 
-COPY (
-    SELECT options @> ARRAY[
-        'write.delete.isolation-level=snapshot',
-        'write.update.isolation-level=serializable',
-        'write.merge.isolation-level=snapshot'
-    ]::text[]
-    FROM lagodb.table_options
-    WHERE relid = 'iceberg_isolation_opts_test'::regclass
-) TO STDOUT;
+SELECT name, value
+FROM lagodb.table_option_values
+WHERE relid = 'iceberg_isolation_opts_test'::regclass
+  AND name IN (
+      'write.delete.isolation-level',
+      'write.update.isolation-level',
+      'write.merge.isolation-level'
+  )
+ORDER BY name;
 
 DROP TABLE iceberg_isolation_opts_test;
 
@@ -187,13 +266,45 @@ CREATE TABLE test_schema.iceberg_schema_test (
     "format-version" = 2
 );
 
--- Verify the option is stored with correct schema-qualified name
-SELECT relid::regclass::text AS table_name, options
-FROM lagodb.table_options
-WHERE relid = 'test_schema.iceberg_schema_test'::regclass;
+-- Verify the option is stored for the schema-qualified relation.
+SELECT relid::regclass::text AS table_name, value AS format_version
+FROM lagodb.table_option_values
+WHERE relid = 'test_schema.iceberg_schema_test'::regclass
+  AND name = 'format-version';
 
 DROP TABLE test_schema.iceberg_schema_test;
 DROP SCHEMA test_schema;
+
+-- ============================================================================
+-- Test 8: representative rejection of a user-supplied AM-owned option
+-- ============================================================================
+\set VERBOSITY sqlstate
+CREATE TABLE iceberg_user_location_test (id integer)
+USING iceberg WITH (location = 'user-owned-location');
+
+\set VERBOSITY default
+
+-- ============================================================================
+-- Test 9: rename preserves the physical root and name reuse gets a new root
+-- ============================================================================
+CREATE TABLE iceberg_identity_test (id integer) USING iceberg;
+SELECT pg_relation_filepath('iceberg_identity_test'::regclass) || '_iceberg' AS original_location \gset
+
+ALTER TABLE iceberg_identity_test RENAME TO iceberg_identity_archive;
+CREATE TABLE iceberg_identity_test (id integer) USING iceberg;
+SELECT pg_relation_filepath('iceberg_identity_test'::regclass) || '_iceberg' AS recreated_location \gset
+
+SELECT (pg_relation_filepath('iceberg_identity_archive'::regclass) || '_iceberg') = :'original_location'
+           AS archived_location_unchanged,
+       :'recreated_location' <> :'original_location'
+           AS recreated_table_has_distinct_root;
+
+DROP TABLE iceberg_identity_archive;
+SELECT pg_stat_file(:'original_location', true) IS NULL
+           AS renamed_storage_removed,
+       (pg_stat_file(:'recreated_location')).isdir
+           AS recreated_storage_preserved;
+DROP TABLE iceberg_identity_test;
 
 -- ============================================================================
 -- Clean up: Verify no orphaned entries remain
@@ -217,7 +328,7 @@ CREATE TABLE dml_lifecycle.after_ctas_t (
 INSERT INTO dml_lifecycle.after_ctas_t VALUES (99);
 SELECT * FROM dml_lifecycle.after_ctas_t ORDER BY id;
 
--- Storage identity changes and truncate need explicit Iceberg lifecycle support.
+-- Storage relocation remains unsupported; TRUNCATE has explicit AM lifecycle.
 \set VERBOSITY sqlstate
 ALTER TABLE dml_lifecycle.after_ctas_t SET ACCESS METHOD heap;
 ALTER TABLE dml_lifecycle.after_ctas_t SET TABLESPACE pg_default;

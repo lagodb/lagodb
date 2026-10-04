@@ -170,24 +170,18 @@ FROM schema_evolution_drop_required_t;
 
 CREATE TABLE schema_evolution_part_root_t (
     id integer NOT NULL,
+    region text NOT NULL,
     payload text
-) PARTITION BY RANGE (id) USING iceberg;
-
-CREATE TABLE schema_evolution_part_root_t_p0
-PARTITION OF schema_evolution_part_root_t
-FOR VALUES FROM (0) TO (100) USING iceberg;
-
-CREATE TABLE schema_evolution_part_root_t_p1
-PARTITION OF schema_evolution_part_root_t
-FOR VALUES FROM (100) TO (200) USING iceberg;
+) PARTITION BY LIST (region) USING iceberg;
 
 INSERT INTO schema_evolution_part_root_t
-VALUES (1, 'one'), (101, 'one hundred one');
+VALUES (1, 'east', 'one'), (101, 'west', 'one hundred one');
 
 ALTER TABLE schema_evolution_part_root_t ADD COLUMN extra integer;
 
-INSERT INTO schema_evolution_part_root_t (id, payload, extra)
-VALUES (2, 'two', 20), (102, 'one hundred two', 120);
+INSERT INTO schema_evolution_part_root_t (id, region, payload, extra)
+VALUES (2, 'east', 'two', 20),
+       (102, 'west', 'one hundred two', 120);
 
 COPY (
     SELECT count(*) AS rows, count(extra) AS extra_values, sum(extra) AS extra_sum
@@ -197,8 +191,8 @@ COPY (
 ALTER TABLE schema_evolution_part_root_t DROP COLUMN extra;
 ALTER TABLE schema_evolution_part_root_t RENAME COLUMN payload TO body;
 
-INSERT INTO schema_evolution_part_root_t (id, body)
-VALUES (3, 'three'), (103, 'one hundred three');
+INSERT INTO schema_evolution_part_root_t (id, region, body)
+VALUES (3, 'east', 'three'), (103, 'west', 'one hundred three');
 
 COPY (
     SELECT string_agg(attname, ',' ORDER BY attnum) AS live_columns
@@ -214,36 +208,14 @@ COPY (
 ) TO STDOUT WITH (FORMAT csv, HEADER true);
 
 COPY (
-    SELECT rel::regclass::text AS rel,
-           metadata.metadata_location IS NOT NULL AS has_metadata
-    FROM (
-        VALUES
-            ('schema_evolution_part_root_t'::regclass),
-            ('schema_evolution_part_root_t_p0'::regclass),
-            ('schema_evolution_part_root_t_p1'::regclass)
-    ) AS relations(rel)
-    LEFT JOIN iceberg.iceberg_metadata AS metadata ON metadata.relid = relations.rel
-    ORDER BY rel
+    SELECT class.relkind = 'p' AS is_partitioned_catalog,
+           NOT class.relhassubclass AS has_no_pg_children,
+           metadata.metadata_location IS NOT NULL AS root_has_metadata
+    FROM pg_class AS class
+    LEFT JOIN iceberg.iceberg_metadata AS metadata
+      ON metadata.relid = class.oid
+    WHERE class.oid = 'schema_evolution_part_root_t'::regclass
 ) TO STDOUT WITH (FORMAT csv, HEADER true);
-
-CREATE TABLE schema_evolution_mixed_root_t (
-    id integer NOT NULL,
-    payload text
-) PARTITION BY RANGE (id) USING iceberg;
-
-CREATE TABLE schema_evolution_mixed_root_t_iceberg
-PARTITION OF schema_evolution_mixed_root_t
-FOR VALUES FROM (0) TO (100) USING iceberg;
-
-CREATE TABLE schema_evolution_mixed_root_t_heap
-PARTITION OF schema_evolution_mixed_root_t
-FOR VALUES FROM (100) TO (200) USING heap;
-
-\set VERBOSITY terse
-ALTER TABLE schema_evolution_mixed_root_t ADD COLUMN should_fail integer;
-\set VERBOSITY default
-
-DROP TABLE schema_evolution_mixed_root_t;
 
 CREATE TABLE schema_evolution_epoch_t (
     id integer NOT NULL
