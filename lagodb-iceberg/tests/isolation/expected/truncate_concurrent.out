@@ -1,6 +1,6 @@
 Parsed test spec with 2 sessions
 
-starting permutation: s1_begin s1_truncate s2_location_unchanged s2_swap_metadata s1_commit s2_target_rows
+starting permutation: s1_begin s1_truncate s2_location_unchanged s2_insert s1_commit s2_target_rows
 step s1_begin: BEGIN;
 step s1_truncate: TRUNCATE truncate_iso.target_t;
 step s2_location_unchanged: 
@@ -14,16 +14,9 @@ unchanged
 t        
 (1 row)
 
-step s2_swap_metadata: 
-  UPDATE iceberg.iceberg_metadata AS target
-  SET metadata_location = shadow.metadata_location,
-      previous_metadata_location = target.metadata_location
-  FROM iceberg.iceberg_metadata AS shadow
-  WHERE target.relid = 'truncate_iso.target_t'::regclass
-    AND shadow.relid = 'truncate_iso.shadow_t'::regclass;
-
+step s2_insert: INSERT INTO truncate_iso.target_t VALUES (2); <waiting ...>
 step s1_commit: COMMIT;
-ERROR:  cannot commit truncate: Iceberg metadata changed after TRUNCATE
+step s2_insert: <... completed>
 step s2_target_rows: SELECT array_agg(id ORDER BY id) AS rows FROM truncate_iso.target_t;
 rows
 ----
@@ -64,45 +57,25 @@ rows
 (1 row)
 
 
-starting permutation: s1_begin_multi s1_truncate_multi s2_swap_multi_metadata s1_commit_multi s2_multi_first_location_unchanged s2_multi_first_rows s2_multi_conflict_rows
+starting permutation: s1_begin_multi s1_truncate_multi s2_multi_rows s1_commit_multi s2_multi_locations_changed
 step s1_begin_multi: BEGIN;
-step s1_truncate_multi: 
-  TRUNCATE truncate_iso.multi_first_t, truncate_iso.multi_conflict_t;
-
-step s2_swap_multi_metadata: 
-  UPDATE iceberg.iceberg_metadata AS target
-  SET metadata_location = shadow.metadata_location,
-      previous_metadata_location = target.metadata_location
-  FROM iceberg.iceberg_metadata AS shadow
-  WHERE target.relid = 'truncate_iso.multi_conflict_t'::regclass
-    AND shadow.relid = 'truncate_iso.multi_shadow_t'::regclass;
-
+step s1_truncate_multi: TRUNCATE truncate_iso.multi_first_t, truncate_iso.multi_second_t;
+step s2_multi_rows: SELECT (SELECT count(*) FROM truncate_iso.multi_first_t) = 0 AND (SELECT count(*) FROM truncate_iso.multi_second_t) = 0 AS both_empty; <waiting ...>
 step s1_commit_multi: COMMIT;
-ERROR:  cannot commit truncate: Iceberg metadata changed after TRUNCATE
-step s2_multi_first_location_unchanged: 
-  SELECT current.metadata_location = original.metadata_location AS unchanged
+step s2_multi_rows: <... completed>
+both_empty
+----------
+t         
+(1 row)
+
+step s2_multi_locations_changed: 
+  SELECT bool_and(current.metadata_location <> original.metadata_location) AS changed
   FROM iceberg.iceberg_metadata AS current
   JOIN truncate_iso.locations AS original USING (relid)
-  WHERE current.relid = 'truncate_iso.multi_first_t'::regclass;
+  WHERE current.relid IN ('truncate_iso.multi_first_t'::regclass, 'truncate_iso.multi_second_t'::regclass);
 
-unchanged
----------
-t        
-(1 row)
-
-step s2_multi_first_rows: 
-  SELECT array_agg(id ORDER BY id) AS rows FROM truncate_iso.multi_first_t;
-
-rows
-----
-{4} 
-(1 row)
-
-step s2_multi_conflict_rows: 
-  SELECT array_agg(id ORDER BY id) AS rows FROM truncate_iso.multi_conflict_t;
-
-rows
-----
-{6} 
+changed
+-------
+t      
 (1 row)
 

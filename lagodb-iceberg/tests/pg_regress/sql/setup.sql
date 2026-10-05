@@ -3,7 +3,10 @@
 -- export it for the fixture's own psql calls. `\!` does not interpolate psql
 -- variables (OT_WHOLE_LINE), but `\setenv` arguments (OT_NORMAL) do.
 \setenv PGDATABASE :DBNAME
-\! ../../../scripts/pg_regress/object_storage_fixture setup
+\! python3 ../../../scripts/pg_regress/regress_fixture.py setup --iceberg
+\set ECHO none
+\i ../../../scripts/pg_regress/fixture_command_result.sql
+\set ECHO all
 
 -- Install the shared LagoDB services once for the regression database.
 -- Individual AM tests may drop/recreate lagodb_iceberg, but the base-owned
@@ -62,5 +65,9 @@ SELECT count(*) >= 0 AS worker_cancel_cleanup_completed
 FROM dropped;
 RESET client_min_messages;
 \set QUIET 0
+\! python3 ../../../scripts/pg_regress/regress_fixture.py wait-storage
+\set ECHO none
+\i ../../../scripts/pg_regress/fixture_command_result.sql
+\set ECHO all
 
 -- LagoDB setup complete.
