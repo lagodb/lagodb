@@ -1,6 +1,9 @@
 # Rust build artifacts
 target/
 
+# Python fixture imports
+scripts/pg_regress/__pycache__/
+
 # Test data and results
 lagodb-iceberg/tests/isolation/output_iso/
 lagodb-iceberg/tests/pg_regress/log/

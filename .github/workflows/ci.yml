@@ -136,24 +136,8 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --locked --no-deps --no-default-features --features "${PG_FEATURE}" -- -D warnings
 
-      - name: Verify Docker
-        run: |
-          set -euo pipefail
-          . scripts/pg_regress/object_storage.defaults.env
-          MINIO_IMAGE="${MINIO_IMAGE:-${DEFAULT_MINIO_IMAGE}}"
-          ICEBERG_REST_IMAGE="${ICEBERG_REST_IMAGE:-${DEFAULT_ICEBERG_REST_IMAGE}}"
-          SPARK_BASE_IMAGE="${SPARK_BASE_IMAGE:-${DEFAULT_SPARK_BASE_IMAGE}}"
-          SPARK_IMAGE="${SPARK_IMAGE:-${DEFAULT_SPARK_IMAGE}}"
-          docker version
-          docker info
-          docker pull "${MINIO_IMAGE}"
-          docker pull "${ICEBERG_REST_IMAGE}"
-          docker pull "${SPARK_BASE_IMAGE}"
-          docker build \
-            --build-arg "SPARK_BASE_IMAGE=${SPARK_BASE_IMAGE}" \
-            --tag "${SPARK_IMAGE}" \
-            --file scripts/pg_regress/spark.Dockerfile \
-            scripts/pg_regress
+      - name: Prepare regression fixture images
+        run: python3 scripts/pg_regress/regress_fixture.py prepare-images --iceberg
 
       - name: Run test suite
         run: cargo xtask test-all "pg${PG_VERSION}"
@@ -174,4 +158,5 @@ jobs:
             lagodb-connectors/tests/pg_regress/regression.out
             lagodb-connectors/tests/pg_regress/log/
             lagodb-connectors/tests/pg_regress/results/
+            target/fixture-images/
             target/isolation/pg${{ matrix.postgres }}/output_iso/

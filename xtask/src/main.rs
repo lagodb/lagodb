@@ -69,7 +69,7 @@ fn usage_error(message: &str) -> String {
          usage:\n  \
            cargo xtask test-all <pg-version>\n  \
            cargo xtask regress <pg-version> [all]\n  \
-           cargo xtask regress <pg-version> <iceberg|connectors> [test ...]\n  \
+           cargo xtask regress <pg-version> <iceberg|connectors> [test]\n  \
            cargo xtask isolation <pg-version> [spec ...]\n\n\
          examples:\n  \
            cargo xtask test-all pg17\n  \
@@ -163,10 +163,10 @@ fn run_test_all(pg_version: &OsStr) -> Result<(), String> {
     let regression = RegressionRunner::prepare(pg_version)?;
 
     println!("\n=== Phase 4: lagodb-iceberg SQL regression (PostgreSQL) ===\n");
-    regression.run(RegressionSuite::Iceberg, &[])?;
+    regression.run(RegressionSuite::Iceberg, None)?;
 
     println!("\n=== Phase 5: LagoDB connectors SQL regression (PostgreSQL) ===\n");
-    regression.run(RegressionSuite::Connectors, &[])?;
+    regression.run(RegressionSuite::Connectors, None)?;
 
     println!("\n=== Phase 6: Isolation tests (PostgreSQL) ===\n");
     run_isolation(pg_version, &[])?;

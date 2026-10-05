@@ -55,7 +55,7 @@ impl RegressionRunner {
     pub(crate) fn run(
         &self,
         suite: RegressionSuite,
-        tests: &[OsString],
+        test: Option<&OsStr>,
     ) -> Result<(), String> {
         if matches!(suite, RegressionSuite::Iceberg) {
             run_command(
@@ -86,7 +86,9 @@ impl RegressionRunner {
                 "lagodb.provider_libraries='{}'",
                 suite.provider_libraries()
             ));
-        command.args(tests);
+        if let Some(test) = test {
+            command.arg(test);
+        }
         prepend_path_env(&mut command, &self.bindir)?;
 
         run_command(&mut command)
@@ -97,7 +99,7 @@ pub(crate) enum RegressionTarget {
     All,
     Suite {
         suite: RegressionSuite,
-        tests: Vec<OsString>,
+        test: Option<OsString>,
     },
 }
 
@@ -129,9 +131,15 @@ impl RegressionTarget {
             }
         };
 
-        let tests = args.collect();
+        let test = args.next();
+        if let Some(extra) = args.next() {
+            return Err(usage_error(&format!(
+                "cargo pgrx regress accepts one test name; unexpected '{}'",
+                extra.to_string_lossy()
+            )));
+        }
 
-        Ok(Self::Suite { suite, tests })
+        Ok(Self::Suite { suite, test })
     }
 
     pub(crate) fn includes_iceberg(&self) -> bool {
@@ -149,11 +157,11 @@ impl RegressionTarget {
         match self {
             Self::All => {
                 println!("=== lagodb-iceberg SQL regression (PostgreSQL) ===\n");
-                runner.run(RegressionSuite::Iceberg, &[])?;
+                runner.run(RegressionSuite::Iceberg, None)?;
                 println!("\n=== LagoDB connectors SQL regression (PostgreSQL) ===\n");
-                runner.run(RegressionSuite::Connectors, &[])
+                runner.run(RegressionSuite::Connectors, None)
             }
-            Self::Suite { suite, tests } => runner.run(suite, &tests),
+            Self::Suite { suite, test } => runner.run(suite, test.as_deref()),
         }
     }
 }
