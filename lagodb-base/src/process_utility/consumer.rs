@@ -10,7 +10,8 @@ use crate::descriptor_registry::{
 };
 use lagodb_core::hooks::HookError;
 use lagodb_core::runtime_api::{
-    UTILITY_ROUTE_CONSUMED, UTILITY_ROUTE_PASS_THROUGH, UtilityConsumerDescriptor,
+    UTILITY_ROUTE_CONSUMED, UTILITY_ROUTE_FALLBACK, UTILITY_ROUTE_PASS_THROUGH,
+    UtilityConsumerDescriptor,
 };
 use pgrx::pg_sys;
 
@@ -57,6 +58,7 @@ impl UtilityConsumerSnapshot {
         args: ProcessUtilityArgs,
     ) -> Result<Option<SelectedUtilityConsumer>, HookError> {
         let mut selected = None;
+        let mut fallback = None;
         self.descriptors.try_for_each(|descriptor| {
             if descriptor.tag == self.tag {
                 let route = unsafe {
@@ -74,26 +76,25 @@ impl UtilityConsumerSnapshot {
                         args.completion_tag,
                     )
                 };
-                match route {
-                    UTILITY_ROUTE_PASS_THROUGH => {}
-                    UTILITY_ROUTE_CONSUMED => {
-                        if selected.is_some() {
-                            return Err(HookError::new(
-                                "multiple COPY consumers claimed the same statement",
-                            ));
-                        }
-                        selected = Some(descriptor);
-                    }
+                let candidate = match route {
+                    UTILITY_ROUTE_PASS_THROUGH => return Ok(()),
+                    UTILITY_ROUTE_CONSUMED => &mut selected,
+                    UTILITY_ROUTE_FALLBACK => &mut fallback,
                     other => {
                         return Err(HookError::new(format!(
                             "utility predicate returned invalid route value {other}"
                         )));
                     }
+                };
+                if candidate.replace(descriptor).is_some() {
+                    return Err(HookError::new(
+                        "multiple COPY consumers claimed the same statement at the same priority",
+                    ));
                 }
             }
             Ok(())
         })?;
-        Ok(selected.map(SelectedUtilityConsumer))
+        Ok(selected.or(fallback).map(SelectedUtilityConsumer))
     }
 
     fn for_each(self, mut callback: impl FnMut(UtilityConsumerDescriptor)) {

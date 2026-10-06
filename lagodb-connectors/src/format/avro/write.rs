@@ -4,14 +4,13 @@ mod encoder;
 mod ocf;
 mod plan;
 
-use lagodb_core::fdw::{ForeignModifyOutcome, ModifyPlanSlot, ModifySlot};
 use lagodb_core::handles::RelationHandle;
 use lagodb_core::tuple::SlotDatumIndex;
+use lagodb_core::tuple::TupleSlotRow;
 
 use crate::error::ConnectorError;
 use crate::format::{
-    AvroWriteCompression, EmptyOutputPolicy, FormatKind, FormatWriteState,
-    ObjectSetWriter,
+    AvroWriteCompression, EmptyOutputPolicy, FormatWriteState, ObjectSetWriter,
 };
 use crate::storage::ObjectOutput;
 
@@ -29,14 +28,14 @@ impl AvroObjectWriter {
         output: ObjectOutput,
         plan: AvroWritePlan,
         compression: AvroWriteCompression,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ConnectorError> {
+        Ok(Self {
             writer: Some(ObjectSetWriter::new(
                 output,
                 AvroEncoderFactory::new(plan, compression),
-            )),
+            )?),
             completed_bytes: 0,
-        }
+        })
     }
 
     pub(super) fn write_row(
@@ -93,17 +92,14 @@ impl AvroWriteState {
         Ok(Self {
             row: AvroDatumRow::new(sources.len()),
             sources,
-            writer: AvroObjectWriter::new(output, plan, compression),
+            writer: AvroObjectWriter::new(output, plan, compression)?,
         })
     }
 }
 
 impl FormatWriteState for AvroWriteState {
-    fn insert(
-        &mut self,
-        slot: &mut ModifySlot<'_>,
-    ) -> Result<ForeignModifyOutcome, ConnectorError> {
-        let datums = slot.tuple_row().datums();
+    fn write_row(&mut self, row: TupleSlotRow<'_>) -> Result<(), ConnectorError> {
+        let datums = row.datums();
         for (output, source) in self.sources.iter().copied().enumerate() {
             // SAFETY: every source token was validated against this relation's
             // tuple width during Begin, and the executor supplies that same
@@ -114,23 +110,7 @@ impl FormatWriteState for AvroWriteState {
             unsafe { self.row.set_at_bound(output, (!is_null).then_some(datum)) };
         }
         self.writer.write_row(&self.row)?;
-        Ok(ForeignModifyOutcome::Applied)
-    }
-
-    fn update(
-        &mut self,
-        _slot: &mut ModifySlot<'_>,
-        _plan_slot: &ModifyPlanSlot<'_>,
-    ) -> Result<ForeignModifyOutcome, ConnectorError> {
-        Err(ConnectorError::modify_not_implemented(FormatKind::Avro))
-    }
-
-    fn delete(
-        &mut self,
-        _returned_slot: Option<&mut ModifySlot<'_>>,
-        _plan_slot: &ModifyPlanSlot<'_>,
-    ) -> Result<ForeignModifyOutcome, ConnectorError> {
-        Err(ConnectorError::modify_not_implemented(FormatKind::Avro))
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<(), ConnectorError> {

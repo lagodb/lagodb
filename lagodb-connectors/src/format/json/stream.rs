@@ -1,14 +1,14 @@
 //! Bounded NDJSON framing across one ordered object set.
 
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::num::NonZeroUsize;
 
-use lagodb_storage::StorageFile;
+use crate::storage::InputFile;
 
 use crate::error::ConnectorError;
-use crate::storage::{ObjectFiles, ReadProgress};
+use crate::storage::{ObjectFiles, ProgressReader, ReadProgress};
 
-use super::super::{StreamCompression, StreamDecoder};
+use super::super::{StreamCompressionOptions, StreamDecoder};
 
 pub(super) struct JsonLineReader<R> {
     input: R,
@@ -97,11 +97,12 @@ where
     }
 }
 
-type ObjectDecoder = JsonLineReader<BufReader<StreamDecoder<ObjectReader>>>;
+type ObjectDecoder =
+    JsonLineReader<BufReader<StreamDecoder<ProgressReader<InputFile>>>>;
 
 pub(in crate::format) struct JsonRecordStream {
     files: ObjectFiles,
-    compression: StreamCompression,
+    compression: StreamCompressionOptions,
     max_record_bytes: NonZeroUsize,
     reader: Option<ObjectDecoder>,
     track_progress: bool,
@@ -112,7 +113,7 @@ pub(in crate::format) struct JsonRecordStream {
 impl JsonRecordStream {
     pub(in crate::format) fn new(
         files: ObjectFiles,
-        compression: StreamCompression,
+        compression: StreamCompressionOptions,
         max_record_bytes: NonZeroUsize,
     ) -> Self {
         Self {
@@ -128,7 +129,7 @@ impl JsonRecordStream {
 
     pub(in crate::format) fn with_progress(
         files: ObjectFiles,
-        compression: StreamCompression,
+        compression: StreamCompressionOptions,
         max_record_bytes: NonZeroUsize,
     ) -> Self {
         Self {
@@ -190,13 +191,12 @@ impl JsonRecordStream {
         let Some(file) = self.files.next() else {
             return Ok(false);
         };
+        let file = file?;
+        let compression = self.compression.for_file(&file);
         let progress = self.track_progress.then(ReadProgress::default);
         let input = StreamDecoder::new(
-            ObjectReader {
-                file: file?,
-                progress: progress.clone(),
-            },
-            self.compression,
+            ProgressReader::new(file, progress.clone()),
+            compression,
         )
         .map_err(ConnectorError::json_io)?;
         self.current_progress = progress;
@@ -212,20 +212,5 @@ impl JsonRecordStream {
             self.completed_bytes =
                 self.completed_bytes.saturating_add(progress.bytes());
         }
-    }
-}
-
-struct ObjectReader {
-    file: StorageFile,
-    progress: Option<ReadProgress>,
-}
-
-impl Read for ObjectReader {
-    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        let read = self.file.read_into(output).map_err(io::Error::other)?;
-        if let Some(progress) = &self.progress {
-            progress.record(read);
-        }
-        Ok(read)
     }
 }

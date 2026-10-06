@@ -33,6 +33,7 @@ pgrx = { workspace = true }
 lagodb-core = { path = "../lagodb-core", default-features = false }
 lagodb-arrow = { path = "../lagodb-arrow", default-features = false }
 lagodb-storage = { workspace = true }
+libc = "0.2"
 parquet = { version = "59.2.0", default-features = false, features = ["arrow", "snap", "zstd"] }
 serde = "1"
 serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }

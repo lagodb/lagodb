@@ -7,7 +7,7 @@ use apache_avro::{Codec, Schema};
 
 use crate::error::ConnectorError;
 use crate::format::AvroWriteCompression;
-use crate::storage::StagedObjectWriter;
+use crate::storage::OutputWriter;
 
 const AVRO_OBJECT_HEADER: &[u8] = b"Obj\x01";
 const BLOCK_TARGET_BYTES: usize = 16_000;
@@ -96,7 +96,7 @@ impl AvroBinaryBuffer {
 
 /// One Avro OCF file with a reusable uncompressed row block.
 pub(super) struct AvroOcfWriter {
-    output: StagedObjectWriter,
+    output: OutputWriter,
     codec: Codec,
     marker: [u8; SYNC_MARKER_BYTES],
     block: AvroBinaryBuffer,
@@ -108,7 +108,7 @@ impl AvroOcfWriter {
     pub(super) fn new(
         schema: &Schema,
         compression: AvroWriteCompression,
-        output: StagedObjectWriter,
+        output: OutputWriter,
     ) -> Result<Self, ConnectorError> {
         let codec = match compression {
             AvroWriteCompression::Null => Codec::Null,
@@ -156,7 +156,7 @@ impl AvroOcfWriter {
         self.output.bytes_written()
     }
 
-    pub(super) fn finish(mut self) -> Result<StagedObjectWriter, ConnectorError> {
+    pub(super) fn finish(mut self) -> Result<OutputWriter, ConnectorError> {
         self.flush_block()?;
         self.output.flush().map_err(|source| {
             ConnectorError::Avro(Details::FlushWriter(source).into())

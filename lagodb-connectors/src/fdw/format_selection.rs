@@ -3,6 +3,7 @@
 use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 
+use crate::access::{ConnectorAccess, LocalFilePolicy};
 use crate::error::ConnectorError;
 use crate::format::{FormatAnalyzer, FormatKind, FormatReader, FormatWriter};
 use crate::storage::ObjectLocationKind;
@@ -42,12 +43,8 @@ impl ResolvedForeignRelation {
         self.options.format.into_reader()
     }
 
-    pub(crate) fn into_writer(self) -> Box<dyn FormatWriter> {
-        self.options.format.into_writer()
-    }
-
     pub(crate) fn output_kind(&self) -> Result<ObjectLocationKind, ConnectorError> {
-        ObjectLocationKind::classify(self.options.object.key(), self.kind())
+        self.kind().location_kind(&self.options.object)
     }
 
     pub(crate) fn validate_relation_columns(
@@ -64,7 +61,7 @@ impl ResolvedForeignRelation {
         self,
         effective_user: pg_sys::Oid,
     ) -> Result<ResolvedFormatParts<Box<dyn FormatReader>>, ConnectorError> {
-        let location = ResolvedStorageLocation::resolve_foreign_object(
+        let location = ConnectorAccess::resolve_foreign_object(
             self.options.object,
             self.server_oid,
             effective_user,
@@ -81,7 +78,7 @@ impl ResolvedForeignRelation {
         let Some(analyzer) = format.into_reader().analyzer() else {
             return Ok(None);
         };
-        let location = ResolvedStorageLocation::resolve_foreign_object(
+        let location = ConnectorAccess::resolve_foreign_object(
             object,
             self.server_oid,
             effective_user,
@@ -93,11 +90,14 @@ impl ResolvedForeignRelation {
         self,
         effective_user: pg_sys::Oid,
     ) -> Result<ResolvedFormatParts<Box<dyn FormatWriter>>, ConnectorError> {
-        let location = ResolvedStorageLocation::resolve_foreign_object(
+        let location = ConnectorAccess::resolve_foreign_object(
             self.options.object,
             self.server_oid,
             effective_user,
         )?;
+        if location.local_path().is_some() {
+            LocalFilePolicy::require_write(effective_user)?;
+        }
         Ok((self.options.format.into_writer(), location))
     }
 }

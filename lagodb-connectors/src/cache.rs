@@ -3,16 +3,17 @@
 use lagodb_core::diag::PgReportError;
 use pgrx::prelude::*;
 
+use crate::access::ConnectorAccess;
 use crate::error::ConnectorError;
 
-use super::{ObjectUri, ResolvedStorageLocation};
+use crate::storage::{ObjectUri, StoragePath};
 
 fn invalidate(
     object_uri: &str,
     server: Option<&str>,
 ) -> Result<bool, ConnectorError> {
     let object = ObjectUri::parse(object_uri)?;
-    let location = ResolvedStorageLocation::resolve(object, server)?;
+    let location = ConnectorAccess::resolve(StoragePath::Object(object), server)?;
     let object = location.acquire_object_access_from_pg_gucs()?;
     object.invalidate_cache().map_err(ConnectorError::from)
 }

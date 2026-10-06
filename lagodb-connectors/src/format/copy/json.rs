@@ -16,14 +16,12 @@ use crate::format::json::{
 };
 use crate::format::{
     EmptyOutputPolicy, FormatKind, ObjectSetWriter, StreamCompression,
-    StreamEncoderFactory, StreamFormat,
+    StreamCompressionOptions, StreamEncoderFactory, StreamFormat,
 };
 use crate::gucs::ReadConfig;
 use crate::storage::{ObjectFiles, ObjectOutput};
 
-use super::{
-    FormatCopyDestination, FormatCopyInput, FormatCopyOutput, FormatCopySource,
-};
+use super::{FormatCopyDestination, FormatCopyOutput};
 
 /// NDJSON-to-Datum source for PostgreSQL COPY FROM.
 pub(super) struct JsonCopySource {
@@ -57,7 +55,7 @@ impl JsonCopySource {
         Ok(Self {
             stream: JsonRecordStream::with_progress(
                 files,
-                compression,
+                StreamCompressionOptions::new(Some(compression), None),
                 max_record_bytes,
             ),
             decoder: JsonRecordDecoder::new(plan.len()),
@@ -67,15 +65,6 @@ impl JsonCopySource {
 }
 
 impl CopyDatumSource for JsonCopySource {
-    fn initialize(&mut self, layout: &CopyColumnLayout) -> Result<(), CopyError> {
-        if layout.len() != self.plan.len() {
-            return Err(CopyError::invalid_column_layout(
-                "JSON source was bound to a different COPY layout",
-            ));
-        }
-        Ok(())
-    }
-
     fn next_row(
         &mut self,
         row: CopyInputRow<'_>,
@@ -147,12 +136,6 @@ impl CopyDatumSource for JsonCopySource {
     }
 }
 
-impl FormatCopySource for JsonCopySource {
-    fn input(&mut self) -> FormatCopyInput<'_> {
-        FormatCopyInput::Datums(self)
-    }
-}
-
 struct ReadyJsonCopyDestination {
     encoder: BoundJsonObjectEncoder,
     writer: ObjectSetWriter<StreamEncoderFactory>,
@@ -163,7 +146,6 @@ pub(super) struct JsonCopyDestination {
     output: Option<ObjectOutput>,
     compression: StreamCompression,
     ready: Option<ReadyJsonCopyDestination>,
-    completed: bool,
     bytes_produced: u64,
 }
 
@@ -173,35 +155,13 @@ impl JsonCopyDestination {
             output: Some(output),
             compression,
             ready: None,
-            completed: false,
             bytes_produced: 0,
         }
     }
+}
 
-    pub(super) fn finish(mut self) -> Result<(), CopyError> {
-        self.finish_inner()
-    }
-
-    fn finish_inner(&mut self) -> Result<(), CopyError> {
-        if self.completed {
-            return Ok(());
-        }
-        let ready = self
-            .ready
-            .take()
-            .expect("COPY TO initializes its destination before completion");
-        self.bytes_produced = ready
-            .writer
-            .finish_with_bytes(EmptyOutputPolicy::EmitFile)
-            .map_err(CopyError::from)?;
-        self.completed = true;
-        Ok(())
-    }
-
-    fn initialize_inner(
-        &mut self,
-        layout: &CopyColumnLayout,
-    ) -> Result<(), CopyError> {
+impl CopyTupleDestination for JsonCopyDestination {
+    fn initialize(&mut self, layout: &CopyColumnLayout) -> Result<(), CopyError> {
         let fields = layout
             .columns()
             .iter()
@@ -235,15 +195,9 @@ impl JsonCopyDestination {
             writer: ObjectSetWriter::new(
                 output,
                 StreamEncoderFactory::new(StreamFormat::Json, self.compression),
-            ),
+            )?,
         });
         Ok(())
-    }
-}
-
-impl CopyTupleDestination for JsonCopyDestination {
-    fn initialize(&mut self, layout: &CopyColumnLayout) -> Result<(), CopyError> {
-        self.initialize_inner(layout)
     }
 
     fn write_slot(&mut self, row: CopyOutputRow<'_>) -> Result<(), CopyError> {
@@ -264,7 +218,15 @@ impl CopyTupleDestination for JsonCopyDestination {
     }
 
     fn finish(&mut self) -> Result<(), CopyError> {
-        self.finish_inner()
+        let ready = self
+            .ready
+            .take()
+            .expect("COPY TO initializes its destination before completion");
+        self.bytes_produced = ready
+            .writer
+            .finish_with_bytes(EmptyOutputPolicy::EmitFile)
+            .map_err(CopyError::from)?;
+        Ok(())
     }
 
     fn abort(&mut self) {
@@ -276,10 +238,5 @@ impl CopyTupleDestination for JsonCopyDestination {
 impl FormatCopyDestination for JsonCopyDestination {
     fn output(&mut self) -> FormatCopyOutput<'_> {
         FormatCopyOutput::Tuples(self)
-    }
-
-    fn finish(self: Box<Self>) -> Result<(), CopyError> {
-        let destination = *self;
-        destination.finish()
     }
 }

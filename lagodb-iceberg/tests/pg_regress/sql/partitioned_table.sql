@@ -168,6 +168,70 @@ COPY partitioned_copy.root_t TO STDOUT WITH (FORMAT csv);
 COPY (SELECT id, region FROM partitioned_copy.root_t) TO STDOUT WITH (FORMAT csv);
 RESET ROLE;
 
+-- Without connectors, native-format suffixes retain PostgreSQL text COPY.
+-- Check implicit input and decode the exported bytes explicitly as text.
+SELECT current_setting('data_directory') || '/iceberg-copy-routing-' || pg_backend_pid()
+       AS partitioned_copy_file_root
+\gset
+CREATE TABLE partitioned_copy.file_sink (id integer, region text)
+PARTITION BY LIST (region) USING iceberg;
+
+\set partitioned_copy_file :partitioned_copy_file_root '.json'
+COPY partitioned_copy.root_t TO :'partitioned_copy_file';
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file';
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file' WITH (format text);
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+
+\set partitioned_copy_file :partitioned_copy_file_root '.avro'
+COPY partitioned_copy.root_t TO :'partitioned_copy_file';
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file';
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file' WITH (format text);
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+
+\set partitioned_copy_file :partitioned_copy_file_root '.parquet'
+COPY partitioned_copy.root_t TO :'partitioned_copy_file';
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file';
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file' WITH (format text);
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+
+\set partitioned_copy_file :partitioned_copy_file_root '.json.gz'
+COPY partitioned_copy.root_t TO :'partitioned_copy_file';
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file';
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file' WITH (format text);
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+
 SET client_min_messages = warning;
 DROP SCHEMA partitioned_copy CASCADE;
 RESET client_min_messages;

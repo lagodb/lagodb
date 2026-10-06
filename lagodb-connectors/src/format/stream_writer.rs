@@ -3,7 +3,7 @@
 use std::io::Write;
 
 use crate::error::ConnectorError;
-use crate::storage::{ObjectFileSuffix, StagedObjectWriter};
+use crate::storage::{ObjectFileSuffix, OutputWriter};
 
 use super::{
     FileWriteProgress, ObjectFileEncoder, ObjectFileEncoderFactory,
@@ -58,7 +58,7 @@ impl ObjectFileEncoderFactory for StreamEncoderFactory {
 
     fn open(
         &mut self,
-        writer: StagedObjectWriter,
+        writer: OutputWriter,
     ) -> Result<Self::Encoder, ConnectorError> {
         let mut encoder = StreamEncoder::new(writer, self.compression)
             .map_err(ConnectorError::copy_stream_io)?;
@@ -73,7 +73,7 @@ impl ObjectFileEncoderFactory for StreamEncoderFactory {
 }
 
 pub(crate) struct StreamFileEncoder {
-    encoder: StreamEncoder<StagedObjectWriter>,
+    encoder: StreamEncoder<OutputWriter>,
 }
 
 impl ObjectFileEncoder for StreamFileEncoder {
@@ -96,7 +96,7 @@ impl ObjectFileEncoder for StreamFileEncoder {
         self.encoder.writer().bytes_written()
     }
 
-    fn finish(self) -> Result<StagedObjectWriter, ConnectorError> {
+    fn finish(self) -> Result<OutputWriter, ConnectorError> {
         self.encoder
             .finish()
             .map_err(ConnectorError::copy_stream_io)

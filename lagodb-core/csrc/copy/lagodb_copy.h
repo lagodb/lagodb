@@ -122,6 +122,7 @@ void		lagodb_encode_copy_header(
 									  LagodbCopyRowEncoder *state,
 									  const char **data,
 									  int *len);
+/* The caller supplies a slot with all attributes already materialized. */
 void		lagodb_encode_copy_row(
 								   LagodbCopyRowEncoder *state,
 								   TupleTableSlot *slot,
@@ -152,6 +153,7 @@ void		lagodb_update_routed_copy_to_progress(CopyToState state,
 												  uint64 bytes_produced);
 TupleDesc	lagodb_routed_copy_to_tuple_desc(CopyToState state);
 List	   *lagodb_routed_copy_to_attnums(CopyToState state);
+bool		lagodb_routed_copy_to_has_header(CopyToState state);
 List	   *lagodb_copy_get_attnums(Relation rel, List *attnamelist);
 
 typedef struct LagodbRawFieldReader LagodbRawFieldReader;

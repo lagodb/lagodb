@@ -271,7 +271,10 @@ CopySendEndOfRow(CopyToState cstate)
 			break;
 		case COPY_CALLBACK:
 			cstate->data_dest_cb(fe_msgbuf->data, fe_msgbuf->len);
-			break;
+			/* Provider progress counts encoded files, including their framing.
+			 * Publishing logical row bytes here would overwrite that count. */
+			resetStringInfo(fe_msgbuf);
+			return;
 	}
 
 	/* Update the progress */
@@ -766,7 +769,7 @@ LagodbBeginCopyTo(ParseState *pstate,
 	return cstate;
 }
 
-/* LAGODB BEGIN: finish query execution before committing a typed destination. */
+/* LAGODB BEGIN: finish query execution before committing a provider destination. */
 void
 lagodb_finish_routed_copy_to(CopyToState cstate)
 {
@@ -802,7 +805,7 @@ lagodb_finish_routed_copy_to(CopyToState cstate)
 void
 EndCopyTo(CopyToState cstate)
 {
-	/* LAGODB BEGIN: query finalization is shared with the typed driver. */
+	/* LAGODB BEGIN: query finalization is shared by both provider drivers. */
 	lagodb_finish_routed_copy_to(cstate);
 	/* LAGODB END */
 
@@ -1464,6 +1467,12 @@ List *
 lagodb_routed_copy_to_attnums(CopyToState state)
 {
 	return state->attnumlist;
+}
+
+bool
+lagodb_routed_copy_to_has_header(CopyToState state)
+{
+	return state->opts.header_line == COPY_HEADER_TRUE;
 }
 
 /* LAGODB END */

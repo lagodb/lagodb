@@ -1,9 +1,11 @@
 //! LagoDB connector extension entry point.
 //!
-//! The PostgreSQL FDW adapter and its format implementations live below
-//! [`fdw`].  A single FDW provider selects one of the supported formats for
-//! each foreign table.
+//! [`copy`] and [`fdw`] adapt PostgreSQL execution, [`access`] resolves catalog
+//! bindings and privileges, [`format`] owns codecs and format-specific execution,
+//! and [`storage`] owns file discovery, I/O, and publication.
 
+mod access;
+mod cache;
 mod copy;
 mod error;
 mod fdw;
@@ -11,9 +13,13 @@ mod format;
 mod gucs;
 mod storage;
 
+use std::ffi::CStr;
+
 use lagodb_core::hooks::freeze_hooks;
 use lagodb_core::runtime_api::ProviderIdentity;
 use pgrx::prelude::*;
+
+pub(crate) const CONNECTOR_FDW_NAME: &CStr = c"lagodb_connectors";
 
 pgrx::pg_module_magic!();
 

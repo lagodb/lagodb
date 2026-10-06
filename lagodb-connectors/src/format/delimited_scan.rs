@@ -1,7 +1,8 @@
 //! PostgreSQL COPY-backed Text/CSV Foreign Table scans.
 
-use std::io::{self, Read};
+use std::io;
 
+use crate::storage::InputFile;
 use lagodb_core::copy::{
     CopyDataSource, CopyDocumentSource, CopyError, CopyFromScan,
 };
@@ -11,14 +12,13 @@ use lagodb_core::fdw::{
     ReScanForeignScanContext, ScanProjectionPolicy, ScanSlotWriter,
     StartForeignScanContext,
 };
-use lagodb_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 use crate::fdw::LagodbConnectors;
 
 use super::scan::{FormatScanPlanner, FormatScanPrivate, FormatScanState};
-use super::{FormatKind, StreamCompression, StreamDecoder};
+use super::{FormatKind, StreamCompressionOptions, StreamDecoder};
 use crate::storage::ObjectFiles;
 
 const DEFAULT_ESTIMATED_ROWS: f64 = 1_000.0;
@@ -85,13 +85,13 @@ impl DelimitedScanState {
     pub(super) fn begin(
         context: StartForeignScanContext<'_, LagodbConnectors>,
         files: ObjectFiles,
-        compression: StreamCompression,
+        compression: StreamCompressionOptions,
         postgres_options: *mut pg_sys::List,
     ) -> Result<Self, ConnectorError> {
         let source = DelimitedObjectSource::new(files, compression);
         // SAFETY: the executor owns the relation, expression context, and
         // PostgreSQL option list for this scan lifetime; the boxed source is
-        // retained by CopyFromScan until its callback guard is removed.
+        // retained by CopyFromScan for every synchronous parser invocation.
         let decoder = unsafe {
             CopyFromScan::begin(
                 context.relation.as_raw(),
@@ -127,12 +127,12 @@ impl FormatScanState for DelimitedScanState {
 
 struct DelimitedObjectSource {
     files: ObjectFiles,
-    compression: StreamCompression,
-    decoder: Option<StreamDecoder<ObjectReader>>,
+    compression: StreamCompressionOptions,
+    decoder: Option<StreamDecoder<InputFile>>,
 }
 
 impl DelimitedObjectSource {
-    fn new(files: ObjectFiles, compression: StreamCompression) -> Self {
+    fn new(files: ObjectFiles, compression: StreamCompressionOptions) -> Self {
         Self {
             files,
             compression,
@@ -152,7 +152,8 @@ impl CopyDocumentSource for DelimitedObjectSource {
             return Ok(false);
         };
         let file = file?;
-        let decoder = StreamDecoder::new(ObjectReader { file }, self.compression)
+        let compression = self.compression.for_file(&file);
+        let decoder = StreamDecoder::new(file, compression)
             .map_err(ConnectorError::copy_stream_io)?;
         self.decoder = Some(decoder);
         Ok(true)
@@ -180,15 +181,5 @@ impl CopyDataSource for DelimitedObjectSource {
             .read_at_least(output, min_read)
             .map_err(ConnectorError::copy_stream_io)?;
         Ok(read)
-    }
-}
-
-struct ObjectReader {
-    file: StorageFile,
-}
-
-impl Read for ObjectReader {
-    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        self.file.read_into(output).map_err(io::Error::other)
     }
 }

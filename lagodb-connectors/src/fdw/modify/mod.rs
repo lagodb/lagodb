@@ -4,21 +4,34 @@ mod state;
 
 use lagodb_core::fdw::{
     FdwModify, FdwScan, ForeignInsertBeginContext, ForeignModifyBeginContext,
-    ForeignModifyCapabilities, ForeignModifyError, ForeignModifyPlanContext,
-    ForeignModifyPlanSpec, ForeignModifyPrivate, ForeignModifyRelationContext,
-    ForeignPrivateReader, ForeignPrivateWriter, ForeignUpdateTargetContext,
+    ForeignModifyCapabilities, ForeignModifyError, ForeignModifyOperation,
+    ForeignModifyPlanContext, ForeignModifyPlanSpec, ForeignModifyPrivate,
+    ForeignModifyRelationContext, ForeignPrivateReader, ForeignPrivateWriter,
+    ForeignUpdateTargetContext,
 };
 
 use super::{LagodbConnectors, ResolvedForeignRelation};
 use crate::error::ConnectorError;
-use crate::format::{FormatKind, FormatWritePrivate};
+use crate::format::FormatKind;
 use crate::gucs::WriteConfig;
-use crate::storage::{ObjectLocationKind, ObjectOutput};
-use lagodb_core::storage::foreign::StorageManager;
+use crate::storage::ObjectLocationKind;
 
 pub(crate) use state::ConnectorModifyState;
 
-pub(crate) type ConnectorModifyPrivate = FormatWritePrivate;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConnectorModifyPrivate {
+    kind: FormatKind,
+}
+
+impl ConnectorModifyPrivate {
+    const fn new(kind: FormatKind) -> Self {
+        Self { kind }
+    }
+
+    const fn kind(self) -> FormatKind {
+        self.kind
+    }
+}
 
 impl ForeignModifyPrivate for ConnectorModifyPrivate {
     fn encode(
@@ -51,14 +64,13 @@ impl FdwModify for LagodbConnectors {
         if relation.output_kind()? == ObjectLocationKind::Exact {
             return Ok(ForeignModifyCapabilities::default());
         }
-        Ok(relation.into_writer().capabilities(context)?)
+        Ok(ForeignModifyCapabilities::new(true, false, false))
     }
 
     fn add_update_targets(
-        context: &mut ForeignUpdateTargetContext<'_>,
+        _context: &mut ForeignUpdateTargetContext<'_>,
     ) -> Result<(), ForeignModifyError> {
-        let relation = ResolvedForeignRelation::resolve(context.relation().oid())?;
-        Ok(relation.into_writer().add_update_targets(context)?)
+        Ok(())
     }
 
     fn plan_modify(
@@ -66,7 +78,14 @@ impl FdwModify for LagodbConnectors {
     ) -> Result<ForeignModifyPlanSpec<Self::ModifyPrivateData>, ForeignModifyError>
     {
         let relation = ResolvedForeignRelation::resolve(context.relation().oid())?;
-        Ok(relation.into_writer().plan_modify(context)?)
+        if context.operation() != ForeignModifyOperation::Insert {
+            return Err(
+                ConnectorError::modify_not_implemented(relation.kind()).into()
+            );
+        }
+        Ok(ForeignModifyPlanSpec::new(ConnectorModifyPrivate::new(
+            relation.kind(),
+        )))
     }
 
     fn begin_modify(
@@ -82,12 +101,10 @@ impl FdwModify for LagodbConnectors {
         }
         let (writer, target) =
             selected.into_write_parts(context.effective_user_id())?;
-        let manager = StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
-        let output = ObjectOutput::resolve(&target, &manager, format, || {
-            WriteConfig::from_guc().target_file_bytes()
-        })?;
-        let inner = writer.begin_modify(context, output)?;
-        Ok(ConnectorModifyState::new(inner))
+        let output =
+            format.output(&target, || WriteConfig::from_guc().target_file_bytes())?;
+        let inner = writer.begin(context.relation(), output)?;
+        Ok(ConnectorModifyState::new(format, inner))
     }
 
     fn target_scan_context(
@@ -104,11 +121,9 @@ impl FdwModify for LagodbConnectors {
         let (writer, target) =
             selected.into_write_parts(context.effective_user_id())?;
         let format = writer.kind();
-        let manager = StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
-        let output = ObjectOutput::resolve(&target, &manager, format, || {
-            WriteConfig::from_guc().target_file_bytes()
-        })?;
-        let inner = writer.begin_insert(context, output)?;
-        Ok(ConnectorModifyState::new(inner))
+        let output =
+            format.output(&target, || WriteConfig::from_guc().target_file_bytes())?;
+        let inner = writer.begin(context.relation(), output)?;
+        Ok(ConnectorModifyState::new(format, inner))
     }
 }

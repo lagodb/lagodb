@@ -2,69 +2,22 @@
 
 use std::collections::HashSet;
 use std::ffi::CString;
-use std::io::{self, Read};
 
+use crate::storage::InputFile;
 use arrow_schema::{DataType, Schema, TimeUnit};
-use lagodb_core::copy::{CopyDataSource, CopyError};
-use lagodb_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 
-use super::{FormatKind, FormatObject, StreamCompression, StreamDecoder};
+use super::{FormatKind, FormatObject};
 
 pub(crate) const SCHEMA_SAMPLE_RECORDS: usize = 100;
 
 pub(crate) trait FormatSchemaReader: FormatObject {
     fn infer_schema(
         &self,
-        file: &mut StorageFile,
+        file: &mut InputFile,
     ) -> Result<InferredSchema, ConnectorError>;
-}
-
-pub(crate) struct StorageFileReader<'a> {
-    file: &'a mut StorageFile,
-}
-
-impl<'a> StorageFileReader<'a> {
-    pub(crate) fn new(file: &'a mut StorageFile) -> Self {
-        Self { file }
-    }
-}
-
-impl Read for StorageFileReader<'_> {
-    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        self.file.read_into(output).map_err(io::Error::other)
-    }
-}
-
-/// A compressed object source for one cold-path PostgreSQL COPY parser.
-pub(crate) struct StorageFileCopySource<'a> {
-    decoder: StreamDecoder<StorageFileReader<'a>>,
-}
-
-impl<'a> StorageFileCopySource<'a> {
-    pub(crate) fn new(
-        file: &'a mut StorageFile,
-        compression: StreamCompression,
-    ) -> Result<Self, ConnectorError> {
-        let decoder = StreamDecoder::new(StorageFileReader::new(file), compression)
-            .map_err(ConnectorError::copy_stream_io)?;
-        Ok(Self { decoder })
-    }
-}
-
-impl CopyDataSource for StorageFileCopySource<'_> {
-    fn read(
-        &mut self,
-        output: &mut [u8],
-        min_read: usize,
-    ) -> Result<usize, CopyError> {
-        self.decoder
-            .read_at_least(output, min_read)
-            .map_err(ConnectorError::copy_stream_io)
-            .map_err(CopyError::from)
-    }
 }
 
 #[derive(Debug)]

@@ -88,11 +88,11 @@ impl ExactSizeIterator for CopyRawFields<'_> {}
 
 /// A synchronous PostgreSQL COPY parser that exposes raw fields.
 ///
-/// The reader installs the same callback guard used by COPY scans. Its parser
-/// state is ended before that guard releases the borrowed source.
+/// The reader owns its source binding, just like COPY scans, and activates it
+/// only while its parser is running.
 pub struct CopyRawFieldReader<'source> {
     state: Option<NonNull<c_void>>,
-    _source_guard: SourceGuard<'source>,
+    source_guard: SourceGuard<'source>,
     _not_send_sync: PhantomData<*mut ()>,
 }
 
@@ -105,24 +105,25 @@ impl<'source> CopyRawFieldReader<'source> {
         options: *mut pg_sys::List,
         source: &'source mut dyn CopyDataSource,
     ) -> Result<Self, CopyError> {
-        let source_guard = SourceGuard::install(source);
-        let state = unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                Ok(pg::CopyBridge::begin_raw_field_reader(
-                    source_callback(),
-                    options,
-                ))
-            }))
-            .catch_others(|error| Err(PgError::from_caught(error)))
-            .execute()
-        }
-        .map_err(CopyError::from)?;
+        let mut source_guard = SourceGuard::new(source);
+        let state = source_guard
+            .with_active(|| unsafe {
+                PgTryBuilder::new(AssertUnwindSafe(|| {
+                    Ok(pg::CopyBridge::begin_raw_field_reader(
+                        source_callback(),
+                        options,
+                    ))
+                }))
+                .catch_others(|error| Err(PgError::from_caught(error)))
+                .execute()
+            })
+            .map_err(CopyError::from)?;
         // SAFETY: the C bridge allocates this object with palloc, which either
         // returns a valid address or reports a PostgreSQL ERROR caught above.
         let state = unsafe { NonNull::new_unchecked(state) };
         Ok(Self {
             state: Some(state),
-            _source_guard: source_guard,
+            source_guard,
             _not_send_sync: PhantomData,
         })
     }
@@ -131,18 +132,20 @@ impl<'source> CopyRawFieldReader<'source> {
         let state = self.state.ok_or(CopyError::RawFieldReaderFinished)?;
         let mut fields = std::ptr::null_mut();
         let mut field_count = 0;
-        let found = unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                Ok(pg::CopyBridge::next_raw_fields(
-                    state.as_ptr(),
-                    &mut fields,
-                    &mut field_count,
-                ))
-            }))
-            .catch_others(|error| Err(PgError::from_caught(error)))
-            .execute()
-        }
-        .map_err(CopyError::from)?;
+        let found = self
+            .source_guard
+            .with_active(|| unsafe {
+                PgTryBuilder::new(AssertUnwindSafe(|| {
+                    Ok(pg::CopyBridge::next_raw_fields(
+                        state.as_ptr(),
+                        &mut fields,
+                        &mut field_count,
+                    ))
+                }))
+                .catch_others(|error| Err(PgError::from_caught(error)))
+                .execute()
+            })
+            .map_err(CopyError::from)?;
         Ok(found.then_some(CopyRawRecord {
             fields,
             field_count,

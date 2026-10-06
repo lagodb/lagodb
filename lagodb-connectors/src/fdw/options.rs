@@ -3,11 +3,12 @@
 use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 
+use crate::access::{ConnectorAccess, LocalFilePolicy};
 use crate::error::ConnectorError;
 use crate::format::{
     FormatKind, FormatOption, ResolvedForeignFormat, StreamCompression,
 };
-use crate::storage::{ObjectUri, validate_storage_options};
+use crate::storage::StoragePath;
 
 pub(crate) fn validate_catalog_options(
     options: &[Option<String>],
@@ -15,12 +16,18 @@ pub(crate) fn validate_catalog_options(
 ) -> Result<(), ConnectorError> {
     match catalog {
         Some(catalog) if catalog == pg_sys::ForeignTableRelationId => {
-            RawTableOptions::parse(options)?.resolve().map(|_| ())
+            let resolved = RawTableOptions::parse(options)?.resolve()?;
+            if matches!(resolved.object, StoragePath::Local(_)) {
+                // file_fdw checks the role when a filename is set, so table
+                // privileges can subsequently share reads with other roles.
+                LocalFilePolicy::require_read(unsafe { pg_sys::GetUserId() })?;
+            }
+            Ok(())
         }
         Some(catalog) if catalog == pg_sys::AttributeRelationId => {
             ResolvedForeignFormat::validate_column_catalog_options(options)
         }
-        _ => validate_storage_options(options, catalog),
+        _ => ConnectorAccess::validate_options(options, catalog),
     }
 }
 
@@ -31,12 +38,12 @@ pub(crate) fn resolve_table_options(
 }
 
 pub(crate) struct ResolvedTableOptions {
-    pub(crate) object: ObjectUri,
+    pub(crate) object: StoragePath,
     pub(crate) format: ResolvedForeignFormat,
 }
 
 struct RawTableOptions<'a> {
-    object: Option<ObjectUri>,
+    object: Option<StoragePath>,
     kind: Option<FormatKind>,
     compression: Option<&'a str>,
     format_options: Vec<FormatOption<'a>>,
@@ -86,7 +93,7 @@ impl<'a> RawTableOptions<'a> {
     fn set(&mut self, name: &'a str, value: &'a str) -> Result<(), ConnectorError> {
         match name {
             "path" => {
-                Self::set_once(&mut self.object, name, ObjectUri::parse(value)?)
+                Self::set_once(&mut self.object, name, StoragePath::parse(value)?)
             }
             "format" => {
                 let kind = FormatKind::parse(value)

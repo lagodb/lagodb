@@ -68,8 +68,7 @@ impl<'a> TypedSourceGuard<'a> {
     pub(super) fn install(
         source: &'a mut dyn CopyDatumSource,
         layout: CopyColumnLayout,
-    ) -> Result<Self, CopyError> {
-        source.initialize(&layout)?;
+    ) -> Self {
         // SAFETY: the guard retains the exclusive borrow until finalization.
         // The C executor receives a pointer to this context only for its
         // synchronous execute/end lifetime.
@@ -78,7 +77,7 @@ impl<'a> TypedSourceGuard<'a> {
                 source as *mut (dyn CopyDatumSource + 'a),
             )
         };
-        Ok(Self {
+        Self {
             context: TypedSourceContext {
                 source,
                 layout,
@@ -86,7 +85,7 @@ impl<'a> TypedSourceGuard<'a> {
             },
             finished: false,
             _lifetime: PhantomData,
-        })
+        }
     }
 
     pub(super) fn callback_context(&mut self) -> NonNull<c_void> {

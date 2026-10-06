@@ -21,9 +21,8 @@ use crate::error::ConnectorError;
 use crate::format::{FormatKind, ParquetObjectReader};
 use crate::storage::{ObjectFiles, ReadProgress};
 
-use super::super::super::copy::{FormatCopyInput, FormatCopySource};
-
 const PARQUET_BATCH_SIZE: usize = 8_192;
+
 struct CopyColumnPlan {
     source: usize,
     rule: ColumnRule,
@@ -42,35 +41,27 @@ struct CopyColumnBindings {
 }
 
 struct BoundParquetCopy {
-    layout: CopyColumnLayout,
     expected_schema: Arc<Schema>,
     projection_roots: Box<[usize]>,
     columns: Box<[CopyColumnPlan]>,
 }
 
 enum ParquetCopyBinding {
-    Empty { layout: CopyColumnLayout },
+    Empty,
     Bound(BoundParquetCopy),
 }
 
 impl ParquetCopyBinding {
-    fn layout(&self) -> &CopyColumnLayout {
-        match self {
-            Self::Empty { layout } => layout,
-            Self::Bound(binding) => &binding.layout,
-        }
-    }
-
     fn bound(&self) -> Option<&BoundParquetCopy> {
         match self {
-            Self::Empty { .. } => None,
+            Self::Empty => None,
             Self::Bound(binding) => Some(binding),
         }
     }
 
     fn bound_mut(&mut self) -> Option<&mut BoundParquetCopy> {
         match self {
-            Self::Empty { .. } => None,
+            Self::Empty => None,
             Self::Bound(binding) => Some(binding),
         }
     }
@@ -95,9 +86,7 @@ impl ParquetCopySource {
         let Some(first) = files.next() else {
             return Ok(Self {
                 files,
-                binding: ParquetCopyBinding::Empty {
-                    layout: layout.clone(),
-                },
+                binding: ParquetCopyBinding::Empty,
                 reader: None,
                 batch: None,
                 row: 0,
@@ -117,7 +106,6 @@ impl ParquetCopySource {
         Ok(Self {
             files,
             binding: ParquetCopyBinding::Bound(BoundParquetCopy {
-                layout: layout.clone(),
                 expected_schema,
                 projection_roots: bindings.projection_roots,
                 columns: bindings.columns,
@@ -294,20 +282,11 @@ impl ParquetCopySource {
 }
 
 impl CopyDatumSource for ParquetCopySource {
-    fn initialize(&mut self, layout: &CopyColumnLayout) -> Result<(), CopyError> {
-        if layout != self.binding.layout() {
-            return Err(CopyError::invalid_column_layout(
-                "Parquet source was bound to a different COPY layout",
-            ));
-        }
-        Ok(())
-    }
-
     fn next_row(
         &mut self,
         row: CopyInputRow<'_>,
     ) -> Result<CopyRowOutcome, CopyError> {
-        if matches!(&self.binding, ParquetCopyBinding::Empty { .. }) {
+        if matches!(&self.binding, ParquetCopyBinding::Empty) {
             return Ok(CopyRowOutcome::End);
         }
         if self
@@ -364,11 +343,5 @@ impl CopyDatumSource for ParquetCopySource {
                 .as_ref()
                 .map_or(0, ReadProgress::bytes),
         )
-    }
-}
-
-impl FormatCopySource for ParquetCopySource {
-    fn input(&mut self) -> FormatCopyInput<'_> {
-        FormatCopyInput::Datums(self)
     }
 }

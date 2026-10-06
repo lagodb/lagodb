@@ -1,7 +1,7 @@
 //! Native NDJSON Foreign Table INSERT writer.
 
-use lagodb_core::fdw::{ForeignModifyOutcome, ModifyPlanSlot, ModifySlot};
 use lagodb_core::handles::RelationHandle;
+use lagodb_core::tuple::TupleSlotRow;
 use lagodb_core::tuple::{BoundJsonObjectEncoder, SlotDatumIndex};
 
 use crate::error::ConnectorError;
@@ -59,17 +59,14 @@ impl JsonWriteState {
             writer: Some(ObjectSetWriter::new(
                 output,
                 StreamEncoderFactory::new(StreamFormat::Json, compression),
-            )),
+            )?),
         })
     }
 }
 
 impl FormatWriteState for JsonWriteState {
-    fn insert(
-        &mut self,
-        slot: &mut ModifySlot<'_>,
-    ) -> Result<ForeignModifyOutcome, ConnectorError> {
-        let datums = slot.tuple_row().datums();
+    fn write_row(&mut self, row: TupleSlotRow<'_>) -> Result<(), ConnectorError> {
+        let datums = row.datums();
         let values = self.sources.iter().copied().map(|source| {
             // SAFETY: every source token was validated against this relation's
             // tuple width during Begin, and the callback supplies that same
@@ -85,23 +82,7 @@ impl FormatWriteState for JsonWriteState {
             .as_mut()
             .expect("JSON writer is not used after finish")
             .write(row)?;
-        Ok(ForeignModifyOutcome::Applied)
-    }
-
-    fn update(
-        &mut self,
-        _slot: &mut ModifySlot<'_>,
-        _plan_slot: &ModifyPlanSlot<'_>,
-    ) -> Result<ForeignModifyOutcome, ConnectorError> {
-        Err(ConnectorError::modify_not_implemented(FormatKind::Json))
-    }
-
-    fn delete(
-        &mut self,
-        _returned_slot: Option<&mut ModifySlot<'_>>,
-        _plan_slot: &ModifyPlanSlot<'_>,
-    ) -> Result<ForeignModifyOutcome, ConnectorError> {
-        Err(ConnectorError::modify_not_implemented(FormatKind::Json))
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<(), ConnectorError> {

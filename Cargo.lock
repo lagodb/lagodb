@@ -3295,6 +3295,7 @@ dependencies = [
  "lagodb-arrow",
  "lagodb-core",
  "lagodb-storage",
+ "libc",
  "parquet",
  "pgrx",
  "serde",

@@ -1,7 +1,8 @@
 //! Streaming Avro OCF reader and Foreign Scan adapter.
 
-use std::io::{self, Read};
+use std::io::BufReader;
 
+use crate::storage::InputFile;
 use apache_avro::types::Value;
 use apache_avro::{Reader, Schema};
 use lagodb_core::fdw::{
@@ -14,7 +15,6 @@ use lagodb_core::tuple::{
     ByteaView, Cell, ColumnDatumCodec, ColumnDatumTarget, PG_EPOCH_DAYS_DIFF,
     PG_EPOCH_USECS_DIFF, StringView, numeric_precision_scale,
 };
-use lagodb_storage::StorageFile;
 use pgrx::datum::{USECS_PER_DAY, Uuid as PgUuid};
 use pgrx::pg_sys;
 use pgrx::prelude::{Date, Time, Timestamp, TimestampWithTimeZone};
@@ -24,7 +24,7 @@ use crate::fdw::LagodbConnectors;
 use crate::format::{
     FormatKind, FormatScanPlanner, FormatScanPrivate, FormatScanState,
 };
-use crate::storage::{ObjectFiles, ReadProgress};
+use crate::storage::ObjectFiles;
 
 use super::AvroValueKind;
 
@@ -80,42 +80,6 @@ impl FormatScanPlanner for AvroScanPlanner {
         context: &ForeignPlanContext<'_, LagodbConnectors>,
     ) -> Result<ForeignPlanSpec<FormatScanPrivate>, ConnectorError> {
         Ok(ForeignPlanSpec::new(context.path_private().to_owned()))
-    }
-}
-
-/// Owns the storage handle behind one Avro reader.
-pub(super) struct AvroObjectReader {
-    file: StorageFile,
-    progress: Option<ReadProgress>,
-}
-
-impl AvroObjectReader {
-    pub(super) fn new(file: StorageFile) -> Self {
-        Self {
-            file,
-            progress: None,
-        }
-    }
-
-    pub(super) fn with_progress(file: StorageFile) -> (Self, ReadProgress) {
-        let progress = ReadProgress::default();
-        (
-            Self {
-                file,
-                progress: Some(progress.clone()),
-            },
-            progress,
-        )
-    }
-}
-
-impl Read for AvroObjectReader {
-    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        let read = self.file.read_into(output).map_err(io::Error::other)?;
-        if let Some(progress) = &self.progress {
-            progress.record(read);
-        }
-        Ok(read)
     }
 }
 
@@ -342,7 +306,7 @@ struct ScanColumn {
 
 pub(super) struct AvroScanState {
     files: ObjectFiles,
-    reader: Option<Reader<'static, AvroObjectReader>>,
+    reader: Option<Reader<'static, BufReader<InputFile>>>,
     schema: Option<Schema>,
     columns: Box<[ScanColumn]>,
 }
@@ -369,7 +333,7 @@ impl AvroScanState {
                 columns: Box::new([]),
             });
         };
-        let reader = Reader::new(AvroObjectReader::new(first?))?;
+        let reader = Reader::new(BufReader::new(first?))?;
         let schema = reader.writer_schema().clone();
         let Schema::Record(record) = &schema else {
             return Err(ConnectorError::invalid_object_schema(
@@ -434,7 +398,7 @@ impl AvroScanState {
         let Some(file) = self.files.next() else {
             return Ok(false);
         };
-        let reader = Reader::new(AvroObjectReader::new(file?))?;
+        let reader = Reader::new(BufReader::new(file?))?;
         let schema = self
             .schema
             .as_ref()

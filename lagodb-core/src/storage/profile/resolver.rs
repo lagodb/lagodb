@@ -216,6 +216,13 @@ impl StorageServerCatalog {
         {
             return Ok(None);
         }
+        // Only explicitly scoped profiles participate in implicit routing.
+        // Unscoped servers remain available through explicit selection.
+        // SAFETY: GetForeignServer owns this option list for this catalog lookup.
+        let options = unsafe { ForeignOptionView::from_raw(server.options) };
+        if !options.iter().any(|option| option.name() == c"scope") {
+            return Ok(None);
+        }
         let server_name = unsafe { CStr::from_ptr(server.servername) }
             .to_string_lossy()
             .into_owned()

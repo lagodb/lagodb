@@ -1,5 +1,6 @@
 //! Direct Datum/slot adapters for Avro COPY FROM and COPY TO.
 
+use std::io::BufReader;
 use std::panic::AssertUnwindSafe;
 
 use apache_avro::types::Value;
@@ -12,13 +13,13 @@ use lagodb_core::diag::PgReportError;
 use pgrx::PgTryBuilder;
 
 use crate::error::ConnectorError;
-use crate::format::copy::{
-    FormatCopyDestination, FormatCopyInput, FormatCopyOutput, FormatCopySource,
-};
+use crate::format::copy::{FormatCopyDestination, FormatCopyOutput};
 use crate::format::{AvroWriteCompression, FormatKind};
-use crate::storage::{ObjectFiles, ObjectOutput, ReadProgress};
+use crate::storage::{
+    InputFile, ObjectFiles, ObjectOutput, ProgressReader, ReadProgress,
+};
 
-use super::read::{AvroObjectReader, AvroReadColumn};
+use super::read::AvroReadColumn;
 use super::write::{AvroDatumRow, AvroObjectWriter, AvroWritePlan};
 
 struct CopyReadColumn {
@@ -28,7 +29,7 @@ struct CopyReadColumn {
 
 /// Avro-to-Datum source for PostgreSQL COPY FROM.
 pub(in crate::format) struct AvroCopySource {
-    reader: Reader<'static, AvroObjectReader>,
+    reader: Reader<'static, BufReader<ProgressReader<InputFile>>>,
     columns: Box<[CopyReadColumn]>,
     logical_row: u64,
     progress: ReadProgress,
@@ -42,8 +43,10 @@ impl AvroCopySource {
         let first = files.next().expect(
             "Avro COPY FROM resolves one exact object before opening its source",
         );
-        let (object, progress) = AvroObjectReader::with_progress(first?);
-        let reader = Reader::new(object).map_err(ConnectorError::from)?;
+        let progress = ReadProgress::default();
+        let object = ProgressReader::new(first?, Some(progress.clone()));
+        let reader =
+            Reader::new(BufReader::new(object)).map_err(ConnectorError::from)?;
         let schema = reader.writer_schema().clone();
         let Schema::Record(record) = &schema else {
             return Err(ConnectorError::invalid_object_schema(
@@ -103,15 +106,6 @@ impl AvroCopySource {
 }
 
 impl CopyDatumSource for AvroCopySource {
-    fn initialize(&mut self, layout: &CopyColumnLayout) -> Result<(), CopyError> {
-        if layout.len() != self.columns.len() {
-            return Err(CopyError::invalid_column_layout(
-                "Avro source was bound to a different COPY layout",
-            ));
-        }
-        Ok(())
-    }
-
     fn next_row(
         &mut self,
         row: CopyInputRow<'_>,
@@ -164,12 +158,6 @@ impl CopyDatumSource for AvroCopySource {
     }
 }
 
-impl FormatCopySource for AvroCopySource {
-    fn input(&mut self) -> FormatCopyInput<'_> {
-        FormatCopyInput::Datums(self)
-    }
-}
-
 struct ReadyAvroCopyDestination {
     row: AvroDatumRow,
     writer: AvroObjectWriter,
@@ -193,20 +181,10 @@ impl AvroCopyDestination {
             ready: None,
         }
     }
+}
 
-    pub(in crate::format) fn finish(mut self) -> Result<(), CopyError> {
-        self.ready
-            .as_mut()
-            .expect("COPY TO initializes its destination before producing rows")
-            .writer
-            .finish(true)
-            .map_err(CopyError::from)
-    }
-
-    fn initialize_inner(
-        &mut self,
-        layout: &CopyColumnLayout,
-    ) -> Result<(), CopyError> {
+impl CopyTupleDestination for AvroCopyDestination {
+    fn initialize(&mut self, layout: &CopyColumnLayout) -> Result<(), CopyError> {
         let fields =
             layout.columns().iter().map(|column| {
                 column.name().to_str().map(|name| {
@@ -226,15 +204,9 @@ impl AvroCopyDestination {
             .expect("COPY TO initializes its destination exactly once");
         self.ready = Some(ReadyAvroCopyDestination {
             row: AvroDatumRow::new(layout.len()),
-            writer: AvroObjectWriter::new(output, plan, self.compression),
+            writer: AvroObjectWriter::new(output, plan, self.compression)?,
         });
         Ok(())
-    }
-}
-
-impl CopyTupleDestination for AvroCopyDestination {
-    fn initialize(&mut self, layout: &CopyColumnLayout) -> Result<(), CopyError> {
-        self.initialize_inner(layout)
     }
 
     fn write_slot(&mut self, row: CopyOutputRow<'_>) -> Result<(), CopyError> {
@@ -272,10 +244,5 @@ impl CopyTupleDestination for AvroCopyDestination {
 impl FormatCopyDestination for AvroCopyDestination {
     fn output(&mut self) -> FormatCopyOutput<'_> {
         FormatCopyOutput::Tuples(self)
-    }
-
-    fn finish(self: Box<Self>) -> Result<(), CopyError> {
-        let destination = *self;
-        destination.finish()
     }
 }

@@ -9,14 +9,11 @@ mod schema;
 mod write;
 mod writer;
 
+use crate::storage::InputFile;
 use lagodb_core::expr::pushdown::FilterPlanningContext;
-use lagodb_core::fdw::{
-    ForeignInsertBeginContext, ForeignModifyBeginContext, ForeignModifyCapabilities,
-    ForeignModifyOperation, ForeignModifyPlanContext, ForeignModifyPlanSpec,
-    ForeignModifyRelationContext, StartForeignScanContext,
-};
+use lagodb_core::fdw::StartForeignScanContext;
+use lagodb_core::handles::RelationHandle;
 use lagodb_core::plan_data::PlanDataReader;
-use lagodb_storage::StorageFile;
 
 use crate::error::ConnectorError;
 use crate::fdw::LagodbConnectors;
@@ -25,8 +22,8 @@ use crate::storage::{ObjectFiles, ObjectOutput};
 use super::{
     FormatAnalyzer, FormatFilterPlanner, FormatKind, FormatObject, FormatOption,
     FormatPlannedFilter, FormatReader, FormatScanPlanner, FormatScanState,
-    FormatSchemaReader, FormatWritePrivate, FormatWriteState, FormatWriter,
-    InferredSchema, ParquetWriteCompression,
+    FormatSchemaReader, FormatWriteState, FormatWriter, InferredSchema,
+    ParquetWriteCompression,
 };
 
 pub(super) use copy::{ParquetCopyDestination, ParquetCopySource};
@@ -96,47 +93,13 @@ impl FormatReader for ParquetFormat {
 }
 
 impl FormatWriter for ParquetFormat {
-    fn capabilities(
-        &self,
-        _context: &ForeignModifyRelationContext<'_>,
-    ) -> Result<ForeignModifyCapabilities, ConnectorError> {
-        Ok(ForeignModifyCapabilities::new(true, false, false))
-    }
-
-    fn plan_modify(
-        &self,
-        context: &ForeignModifyPlanContext<'_>,
-    ) -> Result<ForeignModifyPlanSpec<FormatWritePrivate>, ConnectorError> {
-        if context.operation() != ForeignModifyOperation::Insert {
-            return Err(ConnectorError::modify_not_implemented(FormatKind::Parquet));
-        }
-        Ok(ForeignModifyPlanSpec::new(FormatWritePrivate::new(
-            FormatKind::Parquet,
-        )))
-    }
-
-    fn begin_modify(
+    fn begin(
         self: Box<Self>,
-        context: ForeignModifyBeginContext<'_, FormatWritePrivate>,
-        output: ObjectOutput,
-    ) -> Result<Box<dyn FormatWriteState>, ConnectorError> {
-        if context.operation() != ForeignModifyOperation::Insert {
-            return Err(ConnectorError::modify_not_implemented(FormatKind::Parquet));
-        }
-        Ok(Box::new(write::ParquetWriteState::begin(
-            context.relation(),
-            output,
-            self.write_compression,
-        )?))
-    }
-
-    fn begin_insert(
-        self: Box<Self>,
-        context: &mut ForeignInsertBeginContext<'_>,
+        relation: &RelationHandle<'_>,
         output: ObjectOutput,
     ) -> Result<Box<dyn FormatWriteState>, ConnectorError> {
         Ok(Box::new(write::ParquetWriteState::begin(
-            context.relation(),
+            relation,
             output,
             self.write_compression,
         )?))
@@ -146,7 +109,7 @@ impl FormatWriter for ParquetFormat {
 impl FormatSchemaReader for ParquetFormat {
     fn infer_schema(
         &self,
-        file: &mut StorageFile,
+        file: &mut InputFile,
     ) -> Result<InferredSchema, ConnectorError> {
         schema::infer(file)
     }

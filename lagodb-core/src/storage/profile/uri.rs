@@ -73,6 +73,21 @@ pub struct ObjectUri {
 }
 
 impl ObjectUri {
+    /// Recognize a URI scheme followed by `://` without allocating or decoding.
+    ///
+    /// This classifies locations independently of supported object providers;
+    /// a separator inside a local path does not make that path a URI.
+    pub fn has_uri_scheme(value: &[u8]) -> bool {
+        let Some(separator) = value.windows(3).position(|part| part == b"://") else {
+            return false;
+        };
+        let scheme = &value[..separator];
+        scheme.first().is_some_and(u8::is_ascii_alphabetic)
+            && scheme.iter().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(*byte, b'+' | b'-' | b'.')
+            })
+    }
+
     pub fn is_supported_prefix(value: &[u8]) -> bool {
         let Some(scheme_end) = value.windows(3).position(|part| part == b"://")
         else {

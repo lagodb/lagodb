@@ -1,31 +1,29 @@
 //! PostgreSQL COPY CSV-format object and its validated options.
 
-use lagodb_core::fdw::{
-    ColumnRequirements, ForeignInsertBeginContext, ForeignModifyBeginContext,
-    ForeignModifyCapabilities, ForeignModifyOperation, ForeignModifyPlanContext,
-    ForeignModifyPlanSpec, ForeignModifyRelationContext, StartForeignScanContext,
-};
+use crate::storage::InputFile;
+use lagodb_core::fdw::{ColumnRequirements, StartForeignScanContext};
 use lagodb_core::handles::RelationHandle;
 use lagodb_core::storage::foreign::ForeignOptionView;
-use lagodb_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 
 use super::delimited::{DelimitedFormat, DelimitedOptions, DelimitedOptionsBuilder};
+use super::delimited_scan::{DelimitedScanPlanner, DelimitedScanState};
 use super::delimited_schema::DelimitedSchemaReader;
+use super::delimited_write::DelimitedWriteState;
 use super::{
     FormatKind, FormatObject, FormatOption, FormatReader, FormatScanPlanner,
-    FormatScanState, FormatSchemaReader, FormatWritePrivate, FormatWriteState,
-    FormatWriter, InferredSchema, StreamCompression,
+    FormatScanState, FormatSchemaReader, FormatWriteState, FormatWriter,
+    InferredSchema, StreamCompressionOptions,
 };
 use crate::fdw::LagodbConnectors;
-use crate::storage::ObjectOutput;
+use crate::storage::{ObjectFiles, ObjectOutput};
 
 /// CSV-format processor.
 pub(crate) struct CsvFormat {
     pub(super) options: CsvOptions,
-    pub(super) compression: StreamCompression,
+    pub(super) compression: StreamCompressionOptions,
 }
 
 #[derive(Debug)]
@@ -163,7 +161,7 @@ impl CsvHeader {
 
 impl CsvFormat {
     pub(crate) fn resolve(
-        compression: StreamCompression,
+        compression: StreamCompressionOptions,
         options: &[FormatOption<'_>],
     ) -> Result<Self, ConnectorError> {
         let mut delimited = DelimitedOptionsBuilder::default();
@@ -265,8 +263,9 @@ impl FormatObject for CsvFormat {
 impl FormatSchemaReader for CsvFormat {
     fn infer_schema(
         &self,
-        file: &mut StorageFile,
+        file: &mut InputFile,
     ) -> Result<InferredSchema, ConnectorError> {
+        let compression = self.compression.for_file(file);
         // SAFETY: postgres_schema_options returns a PostgreSQL-owned COPY
         // option list in the current context, which outlives inference.
         unsafe {
@@ -276,21 +275,19 @@ impl FormatSchemaReader for CsvFormat {
                 self.options.postgres_schema_options()?,
             )
         }
-        .infer(file, self.compression)
+        .infer(file, compression)
     }
 }
 
 impl FormatReader for CsvFormat {
     fn planner(self: Box<Self>) -> Box<dyn FormatScanPlanner> {
-        Box::new(super::delimited_scan::DelimitedScanPlanner::new(
-            FormatKind::Csv,
-        ))
+        Box::new(DelimitedScanPlanner::new(FormatKind::Csv))
     }
 
     fn begin(
         self: Box<Self>,
         context: StartForeignScanContext<'_, LagodbConnectors>,
-        files: crate::storage::ObjectFiles,
+        files: ObjectFiles,
     ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
         let Self {
             options,
@@ -298,7 +295,7 @@ impl FormatReader for CsvFormat {
         } = *self;
         let postgres_options =
             options.postgres_options(&context.relation, context.required_columns)?;
-        Ok(Box::new(super::delimited_scan::DelimitedScanState::begin(
+        Ok(Box::new(DelimitedScanState::begin(
             context,
             files,
             compression,
@@ -308,54 +305,9 @@ impl FormatReader for CsvFormat {
 }
 
 impl FormatWriter for CsvFormat {
-    fn capabilities(
-        &self,
-        _context: &ForeignModifyRelationContext<'_>,
-    ) -> Result<ForeignModifyCapabilities, ConnectorError> {
-        Ok(ForeignModifyCapabilities::new(true, false, false))
-    }
-
-    fn plan_modify(
-        &self,
-        context: &ForeignModifyPlanContext<'_>,
-    ) -> Result<ForeignModifyPlanSpec<FormatWritePrivate>, ConnectorError> {
-        if context.operation() != ForeignModifyOperation::Insert {
-            return Err(ConnectorError::modify_not_implemented(FormatKind::Csv));
-        }
-        Ok(ForeignModifyPlanSpec::new(FormatWritePrivate::new(
-            FormatKind::Csv,
-        )))
-    }
-
-    fn begin_modify(
+    fn begin(
         self: Box<Self>,
-        context: ForeignModifyBeginContext<'_, FormatWritePrivate>,
-        output: ObjectOutput,
-    ) -> Result<Box<dyn FormatWriteState>, ConnectorError> {
-        if context.operation() != ForeignModifyOperation::Insert {
-            return Err(ConnectorError::modify_not_implemented(FormatKind::Csv));
-        }
-        let Self {
-            options,
-            compression,
-        } = *self;
-        let postgres_options = options.postgres_output_options()?;
-        let write_header = options.header_enabled();
-        Ok(Box::new(
-            super::delimited_write::DelimitedWriteState::begin(
-                context.relation(),
-                output,
-                DelimitedFormat::Csv,
-                compression,
-                postgres_options,
-                write_header,
-            )?,
-        ))
-    }
-
-    fn begin_insert(
-        self: Box<Self>,
-        context: &mut ForeignInsertBeginContext<'_>,
+        relation: &RelationHandle<'_>,
         output: ObjectOutput,
     ) -> Result<Box<dyn FormatWriteState>, ConnectorError> {
         let Self {
@@ -364,16 +316,14 @@ impl FormatWriter for CsvFormat {
         } = *self;
         let postgres_options = options.postgres_output_options()?;
         let write_header = options.header_enabled();
-        Ok(Box::new(
-            super::delimited_write::DelimitedWriteState::begin(
-                context.relation(),
-                output,
-                DelimitedFormat::Csv,
-                compression,
-                postgres_options,
-                write_header,
-            )?,
-        ))
+        Ok(Box::new(DelimitedWriteState::begin(
+            relation,
+            output,
+            DelimitedFormat::Csv,
+            compression.for_output(),
+            postgres_options,
+            write_header,
+        )?))
     }
 }
 

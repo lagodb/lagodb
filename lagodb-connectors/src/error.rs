@@ -134,12 +134,6 @@ pub(crate) enum ConnectorError {
     #[error("foreign table format changed after the plan was created")]
     PlanFormatChanged,
 
-    #[error("invalid connector scan lifecycle: {detail}")]
-    InvalidScanLifecycle { detail: &'static str },
-
-    #[error("{format} format scan is not implemented")]
-    ScanNotImplemented { format: FormatKind },
-
     #[error("{format} format modify is not implemented")]
     ModifyNotImplemented { format: FormatKind },
 
@@ -163,9 +157,6 @@ pub(crate) enum ConnectorError {
 
     #[error(transparent)]
     StorageAcquire(Box<StorageAcquireError<StorageProfileError>>),
-
-    #[error(transparent)]
-    ForeignModify(ForeignModifyError),
 
     #[error(transparent)]
     Postgres(#[from] PgReportError),
@@ -386,11 +377,6 @@ impl ConnectorError {
     }
 
     #[inline]
-    pub(crate) fn foreign_modify(error: ForeignModifyError) -> Self {
-        Self::ForeignModify(error)
-    }
-
-    #[inline]
     pub(crate) const fn invalid_plan_format(wire: i32) -> Self {
         Self::InvalidPlanFormat { wire }
     }
@@ -398,11 +384,6 @@ impl ConnectorError {
     #[inline]
     pub(crate) const fn plan_format_changed() -> Self {
         Self::PlanFormatChanged
-    }
-
-    #[inline]
-    pub(crate) const fn scan_not_implemented(format: FormatKind) -> Self {
-        Self::ScanNotImplemented { format }
     }
 
     #[inline]
@@ -482,7 +463,6 @@ impl SqlStateError for ConnectorError {
             }
             Self::InvalidPlanFormat { .. }
             | Self::InvalidFilterPlan { .. }
-            | Self::InvalidScanLifecycle { .. }
             | Self::PlanData(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
             Self::InvalidFilterDatum { .. } => PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
             Self::PlanFormatChanged => {
@@ -491,8 +471,7 @@ impl SqlStateError for ConnectorError {
             Self::Storage(error) => error.sql_error_code(),
             Self::StorageProfile(error) => error.sql_error_code(),
             Self::StorageAcquire(error) => error.sql_error_code(),
-            Self::ForeignModify(error) => error.sql_error_code(),
-            Self::ScanNotImplemented { .. } | Self::ModifyNotImplemented { .. } => {
+            Self::ModifyNotImplemented { .. } => {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
             }
             Self::TruncateNotImplemented => {
@@ -545,7 +524,6 @@ impl From<ConnectorError> for ForeignModifyError {
     fn from(error: ConnectorError) -> Self {
         match error {
             ConnectorError::Postgres(error) => error.into(),
-            ConnectorError::ForeignModify(error) => error,
             error => ForeignModifyError::provider(error),
         }
     }

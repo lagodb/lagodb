@@ -71,6 +71,9 @@ pub struct AbiHeader {
 
 pub const UTILITY_ROUTE_PASS_THROUGH: u8 = 0;
 pub const UTILITY_ROUTE_CONSUMED: u8 = 1;
+/// A matching table consumer used only when no primary consumer claims COPY.
+/// This is a predicate result; successful execution still returns CONSUMED.
+pub const UTILITY_ROUTE_FALLBACK: u8 = 2;
 
 pub const OBJECT_ACCESS_POST_CREATE: u32 = 1 << 0;
 pub const OBJECT_ACCESS_DROP: u32 = 1 << 1;

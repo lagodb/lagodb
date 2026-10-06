@@ -1,9 +1,9 @@
 //! Shared single-object and rolling-object write lifecycle.
 
+use lagodb_core::copy::CopyOutputProgress;
+
 use crate::error::ConnectorError;
-use crate::storage::{
-    ObjectFileSuffix, ObjectOutput, StagedObjectUpload, StagedObjectWriter,
-};
+use crate::storage::{FilePublication, ObjectFileSuffix, ObjectOutput, OutputWriter};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FileWriteProgress {
@@ -34,7 +34,7 @@ pub(crate) trait ObjectFileEncoder {
 
     fn bytes_written(&self) -> u64;
 
-    fn finish(self) -> Result<StagedObjectWriter, ConnectorError>;
+    fn finish(self) -> Result<OutputWriter, ConnectorError>;
 }
 
 pub(crate) trait ObjectFileEncoderFactory {
@@ -45,10 +45,8 @@ pub(crate) trait ObjectFileEncoderFactory {
     /// factory.
     fn file_suffix(&self) -> ObjectFileSuffix;
 
-    fn open(
-        &mut self,
-        writer: StagedObjectWriter,
-    ) -> Result<Self::Encoder, ConnectorError>;
+    fn open(&mut self, writer: OutputWriter)
+    -> Result<Self::Encoder, ConnectorError>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,7 +67,7 @@ impl EmptyOutputPolicy {
 
 struct OpenObject<E> {
     encoder: E,
-    upload: StagedObjectUpload,
+    upload: FilePublication,
 }
 
 /// Owns all files produced by one statement-scoped output. Prefix targets are
@@ -83,20 +81,33 @@ where
     current: Option<OpenObject<F::Encoder>>,
     completed_object: bool,
     completed_bytes: u64,
+    copy_progress: Option<CopyOutputProgress>,
 }
 
 impl<F> ObjectSetWriter<F>
 where
     F: ObjectFileEncoderFactory,
 {
-    pub(crate) fn new(output: ObjectOutput, factory: F) -> Self {
-        Self {
+    pub(crate) fn new(
+        output: ObjectOutput,
+        factory: F,
+    ) -> Result<Self, ConnectorError> {
+        let mut writer = Self {
             output,
             factory,
             current: None,
             completed_object: false,
             completed_bytes: 0,
+            copy_progress: None,
+        };
+        if writer.output.open_before_execution() {
+            writer.open_object()?;
         }
+        Ok(writer)
+    }
+
+    pub(crate) fn set_copy_progress(&mut self, progress: CopyOutputProgress) {
+        self.copy_progress = Some(progress);
     }
 
     pub(crate) fn write(&mut self, input: &F::Input) -> Result<(), ConnectorError> {
@@ -145,7 +156,7 @@ where
 
     fn open_object(&mut self) -> Result<(), ConnectorError> {
         let allocation = self.output.allocate_next(self.factory.file_suffix())?;
-        let (writer, upload) = StagedObjectUpload::start(allocation)?;
+        let (writer, upload) = FilePublication::start(allocation)?;
         let encoder = self.factory.open(writer)?;
         self.current = Some(OpenObject { encoder, upload });
         Ok(())
@@ -157,9 +168,15 @@ where
         };
         let writer = encoder.finish()?;
         let bytes_written = writer.bytes_written();
-        writer.finish_local()?;
-        upload.finish()?;
+        writer.finish_file()?;
         self.completed_bytes = self.completed_bytes.saturating_add(bytes_written);
+        // The encoder has emitted framing and compression trailers. Publish
+        // physical bytes before synchronous local publication or remote upload.
+        // This is a file-boundary operation, never an encoder-write operation.
+        if let Some(progress) = &self.copy_progress {
+            progress.publish(self.completed_bytes);
+        }
+        upload.finish()?;
         self.completed_object = true;
         Ok(())
     }

@@ -5,6 +5,7 @@ use std::panic::AssertUnwindSafe;
 use pgrx::{PgTryBuilder, pg_sys};
 
 use crate::diag::PgError;
+use crate::tuple::TupleSlotRow;
 
 use super::error::CopyError;
 use super::pg::{CopyBridge, LagodbCopyRowEncoder};
@@ -47,17 +48,14 @@ impl CopyRowEncoder {
         self.encode(std::ptr::null_mut(), true)
     }
 
-    /// Encode one relation-shaped slot without a line terminator.
+    /// Encode one materialized relation-shaped row without a line terminator.
     ///
     /// # Safety
     ///
-    /// `slot` must contain a live virtual or physical tuple with the
-    /// relation-shaped descriptor bound at [`Self::begin`].
-    pub unsafe fn row(
-        &mut self,
-        slot: *mut pg_sys::TupleTableSlot,
-    ) -> Result<&[u8], CopyError> {
-        self.encode(slot, false)
+    /// `row` must have the relation-shaped descriptor bound at [`Self::begin`].
+    /// Its TupleSlotRow view has already populated the slot's Datum arrays.
+    pub unsafe fn row(&mut self, row: TupleSlotRow<'_>) -> Result<&[u8], CopyError> {
+        self.encode(row.as_raw(), false)
     }
 
     fn encode(

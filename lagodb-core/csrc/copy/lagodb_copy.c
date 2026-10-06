@@ -655,7 +655,7 @@ lagodb_encode_copy_row(LagodbCopyRowEncoder *copy_state, TupleTableSlot *slot,
 	oldcontext = MemoryContextSwitchTo(copy_state->rowcontext);
 	PG_TRY();
 	{
-		slot_getallattrs(slot);
+		/* TupleSlotRow has already populated the slot's Datum arrays. */
 		foreach(cur, copy_state->attnumlist)
 		{
 			int			attnum = lfirst_int(cur);

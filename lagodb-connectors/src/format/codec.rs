@@ -6,6 +6,8 @@
 
 use std::fmt::{self, Display, Formatter};
 
+use crate::storage::InputFile;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StreamCompression {
     None,
@@ -29,6 +31,37 @@ impl StreamCompression {
             "zst" | "zstd" => Some(Self::Zstd),
             _ => None,
         }
+    }
+}
+
+/// Preserve explicit overrides while inferring reads from each selected file.
+/// Output compression is bound once from the configured destination path.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StreamCompressionOptions {
+    explicit: Option<StreamCompression>,
+    output: StreamCompression,
+}
+
+impl StreamCompressionOptions {
+    pub(crate) fn new(
+        explicit: Option<StreamCompression>,
+        suffix: Option<StreamCompression>,
+    ) -> Self {
+        Self {
+            explicit,
+            output: explicit.or(suffix).unwrap_or(StreamCompression::None),
+        }
+    }
+
+    pub(crate) fn for_file(self, file: &InputFile) -> StreamCompression {
+        self.explicit.unwrap_or_else(|| {
+            StreamCompression::from_suffix(file.name())
+                .unwrap_or(StreamCompression::None)
+        })
+    }
+
+    pub(crate) const fn for_output(self) -> StreamCompression {
+        self.output
     }
 }
 

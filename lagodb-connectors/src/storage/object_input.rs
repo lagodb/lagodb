@@ -3,19 +3,20 @@
 use lagodb_core::storage::foreign::{
     ObjectAccess, ObjectPrefixAccess, StorageManager,
 };
-use lagodb_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
-use crate::format::FormatKind;
 
-use super::{ObjectLocationKind, ResolvedStorageLocation};
+use super::local_input::{LocalFiles, LocalInput};
+use super::{InputFile, ObjectLocationKind, ResolvedStorageLocation};
 
 const LIST_PAGE_SIZE: u32 = 1_024;
 
 pub(crate) enum ObjectInput {
+    Local(LocalInput),
     Exact {
         access: ObjectAccess,
+        key: Box<str>,
         size: u64,
     },
     Prefix {
@@ -30,15 +31,20 @@ impl ObjectInput {
     /// for rescans.
     pub(crate) fn resolve(
         location: &ResolvedStorageLocation,
-        manager: &StorageManager,
-        format: FormatKind,
+        kind: ObjectLocationKind,
+        matches: impl Fn(&str) -> bool,
     ) -> Result<Self, ConnectorError> {
-        match ObjectLocationKind::classify(location.object_key(), format)? {
+        if let Some(path) = location.local_path() {
+            return Ok(Self::Local(LocalInput::resolve(path, kind, matches)?));
+        }
+        let manager = StorageManager::from_pg_gucs()?;
+        match kind {
             ObjectLocationKind::Exact => {
-                let exact = location.acquire_object_access(manager)?;
+                let exact = location.acquire_object_access(&manager)?;
                 let size = exact.head()?.size;
                 return Ok(Self::Exact {
                     access: exact,
+                    key: location.object_key().into(),
                     size,
                 });
             }
@@ -46,7 +52,7 @@ impl ObjectInput {
         }
 
         let prefix = location.normalized_prefix();
-        let access = location.acquire_prefix_access(manager, &prefix)?;
+        let access = location.acquire_prefix_access(&manager, &prefix)?;
         let mut keys = Vec::new();
         let mut total_bytes = 0_u64;
         // Prefix scans intentionally materialize and sort one complete LIST.
@@ -60,7 +66,7 @@ impl ObjectInput {
                 break;
             };
             for entry in entries {
-                if format.matches_object_key(&entry.key) {
+                if matches(&entry.key) {
                     total_bytes = total_bytes.saturating_add(entry.size);
                     keys.push(entry.key);
                 }
@@ -81,6 +87,7 @@ impl ObjectInput {
 
     pub(crate) const fn total_bytes(&self) -> u64 {
         match self {
+            Self::Local(input) => input.total_bytes(),
             Self::Exact { size, .. } => *size,
             Self::Prefix { total_bytes, .. } => *total_bytes,
         }
@@ -88,8 +95,10 @@ impl ObjectInput {
 
     pub(crate) fn open(self) -> ObjectFiles {
         match self {
-            Self::Exact { access, .. } => ObjectFiles::Exact {
+            Self::Local(input) => ObjectFiles::Local(input.open()),
+            Self::Exact { access, key, .. } => ObjectFiles::Exact {
                 access,
+                key,
                 emitted: false,
             },
             Self::Prefix { access, keys, .. } => ObjectFiles::Prefix {
@@ -102,8 +111,10 @@ impl ObjectInput {
 }
 
 pub(crate) enum ObjectFiles {
+    Local(LocalFiles),
     Exact {
         access: ObjectAccess,
+        key: Box<str>,
         emitted: bool,
     },
     Prefix {
@@ -116,6 +127,7 @@ pub(crate) enum ObjectFiles {
 impl ObjectFiles {
     pub(crate) fn reset(&mut self) {
         match self {
+            Self::Local(files) => files.reset(),
             Self::Exact { emitted, .. } => *emitted = false,
             Self::Prefix { index, .. } => *index = 0,
         }
@@ -123,13 +135,23 @@ impl ObjectFiles {
 }
 
 impl Iterator for ObjectFiles {
-    type Item = Result<StorageFile, ConnectorError>;
+    type Item = Result<InputFile, ConnectorError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::Exact { access, emitted } if !*emitted => {
+            Self::Local(files) => files.next(),
+            Self::Exact {
+                access,
+                key,
+                emitted,
+            } if !*emitted => {
                 *emitted = true;
-                Some(access.open().map_err(ConnectorError::from))
+                Some(
+                    access
+                        .open()
+                        .map(|file| InputFile::object(file, key))
+                        .map_err(ConnectorError::from),
+                )
             }
             Self::Exact { .. } => None,
             Self::Prefix {
@@ -141,6 +163,7 @@ impl Iterator for ObjectFiles {
                 access
                     .object(key)
                     .and_then(|object| object.open())
+                    .map(|file| InputFile::object(file, key))
                     .map_err(ConnectorError::from)
             }),
         }

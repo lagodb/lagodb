@@ -1,5 +1,6 @@
 //! Prefix-only immutable Parquet Foreign Table writer.
 
+use core::ffi::c_int;
 use std::sync::Arc;
 
 use arrow_schema::{Field, Schema};
@@ -7,11 +8,11 @@ use lagodb_arrow::{
     BoundWriteBuffer, BoundWriteColumnPlan, PgColumnType, resolve_column_rule,
 };
 use lagodb_core::batch::BatchBuffer;
-use lagodb_core::fdw::{ForeignModifyOutcome, ModifyPlanSlot, ModifySlot};
 use lagodb_core::handles::RelationHandle;
+use lagodb_core::tuple::TupleSlotRow;
 
 use crate::error::ConnectorError;
-use crate::format::{FormatWriteState, ParquetWriteCompression};
+use crate::format::{FormatKind, FormatWriteState, ParquetWriteCompression};
 use crate::storage::ObjectOutput;
 
 use super::schema::parquet_arrow_type;
@@ -34,7 +35,7 @@ impl ParquetWriteState {
         let (schema, plans) = Self::bind_schema(relation)?;
         let buffer = BoundWriteBuffer::new(Arc::clone(&schema), plans)?;
         let writer =
-            ParquetObjectWriter::new(output, Arc::clone(&schema), compression);
+            ParquetObjectWriter::new(output, Arc::clone(&schema), compression)?;
         Ok(Self { buffer, writer })
     }
 
@@ -47,7 +48,7 @@ impl ParquetWriteState {
         for column in live.iter() {
             let name = column.name().to_str().map_err(|_| {
                 ConnectorError::invalid_object_schema(
-                    crate::format::FormatKind::Parquet,
+                    FormatKind::Parquet,
                     "PostgreSQL column names must be valid UTF-8 for Parquet",
                 )
             })?;
@@ -65,7 +66,7 @@ impl ParquetWriteState {
             .map(|(field, (source, oid))| {
                 let pg = PgColumnType::from_pg_type(oid).ok_or_else(|| {
                     ConnectorError::invalid_object_schema(
-                        crate::format::FormatKind::Parquet,
+                        FormatKind::Parquet,
                         format!("PostgreSQL type OID {oid} has no Arrow conversion"),
                     )
                 })?;
@@ -92,39 +93,16 @@ impl ParquetWriteState {
 }
 
 impl FormatWriteState for ParquetWriteState {
-    fn batch_size(&self) -> Result<core::ffi::c_int, ConnectorError> {
-        Ok(INSERT_BATCH_SIZE)
+    fn batch_size(&self) -> c_int {
+        INSERT_BATCH_SIZE
     }
 
-    fn insert(
-        &mut self,
-        slot: &mut ModifySlot<'_>,
-    ) -> Result<ForeignModifyOutcome, ConnectorError> {
-        unsafe { self.buffer.append_slot_row(slot.tuple_row()) }?;
+    fn write_row(&mut self, row: TupleSlotRow<'_>) -> Result<(), ConnectorError> {
+        unsafe { self.buffer.append_slot_row(row) }?;
         if self.buffer.should_flush(BUFFER_FLUSH_BYTES) {
             self.flush_batch()?;
         }
-        Ok(ForeignModifyOutcome::Applied)
-    }
-
-    fn update(
-        &mut self,
-        _slot: &mut ModifySlot<'_>,
-        _plan_slot: &ModifyPlanSlot<'_>,
-    ) -> Result<ForeignModifyOutcome, ConnectorError> {
-        Err(ConnectorError::modify_not_implemented(
-            crate::format::FormatKind::Parquet,
-        ))
-    }
-
-    fn delete(
-        &mut self,
-        _returned_slot: Option<&mut ModifySlot<'_>>,
-        _plan_slot: &ModifyPlanSlot<'_>,
-    ) -> Result<ForeignModifyOutcome, ConnectorError> {
-        Err(ConnectorError::modify_not_implemented(
-            crate::format::FormatKind::Parquet,
-        ))
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<(), ConnectorError> {

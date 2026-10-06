@@ -2,10 +2,13 @@
 
 use std::ffi::CStr;
 
+use crate::storage::profile::ObjectUri;
+
 /// The I/O contract of one COPY command.
 ///
 /// External URIs are handled by provider callbacks. Server files and programs
-/// use PostgreSQL's I/O and require its privileged roles during preparation.
+/// require PostgreSQL's privileged roles during preparation. Native formats
+/// retain that permission contract while a provider owns the file I/O.
 /// The representation matches `LagodbCopyEndpoint` in `lagodb_copy.h`.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,18 +32,8 @@ impl CopyEndpoint {
         let Some(filename) = filename else {
             return Self::ClientStream;
         };
-        let bytes = filename.to_bytes();
-        if let Some(separator) = bytes.windows(3).position(|window| window == b"://")
-        {
-            let scheme = &bytes[..separator];
-            if scheme.first().is_some_and(u8::is_ascii_alphabetic)
-                && scheme.iter().all(|byte| {
-                    byte.is_ascii_alphanumeric()
-                        || matches!(*byte, b'+' | b'-' | b'.')
-                })
-            {
-                return Self::ExternalUri;
-            }
+        if ObjectUri::has_uri_scheme(filename.to_bytes()) {
+            return Self::ExternalUri;
         }
         Self::ServerFile
     }

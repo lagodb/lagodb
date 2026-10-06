@@ -4,12 +4,11 @@ use super::super::ResolvedForeignRelation;
 use core::mem;
 
 use crate::format::{FormatReader, FormatScanState};
-use crate::storage::{ObjectFiles, ObjectInput};
+use crate::storage::ObjectFiles;
 use lagodb_core::fdw::{
     BeginForeignScanContext, ForeignScanError, ReScanForeignScanContext,
     ScanSlotWriter, StartForeignScanContext,
 };
-use lagodb_core::storage::foreign::StorageManager;
 
 use super::super::LagodbConnectors;
 use crate::error::ConnectorError;
@@ -40,8 +39,7 @@ impl ConnectorScanState {
         }
         let (reader, target) =
             selected.into_scan_parts(context.effective_user_id())?;
-        let manager = StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
-        let files = ObjectInput::resolve(&target, &manager, format)?.open();
+        let files = format.input(&target)?.open();
         Ok(Self {
             phase: ConnectorScanPhase::Prepared { reader, files },
         })
@@ -54,10 +52,7 @@ impl ConnectorScanState {
         let ConnectorScanPhase::Prepared { reader, files } =
             mem::replace(&mut self.phase, ConnectorScanPhase::Transitioning)
         else {
-            return Err(ConnectorError::InvalidScanLifecycle {
-                detail: "scan was started more than once",
-            }
-            .into());
+            unreachable!("core starts the connector scan exactly once");
         };
         self.phase = ConnectorScanPhase::Active(reader.begin(context, files)?);
         Ok(())
@@ -68,10 +63,7 @@ impl ConnectorScanState {
         output: &mut ScanSlotWriter<'_>,
     ) -> Result<bool, ForeignScanError> {
         let ConnectorScanPhase::Active(inner) = &mut self.phase else {
-            return Err(ConnectorError::InvalidScanLifecycle {
-                detail: "scan cursor is not active",
-            }
-            .into());
+            unreachable!("core starts the connector scan before requesting rows");
         };
         Ok(inner.next_slot(output)?)
     }
@@ -81,10 +73,7 @@ impl ConnectorScanState {
         context: ReScanForeignScanContext<'_, LagodbConnectors>,
     ) -> Result<(), ForeignScanError> {
         let ConnectorScanPhase::Active(inner) = &mut self.phase else {
-            return Err(ConnectorError::InvalidScanLifecycle {
-                detail: "scan cursor is not active during rescan",
-            }
-            .into());
+            unreachable!("core starts the connector scan before rescanning");
         };
         Ok(inner.rescan(context)?)
     }

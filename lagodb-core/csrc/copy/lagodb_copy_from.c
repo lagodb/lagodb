@@ -1982,7 +1982,8 @@ LagodbBeginCopyFrom(ParseState *pstate,
 
 	pgstat_progress_update_multi_param(3, progress_cols, progress_vals);
 
-	if (!typed_input && cstate->opts.binary)
+	/* Callback input is opened by Rust after this state is prepared. */
+	if (!typed_input && !data_source_cb && cstate->opts.binary)
 	{
 		/* Read and verify binary header */
 		ReceiveCopyBinaryHeader(cstate);
@@ -2050,6 +2051,19 @@ lagodb_execute_routed_copy_from(CopyFromState state,
 								void *typed_source_context,
 								bool provider_owned_partitioned_table)
 {
+	/*
+	 * Provider byte input is now open and its callback is active. Preserve PG's
+	 * binary-header validation before starting the executor, using the COPY
+	 * context as BeginCopyFrom does for file/program/frontend input.
+	 */
+	if (typed_source == NULL && state->data_source_cb && state->opts.binary)
+	{
+		MemoryContext oldcontext = MemoryContextSwitchTo(state->copycontext);
+
+		ReceiveCopyBinaryHeader(state);
+		MemoryContextSwitchTo(oldcontext);
+	}
+
 	return LagodbCopyFromExecutor(state, typed_source, typed_source_context,
 								  provider_owned_partitioned_table);
 }

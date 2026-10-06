@@ -12,4 +12,12 @@ RESET client_min_messages;
 \setenv PGDATABASE :DBNAME
 \! python3 ../../../scripts/pg_regress/regress_fixture.py teardown
 object_storage_teardown: true
-\set ECHO none
+\i ../../../scripts/pg_regress/fixture_command_result.sql
+-- psql's \! records an ordinary nonzero exit in SHELL_ERROR and keeps running.
+-- Include with \i from the suite root: pg_regress feeds top-level SQL via stdin.
+-- Only failed infrastructure commands enable ON_ERROR_STOP; expected SQL errors
+-- in the actual regression cases retain their normal pg_regress behavior.
+\if :SHELL_ERROR
+\set ON_ERROR_STOP on
+DO $$ BEGIN RAISE EXCEPTION 'Regression fixture command failed'; END $$;
+\endif

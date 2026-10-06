@@ -269,9 +269,9 @@ impl<'a> CopyOutputRow<'a> {
     }
 }
 
+/// A source already bound to the column layout supplied by the typed driver.
+/// The driver constructs it after PostgreSQL validates options and columns.
 pub trait CopyDatumSource {
-    fn initialize(&mut self, layout: &CopyColumnLayout) -> Result<(), CopyError>;
-
     fn next_row(
         &mut self,
         row: CopyInputRow<'_>,

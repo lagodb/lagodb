@@ -1,45 +1,40 @@
-//! Random-access adapter from a storage-service object to Parquet's reader.
+//! Random-access adapter from connector input files to Parquet's reader.
 
-use std::io::{self, Read};
+use std::io::{self, BufReader, Read};
 use std::rc::Rc;
 
 use bytes::Bytes;
-use lagodb_storage::StorageFile;
 use parquet::errors::{ParquetError, Result as ParquetResult};
 use parquet::file::reader::{ChunkReader, Length};
 
-use crate::storage::ReadProgress;
+use crate::storage::{InputFile, ReadProgress};
 
 pub(crate) struct ParquetObjectReader {
-    file: Rc<StorageFile>,
+    file: Rc<InputFile>,
     progress: Option<ReadProgress>,
 }
 
 // SAFETY: The connector only constructs, uses, and drops this adapter on the
 // PostgreSQL backend thread. The synchronous Parquet readers used here do not
 // move it to a worker thread or invoke its read methods concurrently. The
-// underlying StorageFile intentionally remains !Send and !Sync; these impls
+// underlying InputFile intentionally remains !Send and !Sync; these impls
 // are confined to this crate-private PostgreSQL adapter boundary.
 unsafe impl Send for ParquetObjectReader {}
 unsafe impl Sync for ParquetObjectReader {}
 
 impl ParquetObjectReader {
-    pub(crate) fn new(file: StorageFile) -> Self {
+    pub(crate) fn new(file: InputFile) -> Self {
         Self {
             file: Rc::new(file),
             progress: None,
         }
     }
 
-    pub(crate) fn with_progress(file: StorageFile) -> (Self, ReadProgress) {
+    pub(crate) fn with_progress(file: InputFile) -> (Self, ReadProgress) {
+        let mut reader = Self::new(file);
         let progress = ReadProgress::default();
-        (
-            Self {
-                file: Rc::new(file),
-                progress: Some(progress.clone()),
-            },
-            progress,
-        )
+        reader.progress = Some(progress.clone());
+        (reader, progress)
     }
 }
 
@@ -50,7 +45,7 @@ impl Length for ParquetObjectReader {
 }
 
 impl ChunkReader for ParquetObjectReader {
-    type T = ParquetObjectRange;
+    type T = BufReader<ParquetObjectRange>;
 
     fn get_read(&self, start: u64) -> ParquetResult<Self::T> {
         if start > self.len() {
@@ -59,11 +54,13 @@ impl ChunkReader for ParquetObjectReader {
                 self.len()
             )));
         }
-        Ok(ParquetObjectRange {
+        // Thrift reads page headers a byte at a time. Buffer this sequential
+        // view as parquet's File adapter does; get_bytes keeps bulk range I/O.
+        Ok(BufReader::new(ParquetObjectRange {
             file: Rc::clone(&self.file),
             position: start,
             progress: self.progress.clone(),
-        })
+        }))
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> ParquetResult<Bytes> {
@@ -77,7 +74,7 @@ impl ChunkReader for ParquetObjectReader {
                 self.len()
             )));
         }
-        // StorageFile fills initialized caller-owned buffers directly for both
+        // InputFile fills initialized caller-owned buffers directly for both
         // mediated and direct I/O paths.
         let mut data = vec![0_u8; length];
         let mut position = start;
@@ -105,7 +102,7 @@ impl ChunkReader for ParquetObjectReader {
 }
 
 pub(crate) struct ParquetObjectRange {
-    file: Rc<StorageFile>,
+    file: Rc<InputFile>,
     position: u64,
     progress: Option<ReadProgress>,
 }

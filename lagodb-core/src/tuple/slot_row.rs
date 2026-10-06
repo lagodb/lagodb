@@ -83,6 +83,9 @@ impl<'slot> PgDatumRef<'slot> {
 
 /// Borrowed view of a PostgreSQL [`TupleTableSlot`](pg_sys::TupleTableSlot).
 ///
+/// Construction materializes all attributes once; consumers read the populated
+/// Datum arrays without deforming the slot again.
+///
 /// This view is scoped to the table-AM callback that received the slot. It must
 /// not be stored across callbacks because PostgreSQL can reuse the slot and
 /// reset the surrounding memory context.

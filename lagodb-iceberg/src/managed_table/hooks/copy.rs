@@ -27,14 +27,14 @@ impl CopyConsumer for PartitionedTableCopyConsumer {
     }
 
     fn route(&self, context: &CopyContext<'_>) -> Result<CopyRoute, CopyError> {
-        // URI COPY belongs to the connector consumer. Passing it through also
-        // avoids two consumers claiming a managed partitioned table backed
-        // by an object URI.
+        // This consumer supplies PostgreSQL-format I/O for managed tables.
+        // URI I/O requires a format consumer; local file format claims are
+        // resolved by the runtime before this table fallback.
         if context.statement().endpoint() == CopyEndpoint::ExternalUri {
             return Ok(CopyRoute::PassThrough);
         }
         Ok(if Self::owns_target(context) {
-            CopyRoute::Consumed
+            CopyRoute::Fallback
         } else {
             CopyRoute::PassThrough
         })

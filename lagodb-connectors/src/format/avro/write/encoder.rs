@@ -15,7 +15,7 @@ use crate::format::{
     AvroWriteCompression, FileWriteProgress, ObjectFileEncoder,
     ObjectFileEncoderFactory,
 };
-use crate::storage::{ObjectFileSuffix, StagedObjectWriter};
+use crate::storage::{ObjectFileSuffix, OutputWriter};
 
 use super::ocf::{AvroBinaryBuffer, AvroOcfWriter};
 use super::plan::{AvroValueKind, AvroWritePlan};
@@ -84,7 +84,7 @@ impl ObjectFileEncoderFactory for AvroEncoderFactory {
 
     fn open(
         &mut self,
-        writer: StagedObjectWriter,
+        writer: OutputWriter,
     ) -> Result<Self::Encoder, ConnectorError> {
         AvroFileEncoder::new(
             &self.schema,
@@ -105,7 +105,7 @@ impl AvroFileEncoder {
         schema: &Schema,
         fields: Rc<[AvroValueKind]>,
         compression: AvroWriteCompression,
-        output: StagedObjectWriter,
+        output: OutputWriter,
     ) -> Result<Self, ConnectorError> {
         Ok(Self {
             writer: AvroOcfWriter::new(schema, compression, output)?,
@@ -140,7 +140,7 @@ impl ObjectFileEncoder for AvroFileEncoder {
         self.writer.bytes_written()
     }
 
-    fn finish(self) -> Result<StagedObjectWriter, ConnectorError> {
+    fn finish(self) -> Result<OutputWriter, ConnectorError> {
         self.writer.finish()
     }
 }

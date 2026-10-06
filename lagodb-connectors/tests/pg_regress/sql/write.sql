@@ -58,9 +58,7 @@ CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_rollback_text
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_rollback_text_path', format 'text');
 
--- Abort cleanup is owned by the shared upload lifecycle, so one format covers
--- the transaction callback. Per-format finish paths are covered below by the
--- empty-output and rollover conformance matrices.
+-- Rollback removes published objects; empty-output and rollover cases cover each writer.
 BEGIN;
 INSERT INTO lagodb_connectors_regress.lifecycle_rollback_text
 SELECT * FROM lagodb_connectors_regress.common_source WHERE id = 1;
@@ -113,8 +111,7 @@ INSERT INTO lagodb_connectors_regress.lifecycle_append
 SELECT * FROM lagodb_connectors_regress.common_source WHERE id = 2;
 SELECT id FROM lagodb_connectors_regress.lifecycle_append ORDER BY id;
 
--- Foreign INSERT uses Skip for empty output, unlike direct COPY TO's explicit
--- empty-object contract. No writer may leave a remote object for zero rows.
+-- Empty foreign INSERT leaves no object; direct COPY TO has a separate empty-object contract.
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_empty_text
     (:common_columns)
 SERVER lagodb_connectors_regress_s3
@@ -173,35 +170,31 @@ INSERT INTO lagodb_connectors_regress.lifecycle_failure_foreign
 SELECT id,
        repeat(md5(id::text), 40000 + 0 / (4 - id))
 FROM generate_series(1, 4) AS rows(id);
-\set VERBOSITY default
 \setenv OBJECT_STORAGE_PREFIX :lifecycle_failure_foreign_key
 \! sh bin/object_storage_tool assert-prefix-empty
 
 -- Exact COPY keeps bytes in local staging until successful completion, so a
 -- statement error cannot publish a partial exact object.
-\set VERBOSITY sqlstate
 COPY (
     SELECT id,
            repeat(md5(id::text), 40000 + 0 / (4 - id)) AS payload
     FROM generate_series(1, 4) AS rows(id)
 ) TO :'lifecycle_failure_copy_exact_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'text');
-\set VERBOSITY default
 \setenv OBJECT_STORAGE_PREFIX :lifecycle_failure_copy_exact_key
 \! sh bin/object_storage_tool assert-prefix-empty
 
 -- Prefix COPY can publish rolled objects before a later row fails; abort
 -- cleanup removes every object allocated by the failed statement.
-\set VERBOSITY sqlstate
 COPY (
     SELECT id,
            repeat(md5(id::text), 40000 + 0 / (4 - id)) AS payload
     FROM generate_series(1, 4) AS rows(id)
 ) TO :'lifecycle_failure_copy_prefix_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'text');
-\set VERBOSITY default
 \setenv OBJECT_STORAGE_PREFIX :lifecycle_failure_copy_prefix_key
 \! sh bin/object_storage_tool assert-prefix-empty
+\set VERBOSITY default
 
 -- A successful prefix COPY is visible before commit and removed on an
 -- explicit top-level abort.
@@ -220,8 +213,6 @@ FROM lagodb_connectors_regress.lifecycle_abort_copy_prefix;
 ROLLBACK;
 \setenv OBJECT_STORAGE_PREFIX :lifecycle_abort_copy_prefix_key
 \! sh bin/object_storage_tool assert-prefix-empty
-
-RESET lagodb_connectors.target_file_size_mb;
 
 -- Prefix rollover for every writer implementation.
 
@@ -242,7 +233,6 @@ SELECT format('s3://%s/lagodb-connectors/rollover/text/',
        'lagodb-connectors/rollover/parquet/' AS parquet_key
 \gset rollover_
 
-SET lagodb_connectors.target_file_size_mb = 1;
 CREATE TABLE lagodb_connectors_regress.rollover_source (
     id integer,
     payload text

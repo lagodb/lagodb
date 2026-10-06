@@ -15,7 +15,7 @@ use crate::diag::ReportableError;
 use crate::runtime_api::UtilityConsumerDescriptor;
 use crate::runtime_api::{
     RoutedUtilityConsumer, RoutedUtilityPredicate, UTILITY_ROUTE_CONSUMED,
-    UTILITY_ROUTE_PASS_THROUGH,
+    UTILITY_ROUTE_FALLBACK, UTILITY_ROUTE_PASS_THROUGH,
 };
 
 use super::error::{HookError, UtilityHookPhase};
@@ -24,6 +24,9 @@ use super::error::{HookError, UtilityHookPhase};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CopyRoute {
     PassThrough,
+    /// Own the statement unless a primary consumer claims it. Table providers
+    /// use this for PostgreSQL-format COPY; format providers take precedence.
+    Fallback,
     Consumed,
 }
 
@@ -41,8 +44,9 @@ pub trait CopyConsumer: 'static {
     ///
     /// This method must only inspect the parse node and other cold-path
     /// command metadata. It must not perform object I/O or mutate command
-    /// state; the runtime uses the result to detect competing consumers before
-    /// invoking any consuming implementation.
+    /// state. The runtime selects a primary claim before a fallback claim and
+    /// rejects competing consumers at the same level, regardless of registration
+    /// order, before invoking any consuming implementation.
     fn route(&self, context: &CopyContext<'_>) -> Result<CopyRoute, CopyError>;
 
     /// Execute a statement selected by [`Self::route`].
@@ -138,6 +142,7 @@ unsafe extern "C-unwind" fn copy_consumer_matches(
         .route(&copy)
         .map(|route| match route {
             CopyRoute::PassThrough => UTILITY_ROUTE_PASS_THROUGH,
+            CopyRoute::Fallback => UTILITY_ROUTE_FALLBACK,
             CopyRoute::Consumed => UTILITY_ROUTE_CONSUMED,
         })
         .map_err(|error| {

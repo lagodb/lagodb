@@ -1,7 +1,7 @@
 # LagoDB Connectors
 
-`lagodb_connectors` lets PostgreSQL read and write object storage through
-foreign tables and object-URI `COPY` commands. It supports S3, S3-compatible
+`lagodb_connectors` lets PostgreSQL read and write local files and object storage
+through foreign tables and `COPY` commands. It supports S3, S3-compatible
 storage, Google Cloud Storage, and Azure Blob Storage, with `text`, `csv`,
 `json`, `avro`, and `parquet` data.
 
@@ -24,6 +24,78 @@ supported.
 Object-URI `COPY TO` can write an exact object or a prefix for every supported
 format. Object-URI `COPY FROM` accepts exact objects for every format and also
 accepts Parquet prefixes.
+
+## Local files
+
+Local paths refer to the PostgreSQL server's filesystem. Native JSON (NDJSON),
+Avro, and Parquet COPY use the same format readers and encoders as object storage:
+
+```sql
+COPY events TO '/tmp/events.parquet';
+COPY imported_events FROM '/tmp/events.parquet';
+COPY events TO '/tmp/events.avro' WITH (format 'avro', compression 'snappy');
+COPY events TO '/tmp/events.json.gz' WITH (format 'json');
+COPY events TO '/tmp/export-without-suffix' WITH (format 'parquet');
+```
+
+The connector infers native formats from their suffix when `format` is absent.
+An explicit `format 'text'`, `format 'csv'`, or `format 'binary'` retains
+PostgreSQL COPY semantics even when the filename has a native-format suffix.
+Local native COPY requires `pg_read_server_files` for imports and
+`pg_write_server_files` for exports, including the usual superuser privileges.
+Outputs must use absolute paths; inputs also accept paths relative to PostgreSQL's
+data directory. Local COPY does not need a foreign server or user mapping, and
+does not accept the `server` option. Use filesystem paths rather than `file://` URIs.
+
+For foreign tables, create an optionless server; no user mapping is needed:
+
+```sql
+CREATE SERVER local_files FOREIGN DATA WRAPPER lagodb_connectors;
+
+CREATE FOREIGN TABLE local_events ()
+SERVER local_files OPTIONS (path '/tmp/events.parquet');
+
+CREATE FOREIGN TABLE local_event_directory (id bigint, payload text)
+SERVER local_files OPTIONS (path '/tmp/event-directory/', format 'json');
+
+INSERT INTO local_event_directory VALUES (1, 'example');
+SELECT * FROM local_event_directory;
+```
+
+Foreign-table local paths support all connector formats. A local path ending in
+`/` selects a directory; every other local path selects a single file, including
+filenames without a suffix when `format` is supplied. Directory scans recurse
+through ordinary subdirectories, select matching format suffixes, and retain
+sorted membership for rescans. Directory symlinks are not traversed. An empty
+column list uses the existing schema inference rules.
+
+For text, CSV, and JSON collections, omitted `compression` selects the decoder
+from each file's suffix, so plain, gzip, and Zstandard files can share a directory
+or object prefix. An explicit `compression` option, including `none`, overrides
+suffix inference for every input file. Schema inference uses the same rule.
+For writes, omitted compression follows the destination path's suffix; directory
+and prefix writes default to uncompressed output.
+
+An explicit local input path can name a FIFO for sequential formats, including
+JSON and Avro. Opening it waits for a producer, following PostgreSQL COPY's
+blocking behavior. Parquet uses the file's reported length and random reads;
+callers are responsible for supplying a suitable input. Directory scans collect
+regular files only. For a FIFO foreign
+table, declare columns explicitly to avoid consuming a stream during schema
+inference; each scan or rescan opens the FIFO again and needs a fresh stream.
+
+Like PostgreSQL `file_fdw`, setting a local foreign-table path requires
+`pg_read_server_files`. Thereafter, table privileges and server `USAGE` can share
+reads with other roles. Local inserts additionally require `pg_write_server_files`
+for the effective user. Single-file foreign tables remain read-only; directory
+foreign tables support inserts that create new files.
+
+Single-file COPY TO truncates an existing file and can leave partial output after
+an error, following PostgreSQL's file-output semantics. Directory outputs use
+the existing rolling size policy and unique partitioned filenames. Each complete
+file is published after encoding; transaction and savepoint aborts delete files
+created by that operation. Files are visible before commit, as with object-store
+prefix output; directory foreign tables do not provide MVCC file membership.
 
 ## Configure object storage
 
@@ -77,7 +149,7 @@ mapping for that role, or a `PUBLIC` user mapping, must also exist.
 
 The connector handles a `COPY` when its file source or destination begins
 with `s3://`, `gs://`, or `az://`. PostgreSQL continues to handle `COPY`
-through `STDIN`, `STDOUT`, a local file, or `PROGRAM`. An object-URI `COPY`
+through `STDIN`, `STDOUT`, a local text/CSV/binary file, or `PROGRAM`. An object-URI `COPY`
 does not create or require a foreign table.
 
 With the S3 default configured above, an exact object with a supported suffix

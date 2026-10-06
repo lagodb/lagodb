@@ -157,6 +157,8 @@ unsafe extern "C-unwind" {
     fn lagodb_routed_copy_to_attnums(state: pg_sys::CopyToState)
     -> *mut pg_sys::List;
 
+    fn lagodb_routed_copy_to_has_header(state: pg_sys::CopyToState) -> bool;
+
     fn lagodb_copy_get_attnums(
         rel: pg_sys::Relation,
         attnamelist: *mut pg_sys::List,
@@ -415,6 +417,10 @@ impl CopyBridge {
         state: pg_sys::CopyToState,
     ) -> *mut pg_sys::List {
         unsafe { pg_guard_ffi_boundary(|| lagodb_routed_copy_to_attnums(state)) }
+    }
+
+    pub(crate) unsafe fn routed_to_has_header(state: pg_sys::CopyToState) -> bool {
+        unsafe { pg_guard_ffi_boundary(|| lagodb_routed_copy_to_has_header(state)) }
     }
 
     pub(crate) unsafe fn prepare_from(

@@ -1,7 +1,7 @@
 //! Format-specific option dispatch and validated format state.
 
+use crate::storage::InputFile;
 use lagodb_core::storage::foreign::ForeignOptionView;
-use lagodb_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
@@ -14,6 +14,7 @@ use super::text::TextFormat;
 use super::{
     AvroWriteCompression, FormatKind, FormatReader, FormatSchemaReader, FormatWriter,
     InferredSchema, ParquetWriteCompression, StreamCompression,
+    StreamCompressionOptions,
 };
 
 /// One borrowed format-specific option after common foreign-table options have
@@ -117,16 +118,18 @@ impl ResolvedForeignFormat {
     fn parse_stream_compression(
         explicit: Option<&str>,
         suffix: Option<StreamCompression>,
-    ) -> Result<StreamCompression, ConnectorError> {
-        match explicit {
-            Some(value) => StreamCompression::parse(value).ok_or_else(|| {
-                ConnectorError::invalid_option(
-                    "compression",
-                    "must be none, gzip, or zstd for a stream format",
-                )
-            }),
-            None => Ok(suffix.unwrap_or(StreamCompression::None)),
-        }
+    ) -> Result<StreamCompressionOptions, ConnectorError> {
+        let explicit = explicit
+            .map(|value| {
+                StreamCompression::parse(value).ok_or_else(|| {
+                    ConnectorError::invalid_option(
+                        "compression",
+                        "must be none, gzip, or zstd for a stream format",
+                    )
+                })
+            })
+            .transpose()?;
+        Ok(StreamCompressionOptions::new(explicit, suffix))
     }
 
     pub(crate) const fn kind(&self) -> FormatKind {
@@ -200,7 +203,7 @@ impl ResolvedForeignFormat {
 
     pub(crate) fn infer_schema(
         &self,
-        file: &mut StorageFile,
+        file: &mut InputFile,
     ) -> Result<InferredSchema, ConnectorError> {
         match self {
             Self::Text(format) => format.infer_schema(file),

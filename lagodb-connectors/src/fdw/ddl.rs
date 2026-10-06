@@ -8,14 +8,17 @@ use lagodb_core::hooks::{
     AlterTableStmtNode, CreateForeignTableStmtNode, PostUtilityContext, UtilityHook,
     UtilityHookError, UtilityNode, register_utility_hook,
 };
-use lagodb_core::storage::foreign::{ForeignOptionView, StorageManager};
+use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 
+use crate::access::ConnectorAccess;
 use crate::error::ConnectorError;
 use crate::format::ResolvedForeignFormat;
-use crate::storage::{ObjectInput, ResolvedStorageLocation};
 
-use super::{ResolvedForeignRelation, ResolvedTableOptions, resolve_table_options};
+use super::{
+    LagodbConnectors, ResolvedForeignRelation, ResolvedTableOptions,
+    resolve_table_options,
+};
 
 struct ForeignTableDdlHook;
 
@@ -63,7 +66,7 @@ impl ForeignTableDdlHook {
         statement: &mut pg_sys::CreateForeignTableStmt,
     ) -> Result<(), UtilityHookError> {
         let server_name = unsafe { CStr::from_ptr(statement.servername) };
-        if !ResolvedStorageLocation::server_uses_connectors(server_name) {
+        if !LagodbConnectors::server_uses_connectors(server_name) {
             return Ok(());
         }
 
@@ -87,14 +90,12 @@ impl ForeignTableDdlHook {
             &statement.base,
             &format,
         )?;
-        let location = ResolvedStorageLocation::resolve_for_ddl(object, server_name)?;
+        let location = ConnectorAccess::resolve_for_ddl(object, server_name)?;
         if unsafe { pg_sys::list_length(statement.base.tableElts) } != 0 {
             return Ok(());
         }
 
-        let manager = StorageManager::from_pg_gucs()?;
-        let mut files =
-            ObjectInput::resolve(&location, &manager, format.kind())?.open();
+        let mut files = format.kind().input(&location)?.open();
         let mut file = files.next().ok_or_else(|| {
             ConnectorError::invalid_object_schema(
                 format.kind(),
@@ -130,7 +131,7 @@ impl ForeignTableDdlHook {
         let relation = RelationGuard::open_table(relation_oid, pg_sys::NoLock as _)?;
         let target_uses_connectors = relation.as_handle().relkind() as u8
             == pg_sys::RELKIND_FOREIGN_TABLE
-            && ResolvedStorageLocation::relation_uses_connectors(relation_oid);
+            && LagodbConnectors::relation_uses_connectors(relation_oid);
 
         self.validate_alter_references(statement.cmds)?;
         if target_uses_connectors {
@@ -172,7 +173,7 @@ impl ForeignTableDdlHook {
         if relation_oid == pg_sys::InvalidOid
             || unsafe { pg_sys::get_rel_relkind(relation_oid) } as u8
                 != pg_sys::RELKIND_FOREIGN_TABLE
-            || !ResolvedStorageLocation::relation_uses_connectors(relation_oid)
+            || !LagodbConnectors::relation_uses_connectors(relation_oid)
         {
             return Ok(());
         }
@@ -211,7 +212,7 @@ impl ForeignTableDdlHook {
             };
             if unsafe { pg_sys::get_rel_relkind(relation_oid) } as u8
                 == pg_sys::RELKIND_FOREIGN_TABLE
-                && ResolvedStorageLocation::relation_uses_connectors(relation_oid)
+                && LagodbConnectors::relation_uses_connectors(relation_oid)
             {
                 return Err(ConnectorError::unsupported_foreign_table_definition(
                     "inheritance or partition attachment",

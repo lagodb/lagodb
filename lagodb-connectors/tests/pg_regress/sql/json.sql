@@ -170,11 +170,85 @@ WITH (server 'lagodb_connectors_regress_s3', format 'json');
 \! sh bin/object_storage_tool truncate
 SELECT lagodb.invalidate_object_cache(
            :'json_corrupt_path', 'lagodb_connectors_regress_s3'
-       ) AS cache_invalidated
-\gset
+       )
+\g /dev/null
 
 \set VERBOSITY sqlstate
 COPY lagodb_connectors_regress.json_copy_sink
 FROM :'json_corrupt_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'json');
 \set VERBOSITY default
+
+-- Mixed gzip/zstd/plain json members resolve their codec per file.
+-- Scan and infer local and remote collections, including parameterized rescans.
+BEGIN;
+CREATE SERVER lagodb_connectors_regress_mixed_local FOREIGN DATA WRAPPER lagodb_connectors;
+CREATE USER MAPPING FOR PUBLIC SERVER lagodb_connectors_regress_mixed_local;
+SELECT current_setting('data_directory') || '/lagodb-mixed-json-' || pg_backend_pid()
+           || '-' || txid_current() || '/' AS mixed_local_path,
+       's3://' || bucket || '/lagodb-connectors/mixed-json-' || pg_backend_pid()
+           || '-' || txid_current() || '/' AS mixed_remote_path
+FROM lagodb_regress.object_storage_fixture
+\gset
+
+CREATE TABLE lagodb_connectors_regress.mixed_source (id integer, payload text);
+INSERT INTO lagodb_connectors_regress.mixed_source
+VALUES (1, E'comma,value "quoted"\nline'), (2, NULL), (3, ''), (4, '中文');
+
+CREATE FOREIGN TABLE lagodb_connectors_regress.mixed_local (id integer, payload text)
+SERVER lagodb_connectors_regress_mixed_local
+OPTIONS (path :'mixed_local_path', format 'json', compression 'gzip');
+INSERT INTO lagodb_connectors_regress.mixed_local SELECT * FROM lagodb_connectors_regress.mixed_source;
+ALTER FOREIGN TABLE lagodb_connectors_regress.mixed_local OPTIONS (SET compression 'zstd');
+INSERT INTO lagodb_connectors_regress.mixed_local SELECT * FROM lagodb_connectors_regress.mixed_source;
+ALTER FOREIGN TABLE lagodb_connectors_regress.mixed_local OPTIONS (DROP compression);
+INSERT INTO lagodb_connectors_regress.mixed_local SELECT * FROM lagodb_connectors_regress.mixed_source;
+(SELECT source.* FROM lagodb_connectors_regress.mixed_source AS source, generate_series(1, 3)
+ EXCEPT ALL TABLE lagodb_connectors_regress.mixed_local)
+UNION ALL
+(TABLE lagodb_connectors_regress.mixed_local
+ EXCEPT ALL SELECT source.* FROM lagodb_connectors_regress.mixed_source AS source, generate_series(1, 3));
+
+-- Parameterized scans must reopen all members with their individual codecs.
+SELECT sum(matched.n) AS rescan_rows
+FROM (VALUES (1), (3)) AS thresholds(id)
+CROSS JOIN LATERAL (
+    SELECT count(*) AS n FROM lagodb_connectors_regress.mixed_local AS files
+    WHERE files.id >= thresholds.id OFFSET 0
+) AS matched;
+
+CREATE FOREIGN TABLE lagodb_connectors_regress.mixed_local_inferred ()
+SERVER lagodb_connectors_regress_mixed_local
+OPTIONS (path :'mixed_local_path', format 'json');
+SELECT count(*) AS inferred_rows
+FROM lagodb_connectors_regress.mixed_local_inferred;
+
+CREATE FOREIGN TABLE lagodb_connectors_regress.mixed_remote (id integer, payload text)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'mixed_remote_path', format 'json', compression 'gzip');
+INSERT INTO lagodb_connectors_regress.mixed_remote SELECT * FROM lagodb_connectors_regress.mixed_source;
+ALTER FOREIGN TABLE lagodb_connectors_regress.mixed_remote OPTIONS (SET compression 'zstd');
+INSERT INTO lagodb_connectors_regress.mixed_remote SELECT * FROM lagodb_connectors_regress.mixed_source;
+ALTER FOREIGN TABLE lagodb_connectors_regress.mixed_remote OPTIONS (DROP compression);
+INSERT INTO lagodb_connectors_regress.mixed_remote SELECT * FROM lagodb_connectors_regress.mixed_source;
+(SELECT source.* FROM lagodb_connectors_regress.mixed_source AS source, generate_series(1, 3)
+ EXCEPT ALL TABLE lagodb_connectors_regress.mixed_remote)
+UNION ALL
+(TABLE lagodb_connectors_regress.mixed_remote
+ EXCEPT ALL SELECT source.* FROM lagodb_connectors_regress.mixed_source AS source, generate_series(1, 3));
+
+-- Parameterized scans must reopen all members with their individual codecs.
+SELECT sum(matched.n) AS rescan_rows
+FROM (VALUES (1), (3)) AS thresholds(id)
+CROSS JOIN LATERAL (
+    SELECT count(*) AS n FROM lagodb_connectors_regress.mixed_remote AS files
+    WHERE files.id >= thresholds.id OFFSET 0
+) AS matched;
+
+CREATE FOREIGN TABLE lagodb_connectors_regress.mixed_remote_inferred ()
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'mixed_remote_path', format 'json');
+SELECT count(*) AS inferred_rows
+FROM lagodb_connectors_regress.mixed_remote_inferred;
+
+ROLLBACK;

@@ -53,7 +53,7 @@ COPY (
 WITH (server 'lagodb_connectors_regress_s3', format 'csv');
 COPY lagodb_connectors_regress.common_source
 TO :'csv_header_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'csv', header true);
+WITH (server 'lagodb_connectors_regress_s3', format 'csv', header);
 COPY lagodb_connectors_regress.common_source
 TO :'csv_custom_path'
 WITH (
@@ -172,9 +172,7 @@ ORDER BY attnum;
 SELECT count(*) AS inferred_rows
 FROM lagodb_connectors_regress.csv_inferred;
 
--- CSV relation and column options must affect PostgreSQL CSV semantics, not
--- merely pass DDL validation. The writer quotes the literal NULL marker and
--- leaves SQL NULL unquoted so force_null and force_not_null are observable.
+-- Distinguish a quoted literal NULL marker from SQL NULL for force_null/force_not_null.
 CREATE TABLE lagodb_connectors_regress.csv_option_source (
     id integer,
     force_null_col text,
@@ -242,3 +240,77 @@ OPTIONS (path :'csv_malformed_path', format 'csv');
 \set VERBOSITY sqlstate
 SELECT count(*) FROM lagodb_connectors_regress.csv_malformed;
 \set VERBOSITY default
+
+-- Mixed gzip/zstd/plain csv members resolve their codec per file.
+-- Include local and remote membership; CSV must consume each member's header.
+BEGIN;
+CREATE SERVER lagodb_connectors_regress_mixed_local FOREIGN DATA WRAPPER lagodb_connectors;
+CREATE USER MAPPING FOR PUBLIC SERVER lagodb_connectors_regress_mixed_local;
+SELECT current_setting('data_directory') || '/lagodb-mixed-csv-' || pg_backend_pid()
+           || '-' || txid_current() || '/' AS mixed_local_path,
+       's3://' || bucket || '/lagodb-connectors/mixed-csv-' || pg_backend_pid()
+           || '-' || txid_current() || '/' AS mixed_remote_path
+FROM lagodb_regress.object_storage_fixture
+\gset
+
+CREATE TABLE lagodb_connectors_regress.mixed_source (id integer, payload text);
+INSERT INTO lagodb_connectors_regress.mixed_source
+VALUES (1, E'comma,value "quoted"\nline'), (2, NULL), (3, ''), (4, '中文');
+
+CREATE FOREIGN TABLE lagodb_connectors_regress.mixed_local (id integer, payload text)
+SERVER lagodb_connectors_regress_mixed_local
+OPTIONS (path :'mixed_local_path', format 'csv', compression 'gzip', header 'true');
+INSERT INTO lagodb_connectors_regress.mixed_local SELECT * FROM lagodb_connectors_regress.mixed_source;
+ALTER FOREIGN TABLE lagodb_connectors_regress.mixed_local OPTIONS (SET compression 'zstd');
+INSERT INTO lagodb_connectors_regress.mixed_local SELECT * FROM lagodb_connectors_regress.mixed_source;
+ALTER FOREIGN TABLE lagodb_connectors_regress.mixed_local OPTIONS (DROP compression);
+INSERT INTO lagodb_connectors_regress.mixed_local SELECT * FROM lagodb_connectors_regress.mixed_source;
+(SELECT source.* FROM lagodb_connectors_regress.mixed_source AS source, generate_series(1, 3)
+ EXCEPT ALL TABLE lagodb_connectors_regress.mixed_local)
+UNION ALL
+(TABLE lagodb_connectors_regress.mixed_local
+ EXCEPT ALL SELECT source.* FROM lagodb_connectors_regress.mixed_source AS source, generate_series(1, 3));
+
+-- Parameterized scans must reopen all members with their individual codecs.
+SELECT sum(matched.n) AS rescan_rows
+FROM (VALUES (1), (3)) AS thresholds(id)
+CROSS JOIN LATERAL (
+    SELECT count(*) AS n FROM lagodb_connectors_regress.mixed_local AS files
+    WHERE files.id >= thresholds.id OFFSET 0
+) AS matched;
+
+CREATE FOREIGN TABLE lagodb_connectors_regress.mixed_local_inferred ()
+SERVER lagodb_connectors_regress_mixed_local
+OPTIONS (path :'mixed_local_path', format 'csv', header 'true');
+SELECT count(*) AS inferred_rows
+FROM lagodb_connectors_regress.mixed_local_inferred;
+
+CREATE FOREIGN TABLE lagodb_connectors_regress.mixed_remote (id integer, payload text)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'mixed_remote_path', format 'csv', compression 'gzip', header 'true');
+INSERT INTO lagodb_connectors_regress.mixed_remote SELECT * FROM lagodb_connectors_regress.mixed_source;
+ALTER FOREIGN TABLE lagodb_connectors_regress.mixed_remote OPTIONS (SET compression 'zstd');
+INSERT INTO lagodb_connectors_regress.mixed_remote SELECT * FROM lagodb_connectors_regress.mixed_source;
+ALTER FOREIGN TABLE lagodb_connectors_regress.mixed_remote OPTIONS (DROP compression);
+INSERT INTO lagodb_connectors_regress.mixed_remote SELECT * FROM lagodb_connectors_regress.mixed_source;
+(SELECT source.* FROM lagodb_connectors_regress.mixed_source AS source, generate_series(1, 3)
+ EXCEPT ALL TABLE lagodb_connectors_regress.mixed_remote)
+UNION ALL
+(TABLE lagodb_connectors_regress.mixed_remote
+ EXCEPT ALL SELECT source.* FROM lagodb_connectors_regress.mixed_source AS source, generate_series(1, 3));
+
+-- Parameterized scans must reopen all members with their individual codecs.
+SELECT sum(matched.n) AS rescan_rows
+FROM (VALUES (1), (3)) AS thresholds(id)
+CROSS JOIN LATERAL (
+    SELECT count(*) AS n FROM lagodb_connectors_regress.mixed_remote AS files
+    WHERE files.id >= thresholds.id OFFSET 0
+) AS matched;
+
+CREATE FOREIGN TABLE lagodb_connectors_regress.mixed_remote_inferred ()
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'mixed_remote_path', format 'csv', header 'true');
+SELECT count(*) AS inferred_rows
+FROM lagodb_connectors_regress.mixed_remote_inferred;
+
+ROLLBACK;

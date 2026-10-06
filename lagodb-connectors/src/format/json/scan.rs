@@ -21,7 +21,7 @@ use super::record::{JsonColumnPlan, JsonInputValue, JsonRecordDecoder};
 use super::stream::JsonRecordStream;
 use crate::format::{
     FormatKind, FormatScanPlanner, FormatScanPrivate, FormatScanState,
-    StreamCompression,
+    StreamCompressionOptions,
 };
 
 const DEFAULT_ESTIMATED_ROWS: f64 = 1_000.0;
@@ -84,7 +84,7 @@ impl JsonScanState {
     pub(super) fn begin(
         context: StartForeignScanContext<'_, LagodbConnectors>,
         files: ObjectFiles,
-        compression: StreamCompression,
+        compression: StreamCompressionOptions,
     ) -> Result<Self, ConnectorError> {
         let live = context.relation.live_columns();
         let mut columns_by_attno = vec![None; context.relation.natts()];

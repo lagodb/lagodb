@@ -13,6 +13,4 @@ RESET client_min_messages;
 
 \setenv PGDATABASE :DBNAME
 \! python3 ../../../scripts/pg_regress/regress_fixture.py teardown
-\set ECHO none
 \i ../../../scripts/pg_regress/fixture_command_result.sql
-\set ECHO all

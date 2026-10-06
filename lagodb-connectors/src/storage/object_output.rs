@@ -1,15 +1,17 @@
 //! Object allocation and key generation for one write statement.
 
 use std::num::NonZeroU64;
+use std::path::{Path, PathBuf};
 
 use chrono::{Datelike, Utc};
+use lagodb_core::diag::PgReportError;
 use lagodb_core::storage::foreign::{
     ObjectAccess, ObjectPrefixAccess, StorageManager,
 };
+use pgrx::PgSqlErrorCode;
 use uuid::Uuid;
 
 use crate::error::ConnectorError;
-use crate::format::FormatKind;
 
 use super::{ObjectLocationKind, ResolvedStorageLocation};
 
@@ -31,8 +33,16 @@ impl ObjectFileSuffix {
 /// Prefix output always allocates operation-unique keys. Exact output is for
 /// publishing to a previously unused key; overwriting an existing key is not
 /// a supported publication protocol and requires explicit cache coordination
-/// outside this writer.
+/// outside this writer. Local exact COPY output uses PostgreSQL's overwrite
+/// semantics; local directory output retains the unique-file contract.
 pub(crate) enum ObjectOutput {
+    LocalExact {
+        path: Option<PathBuf>,
+    },
+    LocalPrefix {
+        keys: PartitionedKeyGenerator,
+        target_file_bytes: NonZeroU64,
+    },
     Exact {
         object: Option<ObjectAccess>,
     },
@@ -44,46 +54,50 @@ pub(crate) enum ObjectOutput {
 }
 
 /// One allocated output object together with its transaction disposition.
-pub(crate) struct AllocatedObject {
-    object: ObjectAccess,
-    delete_on_abort: bool,
-}
-
-impl AllocatedObject {
-    fn exact(object: ObjectAccess) -> Self {
-        Self {
-            object,
-            delete_on_abort: false,
-        }
-    }
-
-    fn created(object: ObjectAccess) -> Self {
-        Self {
-            object,
-            delete_on_abort: true,
-        }
-    }
-
-    pub(super) fn into_parts(self) -> (ObjectAccess, bool) {
-        (self.object, self.delete_on_abort)
-    }
+pub(crate) enum AllocatedObject {
+    Remote {
+        object: ObjectAccess,
+        delete_on_abort: bool,
+    },
+    Local {
+        path: PathBuf,
+        delete_on_abort: bool,
+    },
 }
 
 impl ObjectOutput {
     pub(crate) fn resolve(
         location: &ResolvedStorageLocation,
-        manager: &StorageManager,
-        format: FormatKind,
+        kind: ObjectLocationKind,
         prefix_target_file_bytes: impl FnOnce() -> NonZeroU64,
     ) -> Result<Self, ConnectorError> {
-        match ObjectLocationKind::classify(location.object_key(), format)? {
+        if let Some(path) = location.local_path() {
+            if !Path::new(path).is_absolute() {
+                return Err(PgReportError::from_message(
+                    PgSqlErrorCode::ERRCODE_INVALID_NAME,
+                    "relative path not allowed for local file output",
+                )
+                .into());
+            }
+            return Ok(match kind {
+                ObjectLocationKind::Exact => Self::LocalExact {
+                    path: Some(PathBuf::from(path)),
+                },
+                ObjectLocationKind::Prefix => Self::LocalPrefix {
+                    keys: PartitionedKeyGenerator::new(path.to_owned()),
+                    target_file_bytes: prefix_target_file_bytes(),
+                },
+            });
+        }
+        let manager = StorageManager::from_pg_gucs()?;
+        match kind {
             ObjectLocationKind::Exact => Ok(Self::Exact {
-                object: Some(location.acquire_object_access(manager)?),
+                object: Some(location.acquire_object_access(&manager)?),
             }),
             ObjectLocationKind::Prefix => {
                 let prefix = location.normalized_prefix();
                 Ok(Self::Prefix {
-                    access: location.acquire_prefix_access(manager, &prefix)?,
+                    access: location.acquire_prefix_access(&manager, &prefix)?,
                     keys: PartitionedKeyGenerator::new(prefix),
                     target_file_bytes: prefix_target_file_bytes(),
                 })
@@ -91,10 +105,19 @@ impl ObjectOutput {
         }
     }
 
+    /// PostgreSQL opens and truncates an exact local COPY file before running
+    /// the query. Prefix allocation remains demand-driven.
+    pub(crate) const fn open_before_execution(&self) -> bool {
+        matches!(self, Self::LocalExact { .. })
+    }
+
     pub(crate) const fn should_roll(&self, estimated_file_bytes: u64) -> bool {
         match self {
-            Self::Exact { .. } => false,
+            Self::Exact { .. } | Self::LocalExact { .. } => false,
             Self::Prefix {
+                target_file_bytes, ..
+            }
+            | Self::LocalPrefix {
                 target_file_bytes, ..
             } => estimated_file_bytes >= target_file_bytes.get(),
         }
@@ -105,14 +128,24 @@ impl ObjectOutput {
         suffix: ObjectFileSuffix,
     ) -> Result<AllocatedObject, ConnectorError> {
         match self {
-            Self::Exact { object } => Ok(AllocatedObject::exact(
-                object
+            Self::LocalExact { path } => Ok(AllocatedObject::Local {
+                path: path.take().expect("an exact output is allocated only once"),
+                delete_on_abort: false,
+            }),
+            Self::LocalPrefix { keys, .. } => Ok(AllocatedObject::Local {
+                path: PathBuf::from(keys.next_key(suffix)),
+                delete_on_abort: true,
+            }),
+            Self::Exact { object } => Ok(AllocatedObject::Remote {
+                object: object
                     .take()
                     .expect("an exact output is allocated only once"),
-            )),
-            Self::Prefix { access, keys, .. } => Ok(AllocatedObject::created(
-                access.object(&keys.next_key(suffix))?,
-            )),
+                delete_on_abort: false,
+            }),
+            Self::Prefix { access, keys, .. } => Ok(AllocatedObject::Remote {
+                object: access.object(&keys.next_key(suffix))?,
+                delete_on_abort: true,
+            }),
         }
     }
 }

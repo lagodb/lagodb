@@ -1,79 +1,53 @@
-//! Executor-side delegation to one initialized format writer.
+//! FDW operation policy around one relation-bound format encoder.
+
+use core::ffi::c_int;
 
 use lagodb_core::fdw::{
-    ForeignInsertBatch, ForeignModifyError, ForeignModifyOutcome, ForeignModifyState,
-    ModifyPlanSlot, ModifySlot,
+    ForeignModifyError, ForeignModifyOutcome, ForeignModifyState, ModifyPlanSlot,
+    ModifySlot,
 };
 
-use crate::format::FormatWriteState;
+use crate::error::ConnectorError;
+use crate::format::{FormatKind, FormatWriteState};
 
-/// Executor state owns the selected format writer for one modify lifecycle.
 pub(crate) struct ConnectorModifyState {
+    format: FormatKind,
     inner: Box<dyn FormatWriteState>,
 }
 
 impl ConnectorModifyState {
-    pub(crate) fn new(inner: Box<dyn FormatWriteState>) -> Self {
-        Self { inner }
+    pub(crate) fn new(format: FormatKind, inner: Box<dyn FormatWriteState>) -> Self {
+        Self { format, inner }
     }
 }
 
 impl ForeignModifyState for ConnectorModifyState {
-    fn batch_size(&self) -> Result<core::ffi::c_int, ForeignModifyError> {
-        Ok(self.inner.batch_size()?)
-    }
-
-    fn prepare_insert(
-        &mut self,
-        slot: &mut ModifySlot<'_>,
-    ) -> Result<(), ForeignModifyError> {
-        Ok(self.inner.prepare_insert(slot)?)
+    fn batch_size(&self) -> Result<c_int, ForeignModifyError> {
+        Ok(self.inner.batch_size())
     }
 
     fn insert(
         &mut self,
         slot: &mut ModifySlot<'_>,
     ) -> Result<ForeignModifyOutcome, ForeignModifyError> {
-        Ok(self.inner.insert(slot)?)
-    }
-
-    fn insert_batch(
-        &mut self,
-        batch: &mut ForeignInsertBatch<'_>,
-    ) -> Result<(), ForeignModifyError> {
-        Ok(self.inner.insert_batch(batch)?)
-    }
-
-    fn prepare_update(
-        &mut self,
-        slot: &mut ModifySlot<'_>,
-        plan_slot: &ModifyPlanSlot<'_>,
-    ) -> Result<(), ForeignModifyError> {
-        Ok(self.inner.prepare_update(slot, plan_slot)?)
+        self.inner.write_row(slot.tuple_row())?;
+        Ok(ForeignModifyOutcome::Applied)
     }
 
     fn update(
         &mut self,
-        slot: &mut ModifySlot<'_>,
-        plan_slot: &ModifyPlanSlot<'_>,
+        _slot: &mut ModifySlot<'_>,
+        _plan_slot: &ModifyPlanSlot<'_>,
     ) -> Result<ForeignModifyOutcome, ForeignModifyError> {
-        Ok(self.inner.update(slot, plan_slot)?)
-    }
-
-    fn prepare_delete(
-        &mut self,
-        returned_slot: Option<&mut ModifySlot<'_>>,
-        plan_slot: &ModifyPlanSlot<'_>,
-    ) -> Result<(), ForeignModifyError> {
-        Ok(self.inner.prepare_delete(returned_slot, plan_slot)?)
+        Err(ConnectorError::modify_not_implemented(self.format).into())
     }
 
     fn delete(
         &mut self,
-        returned_slot: Option<&mut ModifySlot<'_>>,
-        plan_slot: &ModifyPlanSlot<'_>,
+        _returned_slot: Option<&mut ModifySlot<'_>>,
+        _plan_slot: &ModifyPlanSlot<'_>,
     ) -> Result<ForeignModifyOutcome, ForeignModifyError> {
-        Ok(self.inner.delete(returned_slot, plan_slot)?)
+        Err(ConnectorError::modify_not_implemented(self.format).into())
     }
 
     fn finish(&mut self) -> Result<(), ForeignModifyError> {

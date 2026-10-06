@@ -18,7 +18,7 @@ use crate::format::{
     EmptyOutputPolicy, FileWriteProgress, ObjectFileEncoder,
     ObjectFileEncoderFactory, ObjectSetWriter, ParquetWriteCompression,
 };
-use crate::storage::{ObjectFileSuffix, ObjectOutput, StagedObjectWriter};
+use crate::storage::{ObjectFileSuffix, ObjectOutput, OutputWriter};
 
 struct ParquetEncoderFactory {
     schema: Arc<Schema>,
@@ -56,7 +56,7 @@ impl ObjectFileEncoderFactory for ParquetEncoderFactory {
 
     fn open(
         &mut self,
-        writer: StagedObjectWriter,
+        writer: OutputWriter,
     ) -> Result<Self::Encoder, ConnectorError> {
         Ok(ParquetFileEncoder {
             writer: ArrowWriter::try_new(
@@ -69,7 +69,7 @@ impl ObjectFileEncoderFactory for ParquetEncoderFactory {
 }
 
 struct ParquetFileEncoder {
-    writer: ArrowWriter<StagedObjectWriter>,
+    writer: ArrowWriter<OutputWriter>,
 }
 
 impl ObjectFileEncoder for ParquetFileEncoder {
@@ -94,7 +94,7 @@ impl ObjectFileEncoder for ParquetFileEncoder {
         self.writer.inner().bytes_written()
     }
 
-    fn finish(self) -> Result<StagedObjectWriter, ConnectorError> {
+    fn finish(self) -> Result<OutputWriter, ConnectorError> {
         Ok(self.writer.into_inner()?)
     }
 }
@@ -110,14 +110,14 @@ impl ParquetObjectWriter {
         output: ObjectOutput,
         schema: Arc<Schema>,
         compression: ParquetWriteCompression,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ConnectorError> {
+        Ok(Self {
             writer: Some(ObjectSetWriter::new(
                 output,
                 ParquetEncoderFactory::new(schema, compression),
-            )),
+            )?),
             completed_bytes: 0,
-        }
+        })
     }
 
     pub(crate) fn write_batch(

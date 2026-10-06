@@ -43,9 +43,7 @@ impl FormatScanPrivate {
 /// the corresponding default method on its own reader implementation.
 pub(crate) trait FormatReader: FormatObject {
     /// Create relation-scoped scan planning state.
-    fn planner(self: Box<Self>) -> Box<dyn FormatScanPlanner> {
-        Box::new(NotImplementedScanPlanner::new(self.kind()))
-    }
+    fn planner(self: Box<Self>) -> Box<dyn FormatScanPlanner>;
 
     /// Create relation-scoped filter planning state.
     fn begin_filter_planning(
@@ -73,11 +71,9 @@ pub(crate) trait FormatReader: FormatObject {
     /// Create executor state for the selected reader.
     fn begin(
         self: Box<Self>,
-        _context: StartForeignScanContext<'_, LagodbConnectors>,
-        _files: ObjectFiles,
-    ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
-        Err(ConnectorError::scan_not_implemented(self.kind()))
-    }
+        context: StartForeignScanContext<'_, LagodbConnectors>,
+        files: ObjectFiles,
+    ) -> Result<Box<dyn FormatScanState>, ConnectorError>;
 
     /// Select the explicit ANALYZE capability before resolving storage.
     fn analyzer(self: Box<Self>) -> Option<Box<dyn FormatAnalyzer>> {
@@ -127,51 +123,6 @@ pub(crate) trait FormatScanPlanner: 'static {
         &mut self,
         context: &ForeignPlanContext<'_, LagodbConnectors>,
     ) -> Result<ForeignPlanSpec<FormatScanPrivate>, ConnectorError>;
-}
-
-/// Default planner used by a format before it has a concrete scan
-/// implementation. It reports the missing scan implementation at planning
-/// time and rejects ordered paths without inspecting every row.
-struct NotImplementedScanPlanner {
-    format: FormatKind,
-}
-
-impl NotImplementedScanPlanner {
-    const fn new(format: FormatKind) -> Self {
-        Self { format }
-    }
-}
-
-impl FormatScanPlanner for NotImplementedScanPlanner {
-    fn estimate(
-        &mut self,
-        _context: &ForeignRelSizeContext<'_>,
-    ) -> Result<ForeignRelSize, ConnectorError> {
-        Err(ConnectorError::scan_not_implemented(self.format))
-    }
-
-    fn build_paths(
-        &self,
-        _context: &ForeignPathContext<'_>,
-        _paths: &mut ForeignPathBuilder<FormatScanPrivate>,
-    ) -> Result<(), ConnectorError> {
-        Err(ConnectorError::scan_not_implemented(self.format))
-    }
-
-    fn supports_pathkeys(
-        &self,
-        _context: &ForeignPathContext<'_>,
-        _pathkeys: &mut ForeignPathKeys,
-    ) -> Result<bool, ConnectorError> {
-        Ok(false)
-    }
-
-    fn build_plan(
-        &mut self,
-        _context: &ForeignPlanContext<'_, LagodbConnectors>,
-    ) -> Result<ForeignPlanSpec<FormatScanPrivate>, ConnectorError> {
-        Err(ConnectorError::scan_not_implemented(self.format))
-    }
 }
 
 /// Per-foreign-scan state owned by the selected format reader.

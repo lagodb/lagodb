@@ -15,55 +15,52 @@ use super::route::CopyTargetRoute;
 use super::typed_callback::{
     TypedDestinationGuard, TypedSourceGuard, destination_callback, source_callback,
 };
-use super::{CopyDatumSource, CopyError, CopyTupleDestination, pg};
+use super::{CopyColumnLayout, CopyDatumSource, CopyError, CopyTupleDestination, pg};
 
-pub struct TypedCopyFromSpec<'statement, 'parse, 'source> {
+pub struct TypedCopyFromSpec<'statement, 'parse> {
     statement: &'statement CopyStatement<'statement>,
     parse_state: &'parse CopyParseState,
     preparation: CopyFromPreparation<'statement, 'parse>,
     options: *mut pg_sys::List,
-    source: &'source mut dyn CopyDatumSource,
 }
 
-impl<'statement, 'parse, 'source> TypedCopyFromSpec<'statement, 'parse, 'source> {
+impl<'statement, 'parse> TypedCopyFromSpec<'statement, 'parse> {
     /// # Safety
     ///
     /// The preparation and option list must belong to this statement and parse
-    /// state. The source is synchronously borrowed until execution completes.
+    /// state.
     pub unsafe fn new(
         statement: &'statement CopyStatement<'statement>,
         parse_state: &'parse CopyParseState,
         preparation: CopyFromPreparation<'statement, 'parse>,
         options: *mut pg_sys::List,
-        source: &'source mut dyn CopyDatumSource,
     ) -> Self {
         Self {
             statement,
             parse_state,
             preparation,
             options,
-            source,
         }
     }
 }
 
-pub struct TypedCopyFromDriver<'statement, 'parse, 'source> {
+pub struct TypedCopyFromDriver<'statement, 'parse> {
     state: pg_sys::CopyFromState,
     target_route: CopyTargetRoute,
     state_ended: bool,
-    source_guard: TypedSourceGuard<'source>,
     _preparation: CopyFromPreparation<'statement, 'parse>,
     _statement: PhantomData<&'statement pg_sys::CopyStmt>,
     _parse: PhantomData<&'parse CopyParseState>,
 }
 
-impl<'statement, 'parse, 'source> TypedCopyFromDriver<'statement, 'parse, 'source> {
+impl<'statement, 'parse> TypedCopyFromDriver<'statement, 'parse> {
     fn end_state(state: pg_sys::CopyFromState) {
         unsafe { pg::CopyBridge::end_routed_from(state) }
     }
 
+    /// Validates options and prepares the target before provider input is opened.
     pub fn begin(
-        spec: TypedCopyFromSpec<'statement, 'parse, 'source>,
+        spec: TypedCopyFromSpec<'statement, 'parse>,
     ) -> Result<Self, CopyError> {
         let relation = spec.preparation.relation();
         let target_route = spec.preparation.target_route();
@@ -84,38 +81,38 @@ impl<'statement, 'parse, 'source> TypedCopyFromDriver<'statement, 'parse, 'sourc
             .catch_others(|error| Err(PgError::from_caught(error)))
             .execute()
         }?;
-        let layout = unsafe {
-            super::CopyColumnLayout::from_descriptor(
-                pg::CopyBridge::routed_from_tuple_desc(state),
-                pg::CopyBridge::routed_from_attnums(state),
-            )
-        };
-        let source_guard = match layout
-            .and_then(|layout| TypedSourceGuard::install(spec.source, layout))
-        {
-            Ok(guard) => guard,
-            Err(error) => {
-                Self::end_state(state);
-                return Err(error);
-            }
-        };
-
         Ok(Self {
             state,
             target_route,
             state_ended: false,
-            source_guard,
             _preparation: spec.preparation,
             _statement: PhantomData,
             _parse: PhantomData,
         })
     }
 
-    pub fn execute(mut self) -> Result<u64, CopyError> {
+    /// Constructs a source bound to PostgreSQL's accepted column layout before
+    /// starting the executor. Drop releases the COPY state if construction fails.
+    pub fn execute(
+        mut self,
+        open_source: impl FnOnce(
+            &CopyColumnLayout,
+        ) -> Result<Box<dyn CopyDatumSource>, CopyError>,
+    ) -> Result<u64, CopyError> {
         let state = self.state;
+        // SAFETY: begin prepared a live COPY state; its descriptor and attnums
+        // remain valid until this driver ends the state.
+        let layout = unsafe {
+            CopyColumnLayout::from_descriptor(
+                pg::CopyBridge::routed_from_tuple_desc(state),
+                pg::CopyBridge::routed_from_attnums(state),
+            )
+        }?;
+        let mut source = open_source(&layout)?;
+        let mut source_guard = TypedSourceGuard::install(source.as_mut(), layout);
         let provider_owned_partitioned_table =
             self.target_route.provider_owned_partitioned_table();
-        let source_context = self.source_guard.callback_context();
+        let source_context = source_guard.callback_context();
         let result = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(|| {
                 Ok(pg::CopyBridge::execute_routed_from_typed(
@@ -133,7 +130,7 @@ impl<'statement, 'parse, 'source> TypedCopyFromDriver<'statement, 'parse, 'sourc
         match result {
             Ok(processed) => {
                 Self::end_state(state);
-                self.source_guard.finish()?;
+                source_guard.finish()?;
                 Ok(processed)
             }
             Err(error) => {
@@ -144,7 +141,7 @@ impl<'statement, 'parse, 'source> TypedCopyFromDriver<'statement, 'parse, 'sourc
     }
 }
 
-impl Drop for TypedCopyFromDriver<'_, '_, '_> {
+impl Drop for TypedCopyFromDriver<'_, '_> {
     fn drop(&mut self) {
         if !self.state_ended {
             Self::end_state(self.state);

@@ -1,9 +1,9 @@
 //! Parquet footer and Arrow-to-PostgreSQL schema mapping.
 
+use crate::storage::InputFile;
 use arrow_schema::{DataType, Field, TimeUnit};
 use bytes::Bytes;
 use lagodb_core::tuple::numeric_precision_scale;
-use lagodb_storage::StorageFile;
 use parquet::arrow::parquet_to_arrow_schema;
 use parquet::errors::ParquetError;
 use parquet::file::metadata::ParquetMetaDataReader;
@@ -16,9 +16,7 @@ use super::super::{FormatKind, InferredSchema};
 
 const INITIAL_FOOTER_READ: u64 = 64 * 1024;
 
-pub(super) fn infer(
-    file: &mut StorageFile,
-) -> Result<InferredSchema, ConnectorError> {
+pub(super) fn infer(file: &mut InputFile) -> Result<InferredSchema, ConnectorError> {
     let file_size = file.size();
     if file_size == 0 {
         return Err(ConnectorError::invalid_object_schema(

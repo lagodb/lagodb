@@ -12,61 +12,60 @@ use super::io::{
     DestinationGuard, SourceGuard, destination_callback, source_callback,
 };
 use super::pg::CopyToShutdown;
+use super::progress::CopyOutputProgressGuard;
 use super::route::CopyTargetRoute;
-use super::{CopyDataDestination, CopyDataSource, CopyError, pg};
+use super::{CopyColumnLayout, CopyDataDestination, CopyDataSource, CopyError, pg};
 
 /// Parameters for a standard PostgreSQL COPY FROM execution.
-pub struct CopyFromSpec<'statement, 'parse, 'source> {
+pub struct CopyFromSpec<'statement, 'parse> {
     statement: &'statement CopyStatement<'statement>,
     parse_state: &'parse CopyParseState,
     _preparation: CopyFromPreparation<'statement, 'parse>,
     options: *mut pg_sys::List,
-    data_source: &'source mut dyn CopyDataSource,
 }
 
-impl<'statement, 'parse, 'source> CopyFromSpec<'statement, 'parse, 'source> {
+impl<'statement, 'parse> CopyFromSpec<'statement, 'parse> {
     /// # Safety
     ///
     /// `preparation` must have been created by
     /// [`super::context::CopyContext::prepare_from`] for this statement and
     /// parse state.
     /// `options` must be the original option list or a list produced by
-    /// [`CopyOptionView::without_names`]. PostgreSQL's `CopyFrom` uses the
+    /// [`super::CopyOptionView::without_names`]. PostgreSQL's `CopyFrom` uses the
     /// preparation's range table and permission metadata.
     pub unsafe fn new(
         statement: &'statement CopyStatement<'statement>,
         parse_state: &'parse CopyParseState,
         preparation: CopyFromPreparation<'statement, 'parse>,
         options: *mut pg_sys::List,
-        data_source: &'source mut dyn CopyDataSource,
     ) -> Self {
         Self {
             statement,
             parse_state,
             _preparation: preparation,
             options,
-            data_source,
         }
     }
 }
 
 /// RAII wrapper around PostgreSQL's `CopyFromState`.
-pub struct CopyFromDriver<'statement, 'parse, 'source> {
+pub struct CopyFromDriver<'statement, 'parse> {
     state: pg_sys::CopyFromState,
     target_route: CopyTargetRoute,
     finished: bool,
-    _source_guard: SourceGuard<'source>,
     _preparation: CopyFromPreparation<'statement, 'parse>,
     _statement_lifetime: PhantomData<&'statement pg_sys::CopyStmt>,
     _parse_lifetime: PhantomData<&'parse CopyParseState>,
 }
 
-impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
+impl<'statement, 'parse> CopyFromDriver<'statement, 'parse> {
     fn end_state(state: pg_sys::CopyFromState) {
         unsafe { pg::CopyBridge::end_routed_from(state) }
     }
 
-    /// Starts PostgreSQL's COPY FROM parser and executor state.
+    /// Validates options and prepares PostgreSQL's COPY FROM state without
+    /// opening the provider's input. Execution constructs the source before
+    /// reading any bytes or starting the executor.
     ///
     /// The caller must use [`Self::execute`] to finish the PostgreSQL COPY
     /// state. Execution errors are captured, the opaque PostgreSQL state is
@@ -78,14 +77,13 @@ impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
     /// The [`CopyFromSpec`] must satisfy the lifetime and PostgreSQL-state
     /// invariants documented by [`CopyFromSpec::new`].
     pub unsafe fn begin(
-        spec: CopyFromSpec<'statement, 'parse, 'source>,
+        spec: CopyFromSpec<'statement, 'parse>,
     ) -> Result<Self, CopyError> {
         let statement = spec.statement;
         let pstate = spec.parse_state.as_raw();
         let preparation = spec._preparation;
         let relation = preparation.relation();
         let where_clause = preparation.where_clause();
-        let source_guard = SourceGuard::install(spec.data_source);
         let attlist = statement.attlist();
         let options = spec.options;
         let target_route = preparation.target_route();
@@ -96,9 +94,8 @@ impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
                     pstate,
                     relation,
                     where_clause,
-                    // The provider's object URI is not a PostgreSQL server
-                    // file path. A non-null filename would make BeginCopyFrom
-                    // open that path before it uses the source callback.
+                    // The provider opens its input after PG validates this
+                    // state. Passing a filename here would let PG open it.
                     std::ptr::null(),
                     false,
                     source_callback(),
@@ -115,18 +112,24 @@ impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
             state,
             target_route,
             finished: false,
-            _source_guard: source_guard,
             _preparation: preparation,
             _statement_lifetime: PhantomData,
             _parse_lifetime: PhantomData,
         })
     }
 
-    pub fn execute(mut self) -> Result<u64, CopyError> {
+    /// Opens the source only after PostgreSQL has accepted options and columns.
+    /// Source construction errors release the prepared COPY state through Drop.
+    pub fn execute(
+        mut self,
+        open_source: impl FnOnce() -> Result<Box<dyn CopyDataSource>, CopyError>,
+    ) -> Result<u64, CopyError> {
+        let mut source = open_source()?;
+        let mut source_guard = SourceGuard::new(source.as_mut());
         let state = self.state;
         let provider_owned_partitioned_table =
             self.target_route.provider_owned_partitioned_table();
-        let result = unsafe {
+        let result = source_guard.with_active(|| unsafe {
             PgTryBuilder::new(AssertUnwindSafe(move || {
                 Ok(pg::CopyBridge::execute_routed_from_bytes(
                     state,
@@ -135,7 +138,7 @@ impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
             }))
             .catch_others(|error| Err(PgError::from_caught(error)))
             .execute()
-        };
+        });
         match result {
             Ok(processed) => {
                 self.finished = true;
@@ -154,7 +157,7 @@ impl<'statement, 'parse, 'source> CopyFromDriver<'statement, 'parse, 'source> {
     }
 }
 
-impl Drop for CopyFromDriver<'_, '_, '_> {
+impl Drop for CopyFromDriver<'_, '_> {
     fn drop(&mut self) {
         if !self.finished {
             // Normal callers use execute(); Drop covers Rust-side early
@@ -202,7 +205,8 @@ impl<'statement, 'parse, 'destination> CopyToSpec<'statement, 'parse, 'destinati
 pub struct CopyToDriver<'statement, 'parse, 'destination> {
     state: pg_sys::CopyToState,
     finished: bool,
-    _destination_guard: DestinationGuard<'destination>,
+    destination_guard: DestinationGuard<'destination>,
+    progress: CopyOutputProgressGuard,
     _preparation: CopyToPreparation<'statement, 'parse>,
     _statement_lifetime: PhantomData<&'statement pg_sys::CopyStmt>,
     _parse_lifetime: PhantomData<&'parse CopyParseState>,
@@ -268,15 +272,24 @@ impl<'statement, 'parse, 'destination>
             .execute()
         }?;
 
+        // SAFETY: every subsequent exit revokes progress before ending state.
+        let progress = unsafe { CopyOutputProgressGuard::new(state) };
         let layout = unsafe {
-            super::layout::CopyColumnLayout::from_descriptor(
+            CopyColumnLayout::from_descriptor(
                 pg::CopyBridge::routed_to_tuple_desc(state),
                 pg::CopyBridge::routed_to_attnums(state),
             )
         };
-        if let Err(error) =
-            layout.and_then(|layout| destination_guard.initialize(&layout))
-        {
+        if let Err(error) = layout.and_then(|layout| {
+            // SAFETY: begin has validated COPY options and retains live state.
+            let has_header = unsafe { pg::CopyBridge::routed_to_has_header(state) };
+            destination_guard.initialize(
+                &layout,
+                has_header,
+                progress.progress().clone(),
+            )
+        }) {
+            progress.revoke();
             let _ = Self::end_state(state, CopyToShutdown::Abort);
             return Err(error);
         }
@@ -284,7 +297,8 @@ impl<'statement, 'parse, 'destination>
         Ok(Self {
             state,
             finished: false,
-            _destination_guard: destination_guard,
+            destination_guard,
+            progress,
             _preparation: preparation,
             _statement_lifetime: PhantomData,
             _parse_lifetime: PhantomData,
@@ -295,22 +309,34 @@ impl<'statement, 'parse, 'destination>
         let state = self.state;
         let result = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(move || {
-                Ok(pg::CopyBridge::execute_routed_to_bytes(state))
+                let processed = pg::CopyBridge::execute_routed_to_bytes(state);
+                // As in typed COPY, executor shutdown precedes publication;
+                // retain COPY state for the destination's final progress update.
+                pg::CopyBridge::finish_routed_to(state);
+                Ok(processed)
             }))
             .catch_others(|error| Err(PgError::from_caught(error)))
             .execute()
         };
+        self.finished = true;
         match result {
-            Ok(processed) => {
-                self.finished = true;
-                Self::end_state(state, CopyToShutdown::Complete)?;
-                Ok(processed)
-            }
+            Ok(processed) => match self.destination_guard.finish() {
+                Ok(bytes_produced) => {
+                    self.progress.progress().publish(bytes_produced);
+                    self.progress.revoke();
+                    Self::end_state(state, CopyToShutdown::Complete)?;
+                    Ok(processed)
+                }
+                Err(error) => {
+                    self.progress.revoke();
+                    let _ = Self::end_state(state, CopyToShutdown::Abort);
+                    Err(error)
+                }
+            },
             Err(error) => {
-                // Release COPY storage without running a failed executor's
-                // shutdown callbacks. Transaction abort owns its resources;
-                // preserve the original error if COPY cleanup also fails.
-                self.finished = true;
+                self.progress.revoke();
+                // Preserve the primary error; transaction abort owns any failed
+                // executor resources and the guard abandons unpublished output.
                 let _ = Self::end_state(state, CopyToShutdown::Abort);
                 Err(error.into())
             }
@@ -320,6 +346,7 @@ impl<'statement, 'parse, 'destination>
 
 impl Drop for CopyToDriver<'_, '_, '_> {
     fn drop(&mut self) {
+        self.progress.revoke();
         if !self.finished {
             // Drop is a best-effort guard for Rust-side early returns. Keep
             // PostgreSQL cleanup under the same FFI error boundary as the

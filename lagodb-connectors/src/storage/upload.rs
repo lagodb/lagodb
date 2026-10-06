@@ -1,6 +1,6 @@
-//! Shared local staging and one-shot object upload lifecycle.
+//! Buffered format output and one-shot local or remote publication.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -10,18 +10,42 @@ use lagodb_core::transaction::cleanup::{PendingDelete, register_pending_delete};
 use lagodb_storage::{StagingFile, StorageError, StorageErrorKind, StorageResult};
 
 use super::AllocatedObject;
+use super::local::LocalFile;
+use super::local_output::LocalPublication;
 
 const WRITE_BUFFER_SIZE: usize = 64 * 1024;
 
-/// Buffered writer for one object. Successful finalization uploads once;
-/// Drop closes and removes only the local staging file.
-pub(crate) struct StagedObjectWriter {
-    staging: Option<StagingFile>,
+enum OutputFile {
+    Staging(StagingFile),
+    Local(File),
+}
+
+impl OutputFile {
+    fn write(&mut self, data: &[u8]) -> StorageResult<()> {
+        match self {
+            Self::Staging(file) => file.write(data),
+            Self::Local(file) => file.write_all(data).map_err(Into::into),
+        }
+    }
+
+    fn finish(self) -> StorageResult<()> {
+        match self {
+            Self::Staging(file) => file.sync(),
+            // Match COPY's checked close without adding an fsync contract.
+            Self::Local(file) => LocalFile::close(file),
+        }
+    }
+}
+
+/// Send-safe buffered output for format encoders. The paired publication
+/// capability owns backend accounting and abandoned staging-file cleanup.
+pub(crate) struct OutputWriter {
+    file: OutputFile,
     buffer: Vec<u8>,
     bytes_written: u64,
 }
 
-impl StagedObjectWriter {
+impl OutputWriter {
     fn record_write(&mut self, bytes: usize) {
         let bytes = u64::try_from(bytes).expect(
             "PostgreSQL is supported only on platforms where usize fits in u64",
@@ -33,22 +57,14 @@ impl StagedObjectWriter {
         if self.buffer.is_empty() {
             return Ok(());
         }
-        self.staging
-            .as_mut()
-            .expect("staging file remains open until local finish")
-            .write(&self.buffer)?;
+        self.file.write(&self.buffer)?;
         self.buffer.clear();
         Ok(())
     }
 
-    pub(crate) fn finish_local(mut self) -> StorageResult<()> {
+    pub(crate) fn finish_file(mut self) -> StorageResult<()> {
         self.flush_buffer()?;
-        self.staging
-            .as_ref()
-            .expect("staging file remains open until local finish")
-            .sync()?;
-        drop(self.staging.take());
-        Ok(())
+        self.file.finish()
     }
 
     /// Encoded bytes accepted by this writer, including bytes still resident
@@ -58,15 +74,11 @@ impl StagedObjectWriter {
     }
 }
 
-impl Write for StagedObjectWriter {
+impl Write for OutputWriter {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         if data.len() >= WRITE_BUFFER_SIZE {
             self.flush_buffer().map_err(io::Error::other)?;
-            self.staging
-                .as_mut()
-                .expect("staging file remains open until local finish")
-                .write(data)
-                .map_err(io::Error::other)?;
+            self.file.write(data).map_err(io::Error::other)?;
             self.record_write(data.len());
             return Ok(data.len());
         }
@@ -91,36 +103,67 @@ impl Write for StagedObjectWriter {
     }
 }
 
-/// Backend-local upload capability paired with one Send-safe staging writer.
+/// Backend-local publication capability paired with one Send-safe writer.
 /// It never enters Parquet's generic writer type.
-pub(crate) struct StagedObjectUpload {
+pub(crate) enum FilePublication {
+    Remote(RemoteUpload),
+    Local(LocalPublication),
+}
+
+pub(crate) struct RemoteUpload {
     object: ObjectAccess,
     staging_path: Option<PathBuf>,
     delete_on_abort: bool,
 }
 
-impl StagedObjectUpload {
+impl FilePublication {
     pub(crate) fn start(
         allocation: AllocatedObject,
-    ) -> StorageResult<(StagedObjectWriter, Self)> {
-        let (object, delete_on_abort) = allocation.into_parts();
-        let staging = object.create_staging()?;
-        let staging_path = staging.path().to_owned();
+    ) -> StorageResult<(OutputWriter, Self)> {
+        let (file, upload) = match allocation {
+            AllocatedObject::Remote {
+                object,
+                delete_on_abort,
+            } => {
+                let staging = object.create_staging()?;
+                let staging_path = staging.path().to_owned();
+                (
+                    OutputFile::Staging(staging),
+                    Self::Remote(RemoteUpload {
+                        object,
+                        staging_path: Some(staging_path),
+                        delete_on_abort,
+                    }),
+                )
+            }
+            AllocatedObject::Local {
+                path,
+                delete_on_abort,
+            } => {
+                let (file, upload) = LocalPublication::start(path, delete_on_abort)?;
+                (OutputFile::Local(file), Self::Local(upload))
+            }
+        };
         Ok((
-            StagedObjectWriter {
-                staging: Some(staging),
+            OutputWriter {
+                file,
                 buffer: Vec::with_capacity(WRITE_BUFFER_SIZE),
                 bytes_written: 0,
             },
-            Self {
-                object,
-                staging_path: Some(staging_path),
-                delete_on_abort,
-            },
+            upload,
         ))
     }
 
-    pub(crate) fn finish(mut self) -> StorageResult<()> {
+    pub(crate) fn finish(self) -> StorageResult<()> {
+        match self {
+            Self::Remote(upload) => upload.finish(),
+            Self::Local(upload) => upload.finish(),
+        }
+    }
+}
+
+impl RemoteUpload {
+    fn finish(mut self) -> StorageResult<()> {
         // Object output is immutable: prefix output uses an operation-unique
         // key, and exact output must name a previously unused key. This write
         // path deliberately does not invalidate a prior cache residency and
@@ -205,7 +248,7 @@ impl PendingDelete for UploadedObjectDelete {
     }
 }
 
-impl Drop for StagedObjectUpload {
+impl Drop for RemoteUpload {
     fn drop(&mut self) {
         if let Err(error) = self.remove_local() {
             report_warning(format_args!(

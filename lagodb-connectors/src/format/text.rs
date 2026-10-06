@@ -1,30 +1,28 @@
 //! PostgreSQL COPY text-format object and its validated options.
 
-use lagodb_core::fdw::{
-    ColumnRequirements, ForeignInsertBeginContext, ForeignModifyBeginContext,
-    ForeignModifyCapabilities, ForeignModifyOperation, ForeignModifyPlanContext,
-    ForeignModifyPlanSpec, ForeignModifyRelationContext, StartForeignScanContext,
-};
+use crate::storage::InputFile;
+use lagodb_core::fdw::{ColumnRequirements, StartForeignScanContext};
 use lagodb_core::handles::RelationHandle;
-use lagodb_storage::StorageFile;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 use crate::fdw::LagodbConnectors;
 
 use super::delimited::{DelimitedFormat, DelimitedOptions, DelimitedOptionsBuilder};
+use super::delimited_scan::{DelimitedScanPlanner, DelimitedScanState};
 use super::delimited_schema::DelimitedSchemaReader;
+use super::delimited_write::DelimitedWriteState;
 use super::{
     FormatKind, FormatObject, FormatOption, FormatReader, FormatScanPlanner,
-    FormatScanState, FormatSchemaReader, FormatWritePrivate, FormatWriteState,
-    FormatWriter, InferredSchema, StreamCompression,
+    FormatScanState, FormatSchemaReader, FormatWriteState, FormatWriter,
+    InferredSchema, StreamCompressionOptions,
 };
-use crate::storage::ObjectOutput;
+use crate::storage::{ObjectFiles, ObjectOutput};
 
 /// Text-format processor.
 pub(crate) struct TextFormat {
     pub(super) options: TextOptions,
-    pub(super) compression: StreamCompression,
+    pub(super) compression: StreamCompressionOptions,
 }
 
 #[derive(Debug)]
@@ -54,7 +52,7 @@ impl TextOptions {
 
 impl TextFormat {
     pub(crate) fn resolve(
-        compression: StreamCompression,
+        compression: StreamCompressionOptions,
         options: &[FormatOption<'_>],
     ) -> Result<Self, ConnectorError> {
         let mut builder = DelimitedOptionsBuilder::default();
@@ -97,8 +95,9 @@ impl FormatObject for TextFormat {
 impl FormatSchemaReader for TextFormat {
     fn infer_schema(
         &self,
-        file: &mut StorageFile,
+        file: &mut InputFile,
     ) -> Result<InferredSchema, ConnectorError> {
+        let compression = self.compression.for_file(file);
         // SAFETY: postgres_output_options returns a PostgreSQL-owned COPY
         // option list in the current context, which outlives inference.
         unsafe {
@@ -108,21 +107,19 @@ impl FormatSchemaReader for TextFormat {
                 self.options.postgres_output_options()?,
             )
         }
-        .infer(file, self.compression)
+        .infer(file, compression)
     }
 }
 
 impl FormatReader for TextFormat {
     fn planner(self: Box<Self>) -> Box<dyn FormatScanPlanner> {
-        Box::new(super::delimited_scan::DelimitedScanPlanner::new(
-            FormatKind::Text,
-        ))
+        Box::new(DelimitedScanPlanner::new(FormatKind::Text))
     }
 
     fn begin(
         self: Box<Self>,
         context: StartForeignScanContext<'_, LagodbConnectors>,
-        files: crate::storage::ObjectFiles,
+        files: ObjectFiles,
     ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
         let Self {
             options,
@@ -130,7 +127,7 @@ impl FormatReader for TextFormat {
         } = *self;
         let postgres_options =
             options.postgres_options(&context.relation, context.required_columns)?;
-        Ok(Box::new(super::delimited_scan::DelimitedScanState::begin(
+        Ok(Box::new(DelimitedScanState::begin(
             context,
             files,
             compression,
@@ -140,53 +137,9 @@ impl FormatReader for TextFormat {
 }
 
 impl FormatWriter for TextFormat {
-    fn capabilities(
-        &self,
-        _context: &ForeignModifyRelationContext<'_>,
-    ) -> Result<ForeignModifyCapabilities, ConnectorError> {
-        Ok(ForeignModifyCapabilities::new(true, false, false))
-    }
-
-    fn plan_modify(
-        &self,
-        context: &ForeignModifyPlanContext<'_>,
-    ) -> Result<ForeignModifyPlanSpec<FormatWritePrivate>, ConnectorError> {
-        if context.operation() != ForeignModifyOperation::Insert {
-            return Err(ConnectorError::modify_not_implemented(FormatKind::Text));
-        }
-        Ok(ForeignModifyPlanSpec::new(FormatWritePrivate::new(
-            FormatKind::Text,
-        )))
-    }
-
-    fn begin_modify(
+    fn begin(
         self: Box<Self>,
-        context: ForeignModifyBeginContext<'_, FormatWritePrivate>,
-        output: ObjectOutput,
-    ) -> Result<Box<dyn FormatWriteState>, ConnectorError> {
-        if context.operation() != ForeignModifyOperation::Insert {
-            return Err(ConnectorError::modify_not_implemented(FormatKind::Text));
-        }
-        let Self {
-            options,
-            compression,
-        } = *self;
-        let postgres_options = options.postgres_output_options()?;
-        Ok(Box::new(
-            super::delimited_write::DelimitedWriteState::begin(
-                context.relation(),
-                output,
-                DelimitedFormat::Text,
-                compression,
-                postgres_options,
-                false,
-            )?,
-        ))
-    }
-
-    fn begin_insert(
-        self: Box<Self>,
-        context: &mut ForeignInsertBeginContext<'_>,
+        relation: &RelationHandle<'_>,
         output: ObjectOutput,
     ) -> Result<Box<dyn FormatWriteState>, ConnectorError> {
         let Self {
@@ -194,15 +147,13 @@ impl FormatWriter for TextFormat {
             compression,
         } = *self;
         let postgres_options = options.postgres_output_options()?;
-        Ok(Box::new(
-            super::delimited_write::DelimitedWriteState::begin(
-                context.relation(),
-                output,
-                DelimitedFormat::Text,
-                compression,
-                postgres_options,
-                false,
-            )?,
-        ))
+        Ok(Box::new(DelimitedWriteState::begin(
+            relation,
+            output,
+            DelimitedFormat::Text,
+            compression.for_output(),
+            postgres_options,
+            false,
+        )?))
     }
 }

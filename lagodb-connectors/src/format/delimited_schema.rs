@@ -2,15 +2,18 @@
 
 use std::ffi::CStr;
 
-use lagodb_core::copy::{CopyRawFieldReader, CopyRawRecord, CopyTextInputValidator};
-use lagodb_storage::StorageFile;
+use crate::storage::InputFile;
+use lagodb_core::copy::{
+    CopyDataSource, CopyError, CopyRawFieldReader, CopyRawRecord,
+    CopyTextInputValidator,
+};
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 
 use super::{
     FormatKind, InferredColumn, InferredSchema, PostgresType, SCHEMA_SAMPLE_RECORDS,
-    StorageFileCopySource, StreamCompression,
+    StreamCompression, StreamDecoder,
 };
 
 pub(super) struct DelimitedSchemaReader {
@@ -38,10 +41,10 @@ impl DelimitedSchemaReader {
 
     pub(super) fn infer(
         self,
-        file: &mut StorageFile,
+        file: &mut InputFile,
         compression: StreamCompression,
     ) -> Result<InferredSchema, ConnectorError> {
-        let mut source = StorageFileCopySource::new(file, compression)?;
+        let mut source = SchemaCopySource::new(file, compression)?;
         // SAFETY: required by `new`; `self` retains the same options pointer
         // and the reader is finished before this method returns.
         let mut reader =
@@ -288,5 +291,34 @@ impl TypeValidators {
             (TypeCandidates::NUMERIC, &mut self.numeric),
             (TypeCandidates::FLOAT8, &mut self.float8),
         ]
+    }
+}
+
+/// A compressed object source for one cold-path PostgreSQL COPY parser.
+struct SchemaCopySource<'a> {
+    decoder: StreamDecoder<&'a mut InputFile>,
+}
+
+impl<'a> SchemaCopySource<'a> {
+    fn new(
+        file: &'a mut InputFile,
+        compression: StreamCompression,
+    ) -> Result<Self, ConnectorError> {
+        let decoder = StreamDecoder::new(file, compression)
+            .map_err(ConnectorError::copy_stream_io)?;
+        Ok(Self { decoder })
+    }
+}
+
+impl CopyDataSource for SchemaCopySource<'_> {
+    fn read(
+        &mut self,
+        output: &mut [u8],
+        min_read: usize,
+    ) -> Result<usize, CopyError> {
+        self.decoder
+            .read_at_least(output, min_read)
+            .map_err(ConnectorError::copy_stream_io)
+            .map_err(CopyError::from)
     }
 }

@@ -5,10 +5,8 @@ use lagodb_core::fdw::{
     ForeignSampleContext, ForeignSampleStatistics, ForeignTableMaintenanceError,
     ForeignTruncateContext,
 };
-use lagodb_core::storage::foreign::StorageManager;
 
 use crate::error::ConnectorError;
-use crate::storage::ObjectInput;
 
 use super::{LagodbConnectors, ResolvedForeignRelation};
 
@@ -23,8 +21,7 @@ impl FdwAnalyze for LagodbConnectors {
         else {
             return Ok(None);
         };
-        let manager = StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
-        let input = ObjectInput::resolve(&target, &manager, kind)?;
+        let input = kind.input(&target)?;
         Ok(Some(analyzer.support(input.total_bytes())))
     }
 
@@ -36,8 +33,7 @@ impl FdwAnalyze for LagodbConnectors {
         let (analyzer, target) = selected
             .into_analyze_parts(ctx.relation().owner_oid())?
             .expect("PostgreSQL installed sampling only for an analyzable format");
-        let manager = StorageManager::from_pg_gucs().map_err(ConnectorError::from)?;
-        let files = ObjectInput::resolve(&target, &manager, kind)?.open();
+        let files = kind.input(&target)?.open();
         analyzer.acquire_sample_rows(ctx, files)
     }
 }

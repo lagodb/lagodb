@@ -1,8 +1,8 @@
 //! PG-native Text/CSV Foreign Table INSERT encoding.
 
 use lagodb_core::copy::CopyRowEncoder;
-use lagodb_core::fdw::{ForeignModifyOutcome, ModifyPlanSlot, ModifySlot};
 use lagodb_core::handles::RelationHandle;
+use lagodb_core::tuple::TupleSlotRow;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
@@ -10,15 +10,14 @@ use crate::storage::ObjectOutput;
 
 use super::delimited::DelimitedFormat;
 use super::{
-    EmptyOutputPolicy, FormatKind, FormatWriteState, ObjectSetWriter,
-    StreamCompression, StreamEncoderFactory,
+    EmptyOutputPolicy, FormatWriteState, ObjectSetWriter, StreamCompression,
+    StreamEncoderFactory,
 };
 
 /// Prefix-object writer for one Text or CSV foreign-table INSERT statement.
 pub(super) struct DelimitedWriteState {
     encoder: CopyRowEncoder,
     writer: Option<ObjectSetWriter<StreamEncoderFactory>>,
-    format: FormatKind,
 }
 
 impl DelimitedWriteState {
@@ -41,42 +40,22 @@ impl DelimitedWriteState {
         }
         Ok(Self {
             encoder,
-            writer: Some(ObjectSetWriter::new(output, factory)),
-            format: format.kind(),
+            writer: Some(ObjectSetWriter::new(output, factory)?),
         })
     }
 }
 
 impl FormatWriteState for DelimitedWriteState {
-    fn insert(
-        &mut self,
-        slot: &mut ModifySlot<'_>,
-    ) -> Result<ForeignModifyOutcome, ConnectorError> {
-        // SAFETY: ModifySlot exposes the live relation-shaped executor slot
+    fn write_row(&mut self, row: TupleSlotRow<'_>) -> Result<(), ConnectorError> {
+        // SAFETY: TupleSlotRow borrows the live relation-shaped executor slot
         // for this synchronous callback; CopyRowEncoder was bound to the same
         // foreign relation in begin.
-        let row = unsafe { self.encoder.row(slot.as_raw()) }?;
+        let row = unsafe { self.encoder.row(row) }?;
         self.writer
             .as_mut()
             .expect("delimited writer is not used after finish")
             .write(row)?;
-        Ok(ForeignModifyOutcome::Applied)
-    }
-
-    fn update(
-        &mut self,
-        _slot: &mut ModifySlot<'_>,
-        _plan_slot: &ModifyPlanSlot<'_>,
-    ) -> Result<ForeignModifyOutcome, ConnectorError> {
-        Err(ConnectorError::modify_not_implemented(self.format))
-    }
-
-    fn delete(
-        &mut self,
-        _returned_slot: Option<&mut ModifySlot<'_>>,
-        _plan_slot: &ModifyPlanSlot<'_>,
-    ) -> Result<ForeignModifyOutcome, ConnectorError> {
-        Err(ConnectorError::modify_not_implemented(self.format))
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<(), ConnectorError> {

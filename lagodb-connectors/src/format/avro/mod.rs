@@ -4,13 +4,12 @@ mod copy;
 mod read;
 mod write;
 
+use std::io::BufReader;
+
+use crate::storage::InputFile;
 use apache_avro::{Reader, Schema};
-use lagodb_core::fdw::{
-    ForeignInsertBeginContext, ForeignModifyBeginContext, ForeignModifyCapabilities,
-    ForeignModifyOperation, ForeignModifyPlanContext, ForeignModifyPlanSpec,
-    ForeignModifyRelationContext, StartForeignScanContext,
-};
-use lagodb_storage::StorageFile;
+use lagodb_core::fdw::StartForeignScanContext;
+use lagodb_core::handles::RelationHandle;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
@@ -19,9 +18,8 @@ use crate::storage::{ObjectFiles, ObjectOutput};
 
 use super::{
     AvroWriteCompression, FormatKind, FormatObject, FormatOption, FormatReader,
-    FormatScanPlanner, FormatScanState, FormatSchemaReader, FormatWritePrivate,
-    FormatWriteState, FormatWriter, InferredColumn, InferredSchema, PostgresType,
-    StorageFileReader,
+    FormatScanPlanner, FormatScanState, FormatSchemaReader, FormatWriteState,
+    FormatWriter, InferredColumn, InferredSchema, PostgresType,
 };
 
 pub(super) use copy::{AvroCopyDestination, AvroCopySource};
@@ -69,47 +67,13 @@ impl FormatReader for AvroFormat {
 }
 
 impl FormatWriter for AvroFormat {
-    fn capabilities(
-        &self,
-        _context: &ForeignModifyRelationContext<'_>,
-    ) -> Result<ForeignModifyCapabilities, ConnectorError> {
-        Ok(ForeignModifyCapabilities::new(true, false, false))
-    }
-
-    fn plan_modify(
-        &self,
-        context: &ForeignModifyPlanContext<'_>,
-    ) -> Result<ForeignModifyPlanSpec<FormatWritePrivate>, ConnectorError> {
-        if context.operation() != ForeignModifyOperation::Insert {
-            return Err(ConnectorError::modify_not_implemented(FormatKind::Avro));
-        }
-        Ok(ForeignModifyPlanSpec::new(FormatWritePrivate::new(
-            FormatKind::Avro,
-        )))
-    }
-
-    fn begin_modify(
+    fn begin(
         self: Box<Self>,
-        context: ForeignModifyBeginContext<'_, FormatWritePrivate>,
-        output: ObjectOutput,
-    ) -> Result<Box<dyn FormatWriteState>, ConnectorError> {
-        if context.operation() != ForeignModifyOperation::Insert {
-            return Err(ConnectorError::modify_not_implemented(FormatKind::Avro));
-        }
-        Ok(Box::new(AvroWriteState::begin(
-            context.relation(),
-            output,
-            self.write_compression,
-        )?))
-    }
-
-    fn begin_insert(
-        self: Box<Self>,
-        context: &mut ForeignInsertBeginContext<'_>,
+        relation: &RelationHandle<'_>,
         output: ObjectOutput,
     ) -> Result<Box<dyn FormatWriteState>, ConnectorError> {
         Ok(Box::new(AvroWriteState::begin(
-            context.relation(),
+            relation,
             output,
             self.write_compression,
         )?))
@@ -119,9 +83,11 @@ impl FormatWriter for AvroFormat {
 impl FormatSchemaReader for AvroFormat {
     fn infer_schema(
         &self,
-        file: &mut StorageFile,
+        file: &mut InputFile,
     ) -> Result<InferredSchema, ConnectorError> {
-        let reader = Reader::new(StorageFileReader::new(file))?;
+        // OCF headers contain byte-wise varints even though record payloads
+        // are buffered internally by apache-avro.
+        let reader = Reader::new(BufReader::new(file))?;
         let Schema::Record(record) = reader.writer_schema() else {
             return Err(ConnectorError::invalid_object_schema(
                 self.kind(),

@@ -5,6 +5,9 @@
 //! a format and supplies PostgreSQL's documented COPY source/destination
 //! callback; the drivers keep PostgreSQL's parser, executor, permission,
 //! trigger, partition, RLS, and FDW semantics in charge of row execution.
+//! Provider input factories run after PostgreSQL validates COPY options and
+//! columns, before the executor starts. Drivers own COPY state cleanup if
+//! opening or binding the input fails.
 
 mod context;
 mod datum;
@@ -14,6 +17,7 @@ mod error;
 mod io;
 mod layout;
 mod pg;
+mod progress;
 mod raw_fields;
 mod route;
 mod row;
@@ -34,6 +38,7 @@ pub use endpoint::CopyEndpoint;
 pub use error::CopyError;
 pub use io::{CopyDataDestination, CopyDataSource};
 pub use layout::{CopyColumn, CopyColumnLayout};
+pub use progress::CopyOutputProgress;
 pub use raw_fields::{
     CopyRawFieldReader, CopyRawFields, CopyRawRecord, CopyTextInputValidator,
 };

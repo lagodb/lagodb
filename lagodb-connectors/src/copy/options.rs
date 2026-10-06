@@ -1,4 +1,4 @@
-//! COPY options owned by the object-storage consumer.
+//! COPY options owned by the connector consumer.
 //!
 //! PostgreSQL COPY options are deliberately not decoded here. They remain in
 //! the original `CopyStmt` so the consumer can strip connector-owned options
@@ -6,30 +6,48 @@
 //! the connector-owned option names; the selected format validates its COPY
 //! compression and PostgreSQL-option semantics.
 
-use lagodb_core::copy::{CopyOptionView, CopyStatement};
+use lagodb_core::copy::{CopyEndpoint, CopyOptionView, CopyStatement};
 
 use crate::error::ConnectorError;
 use crate::format::{FormatKind, ResolvedCopyFormat};
-use crate::storage::ObjectUri;
+use crate::storage::StoragePath;
 
 pub(crate) struct CopyCommandOptions {
-    server: Option<Box<str>>,
-    format: ResolvedCopyFormat,
-}
-
-pub(crate) struct ResolvedCopyOptions {
     pub(crate) server: Option<Box<str>>,
     pub(crate) format: ResolvedCopyFormat,
 }
 
 impl CopyCommandOptions {
+    /// Claim native local formats while explicit PostgreSQL formats retain
+    /// the table consumer or PostgreSQL's standard COPY path.
+    pub(super) fn uses_native_file_format(statement: &CopyStatement<'_>) -> bool {
+        if statement.endpoint() != CopyEndpoint::ServerFile {
+            return false;
+        }
+        let kind = match statement.option_view().get("format") {
+            Some(format) => format.value_str().ok().and_then(FormatKind::parse),
+            None => {
+                let filename = statement
+                    .filename()
+                    .expect("server-file COPY has a filename");
+                // Routing only inspects the suffix. Consumption reports an
+                // invalid UTF-8 path instead of falling through to text COPY.
+                FormatKind::infer_from_key(&filename.to_string_lossy())
+            }
+        };
+        matches!(
+            kind,
+            Some(FormatKind::Json | FormatKind::Avro | FormatKind::Parquet)
+        )
+    }
+
     pub(crate) fn from_statement(
         statement: &CopyStatement<'_>,
-        object: &ObjectUri,
+        object: &StoragePath,
     ) -> Result<Self, ConnectorError> {
         let provider = ProviderOptions::parse(statement.option_view())?;
         let format = provider.format.map_or_else(
-            || infer_format(object.key()),
+            || Self::infer_format(object.key()),
             Ok::<FormatKind, ConnectorError>,
         )?;
         let format = ResolvedCopyFormat::resolve(
@@ -45,11 +63,13 @@ impl CopyCommandOptions {
         })
     }
 
-    pub(crate) fn into_resolved(self) -> ResolvedCopyOptions {
-        ResolvedCopyOptions {
-            server: self.server,
-            format: self.format,
-        }
+    fn infer_format(key: &str) -> Result<FormatKind, ConnectorError> {
+        FormatKind::infer_from_key(key).ok_or_else(|| {
+            ConnectorError::invalid_copy_option(
+                "format",
+                "cannot be inferred from the object suffix; specify format explicitly",
+            )
+        })
     }
 }
 
@@ -128,13 +148,4 @@ impl ProviderOptions {
         }
         Ok(options)
     }
-}
-
-fn infer_format(key: &str) -> Result<FormatKind, ConnectorError> {
-    FormatKind::infer_from_key(key).ok_or_else(|| {
-        ConnectorError::invalid_copy_option(
-            "format",
-            "cannot be inferred from the object suffix; specify format explicitly",
-        )
-    })
 }

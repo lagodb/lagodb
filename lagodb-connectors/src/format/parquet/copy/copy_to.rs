@@ -66,7 +66,6 @@ pub(in crate::format) struct ParquetCopyDestination {
     output: Option<ObjectOutput>,
     compression: ParquetWriteCompression,
     ready: Option<ReadyParquetCopyDestination>,
-    completed: bool,
 }
 
 impl ParquetCopyDestination {
@@ -78,31 +77,12 @@ impl ParquetCopyDestination {
             output: Some(output),
             compression,
             ready: None,
-            completed: false,
         }
     }
+}
 
-    pub(in crate::format) fn finish(mut self) -> Result<(), CopyError> {
-        self.finish_inner()
-    }
-
-    fn finish_inner(&mut self) -> Result<(), CopyError> {
-        if self.completed {
-            return Ok(());
-        }
-        self.ready
-            .as_mut()
-            .expect("COPY TO initializes its destination before producing rows")
-            .finish()
-            .map_err(CopyError::from)?;
-        self.completed = true;
-        Ok(())
-    }
-
-    fn initialize_inner(
-        &mut self,
-        layout: &CopyColumnLayout,
-    ) -> Result<(), CopyError> {
+impl CopyTupleDestination for ParquetCopyDestination {
+    fn initialize(&mut self, layout: &CopyColumnLayout) -> Result<(), CopyError> {
         if layout.is_empty() {
             return Err(ConnectorError::invalid_object_schema(
                 FormatKind::Parquet,
@@ -165,15 +145,9 @@ impl ParquetCopyDestination {
             .expect("COPY TO initializes its destination exactly once");
         self.ready = Some(ReadyParquetCopyDestination {
             buffer,
-            writer: ParquetObjectWriter::new(output, schema, self.compression),
+            writer: ParquetObjectWriter::new(output, schema, self.compression)?,
         });
         Ok(())
-    }
-}
-
-impl CopyTupleDestination for ParquetCopyDestination {
-    fn initialize(&mut self, layout: &CopyColumnLayout) -> Result<(), CopyError> {
-        self.initialize_inner(layout)
     }
 
     fn write_slot(&mut self, row: CopyOutputRow<'_>) -> Result<(), CopyError> {
@@ -191,7 +165,12 @@ impl CopyTupleDestination for ParquetCopyDestination {
     }
 
     fn finish(&mut self) -> Result<(), CopyError> {
-        self.finish_inner()
+        self.ready
+            .as_mut()
+            .expect("COPY TO initializes its destination before producing rows")
+            .finish()
+            .map_err(CopyError::from)?;
+        Ok(())
     }
 
     fn abort(&mut self) {
@@ -203,10 +182,5 @@ impl CopyTupleDestination for ParquetCopyDestination {
 impl FormatCopyDestination for ParquetCopyDestination {
     fn output(&mut self) -> FormatCopyOutput<'_> {
         FormatCopyOutput::Tuples(self)
-    }
-
-    fn finish(self: Box<Self>) -> Result<(), CopyError> {
-        let destination = *self;
-        destination.finish()
     }
 }

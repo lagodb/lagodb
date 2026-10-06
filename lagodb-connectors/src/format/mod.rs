@@ -14,6 +14,7 @@ mod delimited_schema;
 mod delimited_write;
 mod filter;
 mod json;
+mod location;
 mod object_writer;
 mod parquet;
 mod resolved;
@@ -31,6 +32,7 @@ use crate::error::ConnectorError;
 
 pub(crate) use codec::{
     AvroWriteCompression, ParquetWriteCompression, StreamCompression,
+    StreamCompressionOptions,
 };
 pub(crate) use copy::{FormatCopyInput, FormatCopyOutput, ResolvedCopyFormat};
 pub(crate) use filter::{
@@ -47,9 +49,9 @@ pub(crate) use scan::{
 };
 pub(crate) use schema::{
     FormatSchemaReader, InferredColumn, InferredSchema, PostgresType,
-    SCHEMA_SAMPLE_RECORDS, StorageFileCopySource, StorageFileReader,
+    SCHEMA_SAMPLE_RECORDS,
 };
-pub(crate) use write::{FormatWritePrivate, FormatWriteState, FormatWriter};
+pub(crate) use write::{FormatWriteState, FormatWriter};
 
 use avro::AvroFormat;
 pub(crate) use compression::{StreamDecoder, StreamEncoder};

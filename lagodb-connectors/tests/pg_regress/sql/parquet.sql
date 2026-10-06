@@ -138,7 +138,6 @@ UNION ALL
 (SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_source AS value
  EXCEPT ALL SELECT to_jsonb(value) FROM lagodb_connectors_regress.parquet_write AS value);
 
-
 CREATE TABLE lagodb_connectors_regress.null_parameter_source (id integer);
 INSERT INTO lagodb_connectors_regress.null_parameter_source VALUES (NULL);
 
@@ -148,8 +147,7 @@ FROM lagodb_connectors_regress.parquet_filter
 WHERE 1 < id AND bigint_col < 0::bigint
 ORDER BY id;
 
--- The ForeignScan reports provider-accepted predicates separately from local
--- residual quals. This plan assertion verifies that filter pushdown occurred.
+-- EXPLAIN distinguishes pushed predicates from local residual quals.
 EXPLAIN (COSTS OFF)
 SELECT id
 FROM lagodb_connectors_regress.parquet_filter
@@ -176,8 +174,7 @@ WHERE varchar_col = 'varchar-one'
    OR text_col COLLATE "C" > 'z' COLLATE "C"
 ORDER BY id;
 
--- A NULL runtime value must remain UNKNOWN rather than becoming a value or a
--- provider error. PostgreSQL WHERE semantics therefore return no rows.
+-- NULL runtime parameters retain UNKNOWN and return no rows.
 SELECT inner_rel.id
 FROM lagodb_connectors_regress.null_parameter_source AS outer_rel
 CROSS JOIN LATERAL (
@@ -232,9 +229,7 @@ FROM lagodb_connectors_regress.parquet_explain_plan(
           WHERE 1 < id AND bigint_col < 0::bigint$$
 ) AS explained(plan);
 
--- PostgreSQL folds comparisons with the constant true into bare boolean Vars.
--- These remain in the local Filter; the NULL-test branches are pushed as
--- conservative pruning and must retain that Filter.
+-- Folded boolean Vars remain local; pushed NULL tests must retain the residual Filter.
 SELECT ((plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%smallint_col IS NOT NULL%'
         OR (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%NOT (smallint_col IS NULL)%')
    AND (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%smallint_col IS NULL%'
@@ -313,7 +308,7 @@ FROM lagodb_connectors_regress.parquet_explain_plan(
           WHERE id + 1 = 2$$
 ) AS explained(plan);
 
--- ANALYZE statistics and provider costs replace the former fixed values.
+-- ANALYZE statistics drive row/width estimates and startup cost.
 SELECT (plan ->> 'Plan Rows')::integer <> 1000
    AND (plan ->> 'Plan Width')::integer <> 32
    AND (plan ->> 'Startup Cost')::double precision > 0
@@ -426,8 +421,7 @@ SELECT format('s3://%s/lagodb-connectors/scan/reorder.parquet',
               :'lagodb_regress_bucket') AS reorder_path
 \gset projection_
 
--- A small native Parquet object makes projection and column-order failures
--- visible without hiding them in the complete type matrix.
+-- A three-column object isolates projection and column-order behavior.
 COPY (
     SELECT id, bool_col, text_col
     FROM lagodb_connectors_regress.common_source

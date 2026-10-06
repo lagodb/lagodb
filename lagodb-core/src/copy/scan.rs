@@ -3,8 +3,8 @@
 //! The parser is deliberately separate from [`super::driver::CopyFromDriver`].
 //! It only converts one input document into a relation-shaped virtual slot;
 //! it never invokes PostgreSQL's COPY insertion executor. A document source is
-//! owned by this state so the callback guard remains installed for the whole
-//! scan instead of being pushed and popped on every row.
+//! owned by this state. Only the parser being invoked activates its input
+//! binding, so other live scans cannot redirect its reads.
 
 use std::marker::PhantomData;
 use std::mem;
@@ -28,7 +28,7 @@ pub trait CopyDocumentSource: CopyDataSource {
     /// Borrow this document source through the COPY byte-source interface.
     ///
     /// This explicit object-safe conversion avoids relying on unstable trait
-    /// object upcasting when the scan installs its PostgreSQL callback guard.
+    /// object upcasting when the scan creates its PostgreSQL source binding.
     fn copy_data_source(&mut self) -> &mut dyn CopyDataSource;
 
     /// Advance to the next independently parsed COPY document.
@@ -39,9 +39,15 @@ pub trait CopyDocumentSource: CopyDataSource {
 }
 
 /// COPY parser state used by a Foreign Table scan.
+///
+/// PostgreSQL owns the parser allocations in the executor query context.
+/// Normal scan termination calls [`Self::end`], while query abort reclaims
+/// those allocations before dropping the Rust scan state. Rust destruction
+/// therefore only releases the source and its binding; it must not
+/// access the PostgreSQL parser after context deletion.
 pub struct CopyFromScan {
     state: Option<pg_sys::CopyFromState>,
-    _source_guard: SourceGuard<'static>,
+    source_guard: SourceGuard<'static>,
     source: Box<dyn CopyDocumentSource>,
     relation: pg_sys::Relation,
     options: *mut pg_sys::List,
@@ -69,13 +75,13 @@ impl CopyFromScan {
     ) -> Result<Self, CopyError> {
         let has_document = source.next_document()?;
 
-        // SAFETY: the boxed allocation never moves. The guard is dropped before
-        // `source` (field order), and the parser owns the only mutable borrow
-        // for the entire callback lifetime.
-        let source_guard = unsafe { install_boxed_source(&mut source) };
+        // SAFETY: the boxed allocation never moves. The scan activates this
+        // binding only during its own synchronous parser calls; transitions
+        // between documents access the source while the binding is inactive.
+        let source_guard = unsafe { Self::bind_source(&mut source) };
         let mut scan = Self {
             state: None,
-            _source_guard: source_guard,
+            source_guard,
             source,
             relation,
             options,
@@ -94,22 +100,24 @@ impl CopyFromScan {
     }
 
     fn begin_state(&mut self) -> Result<pg_sys::CopyFromState, CopyError> {
-        let result = unsafe {
+        let relation = self.relation;
+        let options = self.options;
+        let result = self.source_guard.with_active(|| unsafe {
             PgTryBuilder::new(AssertUnwindSafe(|| {
                 Ok(pg::CopyBridge::begin_from(
                     std::ptr::null_mut(),
-                    self.relation,
+                    relation,
                     std::ptr::null_mut(),
                     std::ptr::null(),
                     false,
                     source_callback(),
                     std::ptr::null_mut(),
-                    self.options,
+                    options,
                 ))
             }))
             .catch_others(|error| Err(PgError::from_caught(error)))
             .execute()
-        }?;
+        })?;
         Ok(result)
     }
 
@@ -141,19 +149,17 @@ impl CopyFromScan {
                 return Ok(false);
             };
             let (values, nulls) = unsafe { output.prepare_copy_input() };
-            let found = unsafe {
-                PgTryBuilder::new(AssertUnwindSafe(|| {
-                    Ok(pg::CopyBridge::next_from(
-                        state,
-                        self.econtext,
-                        values,
-                        nulls,
-                    ))
-                }))
-                .catch_others(|error| Err(PgError::from_caught(error)))
-                .execute()
-            }
-            .map_err(CopyError::from)?;
+            let econtext = self.econtext;
+            let found = self
+                .source_guard
+                .with_active(|| unsafe {
+                    PgTryBuilder::new(AssertUnwindSafe(|| {
+                        Ok(pg::CopyBridge::next_from(state, econtext, values, nulls))
+                    }))
+                    .catch_others(|error| Err(PgError::from_caught(error)))
+                    .execute()
+                })
+                .map_err(CopyError::from)?;
             if found {
                 unsafe { output.store_copy_input() };
                 return Ok(true);
@@ -193,28 +199,17 @@ impl CopyFromScan {
             Self::end_state(state);
         }
     }
-}
 
-impl Drop for CopyFromScan {
-    fn drop(&mut self) {
-        if let Some(state) = self.state.take() {
-            Self::end_state(state);
-        }
+    /// # Safety
+    ///
+    /// The returned binding must be owned by the scan containing this box.
+    unsafe fn bind_source(
+        source: &mut Box<dyn CopyDocumentSource>,
+    ) -> SourceGuard<'static> {
+        let guard = SourceGuard::new(source.copy_data_source());
+        // SAFETY: the source's boxed allocation remains stable while the guard
+        // is stored. Calls activate this binding only while the scan is live;
+        // document transitions access the source only outside those calls.
+        unsafe { mem::transmute(guard) }
     }
-}
-
-/// Install the callback guard for a heap-stable source.
-///
-/// # Safety
-///
-/// `source` must stay in the same boxed allocation until the returned guard is
-/// dropped, and the guard must be dropped before the source.
-unsafe fn install_boxed_source(
-    source: &mut Box<dyn CopyDocumentSource>,
-) -> SourceGuard<'static> {
-    let guard = SourceGuard::install(source.copy_data_source());
-    // SAFETY: the source's boxed allocation remains stable while the guard is
-    // stored, and the guard is dropped before the source. No callback can
-    // outlive that ordering.
-    unsafe { mem::transmute(guard) }
 }
