@@ -1,6 +1,5 @@
 -- Writable Iceberg FDW lifecycle against consumer-owned REST/MinIO tables.
 
-\set ECHO none
 \setenv PGDATABASE :DBNAME
 \set iceberg_fixture fdw-writes
 \i include/iceberg_fixture.sql
@@ -22,6 +21,7 @@ FROM lagodb_regress.object_storage_fixture
 SET client_min_messages = warning;
 DROP EXTENSION IF EXISTS dblink;
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+RESET client_min_messages;
 CREATE EXTENSION lagodb_iceberg;
 CREATE EXTENSION dblink;
 CREATE SCHEMA iceberg_fdw_regress;
@@ -86,9 +86,7 @@ OPTIONS (
     access_key_id :'regress_s3_access_key_id',
     secret_access_key :'regress_s3_secret_access_key'
 );
-RESET client_min_messages;
 
-\set ECHO all
 -- Explicit CREATE FOREIGN TABLE validates the complete remote schema before
 -- PostgreSQL creates the local relation.
 CREATE FOREIGN TABLE iceberg_fdw_regress.writable (
@@ -219,7 +217,6 @@ SELECT array_agg(id ORDER BY id) AS imported_write_rows
 FROM iceberg_fdw_import.import_rows_v2;
 
 -- Mismatched explicit columns are rejected and leave no local catalog entry.
-\set VERBOSITY terse
 CREATE FOREIGN TABLE iceberg_fdw_regress.invalid_schema (
     id bigint,
     payload text
@@ -240,7 +237,6 @@ ALTER FOREIGN TABLE iceberg_fdw_regress.writable RENAME TO renamed;
 TRUNCATE iceberg_fdw_regress.writable;
 VACUUM iceberg_fdw_regress.writable;
 VACUUM (ANALYZE) iceberg_fdw_regress.writable;
-\set VERBOSITY default
 
 -- INSERT/UPDATE/DELETE are visible to later statements in the same PostgreSQL
 -- transaction, and savepoint rollback removes only its own staged actions.
@@ -322,21 +318,17 @@ FROM iceberg_fdw_regress.second_server_table WHERE id = 31;
 -- Once a server/effective-user pair participates in a writable transaction,
 -- changing its server configuration is rejected before another write or scan
 -- can attach to the frozen transaction view.
-\set VERBOSITY terse
 BEGIN;
 INSERT INTO iceberg_fdw_regress.writable VALUES (40, 'forty');
 ALTER SERVER iceberg_rest OPTIONS (SET uri :'regress_failure_rest_uri');
 INSERT INTO iceberg_fdw_regress.writable VALUES (41, 'forty-one');
 ROLLBACK;
-\set VERBOSITY default
 SELECT count(*) AS changed_binding_rows
 FROM iceberg_fdw_regress.writable WHERE id IN (40, 41);
 
-\set VERBOSITY terse
 BEGIN;
 INSERT INTO iceberg_fdw_regress.writable VALUES (50, 'fifty');
 PREPARE TRANSACTION 'iceberg_fdw_must_not_prepare';
-\set VERBOSITY default
 SELECT count(*) AS unprepared_remote_rows
 FROM iceberg_fdw_regress.writable WHERE id = 50;
 
@@ -360,9 +352,7 @@ BEGIN;
 UPDATE iceberg_fdw_regress.writable
 SET payload = 'backend-a' WHERE id = 2;
 SELECT dblink_exec('iceberg_concurrent', 'COMMIT');
-\set VERBOSITY terse
 COMMIT;
-\set VERBOSITY default
 SELECT id, payload FROM iceberg_fdw_regress.writable
 WHERE id IN (1, 2) ORDER BY id;
 SELECT dblink_disconnect('iceberg_concurrent');

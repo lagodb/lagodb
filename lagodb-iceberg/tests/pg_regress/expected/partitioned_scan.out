@@ -1,8 +1,6 @@
 -- Managed partition reads, typed pruning/pushdown, rescans, and native planning.
 -- Managed file counts include both partition and column-metrics pruning.
 -- The external FDW fixture separately disables column metrics.
-\pset format unaligned
-\pset footer off
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION lagodb_iceberg;
 SET lagodb.query_offload_mode = 'off';
@@ -302,17 +300,6 @@ INSERT INTO partitioned_reads.timestamptz_year_heap VALUES
     (0, '1969-12-31 23:30:00-02'::timestamptz, 'keep0'), (3, '2024-01-02 12:00:00+08'::timestamptz, 'keep3'),
     (5, '1969-12-31 23:30:00-02'::timestamptz, 'drop'), (4, NULL, 'empty');
 -- Display the actual transform/source identity, file count, and heap equality.
-WITH reads AS MATERIALIZED (
-    SELECT case_name,
-           pg_temp.partition_query_json(format(
-               'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-                SELECT id FROM partitioned_reads.%I', case_name)) AS plan,
-           pg_temp.partition_query_json(format(
-               'SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM partitioned_reads.%I t', case_name)) AS rows,
-           pg_temp.partition_query_json(format(
-               'SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM partitioned_reads.%I t', case_name || '_heap')) AS heap_rows
-    FROM partition_read_cases
-)
 SELECT case_name,
        metadata->'partition-specs'->0->'fields'->0->>'transform' AS transform,
        metadata->'partition-specs'->0->'fields'->0->>'source-id' AS source_id,
@@ -320,91 +307,98 @@ SELECT case_name,
            '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")')
            ->>'Data Files Selected' AS files,
        rows IS NOT DISTINCT FROM heap_rows AS heap_match
-FROM reads
+FROM partition_read_cases
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
+     SELECT id FROM partitioned_reads.%I', case_name)) AS explained(plan)
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM partitioned_reads.%I t', case_name)) AS results(rows)
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM partitioned_reads.%I t', case_name || '_heap')) AS heap_results(heap_rows)
 JOIN iceberg.iceberg_metadata ON relid = format('partitioned_reads.%I', case_name)::regclass
 CROSS JOIN LATERAL (SELECT pg_read_file(metadata_location)::jsonb AS metadata) AS file
 ORDER BY case_name;
-case_name|transform|source_id|files|heap_match
-identity_binary|identity|2|3|t
-identity_bool|identity|2|3|t
-identity_date|identity|2|3|t
-identity_decimal|identity|2|3|t
-identity_int2|identity|2|3|t
-identity_int4|identity|2|3|t
-identity_int8|identity|2|3|t
-identity_text|identity|2|3|t
-identity_time|identity|2|3|t
-identity_timestamp|identity|2|3|t
-identity_timestamptz|identity|2|3|t
-identity_varchar|identity|2|3|t
-range_date|day|2|3|t
-timestamp_day|day|2|3|t
-timestamp_hour|hour|2|3|t
-timestamp_month|month|2|3|t
-timestamp_year|year|2|3|t
-timestamptz_day|day|2|3|t
-timestamptz_hour|hour|2|3|t
-timestamptz_month|month|2|3|t
-timestamptz_year|year|2|3|t
+      case_name       | transform | source_id | files | heap_match 
+----------------------+-----------+-----------+-------+------------
+ identity_binary      | identity  | 2         | 3     | t
+ identity_bool        | identity  | 2         | 3     | t
+ identity_date        | identity  | 2         | 3     | t
+ identity_decimal     | identity  | 2         | 3     | t
+ identity_int2        | identity  | 2         | 3     | t
+ identity_int4        | identity  | 2         | 3     | t
+ identity_int8        | identity  | 2         | 3     | t
+ identity_text        | identity  | 2         | 3     | t
+ identity_time        | identity  | 2         | 3     | t
+ identity_timestamp   | identity  | 2         | 3     | t
+ identity_timestamptz | identity  | 2         | 3     | t
+ identity_varchar     | identity  | 2         | 3     | t
+ range_date           | day       | 2         | 3     | t
+ timestamp_day        | day       | 2         | 3     | t
+ timestamp_hour       | hour      | 2         | 3     | t
+ timestamp_month      | month     | 2         | 3     | t
+ timestamp_year       | year      | 2         | 3     | t
+ timestamptz_day      | day       | 2         | 3     | t
+ timestamptz_hour     | hour      | 2         | 3     | t
+ timestamptz_month    | month     | 2         | 3     | t
+ timestamptz_year     | year      | 2         | 3     | t
+(21 rows)
+
 -- Partition-key equality, an ordinary pushed column, and a PG residual compose.
 -- In the selected partition's single file, id=0 passes the residual but fails
 -- id >= 2; id=5 passes id >= 2 but fails the residual; only id=2 survives.
 -- id=3 in the other partition passes both non-partition predicates.
-WITH plans AS MATERIALIZED (
-    SELECT case_name,
-           pg_temp.partition_query_json(format(
-               'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-                SELECT id FROM partitioned_reads.%I
-                WHERE part_key = %L::%s AND id >= 2 AND length(payload) = 5',
-               case_name, first_value, sql_type)) AS plan,
-           pg_temp.partition_query_json(format(
-               'SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.%I
-                WHERE part_key = %L::%s AND id >= 2 AND length(payload) = 5',
-               case_name, first_value, sql_type)) AS ids
-    FROM partition_read_cases
-), scans AS (
-    SELECT case_name, ids, jsonb_path_query_first(plan,
-        '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS scan
-    FROM plans
-), filters AS (
-    SELECT *, concat_ws(' ', scan #>> '{LagoDB Pushdown,Pushed Filter Exact}',
-                            scan #>> '{LagoDB Pushdown,Pushed Filter Conservative}') AS pushed
-    FROM scans
-)
+-- As in PG17 gin.sql, LATERAL queries expose plan fields and actual results.
 SELECT case_name, scan->>'Data Files Selected' AS files,
        strpos(pushed, 'part_key') > 0 AND strpos(pushed, ' = ') > 0 AS partition_pushed,
        strpos(pushed, 'id >= 2') > 0 AS id_pushed,
        coalesce(strpos(scan->>'Filter', 'length'), 0) > 0 AS pg_residual,
        ids
-FROM filters ORDER BY case_name;
-case_name|files|partition_pushed|id_pushed|pg_residual|ids
-identity_binary|3|f|t|t|[2]
-identity_bool|3|f|t|t|[2]
-identity_date|1|t|t|t|[2]
-identity_decimal|1|t|t|t|[2]
-identity_int2|1|t|t|t|[2]
-identity_int4|1|t|t|t|[2]
-identity_int8|1|t|t|t|[2]
-identity_text|1|t|t|t|[2]
-identity_time|3|f|t|t|[2]
-identity_timestamp|1|t|t|t|[2]
-identity_timestamptz|1|t|t|t|[2]
-identity_varchar|1|t|t|t|[2]
-range_date|1|t|t|t|[2]
-timestamp_day|1|t|t|t|[2]
-timestamp_hour|1|t|t|t|[2]
-timestamp_month|1|t|t|t|[2]
-timestamp_year|1|t|t|t|[2]
-timestamptz_day|1|t|t|t|[2]
-timestamptz_hour|1|t|t|t|[2]
-timestamptz_month|1|t|t|t|[2]
-timestamptz_year|1|t|t|t|[2]
+FROM partition_read_cases
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
+     SELECT id FROM partitioned_reads.%I
+     WHERE part_key = %L::%s AND id >= 2 AND length(payload) = 5',
+    case_name, first_value, sql_type)) AS explained(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS selected(scan)
+CROSS JOIN LATERAL concat_ws(' ', scan #>> '{LagoDB Pushdown,Pushed Filter Exact}',
+                                scan #>> '{LagoDB Pushdown,Pushed Filter Conservative}') AS filters(pushed)
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.%I
+     WHERE part_key = %L::%s AND id >= 2 AND length(payload) = 5',
+    case_name, first_value, sql_type)) AS results(ids)
+ORDER BY case_name;
+      case_name       | files | partition_pushed | id_pushed | pg_residual | ids 
+----------------------+-------+------------------+-----------+-------------+-----
+ identity_binary      | 3     | f                | t         | t           | [2]
+ identity_bool        | 3     | f                | t         | t           | [2]
+ identity_date        | 1     | t                | t         | t           | [2]
+ identity_decimal     | 1     | t                | t         | t           | [2]
+ identity_int2        | 1     | t                | t         | t           | [2]
+ identity_int4        | 1     | t                | t         | t           | [2]
+ identity_int8        | 1     | t                | t         | t           | [2]
+ identity_text        | 1     | t                | t         | t           | [2]
+ identity_time        | 3     | f                | t         | t           | [2]
+ identity_timestamp   | 1     | t                | t         | t           | [2]
+ identity_timestamptz | 1     | t                | t         | t           | [2]
+ identity_varchar     | 1     | t                | t         | t           | [2]
+ range_date           | 1     | t                | t         | t           | [2]
+ timestamp_day        | 1     | t                | t         | t           | [2]
+ timestamp_hour       | 1     | t                | t         | t           | [2]
+ timestamp_month      | 1     | t                | t         | t           | [2]
+ timestamp_year       | 1     | t                | t         | t           | [2]
+ timestamptz_day      | 1     | t                | t         | t           | [2]
+ timestamptz_hour     | 1     | t                | t         | t           | [2]
+ timestamptz_month    | 1     | t                | t         | t           | [2]
+ timestamptz_year     | 1     | t                | t         | t           | [2]
+(21 rows)
+
 -- Each admitted comparison and NULL test has its own visible expected row.
 -- Temporal <> stays in PG (3 files); other <> retains the NULL file (2 files).
 -- The other pushed comparisons select 1 file. IS NOT NULL selects 2 files.
 WITH predicates AS (
-    SELECT c.*, o.ordinal, o.operator,
-           format('part_key %s %L::%s', o.operator, o.value, sql_type) AS predicate
+    SELECT c.case_name, o.ordinal, o.operator,
+           format('part_key %s %L::%s', o.operator, o.value, c.sql_type) AS predicate
     FROM partition_read_cases c
     CROSS JOIN LATERAL (VALUES
         (1, '=', first_value), (2, '<', second_value), (3, '<=', first_value),
@@ -412,185 +406,184 @@ WITH predicates AS (
     ) AS o(ordinal, operator, value)
     WHERE comparison_pushes
     UNION ALL
-    SELECT c.*, o.ordinal, o.operator, 'part_key ' || o.operator
+    SELECT c.case_name, o.ordinal, o.operator, 'part_key ' || o.operator
     FROM partition_read_cases c
     CROSS JOIN (VALUES (7, 'IS NULL'), (8, 'IS NOT NULL')) AS o(ordinal, operator)
-), plans AS MATERIALIZED (
-    SELECT case_name, ordinal, operator,
-           pg_temp.partition_query_json(format(
-               'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-                SELECT id FROM partitioned_reads.%I WHERE %s', case_name, predicate)) AS plan,
-           pg_temp.partition_query_json(format(
-               'SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.%I WHERE %s', case_name, predicate)) AS ids,
-           pg_temp.partition_query_json(format(
-               'SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.%I WHERE %s', case_name || '_heap', predicate)) AS heap_ids
-    FROM predicates
-), scans AS (
-    SELECT *, jsonb_path_query_first(plan,
-        '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS scan
-    FROM plans
-), filters AS (
-    SELECT *, concat_ws(' ', scan #>> '{LagoDB Pushdown,Pushed Filter Exact}',
-                            scan #>> '{LagoDB Pushdown,Pushed Filter Conservative}') AS pushed
-    FROM scans
 )
 SELECT case_name, operator, scan->>'Data Files Selected' AS files,
        strpos(pushed, 'part_key') > 0 AS partition_pushed,
        strpos(pushed, ' ' || operator || ' ') > 0
            OR (operator IN ('IS NULL', 'IS NOT NULL') AND strpos(pushed, operator) > 0) AS operator_pushed,
        ids, ids IS NOT DISTINCT FROM heap_ids AS heap_match
-FROM filters ORDER BY case_name, ordinal;
-case_name|operator|files|partition_pushed|operator_pushed|ids|heap_match
-identity_binary|IS NULL|3|f|f|[4]|t
-identity_binary|IS NOT NULL|3|f|f|[0, 1, 2, 3, 5]|t
-identity_bool|IS NULL|1|t|t|[4]|t
-identity_bool|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-identity_date|=|1|t|t|[0, 2, 5]|t
-identity_date|<|1|t|t|[0, 2, 5]|t
-identity_date|<=|1|t|t|[0, 2, 5]|t
-identity_date|>|1|t|t|[1, 3]|t
-identity_date|>=|1|t|t|[1, 3]|t
-identity_date|<>|3|f|f|[1, 3]|t
-identity_date|IS NULL|1|t|t|[4]|t
-identity_date|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-identity_decimal|=|1|t|t|[0, 2, 5]|t
-identity_decimal|<|1|t|t|[0, 2, 5]|t
-identity_decimal|<=|1|t|t|[0, 2, 5]|t
-identity_decimal|>|1|t|t|[1, 3]|t
-identity_decimal|>=|1|t|t|[1, 3]|t
-identity_decimal|<>|2|t|t|[1, 3]|t
-identity_decimal|IS NULL|1|t|t|[4]|t
-identity_decimal|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-identity_int2|=|1|t|t|[0, 2, 5]|t
-identity_int2|<|1|t|t|[0, 2, 5]|t
-identity_int2|<=|1|t|t|[0, 2, 5]|t
-identity_int2|>|1|t|t|[1, 3]|t
-identity_int2|>=|1|t|t|[1, 3]|t
-identity_int2|<>|2|t|t|[1, 3]|t
-identity_int2|IS NULL|1|t|t|[4]|t
-identity_int2|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-identity_int4|=|1|t|t|[0, 2, 5]|t
-identity_int4|<|1|t|t|[0, 2, 5]|t
-identity_int4|<=|1|t|t|[0, 2, 5]|t
-identity_int4|>|1|t|t|[1, 3]|t
-identity_int4|>=|1|t|t|[1, 3]|t
-identity_int4|<>|2|t|t|[1, 3]|t
-identity_int4|IS NULL|1|t|t|[4]|t
-identity_int4|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-identity_int8|=|1|t|t|[0, 2, 5]|t
-identity_int8|<|1|t|t|[0, 2, 5]|t
-identity_int8|<=|1|t|t|[0, 2, 5]|t
-identity_int8|>|1|t|t|[1, 3]|t
-identity_int8|>=|1|t|t|[1, 3]|t
-identity_int8|<>|2|t|t|[1, 3]|t
-identity_int8|IS NULL|1|t|t|[4]|t
-identity_int8|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-identity_text|=|1|t|t|[0, 2, 5]|t
-identity_text|<|1|t|t|[0, 2, 5]|t
-identity_text|<=|1|t|t|[0, 2, 5]|t
-identity_text|>|1|t|t|[1, 3]|t
-identity_text|>=|1|t|t|[1, 3]|t
-identity_text|<>|2|t|t|[1, 3]|t
-identity_text|IS NULL|1|t|t|[4]|t
-identity_text|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-identity_time|IS NULL|3|f|f|[4]|t
-identity_time|IS NOT NULL|3|f|f|[0, 1, 2, 3, 5]|t
-identity_timestamp|=|1|t|t|[0, 2, 5]|t
-identity_timestamp|<|1|t|t|[0, 2, 5]|t
-identity_timestamp|<=|1|t|t|[0, 2, 5]|t
-identity_timestamp|>|1|t|t|[1, 3]|t
-identity_timestamp|>=|1|t|t|[1, 3]|t
-identity_timestamp|<>|3|f|f|[1, 3]|t
-identity_timestamp|IS NULL|1|t|t|[4]|t
-identity_timestamp|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-identity_timestamptz|=|1|t|t|[0, 2, 5]|t
-identity_timestamptz|<|1|t|t|[0, 2, 5]|t
-identity_timestamptz|<=|1|t|t|[0, 2, 5]|t
-identity_timestamptz|>|1|t|t|[1, 3]|t
-identity_timestamptz|>=|1|t|t|[1, 3]|t
-identity_timestamptz|<>|3|f|f|[1, 3]|t
-identity_timestamptz|IS NULL|1|t|t|[4]|t
-identity_timestamptz|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-identity_varchar|=|1|t|t|[0, 2, 5]|t
-identity_varchar|<|1|t|t|[0, 2, 5]|t
-identity_varchar|<=|1|t|t|[0, 2, 5]|t
-identity_varchar|>|1|t|t|[1, 3]|t
-identity_varchar|>=|1|t|t|[1, 3]|t
-identity_varchar|<>|2|t|t|[1, 3]|t
-identity_varchar|IS NULL|1|t|t|[4]|t
-identity_varchar|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-range_date|=|1|t|t|[0, 2, 5]|t
-range_date|<|1|t|t|[0, 2, 5]|t
-range_date|<=|1|t|t|[0, 2, 5]|t
-range_date|>|1|t|t|[1, 3]|t
-range_date|>=|1|t|t|[1, 3]|t
-range_date|<>|3|f|f|[1, 3]|t
-range_date|IS NULL|1|t|t|[4]|t
-range_date|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-timestamp_day|=|1|t|t|[0, 2, 5]|t
-timestamp_day|<|1|t|t|[0, 2, 5]|t
-timestamp_day|<=|1|t|t|[0, 2, 5]|t
-timestamp_day|>|1|t|t|[1, 3]|t
-timestamp_day|>=|1|t|t|[1, 3]|t
-timestamp_day|<>|3|f|f|[1, 3]|t
-timestamp_day|IS NULL|1|t|t|[4]|t
-timestamp_day|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-timestamp_hour|=|1|t|t|[0, 2, 5]|t
-timestamp_hour|<|1|t|t|[0, 2, 5]|t
-timestamp_hour|<=|1|t|t|[0, 2, 5]|t
-timestamp_hour|>|1|t|t|[1, 3]|t
-timestamp_hour|>=|1|t|t|[1, 3]|t
-timestamp_hour|<>|3|f|f|[1, 3]|t
-timestamp_hour|IS NULL|1|t|t|[4]|t
-timestamp_hour|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-timestamp_month|=|1|t|t|[0, 2, 5]|t
-timestamp_month|<|1|t|t|[0, 2, 5]|t
-timestamp_month|<=|1|t|t|[0, 2, 5]|t
-timestamp_month|>|1|t|t|[1, 3]|t
-timestamp_month|>=|1|t|t|[1, 3]|t
-timestamp_month|<>|3|f|f|[1, 3]|t
-timestamp_month|IS NULL|1|t|t|[4]|t
-timestamp_month|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-timestamp_year|=|1|t|t|[0, 2, 5]|t
-timestamp_year|<|1|t|t|[0, 2, 5]|t
-timestamp_year|<=|1|t|t|[0, 2, 5]|t
-timestamp_year|>|1|t|t|[1, 3]|t
-timestamp_year|>=|1|t|t|[1, 3]|t
-timestamp_year|<>|3|f|f|[1, 3]|t
-timestamp_year|IS NULL|1|t|t|[4]|t
-timestamp_year|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-timestamptz_day|=|1|t|t|[0, 2, 5]|t
-timestamptz_day|<|1|t|t|[0, 2, 5]|t
-timestamptz_day|<=|1|t|t|[0, 2, 5]|t
-timestamptz_day|>|1|t|t|[1, 3]|t
-timestamptz_day|>=|1|t|t|[1, 3]|t
-timestamptz_day|<>|3|f|f|[1, 3]|t
-timestamptz_day|IS NULL|1|t|t|[4]|t
-timestamptz_day|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-timestamptz_hour|=|1|t|t|[0, 2, 5]|t
-timestamptz_hour|<|1|t|t|[0, 2, 5]|t
-timestamptz_hour|<=|1|t|t|[0, 2, 5]|t
-timestamptz_hour|>|1|t|t|[1, 3]|t
-timestamptz_hour|>=|1|t|t|[1, 3]|t
-timestamptz_hour|<>|3|f|f|[1, 3]|t
-timestamptz_hour|IS NULL|1|t|t|[4]|t
-timestamptz_hour|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-timestamptz_month|=|1|t|t|[0, 2, 5]|t
-timestamptz_month|<|1|t|t|[0, 2, 5]|t
-timestamptz_month|<=|1|t|t|[0, 2, 5]|t
-timestamptz_month|>|1|t|t|[1, 3]|t
-timestamptz_month|>=|1|t|t|[1, 3]|t
-timestamptz_month|<>|3|f|f|[1, 3]|t
-timestamptz_month|IS NULL|1|t|t|[4]|t
-timestamptz_month|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
-timestamptz_year|=|1|t|t|[0, 2, 5]|t
-timestamptz_year|<|1|t|t|[0, 2, 5]|t
-timestamptz_year|<=|1|t|t|[0, 2, 5]|t
-timestamptz_year|>|1|t|t|[1, 3]|t
-timestamptz_year|>=|1|t|t|[1, 3]|t
-timestamptz_year|<>|3|f|f|[1, 3]|t
-timestamptz_year|IS NULL|1|t|t|[4]|t
-timestamptz_year|IS NOT NULL|2|t|t|[0, 1, 2, 3, 5]|t
+FROM predicates
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
+     SELECT id FROM partitioned_reads.%I WHERE %s', case_name, predicate)) AS explained(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS selected(scan)
+CROSS JOIN LATERAL concat_ws(' ', scan #>> '{LagoDB Pushdown,Pushed Filter Exact}',
+                                scan #>> '{LagoDB Pushdown,Pushed Filter Conservative}') AS filters(pushed)
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.%I WHERE %s',
+    case_name, predicate)) AS results(ids)
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.%I WHERE %s',
+    case_name || '_heap', predicate)) AS heap_results(heap_ids)
+ORDER BY case_name, ordinal;
+      case_name       |  operator   | files | partition_pushed | operator_pushed |       ids       | heap_match 
+----------------------+-------------+-------+------------------+-----------------+-----------------+------------
+ identity_binary      | IS NULL     | 3     | f                | f               | [4]             | t
+ identity_binary      | IS NOT NULL | 3     | f                | f               | [0, 1, 2, 3, 5] | t
+ identity_bool        | IS NULL     | 1     | t                | t               | [4]             | t
+ identity_bool        | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ identity_date        | =           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_date        | <           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_date        | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ identity_date        | >           | 1     | t                | t               | [1, 3]          | t
+ identity_date        | >=          | 1     | t                | t               | [1, 3]          | t
+ identity_date        | <>          | 3     | f                | f               | [1, 3]          | t
+ identity_date        | IS NULL     | 1     | t                | t               | [4]             | t
+ identity_date        | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ identity_decimal     | =           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_decimal     | <           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_decimal     | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ identity_decimal     | >           | 1     | t                | t               | [1, 3]          | t
+ identity_decimal     | >=          | 1     | t                | t               | [1, 3]          | t
+ identity_decimal     | <>          | 2     | t                | t               | [1, 3]          | t
+ identity_decimal     | IS NULL     | 1     | t                | t               | [4]             | t
+ identity_decimal     | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ identity_int2        | =           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_int2        | <           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_int2        | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ identity_int2        | >           | 1     | t                | t               | [1, 3]          | t
+ identity_int2        | >=          | 1     | t                | t               | [1, 3]          | t
+ identity_int2        | <>          | 2     | t                | t               | [1, 3]          | t
+ identity_int2        | IS NULL     | 1     | t                | t               | [4]             | t
+ identity_int2        | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ identity_int4        | =           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_int4        | <           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_int4        | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ identity_int4        | >           | 1     | t                | t               | [1, 3]          | t
+ identity_int4        | >=          | 1     | t                | t               | [1, 3]          | t
+ identity_int4        | <>          | 2     | t                | t               | [1, 3]          | t
+ identity_int4        | IS NULL     | 1     | t                | t               | [4]             | t
+ identity_int4        | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ identity_int8        | =           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_int8        | <           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_int8        | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ identity_int8        | >           | 1     | t                | t               | [1, 3]          | t
+ identity_int8        | >=          | 1     | t                | t               | [1, 3]          | t
+ identity_int8        | <>          | 2     | t                | t               | [1, 3]          | t
+ identity_int8        | IS NULL     | 1     | t                | t               | [4]             | t
+ identity_int8        | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ identity_text        | =           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_text        | <           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_text        | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ identity_text        | >           | 1     | t                | t               | [1, 3]          | t
+ identity_text        | >=          | 1     | t                | t               | [1, 3]          | t
+ identity_text        | <>          | 2     | t                | t               | [1, 3]          | t
+ identity_text        | IS NULL     | 1     | t                | t               | [4]             | t
+ identity_text        | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ identity_time        | IS NULL     | 3     | f                | f               | [4]             | t
+ identity_time        | IS NOT NULL | 3     | f                | f               | [0, 1, 2, 3, 5] | t
+ identity_timestamp   | =           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_timestamp   | <           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_timestamp   | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ identity_timestamp   | >           | 1     | t                | t               | [1, 3]          | t
+ identity_timestamp   | >=          | 1     | t                | t               | [1, 3]          | t
+ identity_timestamp   | <>          | 3     | f                | f               | [1, 3]          | t
+ identity_timestamp   | IS NULL     | 1     | t                | t               | [4]             | t
+ identity_timestamp   | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ identity_timestamptz | =           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_timestamptz | <           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_timestamptz | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ identity_timestamptz | >           | 1     | t                | t               | [1, 3]          | t
+ identity_timestamptz | >=          | 1     | t                | t               | [1, 3]          | t
+ identity_timestamptz | <>          | 3     | f                | f               | [1, 3]          | t
+ identity_timestamptz | IS NULL     | 1     | t                | t               | [4]             | t
+ identity_timestamptz | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ identity_varchar     | =           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_varchar     | <           | 1     | t                | t               | [0, 2, 5]       | t
+ identity_varchar     | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ identity_varchar     | >           | 1     | t                | t               | [1, 3]          | t
+ identity_varchar     | >=          | 1     | t                | t               | [1, 3]          | t
+ identity_varchar     | <>          | 2     | t                | t               | [1, 3]          | t
+ identity_varchar     | IS NULL     | 1     | t                | t               | [4]             | t
+ identity_varchar     | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ range_date           | =           | 1     | t                | t               | [0, 2, 5]       | t
+ range_date           | <           | 1     | t                | t               | [0, 2, 5]       | t
+ range_date           | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ range_date           | >           | 1     | t                | t               | [1, 3]          | t
+ range_date           | >=          | 1     | t                | t               | [1, 3]          | t
+ range_date           | <>          | 3     | f                | f               | [1, 3]          | t
+ range_date           | IS NULL     | 1     | t                | t               | [4]             | t
+ range_date           | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ timestamp_day        | =           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamp_day        | <           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamp_day        | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ timestamp_day        | >           | 1     | t                | t               | [1, 3]          | t
+ timestamp_day        | >=          | 1     | t                | t               | [1, 3]          | t
+ timestamp_day        | <>          | 3     | f                | f               | [1, 3]          | t
+ timestamp_day        | IS NULL     | 1     | t                | t               | [4]             | t
+ timestamp_day        | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ timestamp_hour       | =           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamp_hour       | <           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamp_hour       | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ timestamp_hour       | >           | 1     | t                | t               | [1, 3]          | t
+ timestamp_hour       | >=          | 1     | t                | t               | [1, 3]          | t
+ timestamp_hour       | <>          | 3     | f                | f               | [1, 3]          | t
+ timestamp_hour       | IS NULL     | 1     | t                | t               | [4]             | t
+ timestamp_hour       | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ timestamp_month      | =           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamp_month      | <           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamp_month      | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ timestamp_month      | >           | 1     | t                | t               | [1, 3]          | t
+ timestamp_month      | >=          | 1     | t                | t               | [1, 3]          | t
+ timestamp_month      | <>          | 3     | f                | f               | [1, 3]          | t
+ timestamp_month      | IS NULL     | 1     | t                | t               | [4]             | t
+ timestamp_month      | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ timestamp_year       | =           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamp_year       | <           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamp_year       | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ timestamp_year       | >           | 1     | t                | t               | [1, 3]          | t
+ timestamp_year       | >=          | 1     | t                | t               | [1, 3]          | t
+ timestamp_year       | <>          | 3     | f                | f               | [1, 3]          | t
+ timestamp_year       | IS NULL     | 1     | t                | t               | [4]             | t
+ timestamp_year       | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ timestamptz_day      | =           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamptz_day      | <           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamptz_day      | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ timestamptz_day      | >           | 1     | t                | t               | [1, 3]          | t
+ timestamptz_day      | >=          | 1     | t                | t               | [1, 3]          | t
+ timestamptz_day      | <>          | 3     | f                | f               | [1, 3]          | t
+ timestamptz_day      | IS NULL     | 1     | t                | t               | [4]             | t
+ timestamptz_day      | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ timestamptz_hour     | =           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamptz_hour     | <           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamptz_hour     | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ timestamptz_hour     | >           | 1     | t                | t               | [1, 3]          | t
+ timestamptz_hour     | >=          | 1     | t                | t               | [1, 3]          | t
+ timestamptz_hour     | <>          | 3     | f                | f               | [1, 3]          | t
+ timestamptz_hour     | IS NULL     | 1     | t                | t               | [4]             | t
+ timestamptz_hour     | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ timestamptz_month    | =           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamptz_month    | <           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamptz_month    | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ timestamptz_month    | >           | 1     | t                | t               | [1, 3]          | t
+ timestamptz_month    | >=          | 1     | t                | t               | [1, 3]          | t
+ timestamptz_month    | <>          | 3     | f                | f               | [1, 3]          | t
+ timestamptz_month    | IS NULL     | 1     | t                | t               | [4]             | t
+ timestamptz_month    | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+ timestamptz_year     | =           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamptz_year     | <           | 1     | t                | t               | [0, 2, 5]       | t
+ timestamptz_year     | <=          | 1     | t                | t               | [0, 2, 5]       | t
+ timestamptz_year     | >           | 1     | t                | t               | [1, 3]          | t
+ timestamptz_year     | >=          | 1     | t                | t               | [1, 3]          | t
+ timestamptz_year     | <>          | 3     | f                | f               | [1, 3]          | t
+ timestamptz_year     | IS NULL     | 1     | t                | t               | [4]             | t
+ timestamptz_year     | IS NOT NULL | 2     | t                | t               | [0, 1, 2, 3, 5] | t
+(150 rows)
+
 -- Generic plans must rebind exact integer and conservative date filters.
 SET plan_cache_mode = force_generic_plan;
 PREPARE partition_read_int(integer) AS
@@ -598,16 +591,28 @@ SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.identity_int4 WHERE part
 SELECT jsonb_path_exists(pg_temp.partition_query_json(
     'EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) EXECUTE partition_read_int(-7)'),
     '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS generic_custom_scan;
-generic_custom_scan
-t
+ generic_custom_scan 
+---------------------
+ t
+(1 row)
+
 EXECUTE partition_read_int(-7);
-jsonb_agg
-[0, 2, 5]
+ jsonb_agg 
+-----------
+ [0, 2, 5]
+(1 row)
+
 EXECUTE partition_read_int(9);
-jsonb_agg
-[1, 3]
+ jsonb_agg 
+-----------
+ [1, 3]
+(1 row)
+
 EXECUTE partition_read_int(NULL);
-jsonb_agg
+ jsonb_agg 
+-----------
+ 
+(1 row)
 
 DEALLOCATE partition_read_int;
 PREPARE partition_read_date(date) AS
@@ -615,16 +620,28 @@ SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.range_date WHERE part_ke
 SELECT jsonb_path_exists(pg_temp.partition_query_json(
     'EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) EXECUTE partition_read_date(DATE ''1969-12-31'')'),
     '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS generic_custom_scan;
-generic_custom_scan
-t
+ generic_custom_scan 
+---------------------
+ t
+(1 row)
+
 EXECUTE partition_read_date(DATE '1969-12-31');
-jsonb_agg
-[0, 2, 5]
+ jsonb_agg 
+-----------
+ [0, 2, 5]
+(1 row)
+
 EXECUTE partition_read_date(DATE '2024-01-02');
-jsonb_agg
-[1, 3]
+ jsonb_agg 
+-----------
+ [1, 3]
+(1 row)
+
 EXECUTE partition_read_date(NULL);
-jsonb_agg
+ jsonb_agg 
+-----------
+ 
+(1 row)
 
 DEALLOCATE partition_read_date;
 RESET plan_cache_mode;
@@ -636,14 +653,17 @@ CROSS JOIN LATERAL (
     WHERE t.part_key = wanted.part_key OFFSET 0
 ) AS matched
 ORDER BY wanted.ordinal, matched.id;
-ordinal|id
-1|1
-1|3
-2|0
-2|2
-2|5
-3|1
-3|3
+ ordinal | id 
+---------+----
+       1 |  1
+       1 |  3
+       2 |  0
+       2 |  2
+       2 |  5
+       3 |  1
+       3 |  3
+(7 rows)
+
 -- Owned roots still require the storage scan when optional CustomScan is off.
 SET lagodb.customscan_mode = 'off';
 SELECT jsonb_path_query_first(pg_temp.partition_query_json(
@@ -651,13 +671,19 @@ SELECT jsonb_path_query_first(pg_temp.partition_query_json(
      SELECT id FROM partitioned_reads.identity_int4 WHERE part_key = -7'),
     '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")')
     ->>'Data Files Selected' AS files;
-files
-1
+ files 
+-------
+ 1
+(1 row)
+
 SELECT id FROM partitioned_reads.identity_int4 WHERE part_key = -7 ORDER BY id;
-id
-0
-2
-5
+ id 
+----
+  0
+  2
+  5
+(3 rows)
+
 DROP TABLE partition_read_cases;
 SET client_min_messages = warning;
 DROP SCHEMA partitioned_reads CASCADE;
@@ -665,7 +691,6 @@ RESET client_min_messages;
 RESET max_parallel_workers_per_gather;
 RESET lagodb.customscan_mode;
 -- Provider-owned partitioned-table planning and native join costing.
-SET lagodb.query_offload_mode = 'off';
 CREATE SCHEMA partitioned_planning;
 CREATE TABLE partitioned_planning.part_t (
     id integer,
@@ -676,16 +701,28 @@ INSERT INTO partitioned_planning.part_t
 VALUES (10, 'east', 'a'), (20, 'west', 'b'), (40, 'west', 'd');
 -- Constraint exclusion returns no rows and leaves UPDATE/DELETE unchanged.
 SELECT id FROM partitioned_planning.part_t WHERE FALSE;
-id
+ id 
+----
+(0 rows)
+
 UPDATE partitioned_planning.part_t SET label = 'unexpected' WHERE FALSE RETURNING id;
-id
+ id 
+----
+(0 rows)
+
 DELETE FROM partitioned_planning.part_t WHERE FALSE RETURNING id;
-id
+ id 
+----
+(0 rows)
+
 SELECT id, label FROM partitioned_planning.part_t ORDER BY id;
-id|label
-10|a
-20|b
-40|d
+ id | label 
+----+-------
+ 10 | a
+ 20 | b
+ 40 | d
+(3 rows)
+
 -- A native index's parameterized cost must not depend on whether the managed
 -- partitioned table is sized before or after it in range-table order.
 CREATE TABLE partitioned_planning.native_lookup (id integer PRIMARY KEY, payload text);
@@ -698,28 +735,27 @@ SET LOCAL enable_bitmapscan = off;
 SET LOCAL enable_indexonlyscan = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-WITH plans AS MATERIALIZED (
-    SELECT pg_temp.partition_query_json(
-               'EXPLAIN (FORMAT JSON) SELECT n.payload
-                FROM partitioned_planning.native_lookup n JOIN partitioned_planning.part_t r
-                ON n.id = r.id') AS native_first,
-           pg_temp.partition_query_json(
-               'EXPLAIN (FORMAT JSON) SELECT n.payload
-                FROM partitioned_planning.part_t r JOIN partitioned_planning.native_lookup n
-                ON n.id = r.id') AS partitioned_first
-), indexes AS (
-    SELECT jsonb_path_query_first(native_first,
-               '$[0].Plan.** ? (@."Node Type" == "Index Scan" && @."Alias" == "n")') AS native_index,
-           jsonb_path_query_first(partitioned_first,
-               '$[0].Plan.** ? (@."Node Type" == "Index Scan" && @."Alias" == "n")') AS partitioned_index
-    FROM plans
-)
+-- Compare original JSON costs without putting unstable estimates in expected.
 SELECT native_index->>'Index Cond' IS NOT NULL AS native_first_parameterized,
        partitioned_index->>'Index Cond' IS NOT NULL AS partitioned_first_parameterized,
        native_index->'Total Cost' = partitioned_index->'Total Cost' AS costs_match
-FROM indexes;
-native_first_parameterized|partitioned_first_parameterized|costs_match
-t|t|t
+FROM pg_temp.partition_query_json(
+    'EXPLAIN (FORMAT JSON) SELECT n.payload
+     FROM partitioned_planning.native_lookup n JOIN partitioned_planning.part_t r
+     ON n.id = r.id') AS native_first(plan)
+CROSS JOIN pg_temp.partition_query_json(
+    'EXPLAIN (FORMAT JSON) SELECT n.payload
+     FROM partitioned_planning.part_t r JOIN partitioned_planning.native_lookup n
+     ON n.id = r.id') AS partitioned_first(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(native_first.plan,
+    '$[0].Plan.** ? (@."Node Type" == "Index Scan" && @."Alias" == "n")') AS native_scan(native_index)
+CROSS JOIN LATERAL jsonb_path_query_first(partitioned_first.plan,
+    '$[0].Plan.** ? (@."Node Type" == "Index Scan" && @."Alias" == "n")') AS partitioned_scan(partitioned_index);
+ native_first_parameterized | partitioned_first_parameterized | costs_match 
+----------------------------+---------------------------------+-------------
+ t                          | t                               | t
+(1 row)
+
 ROLLBACK;
 DROP TABLE partitioned_planning.native_lookup;
 SET client_min_messages = warning;
@@ -727,5 +763,3 @@ DROP SCHEMA partitioned_planning CASCADE;
 RESET client_min_messages;
 RESET lagodb.query_offload_mode;
 DROP FUNCTION pg_temp.partition_query_json(text);
-\pset format aligned
-\pset footer on

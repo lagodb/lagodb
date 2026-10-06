@@ -3,24 +3,20 @@
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION lagodb_iceberg;
 -- Helper function to get metadata info without random UUIDs
-CREATE OR REPLACE FUNCTION get_meta_info(relname text) 
-RETURNS TABLE(has_meta boolean, has_prev boolean, meta_equals_prev boolean) AS $$
-BEGIN
-    RETURN QUERY 
-    SELECT 
-        metadata_location IS NOT NULL,
-        previous_metadata_location IS NOT NULL,
-        metadata_location = previous_metadata_location
+CREATE OR REPLACE FUNCTION get_meta_info(relname text)
+RETURNS TABLE(has_meta boolean, has_prev boolean, meta_equals_prev boolean)
+LANGUAGE SQL AS $$
+    SELECT metadata_location IS NOT NULL,
+           previous_metadata_location IS NOT NULL,
+           metadata_location = previous_metadata_location
     FROM iceberg.iceberg_metadata
     WHERE relid = relname::regclass;
-END;
-$$ LANGUAGE plpgsql;
+$$;
 --
 -- Test 0: Setup
 --
 CREATE TABLE test_meta (id int) USING iceberg;
--- Initial state: metadata_location should exist, previous should be null
--- (Assuming CREATE TABLE sets an initial metadata file)
+-- CREATE TABLE installs metadata without a previous version.
 SELECT has_meta, has_prev FROM get_meta_info('test_meta');
  has_meta | has_prev 
 ----------+----------
@@ -34,7 +30,13 @@ SELECT metadata_location AS v0 FROM iceberg.iceberg_metadata WHERE relid = 'test
 --
 BEGIN;
   INSERT INTO test_meta VALUES (1);
-  SELECT metadata_location AS v1 FROM iceberg.iceberg_metadata WHERE relid = 'test_meta'::regclass \gset
+  SELECT count(*) = 1 AS metadata_row_present
+  FROM iceberg.iceberg_metadata WHERE relid = 'test_meta'::regclass;
+ metadata_row_present 
+----------------------
+ t
+(1 row)
+
   
   -- Inside transaction, catalog should still show v0 (no update yet)
   SELECT metadata_location = :'v0' as still_v0 FROM iceberg.iceberg_metadata WHERE relid = 'test_meta'::regclass;
@@ -61,11 +63,16 @@ BEGIN;
   2
 (2 rows)
 
-    SELECT metadata_location AS v2 FROM iceberg.iceberg_metadata WHERE relid = 'test_meta'::regclass \gset
+    SELECT count(*) = 1 AS metadata_row_present
+    FROM iceberg.iceberg_metadata WHERE relid = 'test_meta'::regclass;
+ metadata_row_present 
+----------------------
+ t
+(1 row)
+
   RELEASE SAVEPOINT sp1;
 COMMIT;
--- After commit, metadata should be updated to the latest (v2-ish, actually the one from second insert)
--- and previous should be the one from first insert (v1-ish)
+-- Commit publishes new metadata and retains the previous committed version.
 SELECT 
     metadata_location != :'v0' as updated,
     previous_metadata_location != :'v0' as prev_updated,
@@ -82,14 +89,20 @@ SELECT metadata_location AS v_base FROM iceberg.iceberg_metadata WHERE relid = '
 -- Scenario 2: Subtransaction rollback
 --
 BEGIN;
-  INSERT INTO test_meta VALUES (3); -- metadata -> v_new
-  SELECT metadata_location AS v_new FROM iceberg.iceberg_metadata WHERE relid = 'test_meta'::regclass \gset
+  INSERT INTO test_meta VALUES (3);
+  SELECT count(*) = 1 AS metadata_row_present
+  FROM iceberg.iceberg_metadata WHERE relid = 'test_meta'::regclass;
+ metadata_row_present 
+----------------------
+ t
+(1 row)
+
   
   SAVEPOINT sp1;
-    INSERT INTO test_meta VALUES (4); -- metadata -> v_rolled
+    INSERT INTO test_meta VALUES (4);
   ROLLBACK TO SAVEPOINT sp1;
 COMMIT;
--- After commit, metadata should be v_new, and previous should be v_base
+-- Commit publishes the outer write and retains the previous committed metadata.
 SELECT 
     metadata_location != :'v_base' as updated,
     previous_metadata_location = :'v_base' as prev_matches_base
@@ -122,20 +135,32 @@ FROM iceberg.iceberg_metadata WHERE relid = 'test_meta'::regclass;
 -- Scenario 4: Multi-level nested subtransactions
 --
 BEGIN;
-  INSERT INTO test_meta VALUES (6); -- v_l1
-  SELECT metadata_location AS v_l1_old FROM iceberg.iceberg_metadata WHERE relid = 'test_meta'::regclass \gset
+  INSERT INTO test_meta VALUES (6);
+  SELECT count(*) = 1 AS metadata_row_present
+  FROM iceberg.iceberg_metadata WHERE relid = 'test_meta'::regclass;
+ metadata_row_present 
+----------------------
+ t
+(1 row)
+
   
   SAVEPOINT sp1;
-    INSERT INTO test_meta VALUES (7); -- v_l2
-    SELECT metadata_location AS v_l2_old FROM iceberg.iceberg_metadata WHERE relid = 'test_meta'::regclass \gset
+    INSERT INTO test_meta VALUES (7);
+    SELECT count(*) = 1 AS metadata_row_present
+    FROM iceberg.iceberg_metadata WHERE relid = 'test_meta'::regclass;
+ metadata_row_present 
+----------------------
+ t
+(1 row)
+
     
     SAVEPOINT sp2;
-      INSERT INTO test_meta VALUES (8); -- v_l3
-    ROLLBACK TO SAVEPOINT sp2; -- Rollback to v_l2 state
+      INSERT INTO test_meta VALUES (8);
+    ROLLBACK TO SAVEPOINT sp2; -- Restore the outer savepoint state
     
   RELEASE SAVEPOINT sp1;
 COMMIT;
--- After commit, metadata should be what it was after level 2 insert
+-- Commit publishes the writes surviving the nested rollback.
 SELECT 
     metadata_location != :'v_base2' as updated,
     previous_metadata_location != :'v_base2' as prev_updated

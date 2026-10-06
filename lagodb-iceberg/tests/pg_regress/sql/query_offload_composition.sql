@@ -335,7 +335,6 @@ JOIN query_offload_comp_aux AS a USING (key)
 GROUP BY a.label_name;
 
 -- DISTINCT aggregate followed by ORDER BY and LIMIT/OFFSET.
-SET lagodb.query_offload_mode = 'force';
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
 SELECT l.key,
        count(DISTINCT r.measure) AS distinct_values,

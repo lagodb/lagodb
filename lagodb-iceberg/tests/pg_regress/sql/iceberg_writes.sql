@@ -154,9 +154,7 @@ RETURNING id, base, doubled;
 EXECUTE update_generated(2, 9);
 DEALLOCATE update_generated;
 
-\set VERBOSITY terse
 UPDATE dml_lifecycle.generated_t SET base = -1 WHERE id = 1;
-\set VERBOSITY default
 
 SELECT * FROM dml_lifecycle.generated_t ORDER BY id;
 
@@ -189,10 +187,8 @@ CREATE TABLE dml_lifecycle.v1_dml_t (
 
 INSERT INTO dml_lifecycle.v1_dml_t VALUES (1, 'one');
 
-\set VERBOSITY terse
 DELETE FROM dml_lifecycle.v1_dml_t WHERE id = 1;
 UPDATE dml_lifecycle.v1_dml_t SET label = 'updated' WHERE id = 1;
-\set VERBOSITY default
 
 -- INSERT-only MERGE plans write no position deletes, even when their join
 -- reads the target, so they remain valid appends on an Iceberg v1 table.
@@ -316,9 +312,7 @@ FROM dml_lifecycle.generated_t
 WHERE base < 10
 WITH LOCAL CHECK OPTION;
 
-\set VERBOSITY terse
 UPDATE dml_lifecycle.generated_small SET base = 12 WHERE id = 1;
-\set VERBOSITY default
 SELECT * FROM dml_lifecycle.generated_t ORDER BY id;
 
 -- RLS visibility and WITH CHECK policies remain enforced by the forked
@@ -340,9 +334,7 @@ SET ROLE dml_rls_user;
 UPDATE dml_lifecycle.rls_t
 SET label = 'updated'
 RETURNING id, label;
-\set VERBOSITY terse
 UPDATE dml_lifecycle.rls_t SET label = 'blocked' WHERE id = 1;
-\set VERBOSITY default
 RESET ROLE;
 
 SELECT * FROM dml_lifecycle.rls_t ORDER BY id;

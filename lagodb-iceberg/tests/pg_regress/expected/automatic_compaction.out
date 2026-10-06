@@ -27,26 +27,11 @@ WHERE indexrelid =
 (1 row)
 
 -- Database settings are required because the worker runs in another backend.
-SELECT format(
-    'ALTER DATABASE %I SET lagodb_iceberg.auto_maintenance_enabled = off',
-    current_database()
-)
-\gexec
-ALTER DATABASE lagodb_iceberg_regress SET lagodb_iceberg.auto_maintenance_enabled = off
-SELECT format(
-    'ALTER DATABASE %I SET lagodb_iceberg.auto_maintenance_naptime_s = 10',
-    current_database()
-)
-\gexec
-ALTER DATABASE lagodb_iceberg_regress SET lagodb_iceberg.auto_maintenance_naptime_s = 10
+ALTER DATABASE :"DBNAME" SET lagodb_iceberg.auto_maintenance_enabled = off;
+ALTER DATABASE :"DBNAME" SET lagodb_iceberg.auto_maintenance_naptime_s = 10;
 SET lagodb_iceberg.auto_maintenance_enabled = off;
 SET lagodb_iceberg.auto_maintenance_naptime_s = 10;
-SELECT format(
-    'ALTER DATABASE %I SET lagodb_iceberg.auto_maintenance_enabled = on',
-    current_database()
-)
-\gexec
-ALTER DATABASE lagodb_iceberg_regress SET lagodb_iceberg.auto_maintenance_enabled = on
+ALTER DATABASE :"DBNAME" SET lagodb_iceberg.auto_maintenance_enabled = on;
 CREATE TABLE automatic_compaction_test.eligible (id integer) USING iceberg;
 INSERT INTO automatic_compaction_test.eligible VALUES (1);
 CREATE TEMP TABLE first_due AS
@@ -172,18 +157,8 @@ FROM automatic_compaction_test.eligible;
  t
 (1 row)
 
-SELECT format(
-    'ALTER DATABASE %I RESET lagodb_iceberg.auto_maintenance_enabled',
-    current_database()
-)
-\gexec
-ALTER DATABASE lagodb_iceberg_regress RESET lagodb_iceberg.auto_maintenance_enabled
-SELECT format(
-    'ALTER DATABASE %I RESET lagodb_iceberg.auto_maintenance_naptime_s',
-    current_database()
-)
-\gexec
-ALTER DATABASE lagodb_iceberg_regress RESET lagodb_iceberg.auto_maintenance_naptime_s
+ALTER DATABASE :"DBNAME" RESET lagodb_iceberg.auto_maintenance_enabled;
+ALTER DATABASE :"DBNAME" RESET lagodb_iceberg.auto_maintenance_naptime_s;
 RESET lagodb_iceberg.auto_maintenance_enabled;
 RESET lagodb_iceberg.auto_maintenance_naptime_s;
 DROP SCHEMA automatic_compaction_test CASCADE;

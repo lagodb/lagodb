@@ -1,6 +1,101 @@
 -- Writable Iceberg FDW lifecycle against consumer-owned REST/MinIO tables.
-\set ECHO none
+\setenv PGDATABASE :DBNAME
+\set iceberg_fixture fdw-writes
+\i include/iceberg_fixture.sql
+-- Caller supplies a consumer selection; failure must stop this SQL testcase.
+\setenv LAGODB_ICEBERG_FIXTURE :iceberg_fixture
+\! python3 ../../../scripts/pg_regress/regress_fixture.py provision "$LAGODB_ICEBERG_FIXTURE"
 iceberg_fixture_provisioned: fdw-writes
+\i ../../../scripts/pg_regress/fixture_command_result.sql
+-- psql's \! records an ordinary nonzero exit in SHELL_ERROR and keeps running.
+-- Include with \i from the suite root: pg_regress feeds top-level SQL via stdin.
+-- Only failed infrastructure commands enable ON_ERROR_STOP; expected SQL errors
+-- in the actual regression cases retain their normal pg_regress behavior.
+\if :SHELL_ERROR
+\set ON_ERROR_STOP on
+DO $$ BEGIN RAISE EXCEPTION 'Regression fixture command failed'; END $$;
+\endif
+SELECT rest_uri AS regress_rest_uri,
+       fallback_rest_uri AS regress_fallback_rest_uri,
+       failure_rest_uri AS regress_failure_rest_uri,
+       endpoint AS regress_s3_endpoint,
+       fallback_bucket AS regress_fallback_bucket,
+       fallback_second_bucket AS regress_fallback_second_bucket,
+       region AS regress_s3_region,
+       access_key_id AS regress_s3_access_key_id,
+       secret_access_key AS regress_s3_secret_access_key
+FROM lagodb_regress.object_storage_fixture
+\gset
+\set regress_bucket_a_scope 's3://' :regress_fallback_bucket '/'
+\set regress_bucket_b_scope 's3://' :regress_fallback_second_bucket '/'
+SET client_min_messages = warning;
+DROP EXTENSION IF EXISTS dblink;
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+RESET client_min_messages;
+CREATE EXTENSION lagodb_iceberg;
+CREATE EXTENSION dblink;
+CREATE SCHEMA iceberg_fdw_regress;
+CREATE SERVER iceberg_rest
+TYPE 'rest'
+FOREIGN DATA WRAPPER lagodb_iceberg
+OPTIONS (
+    uri :'regress_rest_uri'
+);
+CREATE SERVER iceberg_rest_failure
+TYPE 'rest'
+FOREIGN DATA WRAPPER lagodb_iceberg
+OPTIONS (
+    uri :'regress_failure_rest_uri'
+);
+CREATE SERVER iceberg_rest_second
+TYPE 'rest'
+FOREIGN DATA WRAPPER lagodb_iceberg
+OPTIONS (
+    uri :'regress_rest_uri'
+);
+CREATE SERVER iceberg_rest_fallback
+TYPE 'rest'
+FOREIGN DATA WRAPPER lagodb_iceberg
+OPTIONS (
+    uri :'regress_fallback_rest_uri',
+    enable_vended_credentials 'false'
+);
+CREATE SERVER bucket_a_storage
+TYPE 'storage'
+FOREIGN DATA WRAPPER lagodb_iceberg
+OPTIONS (
+    provider 's3_compatible',
+    endpoint :'regress_s3_endpoint',
+    region :'regress_s3_region',
+    scope :'regress_bucket_a_scope',
+    allow_http 'true',
+    virtual_hosted_style_request 'false'
+);
+CREATE SERVER bucket_b_storage
+TYPE 'storage'
+FOREIGN DATA WRAPPER lagodb_iceberg
+OPTIONS (
+    provider 's3_compatible',
+    endpoint :'regress_s3_endpoint',
+    region :'regress_s3_region',
+    scope :'regress_bucket_b_scope',
+    allow_http 'true',
+    virtual_hosted_style_request 'false'
+);
+CREATE USER MAPPING FOR CURRENT_USER SERVER iceberg_rest;
+CREATE USER MAPPING FOR CURRENT_USER SERVER iceberg_rest_failure;
+CREATE USER MAPPING FOR CURRENT_USER SERVER iceberg_rest_second;
+CREATE USER MAPPING FOR CURRENT_USER SERVER iceberg_rest_fallback;
+CREATE USER MAPPING FOR CURRENT_USER SERVER bucket_a_storage
+OPTIONS (
+    access_key_id :'regress_s3_access_key_id',
+    secret_access_key :'regress_s3_secret_access_key'
+);
+CREATE USER MAPPING FOR CURRENT_USER SERVER bucket_b_storage
+OPTIONS (
+    access_key_id :'regress_s3_access_key_id',
+    secret_access_key :'regress_s3_secret_access_key'
+);
 -- Explicit CREATE FOREIGN TABLE validates the complete remote schema before
 -- PostgreSQL creates the local relation.
 CREATE FOREIGN TABLE iceberg_fdw_regress.writable (
@@ -209,7 +304,6 @@ FROM iceberg_fdw_import.import_rows_v2;
 (1 row)
 
 -- Mismatched explicit columns are rejected and leave no local catalog entry.
-\set VERBOSITY terse
 CREATE FOREIGN TABLE iceberg_fdw_regress.invalid_schema (
     id bigint,
     payload text
@@ -241,7 +335,6 @@ VACUUM iceberg_fdw_regress.writable;
 ERROR:  Iceberg foreign tables do not support VACUUM on an Iceberg foreign table
 VACUUM (ANALYZE) iceberg_fdw_regress.writable;
 ERROR:  Iceberg foreign tables do not support VACUUM on an Iceberg foreign table
-\set VERBOSITY default
 -- INSERT/UPDATE/DELETE are visible to later statements in the same PostgreSQL
 -- transaction, and savepoint rollback removes only its own staged actions.
 BEGIN;
@@ -377,14 +470,12 @@ FROM iceberg_fdw_regress.second_server_table WHERE id = 31;
 -- Once a server/effective-user pair participates in a writable transaction,
 -- changing its server configuration is rejected before another write or scan
 -- can attach to the frozen transaction view.
-\set VERBOSITY terse
 BEGIN;
 INSERT INTO iceberg_fdw_regress.writable VALUES (40, 'forty');
 ALTER SERVER iceberg_rest OPTIONS (SET uri :'regress_failure_rest_uri');
 INSERT INTO iceberg_fdw_regress.writable VALUES (41, 'forty-one');
 ERROR:  FDW provider "lagodb_iceberg" callback BeginForeignModify failed: FDW provider modify error: foreign server or user-mapping configuration changed after this writable transaction bound it
 ROLLBACK;
-\set VERBOSITY default
 SELECT count(*) AS changed_binding_rows
 FROM iceberg_fdw_regress.writable WHERE id IN (40, 41);
  changed_binding_rows 
@@ -392,12 +483,10 @@ FROM iceberg_fdw_regress.writable WHERE id IN (40, 41);
                     0
 (1 row)
 
-\set VERBOSITY terse
 BEGIN;
 INSERT INTO iceberg_fdw_regress.writable VALUES (50, 'fifty');
 PREPARE TRANSACTION 'iceberg_fdw_must_not_prepare';
 ERROR:  cannot PREPARE a transaction with staged writable Iceberg foreign-table changes
-\set VERBOSITY default
 SELECT count(*) AS unprepared_remote_rows
 FROM iceberg_fdw_regress.writable WHERE id = 50;
  unprepared_remote_rows 
@@ -445,10 +534,8 @@ SELECT dblink_exec('iceberg_concurrent', 'COMMIT');
  COMMIT
 (1 row)
 
-\set VERBOSITY terse
 COMMIT;
 ERROR:  iceberg error: DataConflict => row delta conflicts with data files added after scan snapshot: 1 conflicting data files
-\set VERBOSITY default
 SELECT id, payload FROM iceberg_fdw_regress.writable
 WHERE id IN (1, 2) ORDER BY id;
  id |   payload   
@@ -544,7 +631,6 @@ BEGIN;
 INSERT INTO iceberg_fdw_regress.failure_writable VALUES (99, 'not-published');
 COMMIT;
 WARNING:  local transaction committed but Iceberg REST catalog publication for regress:fdw_writes.rows_v2 failed: Unexpected, context: { status: 503 Service Unavailable, type: CommitStateUnknown, code: 503 } => regression fixture rejected publication, source: REST catalog returned HTTP status 503 Service Unavailable; external table state is unknown
-DETAIL:  lagodb
 SELECT count(*) AS unpublished_remote_rows
 FROM iceberg_fdw_regress.rebound WHERE id = 99;
  unpublished_remote_rows 

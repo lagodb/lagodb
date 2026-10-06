@@ -14,23 +14,11 @@ WHERE indexrelid =
     'iceberg.iceberg_metadata_maintenance_due_idx'::regclass;
 
 -- Database settings are required because the worker runs in another backend.
-SELECT format(
-    'ALTER DATABASE %I SET lagodb_iceberg.auto_maintenance_enabled = off',
-    current_database()
-)
-\gexec
-SELECT format(
-    'ALTER DATABASE %I SET lagodb_iceberg.auto_maintenance_naptime_s = 10',
-    current_database()
-)
-\gexec
+ALTER DATABASE :"DBNAME" SET lagodb_iceberg.auto_maintenance_enabled = off;
+ALTER DATABASE :"DBNAME" SET lagodb_iceberg.auto_maintenance_naptime_s = 10;
 SET lagodb_iceberg.auto_maintenance_enabled = off;
 SET lagodb_iceberg.auto_maintenance_naptime_s = 10;
-SELECT format(
-    'ALTER DATABASE %I SET lagodb_iceberg.auto_maintenance_enabled = on',
-    current_database()
-)
-\gexec
+ALTER DATABASE :"DBNAME" SET lagodb_iceberg.auto_maintenance_enabled = on;
 
 CREATE TABLE automatic_compaction_test.eligible (id integer) USING iceberg;
 INSERT INTO automatic_compaction_test.eligible VALUES (1);
@@ -129,16 +117,8 @@ SELECT array_agg(id ORDER BY id) = ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     AS rows_preserved_after_second_attempt
 FROM automatic_compaction_test.eligible;
 
-SELECT format(
-    'ALTER DATABASE %I RESET lagodb_iceberg.auto_maintenance_enabled',
-    current_database()
-)
-\gexec
-SELECT format(
-    'ALTER DATABASE %I RESET lagodb_iceberg.auto_maintenance_naptime_s',
-    current_database()
-)
-\gexec
+ALTER DATABASE :"DBNAME" RESET lagodb_iceberg.auto_maintenance_enabled;
+ALTER DATABASE :"DBNAME" RESET lagodb_iceberg.auto_maintenance_naptime_s;
 RESET lagodb_iceberg.auto_maintenance_enabled;
 RESET lagodb_iceberg.auto_maintenance_naptime_s;
 

@@ -4,9 +4,7 @@
 -- variables (OT_WHOLE_LINE), but `\setenv` arguments (OT_NORMAL) do.
 \setenv PGDATABASE :DBNAME
 \! python3 ../../../scripts/pg_regress/regress_fixture.py setup --iceberg
-\set ECHO none
 \i ../../../scripts/pg_regress/fixture_command_result.sql
-\set ECHO all
 
 -- Install the shared LagoDB services once for the regression database.
 -- Individual AM tests may drop/recreate lagodb_iceberg, but the base-owned
@@ -19,7 +17,6 @@ WHERE extname = 'lagodb_base';
 
 -- Recover a storage singleton paused by an interrupted worker cancellation
 -- test. The PID is resolved afresh; the guard never trusts an old stored PID.
-\set QUIET 1
 SET client_min_messages = warning;
 SELECT pid::text AS lagodb_regress_storage_pid
 FROM pg_stat_activity
@@ -55,19 +52,19 @@ DROP ROLE IF EXISTS lagodb_runtime_non_superuser;
 -- Remove durable cancellation fixtures left by an interrupted run.
 DELETE FROM lagodb.maintenance_queue
 WHERE item_id = '00000000-0000-0000-0000-000000000004';
-WITH dropped AS (
-    SELECT lagodb.drop_storage_volume(storage_volume_name)
-    FROM lagodb.storage_volumes
+-- Discard only the state-dependent cleanup result; assert the postcondition.
+SELECT lagodb.drop_storage_volume(storage_volume_name)
+FROM lagodb.storage_volumes
+WHERE storage_volume_name =
+      'regress-worker-statement-cancel-' || current_database()
+\g /dev/null
+SELECT NOT EXISTS (
+    SELECT FROM lagodb.storage_volumes
     WHERE storage_volume_name =
           'regress-worker-statement-cancel-' || current_database()
-)
-SELECT count(*) >= 0 AS worker_cancel_cleanup_completed
-FROM dropped;
+) AS worker_cancel_cleanup_completed;
 RESET client_min_messages;
-\set QUIET 0
 \! python3 ../../../scripts/pg_regress/regress_fixture.py wait-storage
-\set ECHO none
 \i ../../../scripts/pg_regress/fixture_command_result.sql
-\set ECHO all
 
 -- LagoDB setup complete.

@@ -3,8 +3,35 @@
 -- operator capability matrices live in the managed-table suites; this file
 -- verifies that each basic operator family accepts foreign scan providers and
 -- preserves PostgreSQL results.
-\set ECHO none
+\setenv PGDATABASE :DBNAME
+\set iceberg_fixture query-offload-writes
+\i include/iceberg_fixture.sql
+-- Caller supplies a consumer selection; failure must stop this SQL testcase.
+\setenv LAGODB_ICEBERG_FIXTURE :iceberg_fixture
+\! python3 ../../../scripts/pg_regress/regress_fixture.py provision "$LAGODB_ICEBERG_FIXTURE"
 iceberg_fixture_provisioned: query-offload-writes
+\i ../../../scripts/pg_regress/fixture_command_result.sql
+-- psql's \! records an ordinary nonzero exit in SHELL_ERROR and keeps running.
+-- Include with \i from the suite root: pg_regress feeds top-level SQL via stdin.
+-- Only failed infrastructure commands enable ON_ERROR_STOP; expected SQL errors
+-- in the actual regression cases retain their normal pg_regress behavior.
+\if :SHELL_ERROR
+\set ON_ERROR_STOP on
+DO $$ BEGIN RAISE EXCEPTION 'Regression fixture command failed'; END $$;
+\endif
+SELECT rest_uri AS regress_rest_uri
+FROM lagodb_regress.object_storage_fixture
+\gset
+SET client_min_messages = warning;
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+RESET client_min_messages;
+CREATE EXTENSION lagodb_iceberg;
+CREATE SCHEMA query_offload_foreign;
+CREATE SERVER query_offload_foreign_rest
+TYPE 'rest'
+FOREIGN DATA WRAPPER lagodb_iceberg
+OPTIONS (uri :'regress_rest_uri');
+CREATE USER MAPPING FOR CURRENT_USER SERVER query_offload_foreign_rest;
 CREATE FOREIGN TABLE query_offload_foreign.left_source (
     id integer,
     group_key integer,

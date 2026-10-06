@@ -1,24 +1,21 @@
-\set ECHO none
 
 -- Storage volume registry reload and replacement.
 -- The storage process starts before database-local extension workers and loads
 -- its desired registry exclusively from the machine-managed volume snapshot.
 SELECT count(*) = 1 AS worker_running
 FROM pg_stat_activity
-WHERE backend_type = 'lagodb-storage'
-\gset
-\echo worker_running: :worker_running
+WHERE backend_type = 'lagodb-storage';
 
-COPY (SELECT current_setting('data_directory') || '/lagodb/storage.sock')
-TO '/tmp/_regress_socket_path.txt';
-\! test -S "$(cat /tmp/_regress_socket_path.txt)" && echo "socket_exists: true" || echo "socket_exists: false"
-\! rm -f /tmp/_regress_socket_path.txt
+SELECT current_setting('data_directory') || '/lagodb/storage.sock'
+       AS lagodb_regress_storage_socket
+\gset
+\setenv LAGODB_REGRESS_STORAGE_SOCKET :lagodb_regress_storage_socket
+\! test -S "$LAGODB_REGRESS_STORAGE_SOCKET" && echo "socket_exists: true" || echo "socket_exists: false"
+\setenv LAGODB_REGRESS_STORAGE_SOCKET
 
 SELECT current_setting(
            'lagodb.storage_volume_retirement_grace_period_seconds'
-) = '604800' AS volume_retirement_grace_period_default
-\gset
-\echo volume_retirement_grace_period_default: :volume_retirement_grace_period_default
+) = '604800' AS volume_retirement_grace_period_default;
 
 SELECT loaded_volume_count AS loaded_before
 FROM lagodb.storage_service_status
@@ -89,30 +86,21 @@ FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'volume_name'
   AND provider = 's3'
   AND credential_type = 'anonymous'
-  AND bound_tablespace_oid IS NULL
-\gset
-\echo config_visible: :config_visible
+  AND bound_tablespace_oid IS NULL;
 
-SELECT pg_temp.storage_volume_wait_for_reload(true, false) AS ignored
-\gset
+SELECT pg_temp.storage_volume_wait_for_reload(true, false);
 
 SELECT loaded_volume_count >= :loaded_before::bigint + 1
            AND last_error IS NULL AS registry_loaded
-FROM lagodb.storage_service_status
-\gset
-\echo registry_loaded: :registry_loaded
+FROM lagodb.storage_service_status;
 
 SELECT :'volume_name' || '-renamed' AS renamed_volume
 \gset
-SELECT lagodb.rename_storage_volume(:'volume_name', :'renamed_volume')
-       AS ignored
-\gset
+SELECT lagodb.rename_storage_volume(:'volume_name', :'renamed_volume');
 SELECT count(*) = 1 AS rename_visible
 FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'renamed_volume'
-  AND internal_volume_id IS NOT NULL
-\gset
-\echo rename_visible: :rename_visible
+  AND internal_volume_id IS NOT NULL;
 
 UPDATE storage_volume_reload_baseline AS baseline
 SET reload_generation = status.reload_generation
@@ -122,46 +110,35 @@ SELECT lagodb.update_storage_volume_credentials(
     :'renamed_volume',
     '{"type":"s3_access_key","access_key_id":"regress-key",'
     '"secret_access_key":"regress-secret"}'::jsonb
-) AS ignored
-\gset
+);
 SELECT count(*) = 1 AS credential_update_visible
 FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'renamed_volume'
-  AND credential_type = 's3_access_key'
-\gset
-\echo credential_update_visible: :credential_update_visible
+  AND credential_type = 's3_access_key';
 
-SELECT pg_temp.storage_volume_wait_for_reload(true, true) AS ignored
-\gset
+SELECT pg_temp.storage_volume_wait_for_reload(true, true);
 
 SELECT loaded_volume_count >= :loaded_before::bigint + 1
            AND last_reload_replaced >= 1
            AND last_error IS NULL AS replacement_loaded
-FROM lagodb.storage_service_status
-\gset
-\echo replacement_loaded: :replacement_loaded
+FROM lagodb.storage_service_status;
 
 UPDATE storage_volume_reload_baseline AS baseline
 SET reload_generation = status.reload_generation
 FROM lagodb.storage_service_status AS status;
 
-SELECT lagodb.reload_storage_volumes() AS ignored
-\gset
+SELECT lagodb.reload_storage_volumes();
 
-SELECT pg_temp.storage_volume_wait_for_reload(false, false) AS ignored
-\gset
+SELECT pg_temp.storage_volume_wait_for_reload(false, false);
 
 SELECT count(*) = 1 AS worker_still_running
 FROM pg_stat_activity
-WHERE backend_type = 'lagodb-storage'
-\gset
-\echo worker_still_running: :worker_still_running
+WHERE backend_type = 'lagodb-storage';
 
 DROP FUNCTION pg_temp.storage_volume_wait_for_reload(boolean, boolean);
 DROP TABLE storage_volume_reload_baseline;
 
 -- Tablespace binding and DDL rules.
-\set ECHO none
 
 -- Storage-volume-backed tablespace DDL rules.
 \! mkdir -p /tmp/lagodb_iceberg_regress_guard_dist
@@ -202,103 +179,55 @@ WHERE volume.storage_volume_name = :'volume_name'
   AND EXISTS (
       SELECT 1 FROM unnest(tablespace.spcoptions) AS option
       WHERE option LIKE 'lagodb_volume_id=%'
-  )
-\gset
-\echo rename_allowed: :rename_allowed
+  );
 
 -- Binding options are immutable, and native relations cannot enter a volume.
 CREATE TABLE storage_volume_move_candidate (id integer);
-CREATE TEMP TABLE guard_results (
-    public_alter_rejected boolean,
-    internal_alter_rejected boolean,
-    native_alter_rejected boolean,
-    native_reset_rejected boolean,
-    local_table_rejected boolean,
-    local_ctas_rejected boolean,
-    table_move_rejected boolean
-);
-DO $guard$
-DECLARE
-    public_rejected boolean := false;
-    internal_rejected boolean := false;
-    native_rejected boolean := false;
-    reset_rejected boolean := false;
-    table_rejected boolean := false;
-    ctas_rejected boolean := false;
-    move_rejected boolean := false;
-BEGIN
-    BEGIN
-        EXECUTE 'ALTER TABLESPACE iceberg_guard_dist_renamed SET '
-                '(storage_volume = ''another-volume'')';
-    EXCEPTION WHEN feature_not_supported THEN
-        public_rejected := true;
-    END;
-    BEGIN
-        EXECUTE 'ALTER TABLESPACE iceberg_guard_dist_renamed SET '
-                '(lagodb_volume_id = 999)';
-    EXCEPTION WHEN feature_not_supported THEN
-        internal_rejected := true;
-    END;
-    BEGIN
-        EXECUTE 'ALTER TABLESPACE iceberg_guard_dist_renamed SET '
-                '(seq_page_cost = 1.25)';
-    EXCEPTION WHEN feature_not_supported THEN
-        native_rejected := true;
-    END;
-    BEGIN
-        EXECUTE 'ALTER TABLESPACE iceberg_guard_dist_renamed RESET '
-                '(seq_page_cost)';
-    EXCEPTION WHEN feature_not_supported THEN
-        reset_rejected := true;
-    END;
-    BEGIN
-        EXECUTE 'CREATE TABLE storage_volume_local_table (id integer) '
-                'TABLESPACE iceberg_guard_dist_renamed';
-    EXCEPTION WHEN feature_not_supported THEN
-        table_rejected := true;
-    END;
-    BEGIN
-        EXECUTE 'CREATE TABLE storage_volume_local_ctas '
-                'TABLESPACE iceberg_guard_dist_renamed AS SELECT 1 AS id';
-    EXCEPTION WHEN feature_not_supported THEN
-        ctas_rejected := true;
-    END;
-    BEGIN
-        EXECUTE 'ALTER TABLE storage_volume_move_candidate '
-                'SET TABLESPACE iceberg_guard_dist_renamed';
-    EXCEPTION WHEN feature_not_supported THEN
-        move_rejected := true;
-    END;
-    INSERT INTO guard_results VALUES (
-        public_rejected,
-        internal_rejected,
-        native_rejected,
-        reset_rejected,
-        table_rejected,
-        ctas_rejected,
-        move_rejected
-    );
-END
-$guard$;
+-- Keep each rejected command in its own rolled-back child transaction.
+\set VERBOSITY terse
+BEGIN;
+SAVEPOINT volume_guard;
+ALTER TABLESPACE iceberg_guard_dist_renamed SET (storage_volume = 'another-volume');
+\echo public_binding_alter_sqlstate: :SQLSTATE
+ROLLBACK TO SAVEPOINT volume_guard;
+RELEASE SAVEPOINT volume_guard;
+SAVEPOINT volume_guard;
+ALTER TABLESPACE iceberg_guard_dist_renamed SET (lagodb_volume_id = 999);
+\echo internal_binding_alter_sqlstate: :SQLSTATE
+ROLLBACK TO SAVEPOINT volume_guard;
+RELEASE SAVEPOINT volume_guard;
+SAVEPOINT volume_guard;
+ALTER TABLESPACE iceberg_guard_dist_renamed SET (seq_page_cost = 1.25);
+\echo native_alter_sqlstate: :SQLSTATE
+ROLLBACK TO SAVEPOINT volume_guard;
+RELEASE SAVEPOINT volume_guard;
+SAVEPOINT volume_guard;
+ALTER TABLESPACE iceberg_guard_dist_renamed RESET (seq_page_cost);
+\echo native_reset_sqlstate: :SQLSTATE
+ROLLBACK TO SAVEPOINT volume_guard;
+RELEASE SAVEPOINT volume_guard;
+SAVEPOINT volume_guard;
+CREATE TABLE storage_volume_local_table (id integer) TABLESPACE iceberg_guard_dist_renamed;
+\echo volume_local_table_sqlstate: :SQLSTATE
+ROLLBACK TO SAVEPOINT volume_guard;
+RELEASE SAVEPOINT volume_guard;
+SAVEPOINT volume_guard;
+CREATE TABLE storage_volume_local_ctas TABLESPACE iceberg_guard_dist_renamed AS SELECT 1 AS id;
+\echo volume_local_ctas_sqlstate: :SQLSTATE
+ROLLBACK TO SAVEPOINT volume_guard;
+RELEASE SAVEPOINT volume_guard;
+SAVEPOINT volume_guard;
+ALTER TABLE storage_volume_move_candidate SET TABLESPACE iceberg_guard_dist_renamed;
+\echo volume_existing_table_move_sqlstate: :SQLSTATE
+ROLLBACK TO SAVEPOINT volume_guard;
+RELEASE SAVEPOINT volume_guard;
+COMMIT;
+\set VERBOSITY default
+SET client_min_messages = warning;
 DROP TABLE IF EXISTS storage_volume_local_table;
 DROP TABLE IF EXISTS storage_volume_local_ctas;
+RESET client_min_messages;
 DROP TABLE storage_volume_move_candidate;
-SELECT public_alter_rejected AS public_binding_alter_rejected,
-       internal_alter_rejected AS internal_binding_alter_rejected,
-       native_alter_rejected,
-       native_reset_rejected,
-       local_table_rejected,
-       local_ctas_rejected,
-       table_move_rejected
-FROM guard_results
-\gset
-\echo public_binding_alter_rejected: :public_binding_alter_rejected
-\echo internal_binding_alter_rejected: :internal_binding_alter_rejected
-\echo native_alter_rejected: :native_alter_rejected
-\echo native_reset_rejected: :native_reset_rejected
-\echo volume_local_table_rejected: :local_table_rejected
-\echo volume_local_ctas_rejected: :local_ctas_rejected
-\echo volume_existing_table_move_rejected: :table_move_rejected
 
 -- Native tablespaces continue to use PostgreSQL's SET/RESET path.
 ALTER TABLESPACE iceberg_guard_native SET (seq_page_cost = 1.25);
@@ -310,9 +239,7 @@ WHERE spcname = 'iceberg_guard_dist_renamed'
   AND EXISTS (
       SELECT 1 FROM unnest(spcoptions) AS option
       WHERE option LIKE 'lagodb_volume_id=%'
-  )
-\gset
-\echo internal_id_unchanged: :internal_id_unchanged
+  );
 
 DROP TABLESPACE iceberg_guard_dist_renamed;
 DROP TABLESPACE iceberg_guard_native;
@@ -346,18 +273,14 @@ SELECT array_length(spcoptions, 1) = 1
            WHERE option LIKE 'storage_volume=%'
        ) AS internal_id_only
 FROM pg_tablespace
-WHERE spcname = 'iceberg_volume_test'
-\gset
-\echo internal_id_only: :internal_id_only
+WHERE spcname = 'iceberg_volume_test';
 
 SELECT count(*) = 1 AS binding_visible
 FROM lagodb.storage_volumes AS volume
 JOIN pg_tablespace AS tablespace
   ON tablespace.oid = volume.bound_tablespace_oid
 WHERE volume.storage_volume_name = :'volume_name'
-  AND tablespace.spcname = 'iceberg_volume_test'
-\gset
-\echo binding_visible: :binding_visible
+  AND tablespace.spcname = 'iceberg_volume_test';
 
 DROP TABLESPACE iceberg_volume_test;
 SELECT count(*) = 1 AS retirement_visible_after_drop
@@ -366,12 +289,9 @@ WHERE storage_volume_name = :'volume_name'
   AND lifecycle = 'retiring'
   AND bound_tablespace_oid IS NULL
   AND retired_tablespace_oid IS NOT NULL
-  AND binding_present = false
-\gset
-\echo retirement_visible_after_drop: :retirement_visible_after_drop
+  AND binding_present = false;
 
 -- Storage I/O cancellation and recovery.
-\set ECHO none
 
 -- Verify query cancellation during storage I/O and post-cancel recovery:
 -- cleanup defers PostgreSQL ERROR until Drop finishes, while a foreground
@@ -388,8 +308,10 @@ FROM lagodb_regress.object_storage_fixture
 
 SET client_min_messages = warning;
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+RESET client_min_messages;
 CREATE EXTENSION lagodb_iceberg;
 CREATE EXTENSION injection_points;
+SET client_min_messages = warning;
 DROP TABLESPACE IF EXISTS regress_storage_socket_cancel_contexts;
 RESET client_min_messages;
 
@@ -439,18 +361,14 @@ WHERE dependency.dbid = (SELECT oid FROM pg_database WHERE datname = current_dat
       SELECT oid FROM pg_tablespace
       WHERE spcname = 'regress_storage_socket_cancel_contexts'
   )
-  AND dependency.deptype = 't'
-\gset
-\echo object_tablespace_dependency_visible: :object_tablespace_dependency_visible
+  AND dependency.deptype = 't';
 INSERT INTO storage_socket_cancel_contexts_t VALUES (1);
 
 \! sh bin/storage_socket_cancel_contexts
 
 SELECT CASE WHEN count(*) = 1 THEN 'true' ELSE 'false' END
        AS storage_usable_after_cancel
-FROM storage_socket_cancel_contexts_t
-\gset
-\echo storage_usable_after_cancel: :storage_usable_after_cancel
+FROM storage_socket_cancel_contexts_t;
 
 DROP TABLE storage_socket_cancel_contexts_t;
 DROP TABLESPACE regress_storage_socket_cancel_contexts;

@@ -1,6 +1,5 @@
 -- Runtime remote-object cleanup: asynchronous DROP and queue semantics.
 
-\set ECHO none
 -- End-to-end asynchronous remote DROP. setup.sql provisions
 -- the MinIO fixture and records its connection details in the test database.
 
@@ -19,10 +18,13 @@ FROM lagodb_regress.object_storage_fixture
 
 SET client_min_messages = warning;
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+RESET client_min_messages;
 CREATE EXTENSION lagodb_iceberg;
+SET client_min_messages = warning;
 DROP TABLE IF EXISTS remote_cleanup_drop;
 DROP TABLE IF EXISTS remote_cleanup_rollback;
 DROP TABLESPACE IF EXISTS regress_object;
+RESET client_min_messages;
 --
 -- Test 0: Local table artifact cleanup
 --
@@ -44,7 +46,6 @@ SELECT count(*) AS local_drop_remote_items
 FROM lagodb.maintenance_queue
 WHERE producer = 'iceberg-drop';
 
-RESET client_min_messages;
 
 \! mkdir -p /tmp/iceberg_regress_object
 \! rm -rf /tmp/iceberg_regress_object/*
@@ -79,7 +80,6 @@ WHERE storage_volume_name = :'volume_name'
 \setenv LAGODB_REGRESS_OBJECT_NAMESPACE :lagodb_regress_bucket
 \! bin/wait_for_object_store 30
 
-\set ECHO all
 SELECT list_succeeded
        AND write_succeeded
        AND read_succeeded

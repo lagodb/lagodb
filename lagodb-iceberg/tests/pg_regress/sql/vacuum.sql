@@ -29,10 +29,8 @@ CREATE TABLE vacuum_correctness_test.t_v3 (
     "history.expire.max-snapshot-age-ms" = '0',
     "history.expire.min-snapshots-to-keep" = '1'
 );
-\set VERBOSITY terse
 ALTER TABLE vacuum_correctness_test.t SET ("format-version" = 3);
 ALTER TABLE vacuum_correctness_test.t RESET ("format-version");
-\set VERBOSITY default
 ALTER TABLE vacuum_correctness_test.t SET (
     "history.expire.max-snapshot-age-ms" = '0',
     "history.expire.min-snapshots-to-keep" = '1'
@@ -373,15 +371,15 @@ INSERT INTO vacuum_full_routing_test.security_t VALUES (6);
 CREATE ROLE vacuum_full_nonowner;
 GRANT USAGE ON SCHEMA vacuum_full_routing_test TO vacuum_full_nonowner;
 GRANT SELECT ON vacuum_full_routing_test.security_t TO vacuum_full_nonowner;
+-- A nonowner is warned and skipped, preserving all six data files.
 SET ROLE vacuum_full_nonowner;
-SET client_min_messages = error;
 VACUUM (FULL) vacuum_full_routing_test.security_t;
-RESET client_min_messages;
 RESET ROLE;
 SELECT current_data_objects = 6 AS nonowner_did_not_rewrite
 FROM lagodb.table_maintenance_stats(
     'vacuum_full_routing_test.security_t'
 );
+-- RESET ROLE restored the owner; VACUUM FULL must rewrite without a permission warning.
 VACUUM (FULL) vacuum_full_routing_test.security_t;
 SELECT current_data_objects = 1 AS owner_rewrite_succeeded
 FROM lagodb.table_maintenance_stats(
@@ -394,7 +392,6 @@ DROP ROLE vacuum_full_nonowner;
 DROP SCHEMA vacuum_full_routing_test CASCADE;
 DROP EXTENSION lagodb_iceberg CASCADE;
 
-\set ECHO none
 
 -- Object storage VACUUM correctness and asynchronous cleanup.
 \setenv PGDATABASE :DBNAME
@@ -409,7 +406,9 @@ FROM lagodb_regress.object_storage_fixture
 
 SET client_min_messages = warning;
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+RESET client_min_messages;
 CREATE EXTENSION lagodb_iceberg;
+SET client_min_messages = warning;
 DROP TABLESPACE IF EXISTS regress_vacuum_object_matrix;
 RESET client_min_messages;
 
@@ -495,6 +494,7 @@ WITH (
 )
 TABLESPACE regress_vacuum_object_matrix;
 
+\set ECHO none
 SELECT format(
     'INSERT INTO %I VALUES (%s, %L)',
     relation_name,
@@ -519,6 +519,7 @@ FROM unnest(ARRAY[
     'object_v2_full', 'object_v3_full'
 ]) AS relations(relation_name)
 \gexec
+\set ECHO all
 
 CREATE TEMP TABLE object_matrix_before AS
 SELECT format, count(*) AS row_count,
@@ -534,29 +535,25 @@ FROM (
 GROUP BY format;
 
 CREATE TEMP TABLE object_matrix_roots AS
-WITH relations(format, relid) AS (
-    VALUES
-        ('v1-ordinary', 'object_v1_ordinary'::regclass),
-        ('v2-ordinary', 'object_v2_ordinary'::regclass),
-        ('v3-ordinary', 'object_v3_ordinary'::regclass),
-        ('v1-full', 'object_v1_full'::regclass),
-        ('v2-full', 'object_v2_full'::regclass),
-        ('v3-full', 'object_v3_full'::regclass)
-), roots AS (
-    SELECT format, relid,
-           regexp_replace(value,
-                          '^[^:]+://[^/]+/', '') || '/' AS prefix
-    FROM relations
-    JOIN lagodb.table_option_values USING (relid)
-    WHERE name = 'location'
-)
-SELECT roots.*, observed.objects AS objects_before
-FROM roots
+SELECT format, relid, roots.prefix, observed.objects AS objects_before
+FROM (VALUES
+    ('v1-ordinary', 'object_v1_ordinary'::regclass),
+    ('v2-ordinary', 'object_v2_ordinary'::regclass),
+    ('v3-ordinary', 'object_v3_ordinary'::regclass),
+    ('v1-full', 'object_v1_full'::regclass),
+    ('v2-full', 'object_v2_full'::regclass),
+    ('v3-full', 'object_v3_full'::regclass)
+) AS relations(format, relid)
+JOIN lagodb.table_option_values USING (relid)
+CROSS JOIN LATERAL (
+    SELECT regexp_replace(value, '^[^:]+://[^/]+/', '') || '/' AS prefix
+) AS roots
 CROSS JOIN LATERAL lagodb.observe_object_tree(
     :'volume_id',
     :'lagodb_regress_bucket',
     roots.prefix
-) AS observed;
+) AS observed
+WHERE name = 'location';
 
 VACUUM object_v1_ordinary;
 VACUUM object_v2_ordinary;
@@ -589,7 +586,6 @@ WHERE format = 'v3-full' \gset
 \setenv LAGODB_REGRESS_OBJECT_PATH :object_path
 \! bin/wait_for_maintenance_item 30
 
-\set ECHO all
 WITH after AS (
     SELECT format, count(*) AS row_count,
            md5(string_agg(id::text || ':' || payload, ',' ORDER BY id)) AS digest
@@ -661,7 +657,6 @@ SELECT format,
 FROM observations
 ORDER BY format;
 
-\set ECHO none
 DROP TABLE object_v1_ordinary, object_v2_ordinary, object_v3_ordinary,
            object_v1_full, object_v2_full, object_v3_full;
 SELECT prefix AS object_path FROM object_matrix_roots

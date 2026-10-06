@@ -422,14 +422,16 @@ CREATE TABLE truncate_table_test.rebuild_definition (
 ) PARTITION BY LIST (region) USING iceberg WITH ("format-version" = 3);
 INSERT INTO truncate_table_test.rebuild_definition VALUES (1, 10, 'east');
 ALTER TABLE truncate_table_test.rebuild_definition DROP COLUMN removed;
+BEGIN;
+SELECT pg_read_file(metadata_location)::jsonb AS rebuild_original_metadata
+FROM iceberg.iceberg_metadata
+WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
+\gset
+-- Exercise exception-created child subtransactions, including successful release.
 DO $$
 DECLARE
     original_number text;
-    original_metadata jsonb;
-    rebuilt_metadata jsonb;
     number_after text;
-    old_root text;
-    new_root text;
     parent_number text;
     nested_number text;
     previous_metadata_path text;
@@ -437,10 +439,6 @@ BEGIN
     SELECT value INTO original_number FROM lagodb.table_option_values
     WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
       AND name = 'relfilenumber';
-    SELECT pg_read_file(metadata_location)::jsonb INTO original_metadata
-    FROM iceberg.iceberg_metadata
-    WHERE relid = 'truncate_table_test.rebuild_definition'::regclass;
-    old_root := original_metadata->>'location';
     BEGIN
         TRUNCATE truncate_table_test.rebuild_definition;
         SELECT value INTO number_after FROM lagodb.table_option_values
@@ -547,42 +545,47 @@ BEGIN
        OR (SELECT count(*) FROM truncate_table_test.rebuild_definition) <> 1 THEN
         RAISE EXCEPTION 'savepoint rollback did not restore the generation';
     END IF;
-    TRUNCATE truncate_table_test.rebuild_definition;
-    SELECT pg_read_file(metadata_location)::jsonb INTO rebuilt_metadata
-    FROM iceberg.iceberg_metadata
-    WHERE relid = 'truncate_table_test.rebuild_definition'::regclass;
-    new_root := rebuilt_metadata->>'location';
-    IF new_root = old_root
-       OR rebuilt_metadata->>'table-uuid' = original_metadata->>'table-uuid'
-       OR rebuilt_metadata->>'format-version' <> '3'
-       OR coalesce(rebuilt_metadata->'snapshots', '[]'::jsonb) <> '[]'::jsonb
-       OR rebuilt_metadata->'properties' <> original_metadata->'properties' THEN
-        RAISE EXCEPTION 'rebuilt table has an incorrect definition or retained history';
-    END IF;
-    IF (SELECT string_agg(field->>'name', ',' ORDER BY ordinality)
-        FROM jsonb_array_elements(rebuilt_metadata->'schemas'->0->'fields')
-             WITH ORDINALITY AS fields(field, ordinality)) <> 'id,region'
-       OR rebuilt_metadata->'schemas'->0->'fields'->0->>'required' <> 'true'
-       OR rebuilt_metadata->'partition-specs'->0->'fields'->0->>'transform' <> 'identity' THEN
-        RAISE EXCEPTION 'rebuild changed the schema or partition transform';
-    END IF;
-    IF EXISTS (
-        SELECT 1 FROM iceberg.iceberg_metadata
-        WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
-          AND (previous_metadata_location IS NOT NULL OR maintenance_due_at IS NOT NULL)
-    ) THEN
-        RAISE EXCEPTION 'rebuild retained catalog history or maintenance state';
-    END IF;
-    IF EXISTS (
-        SELECT 1 FROM lagodb.table_option_values
-        WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
-          AND name = 'location'
-    ) THEN
-        RAISE EXCEPTION 'local table persisted a location option';
-    END IF;
-    INSERT INTO truncate_table_test.rebuild_definition VALUES (2, 'west');
 END;
 $$;
+TRUNCATE truncate_table_test.rebuild_definition;
+WITH rebuilt AS MATERIALIZED (
+    SELECT pg_read_file(metadata_location)::jsonb AS metadata
+    FROM iceberg.iceberg_metadata
+    WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
+)
+SELECT metadata->>'location' <> (:'rebuild_original_metadata'::jsonb)->>'location' AS root_changed,
+       metadata->>'table-uuid' <> (:'rebuild_original_metadata'::jsonb)->>'table-uuid' AS uuid_changed,
+       metadata->>'format-version' = '3' AS format_preserved,
+       coalesce(metadata->'snapshots', '[]'::jsonb) = '[]'::jsonb AS history_cleared,
+       metadata->'properties' = (:'rebuild_original_metadata'::jsonb)->'properties' AS properties_preserved,
+       (SELECT string_agg(field->>'name', ',' ORDER BY ordinality)
+        FROM jsonb_array_elements(metadata->'schemas'->0->'fields')
+             WITH ORDINALITY AS fields(field, ordinality)) = 'id,region' AS columns_preserved,
+       metadata->'schemas'->0->'fields'->0->>'required' = 'true' AS required_preserved,
+       metadata->'partition-specs'->0->'fields'->0->>'transform' = 'identity' AS partition_preserved
+FROM rebuilt;
+ root_changed | uuid_changed | format_preserved | history_cleared | properties_preserved | columns_preserved | required_preserved | partition_preserved 
+--------------+--------------+------------------+-----------------+----------------------+-------------------+--------------------+---------------------
+ t            | t            | t                | t               | t                    | t                 | t                  | t
+(1 row)
+
+SELECT NOT EXISTS (
+           SELECT FROM iceberg.iceberg_metadata
+           WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
+             AND (previous_metadata_location IS NOT NULL OR maintenance_due_at IS NOT NULL)
+       ) AS catalog_history_cleared,
+       NOT EXISTS (
+           SELECT FROM lagodb.table_option_values
+           WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
+             AND name = 'location'
+       ) AS no_persisted_location;
+ catalog_history_cleared | no_persisted_location 
+-------------------------+-----------------------
+ t                       | t
+(1 row)
+
+INSERT INTO truncate_table_test.rebuild_definition VALUES (2, 'west');
+COMMIT;
 SELECT id, region FROM truncate_table_test.rebuild_definition;
  id | region 
 ----+--------
@@ -612,41 +615,40 @@ SELECT pg_stat_file(:'rebuilt_reservation', true) IS NULL
 
 -- CREATE owns its local partitioned-table generation immediately. TRUNCATE
 -- in that same transaction reuses it, and subsequent INSERT commits normally.
-DO $$
-DECLARE
-    original_number text;
-    number_after text;
-    previous_metadata_path text;
-BEGIN
-    CREATE TABLE truncate_table_test.created_partitioned (id integer, region text)
-    PARTITION BY LIST (region) USING iceberg;
-    SELECT value INTO original_number FROM lagodb.table_option_values
-    WHERE relid = 'truncate_table_test.created_partitioned'::regclass
-      AND name = 'relfilenumber';
-    SELECT metadata_location INTO previous_metadata_path
-    FROM iceberg.iceberg_metadata
-    WHERE relid = 'truncate_table_test.created_partitioned'::regclass;
-    INSERT INTO truncate_table_test.created_partitioned VALUES (1, 'east');
-    TRUNCATE truncate_table_test.created_partitioned;
-    SELECT value INTO number_after FROM lagodb.table_option_values
-    WHERE relid = 'truncate_table_test.created_partitioned'::regclass
-      AND name = 'relfilenumber';
-    IF number_after <> original_number
-       OR pg_stat_file(previous_metadata_path, true) IS NOT NULL
-       OR (SELECT count(*) FROM truncate_table_test.created_partitioned) <> 0 THEN
-        RAISE EXCEPTION 'CREATE then TRUNCATE did not reuse and clear the generation';
-    END IF;
-    INSERT INTO truncate_table_test.created_partitioned VALUES (2, 'west');
-END;
-$$;
-DO $$
-BEGIN
-    IF (SELECT array_agg(id ORDER BY id) FROM truncate_table_test.created_partitioned)
-       IS DISTINCT FROM ARRAY[2] THEN
-        RAISE EXCEPTION 'INSERT after in-place TRUNCATE did not commit';
-    END IF;
-    DROP TABLE truncate_table_test.created_partitioned;
-END;
-$$;
+BEGIN;
+CREATE TABLE truncate_table_test.created_partitioned (id integer, region text)
+PARTITION BY LIST (region) USING iceberg;
+SELECT value AS created_original_number
+FROM lagodb.table_option_values
+WHERE relid = 'truncate_table_test.created_partitioned'::regclass
+  AND name = 'relfilenumber'
+\gset
+SELECT metadata_location AS created_previous_metadata_path
+FROM iceberg.iceberg_metadata
+WHERE relid = 'truncate_table_test.created_partitioned'::regclass
+\gset
+INSERT INTO truncate_table_test.created_partitioned VALUES (1, 'east');
+TRUNCATE truncate_table_test.created_partitioned;
+SELECT value = :'created_original_number' AS created_generation_reused,
+       pg_stat_file(:'created_previous_metadata_path', true) IS NULL AS created_metadata_removed,
+       (SELECT count(*) FROM truncate_table_test.created_partitioned) = 0 AS created_rows_cleared
+FROM lagodb.table_option_values
+WHERE relid = 'truncate_table_test.created_partitioned'::regclass
+  AND name = 'relfilenumber';
+ created_generation_reused | created_metadata_removed | created_rows_cleared 
+---------------------------+--------------------------+----------------------
+ t                         | t                        | t
+(1 row)
+
+INSERT INTO truncate_table_test.created_partitioned VALUES (2, 'west');
+COMMIT;
+SELECT array_agg(id ORDER BY id) AS rows_after_in_place_truncate
+FROM truncate_table_test.created_partitioned;
+ rows_after_in_place_truncate 
+------------------------------
+ {2}
+(1 row)
+
+DROP TABLE truncate_table_test.created_partitioned;
 DROP SCHEMA truncate_table_test CASCADE;
 DROP EXTENSION lagodb_iceberg CASCADE;

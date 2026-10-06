@@ -160,21 +160,23 @@ ALTER TABLE schema_evolution_replace_same_stmt_t
     DROP COLUMN a;
 INSERT INTO schema_evolution_replace_same_stmt_t (id, a)
 VALUES (2, 20);
-COPY (
-    SELECT string_agg(attname || ':' || atttypid::regtype::text, ',' ORDER BY attnum) AS live_columns
-    FROM pg_attribute
-    WHERE attrelid = 'schema_evolution_replace_same_stmt_t'::regclass
-      AND attnum > 0
-      AND NOT attisdropped
-) TO STDOUT WITH (FORMAT csv, HEADER true);
-live_columns
-"id:integer,a:integer"
-COPY (
-    SELECT count(*) AS rows, count(a) AS a_values, sum(a) AS a_sum
-    FROM schema_evolution_replace_same_stmt_t
-) TO STDOUT WITH (FORMAT csv, HEADER true);
-rows,a_values,a_sum
-2,1,20
+SELECT string_agg(attname || ':' || atttypid::regtype::text, ',' ORDER BY attnum) AS live_columns
+FROM pg_attribute
+WHERE attrelid = 'schema_evolution_replace_same_stmt_t'::regclass
+  AND attnum > 0
+  AND NOT attisdropped;
+     live_columns     
+----------------------
+ id:integer,a:integer
+(1 row)
+
+SELECT count(*) AS rows, count(a) AS a_values, sum(a) AS a_sum
+FROM schema_evolution_replace_same_stmt_t;
+ rows | a_values | a_sum 
+------+----------+-------
+    2 |        1 |    20
+(1 row)
+
 CREATE TABLE schema_evolution_drop_required_t (
     id integer NOT NULL,
     dropped_required integer NOT NULL,
@@ -213,42 +215,46 @@ ALTER TABLE schema_evolution_part_root_t ADD COLUMN extra integer;
 INSERT INTO schema_evolution_part_root_t (id, region, payload, extra)
 VALUES (2, 'east', 'two', 20),
        (102, 'west', 'one hundred two', 120);
-COPY (
-    SELECT count(*) AS rows, count(extra) AS extra_values, sum(extra) AS extra_sum
-    FROM schema_evolution_part_root_t
-) TO STDOUT WITH (FORMAT csv, HEADER true);
-rows,extra_values,extra_sum
-4,2,140
+SELECT count(*) AS rows, count(extra) AS extra_values, sum(extra) AS extra_sum
+FROM schema_evolution_part_root_t;
+ rows | extra_values | extra_sum 
+------+--------------+-----------
+    4 |            2 |       140
+(1 row)
+
 ALTER TABLE schema_evolution_part_root_t DROP COLUMN extra;
 ALTER TABLE schema_evolution_part_root_t RENAME COLUMN payload TO body;
 INSERT INTO schema_evolution_part_root_t (id, region, body)
 VALUES (3, 'east', 'three'), (103, 'west', 'one hundred three');
-COPY (
-    SELECT string_agg(attname, ',' ORDER BY attnum) AS live_columns
-    FROM pg_attribute
-    WHERE attrelid = 'schema_evolution_part_root_t'::regclass
-      AND attnum > 0
-      AND NOT attisdropped
-) TO STDOUT WITH (FORMAT csv, HEADER true);
-live_columns
-"id,region,body"
-COPY (
-    SELECT count(*) AS rows, count(body) AS body_values
-    FROM schema_evolution_part_root_t
-) TO STDOUT WITH (FORMAT csv, HEADER true);
-rows,body_values
-6,6
-COPY (
-    SELECT class.relkind = 'p' AS is_partitioned_catalog,
-           NOT class.relhassubclass AS has_no_pg_children,
-           metadata.metadata_location IS NOT NULL AS root_has_metadata
-    FROM pg_class AS class
-    LEFT JOIN iceberg.iceberg_metadata AS metadata
-      ON metadata.relid = class.oid
-    WHERE class.oid = 'schema_evolution_part_root_t'::regclass
-) TO STDOUT WITH (FORMAT csv, HEADER true);
-is_partitioned_catalog,has_no_pg_children,root_has_metadata
-t,t,t
+SELECT string_agg(attname, ',' ORDER BY attnum) AS live_columns
+FROM pg_attribute
+WHERE attrelid = 'schema_evolution_part_root_t'::regclass
+  AND attnum > 0
+  AND NOT attisdropped;
+  live_columns  
+----------------
+ id,region,body
+(1 row)
+
+SELECT count(*) AS rows, count(body) AS body_values
+FROM schema_evolution_part_root_t;
+ rows | body_values 
+------+-------------
+    6 |           6
+(1 row)
+
+SELECT class.relkind = 'p' AS is_partitioned_catalog,
+       NOT class.relhassubclass AS has_no_pg_children,
+       metadata.metadata_location IS NOT NULL AS root_has_metadata
+FROM pg_class AS class
+LEFT JOIN iceberg.iceberg_metadata AS metadata
+  ON metadata.relid = class.oid
+WHERE class.oid = 'schema_evolution_part_root_t'::regclass;
+ is_partitioned_catalog | has_no_pg_children | root_has_metadata 
+------------------------+--------------------+-------------------
+ t                      | t                  | t
+(1 row)
+
 CREATE TABLE schema_evolution_epoch_t (
     id integer NOT NULL
 ) USING iceberg;
@@ -359,7 +365,6 @@ FROM schema_evolution_savepoint_t;
     6 |           6 |             5 |               4 |              3 | t
 (1 row)
 
-\set VERBOSITY terse
 ALTER TABLE schema_evolution_t ADD COLUMN bad_required integer NOT NULL;
 ERROR:  ALTER TABLE ADD COLUMN constraints are not supported for Iceberg relations
 ALTER TABLE schema_evolution_t ADD COLUMN bad_default integer DEFAULT 1;
@@ -380,7 +385,6 @@ ALTER TABLE schema_evolution_t DROP COLUMN IF EXISTS maybe_bad;
 ERROR:  ALTER TABLE DROP COLUMN IF EXISTS is not supported for Iceberg relations
 ALTER TABLE schema_evolution_t DROP COLUMN body CASCADE;
 ERROR:  ALTER TABLE DROP COLUMN CASCADE is not supported for Iceberg relations
-\set VERBOSITY default
 DROP TABLE schema_evolution_savepoint_t;
 DROP TABLE schema_evolution_epoch_t;
 DROP TABLE schema_evolution_part_root_t;

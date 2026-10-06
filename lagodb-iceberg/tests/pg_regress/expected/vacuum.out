@@ -36,12 +36,10 @@ CREATE TABLE vacuum_correctness_test.t_v3 (
     "history.expire.max-snapshot-age-ms" = '0',
     "history.expire.min-snapshots-to-keep" = '1'
 );
-\set VERBOSITY terse
 ALTER TABLE vacuum_correctness_test.t SET ("format-version" = 3);
 ERROR:  table option 'format-version' can only be specified by CREATE TABLE
 ALTER TABLE vacuum_correctness_test.t RESET ("format-version");
 ERROR:  table option 'format-version' can only be specified by CREATE TABLE
-\set VERBOSITY default
 ALTER TABLE vacuum_correctness_test.t SET (
     "history.expire.max-snapshot-age-ms" = '0',
     "history.expire.min-snapshots-to-keep" = '1'
@@ -460,10 +458,10 @@ INSERT INTO vacuum_full_routing_test.security_t VALUES (6);
 CREATE ROLE vacuum_full_nonowner;
 GRANT USAGE ON SCHEMA vacuum_full_routing_test TO vacuum_full_nonowner;
 GRANT SELECT ON vacuum_full_routing_test.security_t TO vacuum_full_nonowner;
+-- A nonowner is warned and skipped, preserving all six data files.
 SET ROLE vacuum_full_nonowner;
-SET client_min_messages = error;
 VACUUM (FULL) vacuum_full_routing_test.security_t;
-RESET client_min_messages;
+WARNING:  permission denied to vacuum "security_t", skipping it
 RESET ROLE;
 SELECT current_data_objects = 6 AS nonowner_did_not_rewrite
 FROM lagodb.table_maintenance_stats(
@@ -474,6 +472,7 @@ FROM lagodb.table_maintenance_stats(
  t
 (1 row)
 
+-- RESET ROLE restored the owner; VACUUM FULL must rewrite without a permission warning.
 VACUUM (FULL) vacuum_full_routing_test.security_t;
 SELECT current_data_objects = 1 AS owner_rewrite_succeeded
 FROM lagodb.table_maintenance_stats(
@@ -489,13 +488,167 @@ REVOKE USAGE ON SCHEMA vacuum_full_routing_test FROM vacuum_full_nonowner;
 DROP ROLE vacuum_full_nonowner;
 DROP SCHEMA vacuum_full_routing_test CASCADE;
 DROP EXTENSION lagodb_iceberg CASCADE;
-\set ECHO none
+-- Object storage VACUUM correctness and asynchronous cleanup.
+\setenv PGDATABASE :DBNAME
+SELECT endpoint AS lagodb_regress_endpoint,
+       bucket AS lagodb_regress_bucket,
+       region AS lagodb_regress_region,
+       access_key_id AS lagodb_regress_access_key_id,
+       secret_access_key AS lagodb_regress_secret_access_key
+FROM lagodb_regress.object_storage_fixture
+\gset
+SET client_min_messages = warning;
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+RESET client_min_messages;
+CREATE EXTENSION lagodb_iceberg;
+SET client_min_messages = warning;
+DROP TABLESPACE IF EXISTS regress_vacuum_object_matrix;
+RESET client_min_messages;
+\! mkdir -p /tmp/iceberg_regress_vacuum_object_matrix
+\! rm -rf /tmp/iceberg_regress_vacuum_object_matrix/*
+SELECT 'regress-vacuum-matrix-' || gen_random_uuid() AS volume_name \gset
+SELECT lagodb.create_storage_volume(
+    :'volume_name',
+    format('s3://%s', :'lagodb_regress_bucket'),
+    jsonb_build_object(
+        'type', 's3_access_key',
+        'access_key_id', :'lagodb_regress_access_key_id',
+        'secret_access_key', :'lagodb_regress_secret_access_key'
+    ),
+    jsonb_build_object(
+        'region', :'lagodb_regress_region',
+        'endpoint', :'lagodb_regress_endpoint',
+        'allow_http', true
+    )
+) AS created_volume \gset
+CREATE TABLESPACE regress_vacuum_object_matrix
+LOCATION '/tmp/iceberg_regress_vacuum_object_matrix'
+WITH (storage_volume = :'volume_name');
+SELECT internal_volume_id AS volume_id,
+       regexp_replace(effective_location, '^[^:]+://[^/]+/', '') AS effective_root
+FROM lagodb.storage_volumes
+WHERE storage_volume_name = :'volume_name'
+\gset
+\setenv LAGODB_REGRESS_VOLUME_ID :volume_id
+\setenv LAGODB_REGRESS_OBJECT_NAMESPACE :lagodb_regress_bucket
+\! bin/wait_for_object_store 30
 object_store_ready: true
+CREATE TABLE object_v1_ordinary (id integer, payload text)
+USING iceberg
+WITH (
+    "format-version" = 1,
+    "history.expire.max-snapshot-age-ms" = '0',
+    "history.expire.min-snapshots-to-keep" = '1'
+)
+TABLESPACE regress_vacuum_object_matrix;
+CREATE TABLE object_v2_ordinary (id integer, payload text)
+USING iceberg
+WITH (
+    "format-version" = 2,
+    "history.expire.max-snapshot-age-ms" = '0',
+    "history.expire.min-snapshots-to-keep" = '1'
+)
+TABLESPACE regress_vacuum_object_matrix;
+CREATE TABLE object_v3_ordinary (id integer, payload text)
+USING iceberg
+WITH (
+    "format-version" = 3,
+    "history.expire.max-snapshot-age-ms" = '0',
+    "history.expire.min-snapshots-to-keep" = '1'
+)
+TABLESPACE regress_vacuum_object_matrix;
+CREATE TABLE object_v1_full (id integer, payload text)
+USING iceberg
+WITH (
+    "format-version" = 1,
+    "history.expire.max-snapshot-age-ms" = '0',
+    "history.expire.min-snapshots-to-keep" = '1'
+)
+TABLESPACE regress_vacuum_object_matrix;
+CREATE TABLE object_v2_full (id integer, payload text)
+USING iceberg
+WITH (
+    "format-version" = 2,
+    "history.expire.max-snapshot-age-ms" = '0',
+    "history.expire.min-snapshots-to-keep" = '1'
+)
+TABLESPACE regress_vacuum_object_matrix;
+CREATE TABLE object_v3_full (id integer, payload text)
+USING iceberg
+WITH (
+    "format-version" = 3,
+    "history.expire.max-snapshot-age-ms" = '0',
+    "history.expire.min-snapshots-to-keep" = '1'
+)
+TABLESPACE regress_vacuum_object_matrix;
+\set ECHO none
+CREATE TEMP TABLE object_matrix_before AS
+SELECT format, count(*) AS row_count,
+       md5(string_agg(id::text || ':' || payload, ',' ORDER BY id)) AS digest
+FROM (
+    SELECT 'v1-ordinary' AS format, * FROM object_v1_ordinary
+    UNION ALL SELECT 'v2-ordinary', * FROM object_v2_ordinary
+    UNION ALL SELECT 'v3-ordinary', * FROM object_v3_ordinary
+    UNION ALL SELECT 'v1-full', * FROM object_v1_full
+    UNION ALL SELECT 'v2-full', * FROM object_v2_full
+    UNION ALL SELECT 'v3-full', * FROM object_v3_full
+) AS visible_rows
+GROUP BY format;
+CREATE TEMP TABLE object_matrix_roots AS
+SELECT format, relid, roots.prefix, observed.objects AS objects_before
+FROM (VALUES
+    ('v1-ordinary', 'object_v1_ordinary'::regclass),
+    ('v2-ordinary', 'object_v2_ordinary'::regclass),
+    ('v3-ordinary', 'object_v3_ordinary'::regclass),
+    ('v1-full', 'object_v1_full'::regclass),
+    ('v2-full', 'object_v2_full'::regclass),
+    ('v3-full', 'object_v3_full'::regclass)
+) AS relations(format, relid)
+JOIN lagodb.table_option_values USING (relid)
+CROSS JOIN LATERAL (
+    SELECT regexp_replace(value, '^[^:]+://[^/]+/', '') || '/' AS prefix
+) AS roots
+CROSS JOIN LATERAL lagodb.observe_object_tree(
+    :'volume_id',
+    :'lagodb_regress_bucket',
+    roots.prefix
+) AS observed
+WHERE name = 'location';
+VACUUM object_v1_ordinary;
+VACUUM object_v2_ordinary;
+VACUUM object_v3_ordinary;
+VACUUM (FULL) object_v1_full;
+VACUUM (FULL) object_v2_full;
+VACUUM (FULL) object_v3_full;
+SELECT prefix AS object_path FROM object_matrix_roots
+WHERE format = 'v1-ordinary' \gset
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
+\! bin/wait_for_maintenance_item 30
 maintenance_complete: true
+SELECT prefix AS object_path FROM object_matrix_roots
+WHERE format = 'v2-ordinary' \gset
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
+\! bin/wait_for_maintenance_item 30
 maintenance_complete: true
+SELECT prefix AS object_path FROM object_matrix_roots
+WHERE format = 'v3-ordinary' \gset
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
+\! bin/wait_for_maintenance_item 30
 maintenance_complete: true
+SELECT prefix AS object_path FROM object_matrix_roots
+WHERE format = 'v1-full' \gset
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
+\! bin/wait_for_maintenance_item 30
 maintenance_complete: true
+SELECT prefix AS object_path FROM object_matrix_roots
+WHERE format = 'v2-full' \gset
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
+\! bin/wait_for_maintenance_item 30
 maintenance_complete: true
+SELECT prefix AS object_path FROM object_matrix_roots
+WHERE format = 'v3-full' \gset
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
+\! bin/wait_for_maintenance_item 30
 maintenance_complete: true
 WITH after AS (
     SELECT format, count(*) AS row_count,
@@ -590,10 +743,38 @@ ORDER BY format;
  v3-ordinary |               |              |              | t
 (6 rows)
 
-\set ECHO none
+DROP TABLE object_v1_ordinary, object_v2_ordinary, object_v3_ordinary,
+           object_v1_full, object_v2_full, object_v3_full;
+SELECT prefix AS object_path FROM object_matrix_roots
+WHERE format = 'v1-ordinary' \gset
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
+\! bin/wait_for_maintenance_item 30
 maintenance_complete: true
+SELECT prefix AS object_path FROM object_matrix_roots
+WHERE format = 'v2-ordinary' \gset
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
+\! bin/wait_for_maintenance_item 30
 maintenance_complete: true
+SELECT prefix AS object_path FROM object_matrix_roots
+WHERE format = 'v3-ordinary' \gset
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
+\! bin/wait_for_maintenance_item 30
 maintenance_complete: true
+SELECT prefix AS object_path FROM object_matrix_roots
+WHERE format = 'v1-full' \gset
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
+\! bin/wait_for_maintenance_item 30
 maintenance_complete: true
+SELECT prefix AS object_path FROM object_matrix_roots
+WHERE format = 'v2-full' \gset
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
+\! bin/wait_for_maintenance_item 30
 maintenance_complete: true
+SELECT prefix AS object_path FROM object_matrix_roots
+WHERE format = 'v3-full' \gset
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
+\! bin/wait_for_maintenance_item 30
 maintenance_complete: true
+DROP TABLESPACE regress_vacuum_object_matrix;
+DROP EXTENSION lagodb_iceberg CASCADE;
+\! rm -rf /tmp/iceberg_regress_vacuum_object_matrix/*

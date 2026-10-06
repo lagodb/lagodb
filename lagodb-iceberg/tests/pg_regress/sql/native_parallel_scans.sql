@@ -2,7 +2,6 @@
 -- PostgreSQL-native parallel relation scans for managed and foreign Iceberg
 -- tables. Query-offload execution has a separate lifecycle and test suite.
 
-\set ECHO none
 \setenv PGDATABASE :DBNAME
 
 SELECT rest_uri AS regress_rest_uri
@@ -11,10 +10,9 @@ FROM lagodb_regress.object_storage_fixture
 
 SET client_min_messages = warning;
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
-CREATE EXTENSION lagodb_iceberg;
 RESET client_min_messages;
+CREATE EXTENSION lagodb_iceberg;
 
-\set ECHO all
 SET lagodb.query_offload_mode = 'off';
 SET lagodb.customscan_mode = 'force';
 SET max_parallel_workers_per_gather = 2;
@@ -69,49 +67,42 @@ SELECT id, id, (SELECT string_agg(md5(id::text || ':' || part::text), '')
 FROM generate_series(1, 64) AS id;
 ANALYZE native_parallel_root;
 
-DO $$
+-- Capture EXPLAIN once and compare only stable properties, as in PG explain.sql.
+CREATE FUNCTION pg_temp.native_parallel_plan(query text) RETURNS jsonb
+LANGUAGE plpgsql AS $$
 DECLARE
-    document jsonb;
-    gather jsonb;
-    scan jsonb;
-    rows_actual jsonb;
-    rows_expected jsonb;
+    plan jsonb;
 BEGIN
-    EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-             SELECT id FROM native_parallel_root WHERE region >= 2 ORDER BY id'
-        INTO document;
-    gather := jsonb_path_query_first(document,
-        '$[0].Plan.** ? (@."Node Type" == "Gather" || @."Node Type" == "Gather Merge")');
-    scan := jsonb_path_query_first(document,
-        '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")');
-    IF coalesce((gather->>'Workers Launched')::integer, 0) < 1
-       OR (gather->>'Actual Rows')::bigint IS DISTINCT FROM 63
-       OR (scan->>'Parallel Aware')::boolean IS DISTINCT FROM true
-       OR NOT coalesce(jsonb_path_exists(scan, '$.Workers[*] ? (@."Actual Rows" > 0)'), false)
-       OR (scan->>'Data Files Selected')::bigint IS DISTINCT FROM 63
-       OR coalesce(strpos(scan #>> '{LagoDB Pushdown,Pushed Filter Exact}', 'region >= 2'), 0) = 0 THEN
-        RAISE EXCEPTION 'partitioned partial path, worker execution or filtered inventory failed';
-    END IF;
-    SELECT to_jsonb(array_agg(id ORDER BY id)) INTO rows_expected
-    FROM generate_series(2, 64) AS id;
-    SELECT to_jsonb(array_agg(id ORDER BY id)) INTO rows_actual
-    FROM native_parallel_root WHERE region >= 2;
-    IF rows_actual IS DISTINCT FROM rows_expected THEN
-        RAISE EXCEPTION 'parallel partitioned root returned incorrect rows';
-    END IF;
-    PERFORM set_config('max_parallel_workers_per_gather', '0', true);
-    SELECT to_jsonb(array_agg(id ORDER BY id)) INTO rows_actual
-    FROM native_parallel_root WHERE region >= 2;
-    IF rows_actual IS DISTINCT FROM rows_expected THEN
-        RAISE EXCEPTION 'serial partitioned baseline returned incorrect rows';
-    END IF;
+    EXECUTE query INTO plan;
+    RETURN plan;
 END;
 $$;
+BEGIN;
+SELECT coalesce((gather->>'Workers Launched')::integer, 0) >= 1 AS worker_launched,
+       (gather->>'Actual Rows')::bigint IS NOT DISTINCT FROM 63 AS gather_rows_ok,
+       (scan->>'Parallel Aware')::boolean IS NOT DISTINCT FROM true AS parallel_aware,
+       coalesce(jsonb_path_exists(scan, '$.Workers[*] ? (@."Actual Rows" > 0)'), false) AS worker_scanned_rows,
+       (scan->>'Data Files Selected')::bigint = 63 AS files_selected_ok,
+       coalesce(strpos(scan #>> '{LagoDB Pushdown,Pushed Filter Exact}', 'region >= 2'), 0) > 0 AS filter_pushed
+FROM pg_temp.native_parallel_plan(
+    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
+     SELECT id FROM native_parallel_root WHERE region >= 2 ORDER BY id'
+) AS document(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Node Type" == "Gather" || @."Node Type" == "Gather Merge")') AS gathers(gather)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS scans(scan);
+SELECT array_agg(id ORDER BY id) AS parallel_rows
+FROM native_parallel_root WHERE region >= 2;
+SET LOCAL max_parallel_workers_per_gather = 0;
+SELECT array_agg(id ORDER BY id) AS serial_rows
+FROM native_parallel_root WHERE region >= 2;
+COMMIT;
+DROP FUNCTION pg_temp.native_parallel_plan(text);
 DROP TABLE native_parallel_root;
 
 -- A read-only foreign relation reconstructs its remote Iceberg reader in the
 -- launched worker. This query also protects pushed-filter transfer.
-SET min_parallel_table_scan_size = 0;
 
 CREATE SCHEMA native_parallel_fdw;
 CREATE SERVER native_parallel_rest

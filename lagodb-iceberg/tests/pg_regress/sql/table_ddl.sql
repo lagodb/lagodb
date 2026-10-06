@@ -14,23 +14,16 @@ RESET default_table_access_method;
 INSERT INTO unlogged_iceberg VALUES (10), (20);
 INSERT INTO unlogged_partitioned_iceberg VALUES (1), (2);
 INSERT INTO unlogged_default_iceberg VALUES (9);
-DO $$
-BEGIN
-    IF (SELECT count(*) FROM pg_class AS c
-        JOIN iceberg.iceberg_metadata AS m ON m.relid = c.oid
-        WHERE c.oid IN ('unlogged_iceberg'::regclass,
-                        'unlogged_partitioned_iceberg'::regclass,
-                        'unlogged_default_iceberg'::regclass)
-          AND c.relpersistence = 'u' AND m.metadata_location IS NOT NULL) <> 3 THEN
-        RAISE EXCEPTION 'UNLOGGED Iceberg catalog bootstrap failed';
-    END IF;
-    IF (SELECT array_agg(id ORDER BY id) FROM unlogged_iceberg) IS DISTINCT FROM ARRAY[10, 20]
-       OR (SELECT array_agg(id ORDER BY id) FROM unlogged_partitioned_iceberg) IS DISTINCT FROM ARRAY[1, 2]
-       OR (SELECT array_agg(id ORDER BY id) FROM unlogged_default_iceberg) IS DISTINCT FROM ARRAY[9] THEN
-        RAISE EXCEPTION 'UNLOGGED Iceberg rows were not published';
-    END IF;
-END;
-$$;
+SELECT count(*) = 3 AS unlogged_catalog_bootstrapped
+FROM pg_class AS c
+JOIN iceberg.iceberg_metadata AS m ON m.relid = c.oid
+WHERE c.oid IN ('unlogged_iceberg'::regclass,
+                'unlogged_partitioned_iceberg'::regclass,
+                'unlogged_default_iceberg'::regclass)
+  AND c.relpersistence = 'u' AND m.metadata_location IS NOT NULL;
+SELECT (SELECT array_agg(id ORDER BY id) FROM unlogged_iceberg) AS table_rows,
+       (SELECT array_agg(id ORDER BY id) FROM unlogged_partitioned_iceberg) AS partitioned_rows,
+       (SELECT array_agg(id ORDER BY id) FROM unlogged_default_iceberg) AS default_am_rows;
 BEGIN;
 SAVEPOINT unlogged_change;
 INSERT INTO unlogged_iceberg VALUES (30);
@@ -40,25 +33,15 @@ INSERT INTO unlogged_partitioned_iceberg VALUES (99);
 DROP TABLE unlogged_default_iceberg;
 ROLLBACK TO SAVEPOINT unlogged_change;
 COMMIT;
-DO $$
-BEGIN
-    IF (SELECT array_agg(id ORDER BY id) FROM unlogged_iceberg) IS DISTINCT FROM ARRAY[10, 20]
-       OR (SELECT array_agg(id ORDER BY id) FROM unlogged_partitioned_iceberg) IS DISTINCT FROM ARRAY[1, 2]
-       OR (SELECT array_agg(id ORDER BY id) FROM unlogged_default_iceberg) IS DISTINCT FROM ARRAY[9] THEN
-        RAISE EXCEPTION 'UNLOGGED Iceberg savepoint rollback lost rows';
-    END IF;
-END;
-$$;
+SELECT (SELECT array_agg(id ORDER BY id) FROM unlogged_iceberg) AS table_rows,
+       (SELECT array_agg(id ORDER BY id) FROM unlogged_partitioned_iceberg) AS partitioned_rows,
+       (SELECT array_agg(id ORDER BY id) FROM unlogged_default_iceberg) AS default_am_rows;
 TRUNCATE unlogged_iceberg, unlogged_partitioned_iceberg, unlogged_default_iceberg;
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM unlogged_iceberg
-               UNION ALL SELECT 1 FROM unlogged_partitioned_iceberg
-               UNION ALL SELECT 1 FROM unlogged_default_iceberg) THEN
-        RAISE EXCEPTION 'UNLOGGED Iceberg TRUNCATE retained rows';
-    END IF;
-END;
-$$;
+SELECT NOT EXISTS (
+    SELECT FROM unlogged_iceberg
+    UNION ALL SELECT FROM unlogged_partitioned_iceberg
+    UNION ALL SELECT FROM unlogged_default_iceberg
+) AS unlogged_truncate_cleared_rows;
 SELECT pg_read_file(metadata_location)::jsonb->>'location' AS unlogged_table_root
 FROM iceberg.iceberg_metadata WHERE relid = 'unlogged_iceberg'::regclass \gset
 SELECT pg_read_file(metadata_location)::jsonb->>'location' AS unlogged_partitioned_root

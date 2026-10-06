@@ -46,12 +46,10 @@ CREATE TABLE dml_lifecycle.copy_t (
     id integer
 ) USING iceberg;
 
-\set VERBOSITY terse
 COPY dml_lifecycle.copy_t FROM stdin;
 1
 bad
 \.
-\set VERBOSITY default
 
 SELECT 'no resource leak' AS check;
 SELECT count(*) AS rows_after_failed_copy FROM dml_lifecycle.copy_t;
@@ -81,14 +79,10 @@ SET label = 'two_updated'
 WHERE id = 2;
 DELETE FROM dml_lifecycle.same_tx_dml_t
 WHERE id IN (1, 2);
-COPY (
-    SELECT id, label FROM dml_lifecycle.same_tx_dml_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label FROM dml_lifecycle.same_tx_dml_t ORDER BY id;
 COMMIT;
 
-COPY (
-    SELECT id, label FROM dml_lifecycle.same_tx_dml_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label FROM dml_lifecycle.same_tx_dml_t ORDER BY id;
 
 SET client_min_messages = warning;
 DROP SCHEMA dml_lifecycle CASCADE;

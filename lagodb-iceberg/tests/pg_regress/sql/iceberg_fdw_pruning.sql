@@ -2,12 +2,12 @@
 -- The immutable Spark fixture has write.metadata.metrics.default=none:
 -- column bounds and null counts cannot mask a partition-projection regression.
 
-\set ECHO none
 SELECT rest_uri AS regress_rest_uri
 FROM lagodb_regress.object_storage_fixture
 \gset
 SET client_min_messages = warning;
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+RESET client_min_messages;
 CREATE EXTENSION lagodb_iceberg;
 CREATE SCHEMA iceberg_fdw_pruning;
 CREATE SERVER iceberg_pruning_rest
@@ -15,8 +15,6 @@ TYPE 'rest'
 FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (uri :'regress_rest_uri');
 CREATE USER MAPPING FOR CURRENT_USER SERVER iceberg_pruning_rest;
-RESET client_min_messages;
-\set ECHO all
 CREATE FOREIGN TABLE iceberg_fdw_pruning.source ()
 SERVER iceberg_pruning_rest
 OPTIONS (
@@ -37,8 +35,6 @@ SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SET max_parallel_workers_per_gather = 0;
 
-\pset format unaligned
-\pset footer off
 
 -- As in PostgreSQL's explain.sql, use a short EXECUTE adapter to expose
 -- stable EXPLAIN JSON fields. Test assertions remain ordinary SELECT results.
@@ -74,29 +70,22 @@ INSERT INTO pruning_cases VALUES
 -- Old/new day cases isolate each spec; mixed cases preserve truncate/bucket
 -- collisions. Expected counts come from Spark's physical files inventory.
 CREATE TEMP VIEW pruning_results AS
-WITH plans AS MATERIALIZED (
-    SELECT c.*, pg_temp.partition_query_json(
-        'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-         SELECT count(*) FROM iceberg_fdw_pruning.source WHERE ' || predicate) AS plan
-    FROM pruning_cases c
-), scans AS (
-    SELECT *, jsonb_path_query_first(plan,
-        '$[0].Plan.** ? (@."Node Type" == "Table Scan" || @."Node Type" == "Foreign Scan")') AS scan
-    FROM plans
-), filters AS (
-    SELECT *, concat_ws(' ', scan->>'Pushed Filter Exact', scan->>'Pushed Filter Conservative',
-                            scan #>> '{LagoDB Pushdown,Pushed Filter Exact}',
-                            scan #>> '{LagoDB Pushdown,Pushed Filter Conservative}') AS pushed
-    FROM scans
-)
 SELECT ordinal, case_name, scan->>'Node Type' AS scan_type,
        (scan->>'Data Files Selected')::bigint =
            (SELECT sum(file_count) FROM iceberg_fdw_pruning.inventory i
-            WHERE i.case_name = filters.case_name) AS files_match,
+            WHERE i.case_name = c.case_name) AS files_match,
        strpos(pushed, pushed_first) > 0 AND strpos(pushed, pushed_second) > 0 AS filter_bound,
        pg_temp.partition_query_json(
            'SELECT to_jsonb(array_agg(id ORDER BY id)) FROM iceberg_fdw_pruning.source WHERE ' || predicate) AS ids
-FROM filters;
+FROM pruning_cases c
+CROSS JOIN LATERAL pg_temp.partition_query_json(
+    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
+     SELECT count(*) FROM iceberg_fdw_pruning.source WHERE ' || predicate) AS explained(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Node Type" == "Table Scan" || @."Node Type" == "Foreign Scan")') AS selected(scan)
+CROSS JOIN LATERAL concat_ws(' ', scan->>'Pushed Filter Exact', scan->>'Pushed Filter Conservative',
+                                scan #>> '{LagoDB Pushdown,Pushed Filter Exact}',
+                                scan #>> '{LagoDB Pushdown,Pushed Filter Conservative}') AS filters(pushed);
 
 -- Offload supported predicates; DATE values retain native FDW execution
 -- because ExecutionScalarRepr does not admit DATE runtime bindings.
@@ -120,5 +109,3 @@ RESET client_min_messages;
 RESET max_parallel_workers_per_gather;
 RESET lagodb.query_offload_mode;
 RESET lagodb.customscan_mode;
-\pset format aligned
-\pset footer on

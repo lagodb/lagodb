@@ -90,17 +90,13 @@ WHEN MATCHED THEN
     UPDATE SET label = source.label;
 \set VERBOSITY default
 
-COPY (
-    SELECT id, label, length(label)
-    FROM dml_self_modified.force_target
-    WHERE id = 1
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label, length(label)
+FROM dml_self_modified.force_target
+WHERE id = 1;
 
-COPY (
-    SELECT metadata_location = :'force_before_error'
-    FROM iceberg.iceberg_metadata
-    WHERE relid = 'dml_self_modified.force_target'::regclass
-) TO STDOUT WITH (FORMAT csv);
+SELECT metadata_location = :'force_before_error' AS metadata_unchanged
+FROM iceberg.iceberg_metadata
+WHERE relid = 'dml_self_modified.force_target'::regclass;
 
 \set VERBOSITY sqlstate
 MERGE INTO dml_self_modified.force_target AS target
@@ -110,17 +106,13 @@ WHEN MATCHED THEN
     DELETE;
 \set VERBOSITY default
 
-COPY (
-    SELECT id, label
-    FROM dml_self_modified.force_target
-    WHERE id = 2
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label
+FROM dml_self_modified.force_target
+WHERE id = 2;
 
-COPY (
-    SELECT metadata_location = :'force_before_error'
-    FROM iceberg.iceberg_metadata
-    WHERE relid = 'dml_self_modified.force_target'::regclass
-) TO STDOUT WITH (FORMAT csv);
+SELECT metadata_location = :'force_before_error' AS metadata_unchanged
+FROM iceberg.iceberg_metadata
+WHERE relid = 'dml_self_modified.force_target'::regclass;
 
 UPDATE dml_self_modified.force_target AS target
 SET label = source.label
@@ -133,11 +125,9 @@ USING (VALUES (4), (4)) AS source(id)
 WHERE target.id = source.id
 RETURNING target.id;
 
-COPY (
-    SELECT id, label
-    FROM dml_self_modified.force_target
-    ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label
+FROM dml_self_modified.force_target
+ORDER BY id;
 
 INSERT INTO dml_self_modified.force_target VALUES
     (5, 'trigger_update_original'),
@@ -174,33 +164,26 @@ ON target.id = source.id
 WHEN MATCHED THEN UPDATE SET label = 'outer_merge';
 \set VERBOSITY default
 
-COPY (
-    SELECT id, label
-    FROM dml_self_modified.force_target
-    WHERE id BETWEEN 5 AND 7
-    ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label
+FROM dml_self_modified.force_target
+WHERE id BETWEEN 5 AND 7
+ORDER BY id;
 
-COPY (
-    SELECT metadata_location = :'force_before_trigger'
-    FROM iceberg.iceberg_metadata
-    WHERE relid = 'dml_self_modified.force_target'::regclass
-) TO STDOUT WITH (FORMAT csv);
+SELECT metadata_location = :'force_before_trigger' AS metadata_unchanged
+FROM iceberg.iceberg_metadata
+WHERE relid = 'dml_self_modified.force_target'::regclass;
 
 UPDATE dml_self_modified.force_target
 SET label = 'outer_different'
 WHERE id = 9;
 
-COPY (
-    SELECT id, label
-    FROM dml_self_modified.force_target
-    WHERE id IN (9, 10)
-    ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label
+FROM dml_self_modified.force_target
+WHERE id IN (9, 10)
+ORDER BY id;
 
 -- Two sibling ModifyTable nodes use separate IcebergModifyState values but
 -- the same PostgreSQL command ID. Exactly one action may affect the row.
-COPY (
 WITH first_update AS (
     UPDATE dml_self_modified.force_target
     SET label = 'sibling_first'
@@ -212,19 +195,16 @@ WITH first_update AS (
     WHERE id = 8
     RETURNING id
 )
-SELECT count(*)
+SELECT count(*) AS changed_rows
 FROM (
     SELECT id FROM first_update
     UNION ALL
     SELECT id FROM second_update
-) AS changed
-) TO STDOUT WITH (FORMAT csv);
+) AS changed;
 
-COPY (
-    SELECT count(*), bool_and(label IN ('sibling_first', 'sibling_second'))
-    FROM dml_self_modified.force_target
-    WHERE id = 8
-) TO STDOUT WITH (FORMAT csv);
+SELECT count(*), bool_and(label IN ('sibling_first', 'sibling_second'))
+FROM dml_self_modified.force_target
+WHERE id = 8;
 
 -- A claim made in an aborted savepoint must not poison the replacement
 -- command that subsequently sees the original physical row.
@@ -239,11 +219,9 @@ SET label = 'after_rollback'
 WHERE id = 5;
 COMMIT;
 
-COPY (
-    SELECT id, label
-    FROM dml_self_modified.force_target
-    WHERE id = 5
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label
+FROM dml_self_modified.force_target
+WHERE id = 5;
 
 -- Repeat with query CustomScan optimization disabled. ModifyTarget-purpose
 -- CustomScan remains mandatory correctness infrastructure.
@@ -275,17 +253,13 @@ WHEN MATCHED THEN
     UPDATE SET label = source.label;
 \set VERBOSITY default
 
-COPY (
-    SELECT id, label, length(label)
-    FROM dml_self_modified.seqscan_target
-    WHERE id = 1
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label, length(label)
+FROM dml_self_modified.seqscan_target
+WHERE id = 1;
 
-COPY (
-    SELECT metadata_location = :'seqscan_before_error'
-    FROM iceberg.iceberg_metadata
-    WHERE relid = 'dml_self_modified.seqscan_target'::regclass
-) TO STDOUT WITH (FORMAT csv);
+SELECT metadata_location = :'seqscan_before_error' AS metadata_unchanged
+FROM iceberg.iceberg_metadata
+WHERE relid = 'dml_self_modified.seqscan_target'::regclass;
 
 \set VERBOSITY sqlstate
 MERGE INTO dml_self_modified.seqscan_target AS target
@@ -295,17 +269,13 @@ WHEN MATCHED THEN
     DELETE;
 \set VERBOSITY default
 
-COPY (
-    SELECT id, label
-    FROM dml_self_modified.seqscan_target
-    WHERE id = 2
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label
+FROM dml_self_modified.seqscan_target
+WHERE id = 2;
 
-COPY (
-    SELECT metadata_location = :'seqscan_before_error'
-    FROM iceberg.iceberg_metadata
-    WHERE relid = 'dml_self_modified.seqscan_target'::regclass
-) TO STDOUT WITH (FORMAT csv);
+SELECT metadata_location = :'seqscan_before_error' AS metadata_unchanged
+FROM iceberg.iceberg_metadata
+WHERE relid = 'dml_self_modified.seqscan_target'::regclass;
 
 UPDATE dml_self_modified.seqscan_target AS target
 SET label = source.label
@@ -318,11 +288,9 @@ USING (VALUES (4), (4)) AS source(id)
 WHERE target.id = source.id
 RETURNING target.id;
 
-COPY (
-    SELECT id, label
-    FROM dml_self_modified.seqscan_target
-    ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label
+FROM dml_self_modified.seqscan_target
+ORDER BY id;
 
 INSERT INTO dml_self_modified.seqscan_target VALUES
     (5, 'trigger_update_original'),
@@ -358,29 +326,23 @@ ON target.id = source.id
 WHEN MATCHED THEN UPDATE SET label = 'outer_merge';
 \set VERBOSITY default
 
-COPY (
-    SELECT id, label
-    FROM dml_self_modified.seqscan_target
-    WHERE id BETWEEN 5 AND 7
-    ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label
+FROM dml_self_modified.seqscan_target
+WHERE id BETWEEN 5 AND 7
+ORDER BY id;
 
-COPY (
-    SELECT metadata_location = :'seqscan_before_trigger'
-    FROM iceberg.iceberg_metadata
-    WHERE relid = 'dml_self_modified.seqscan_target'::regclass
-) TO STDOUT WITH (FORMAT csv);
+SELECT metadata_location = :'seqscan_before_trigger' AS metadata_unchanged
+FROM iceberg.iceberg_metadata
+WHERE relid = 'dml_self_modified.seqscan_target'::regclass;
 
 UPDATE dml_self_modified.seqscan_target
 SET label = 'outer_different'
 WHERE id = 8;
 
-COPY (
-    SELECT id, label
-    FROM dml_self_modified.seqscan_target
-    WHERE id IN (8, 9)
-    ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, label
+FROM dml_self_modified.seqscan_target
+WHERE id IN (8, 9)
+ORDER BY id;
 
 RESET lagodb.customscan_mode;
 RESET iceberg.mutation_buffer_flush_mb;

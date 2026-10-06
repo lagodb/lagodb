@@ -213,10 +213,9 @@ EXECUTE update_generated(2, 9);
 (1 row)
 
 DEALLOCATE update_generated;
-\set VERBOSITY terse
 UPDATE dml_lifecycle.generated_t SET base = -1 WHERE id = 1;
 ERROR:  new row for relation "generated_t" violates check constraint "generated_t_base_check"
-\set VERBOSITY default
+DETAIL:  Failing row contains (1, -1, -2).
 SELECT * FROM dml_lifecycle.generated_t ORDER BY id;
  id | base | doubled 
 ----+------+---------
@@ -258,12 +257,10 @@ CREATE TABLE dml_lifecycle.v1_dml_t (
     "format-version" = 1
 );
 INSERT INTO dml_lifecycle.v1_dml_t VALUES (1, 'one');
-\set VERBOSITY terse
 DELETE FROM dml_lifecycle.v1_dml_t WHERE id = 1;
 ERROR:  feature not yet implemented: UPDATE/DELETE and MERGE actions that update or delete require Iceberg format v2 or later
 UPDATE dml_lifecycle.v1_dml_t SET label = 'updated' WHERE id = 1;
 ERROR:  feature not yet implemented: UPDATE/DELETE and MERGE actions that update or delete require Iceberg format v2 or later
-\set VERBOSITY default
 -- INSERT-only MERGE plans write no position deletes, even when their join
 -- reads the target, so they remain valid appends on an Iceberg v1 table.
 MERGE INTO dml_lifecycle.v1_dml_t AS target
@@ -436,10 +433,9 @@ SELECT id, base, doubled
 FROM dml_lifecycle.generated_t
 WHERE base < 10
 WITH LOCAL CHECK OPTION;
-\set VERBOSITY terse
 UPDATE dml_lifecycle.generated_small SET base = 12 WHERE id = 1;
 ERROR:  new row violates check option for view "generated_small"
-\set VERBOSITY default
+DETAIL:  Failing row contains (1, 12, 24).
 SELECT * FROM dml_lifecycle.generated_t ORDER BY id;
  id | base | doubled 
 ----+------+---------
@@ -470,10 +466,8 @@ RETURNING id, label;
   1 | updated
 (1 row)
 
-\set VERBOSITY terse
 UPDATE dml_lifecycle.rls_t SET label = 'blocked' WHERE id = 1;
 ERROR:  new row violates row-level security policy for table "rls_t"
-\set VERBOSITY default
 RESET ROLE;
 SELECT * FROM dml_lifecycle.rls_t ORDER BY id;
  id |  label  

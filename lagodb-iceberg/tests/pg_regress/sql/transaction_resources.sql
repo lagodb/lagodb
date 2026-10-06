@@ -14,15 +14,19 @@ CREATE SCHEMA transaction_resources;
 CREATE TABLE transaction_resources.abort_insert (id integer) USING iceberg;
 SELECT pg_relation_filepath('transaction_resources.abort_insert'::regclass) || '_iceberg' AS tbl_dir \gset
 
--- Verify table dir exists but data dir has no parquet files yet
-\! find :"tbl_dir" -name '*.parquet' 2>/dev/null | wc -l | tr -d ' '
+-- No data files before INSERT.
+SELECT count(*) AS data_files_before_insert
+FROM pg_ls_dir(:'tbl_dir' || '/data', true, false) AS files(name)
+WHERE name LIKE '%.parquet';
 
 BEGIN;
 INSERT INTO transaction_resources.abort_insert SELECT g FROM generate_series(1, 100) AS g;
 ROLLBACK;
 
 -- After ROLLBACK, data files must be cleaned up
-\! find :"tbl_dir" -name '*.parquet' 2>/dev/null | wc -l | tr -d ' '
+SELECT count(*) AS data_files_after_abort
+FROM pg_ls_dir(:'tbl_dir' || '/data', true, false) AS files(name)
+WHERE name LIKE '%.parquet';
 
 -- Table should have zero rows
 SELECT count(*) AS rows_after_abort FROM transaction_resources.abort_insert;
@@ -72,7 +76,9 @@ ROLLBACK;
 
 -- Zero rows, data files cleaned
 SELECT count(*) AS rows_after_release_abort FROM transaction_resources.release_abort;
-\! find :"ra_dir" -name '*.parquet' 2>/dev/null | wc -l | tr -d ' '
+SELECT count(*) AS data_files_after_release_abort
+FROM pg_ls_dir(:'ra_dir' || '/data', true, false) AS files(name)
+WHERE name LIKE '%.parquet';
 
 
 --

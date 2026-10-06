@@ -49,7 +49,6 @@ FROM query_offload_expression_basic
 WHERE (id >= 2 AND lower(value_text) = 'alpha')
    OR (id <= 1 AND upper(value_text) = 'ALPHA');
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT count(*) AS rows
 FROM query_offload_expression_basic
@@ -58,7 +57,6 @@ WHERE (id >= 2 AND lower(value_text) = 'alpha')
 
 -- A volatile subtree blocks pruning of the complete OR clause. Forced serial
 -- query offload still evaluates the complete expression through PostgreSQL.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT count(*) AS rows
@@ -71,7 +69,6 @@ FROM query_offload_expression_basic
 WHERE (id >= 2 AND random() >= 0)
    OR id <= 1;
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT count(*) AS rows
 FROM query_offload_expression_basic
@@ -79,7 +76,6 @@ WHERE (id >= 2 AND random() >= 0)
    OR id <= 1;
 
 -- A PG-only exact filter remains force-offloadable without a pushed filter.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT count(*) AS rows
@@ -90,7 +86,6 @@ SELECT count(*) AS rows
 FROM query_offload_expression_basic
 WHERE lower(value_text) = 'alpha';
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT count(*) AS rows
 FROM query_offload_expression_basic
@@ -98,7 +93,6 @@ WHERE lower(value_text) = 'alpha';
 
 -- Per-row PostgreSQL fallback remains isolated from auto mode until a measured
 -- fallback cost model justifies selecting it.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'auto';
 EXPLAIN (COSTS OFF)
 SELECT count(*) AS rows
@@ -111,7 +105,6 @@ WHERE lower(value_text) = 'alpha';
 
 -- This compact matrix crosses BooleanTest, searched CASE, COALESCE, NULLIF,
 -- native scalar-array comparison, text and numeric scalar functions.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
@@ -144,7 +137,6 @@ SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
        sum(abs(value_f8)) AS abs_f8_sum
 FROM query_offload_expression_basic;
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
        count(*) FILTER (
@@ -162,7 +154,6 @@ SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
 FROM query_offload_expression_basic;
 
 -- `> ANY` and simple CASE are complete PostgreSQL fallback expressions.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT count(*) FILTER (WHERE id > ANY (ARRAY[2, 5]::integer[])) AS any_gt_rows,
@@ -177,7 +168,6 @@ SELECT count(*) FILTER (WHERE id > ANY (ARRAY[2, 5]::integer[])) AS any_gt_rows,
        ) AS simple_case_rows
 FROM query_offload_expression_basic;
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT count(*) FILTER (WHERE id > ANY (ARRAY[2, 5]::integer[])) AS any_gt_rows,
        count(*) FILTER (
@@ -186,7 +176,6 @@ SELECT count(*) FILTER (WHERE id > ANY (ARRAY[2, 5]::integer[])) AS any_gt_rows,
 FROM query_offload_expression_basic;
 
 -- Non-selected error branches prove PostgreSQL lazy CASE/COALESCE evaluation.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT count(*) FILTER (
@@ -203,7 +192,6 @@ SELECT count(*) FILTER (
 FROM query_offload_expression_basic
 WHERE value_i4 IS NOT NULL;
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT count(*) FILTER (
            WHERE CASE WHEN id >= 0 THEN true ELSE 1 / (id - id) > 0 END
@@ -213,7 +201,6 @@ FROM query_offload_expression_basic
 WHERE value_i4 IS NOT NULL;
 
 -- One matrix covers every initial fallback converter family, including NULLs.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT sum((-value_i2)::smallint) AS udf_i2,
@@ -238,7 +225,6 @@ SELECT sum((-value_i2)::smallint) AS udf_i2,
        count(lower(value_text)::name) AS udf_name
 FROM query_offload_expression_basic;
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT sum((-value_i2)::smallint) AS udf_i2,
        sum(mod(value_i4, 7)) AS udf_i4,
@@ -257,7 +243,6 @@ FROM query_offload_expression_basic;
 
 -- A fallback result outside the initial converter matrix declines the complete
 -- query-offload path even in force mode.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT count(date_trunc('day', value_timestamp))
@@ -283,7 +268,6 @@ CREATE TABLE query_offload_expression_abs_edge (
 
 INSERT INTO query_offload_expression_abs_edge VALUES ('-32768'::smallint);
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT count(*) FILTER (WHERE abs(value_i2) >= 0::smallint)
@@ -292,7 +276,6 @@ FROM query_offload_expression_abs_edge;
 SELECT count(*) FILTER (WHERE abs(value_i2) >= 0::smallint)
 FROM query_offload_expression_abs_edge;
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT count(*) FILTER (WHERE abs(value_i2) >= 0::smallint)
 FROM query_offload_expression_abs_edge;

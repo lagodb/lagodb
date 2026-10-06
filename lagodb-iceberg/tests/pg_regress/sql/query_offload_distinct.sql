@@ -4,8 +4,7 @@
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 
--- Each test case sets both planner modes locally instead of depending on
--- session state from an earlier case.
+-- Keep CustomScan off while comparing query offload with PostgreSQL.
 SET lagodb.query_batch_rows = 2;
 SET timezone = 'UTC';
 
@@ -107,7 +106,6 @@ SELECT count(DISTINCT value_bool) AS bool_values,
 FROM query_offload_distinct_basic;
 
 -- PostgreSQL native result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT count(DISTINCT value_bool) AS bool_values,
        count(DISTINCT value_i4) AS i4_values,
@@ -141,7 +139,6 @@ FROM query_offload_distinct_basic;
 -- ============================================================================
 
 -- Query offload plan and result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT DISTINCT value_bool,
@@ -165,7 +162,6 @@ ORDER BY value_bool NULLS LAST,
          value_numeric NULLS LAST;
 
 -- PostgreSQL native result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT DISTINCT value_bool,
                 value_i4,
@@ -178,7 +174,6 @@ ORDER BY value_bool NULLS LAST,
          value_numeric NULLS LAST;
 
 -- Query offload plan and result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT DISTINCT value_text,
@@ -214,7 +209,6 @@ ORDER BY value_text NULLS LAST,
          value_bytea NULLS LAST;
 
 -- PostgreSQL native result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT DISTINCT value_text,
                 value_date,
@@ -239,7 +233,6 @@ ORDER BY value_text NULLS LAST,
 
 -- The integer conjunct is available for Iceberg pruning; lower(value_text)
 -- remains in the complete DataFusion residual as one PostgreSQL UDF.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT DISTINCT value_i4
@@ -252,7 +245,6 @@ FROM query_offload_distinct_basic
 WHERE id <= 4 AND lower(value_text) = 'alpha'
 ORDER BY value_i4 NULLS LAST;
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT DISTINCT value_i4
 FROM query_offload_distinct_basic
@@ -260,7 +252,6 @@ WHERE id <= 4 AND lower(value_text) = 'alpha'
 ORDER BY value_i4 NULLS LAST;
 
 -- DISTINCT ON remains outside the query-level DISTINCT capability.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT DISTINCT ON (value_i4) value_i4, id
@@ -271,7 +262,6 @@ SELECT DISTINCT ON (value_i4) value_i4, id
 FROM query_offload_distinct_basic
 ORDER BY value_i4 NULLS LAST, id;
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT DISTINCT ON (value_i4) value_i4, id

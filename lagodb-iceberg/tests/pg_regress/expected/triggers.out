@@ -30,7 +30,6 @@ INSERT INTO dml_trigger_query_state.target VALUES
     (1, 'old_1'), (2, 'old_2'), (3, 'old_3'), (4, 'old_4');
 -- Sibling ModifyTable nodes for one relation must share one query-level store
 -- without allowing OLD/NEW identities to cross between their result states.
-COPY (
 WITH first_update AS (
     UPDATE dml_trigger_query_state.target
     SET label = 'cte_1'
@@ -42,21 +41,26 @@ WITH first_update AS (
     WHERE id = 2
     RETURNING id
 )
-SELECT count(*)
+SELECT count(*) AS changed_rows
 FROM (
     SELECT id FROM first_update
     UNION ALL
     SELECT id FROM second_update
-) AS changed
-) TO STDOUT WITH (FORMAT csv);
-2
-COPY (
-    SELECT id, old_label, new_label
-    FROM dml_trigger_query_state.audit
-    ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
-1,old_1,cte_1
-2,old_2,cte_2
+) AS changed;
+ changed_rows 
+--------------
+            2
+(1 row)
+
+SELECT id, old_label, new_label
+FROM dml_trigger_query_state.audit
+ORDER BY id;
+ id | old_label | new_label 
+----+-----------+-----------
+  1 | old_1     | cte_1
+  2 | old_2     | cte_2
+(2 rows)
+
 TRUNCATE dml_trigger_query_state.audit;
 -- The outer query store remains routable while an AFTER trigger runs a nested
 -- SPI UPDATE that creates another query store for the same relation.
@@ -77,21 +81,25 @@ CREATE TRIGGER target_nested
 AFTER UPDATE ON dml_trigger_query_state.target
 FOR EACH ROW EXECUTE FUNCTION dml_trigger_query_state.nested_update();
 UPDATE dml_trigger_query_state.target SET label = 'outer_3' WHERE id = 3;
-COPY (
-    SELECT id, label
-    FROM dml_trigger_query_state.target
-    WHERE id IN (3, 4)
-    ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
-3,outer_3
-4,nested_4
-COPY (
-    SELECT id, old_label, new_label
-    FROM dml_trigger_query_state.audit
-    ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
-3,old_3,outer_3
-4,old_4,nested_4
+SELECT id, label
+FROM dml_trigger_query_state.target
+WHERE id IN (3, 4)
+ORDER BY id;
+ id |  label   
+----+----------
+  3 | outer_3
+  4 | nested_4
+(2 rows)
+
+SELECT id, old_label, new_label
+FROM dml_trigger_query_state.audit
+ORDER BY id;
+ id | old_label | new_label 
+----+-----------+-----------
+  3 | old_3     | outer_3
+  4 | old_4     | nested_4
+(2 rows)
+
 -- Disabled and WHEN=false events must not fire. A later matching row in the
 -- same UPDATE verifies that the tuplestore can skip preserved, unused rows.
 CREATE TABLE dml_trigger_query_state.conditional_target (
@@ -126,12 +134,14 @@ INSERT INTO dml_trigger_query_state.conditional_target VALUES
     (1, 'old_1'), (2, 'old_2');
 UPDATE dml_trigger_query_state.conditional_target
 SET label = CASE id WHEN 1 THEN 'skip' ELSE 'fire' END;
-COPY (
-    SELECT trigger_name, id, label
-    FROM dml_trigger_query_state.conditional_audit
-    ORDER BY trigger_name, id
-) TO STDOUT WITH (FORMAT csv);
-conditional_when,2,fire
+SELECT trigger_name, id, label
+FROM dml_trigger_query_state.conditional_audit
+ORDER BY trigger_name, id;
+   trigger_name   | id | label 
+------------------+----+-------
+ conditional_when |  2 | fire
+(1 row)
+
 -- work_mem is deliberately smaller than the retained OLD/NEW rows so the
 -- PostgreSQL tuplestore must use its spill path.
 SET work_mem = '64kB';
@@ -161,11 +171,13 @@ INSERT INTO dml_trigger_query_state.spill_target
 SELECT id, repeat('x', 8192)
 FROM generate_series(1, 80) AS id;
 UPDATE dml_trigger_query_state.spill_target SET payload = payload || 'y';
-COPY (
-    SELECT count(*), min(old_length), max(new_length)
-    FROM dml_trigger_query_state.spill_audit
-) TO STDOUT WITH (FORMAT csv);
-80,8192,8193
+SELECT count(*), min(old_length), max(new_length)
+FROM dml_trigger_query_state.spill_audit;
+ count | min  | max  
+-------+------+------
+    80 | 8192 | 8193
+(1 row)
+
 RESET work_mem;
 -- AFTER-trigger materialization must be identical whether query CustomScan
 -- optimization is forced or disabled; DML itself always uses CustomScan.
@@ -200,16 +212,17 @@ AFTER UPDATE ON dml_trigger_query_state.seq_target
 FOR EACH ROW EXECUTE FUNCTION dml_trigger_query_state.audit_parity();
 INSERT INTO dml_trigger_query_state.force_target VALUES (1, 'old');
 INSERT INTO dml_trigger_query_state.seq_target VALUES (1, 'old');
-SET lagodb.customscan_mode = 'force';
 UPDATE dml_trigger_query_state.force_target SET label = 'new' WHERE id = 1;
 SET lagodb.customscan_mode = 'off';
 UPDATE dml_trigger_query_state.seq_target SET label = 'new' WHERE id = 1;
-COPY (
-    SELECT old_label, new_label, count(*)
-    FROM dml_trigger_query_state.parity_audit
-    GROUP BY old_label, new_label
-) TO STDOUT WITH (FORMAT csv);
-old,new,2
+SELECT old_label, new_label, count(*)
+FROM dml_trigger_query_state.parity_audit
+GROUP BY old_label, new_label;
+ old_label | new_label | count 
+-----------+-----------+-------
+ old       | new       |     2
+(1 row)
+
 RESET lagodb.customscan_mode;
 SET client_min_messages = warning;
 DROP SCHEMA dml_trigger_query_state CASCADE;

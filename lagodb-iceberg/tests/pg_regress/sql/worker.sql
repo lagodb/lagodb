@@ -1,8 +1,6 @@
 -- Exercise the worker framework's transaction, scheduling, process, and
 -- cancellation lifecycles. SQL owns every database assertion and fixture;
 -- the pause guard below performs only SIGSTOP/SIGCONT process control.
-\set ECHO none
-\set QUIET 1
 \set regress_database :DBNAME
 \set runtime_database lagodb_runtime_source
 \set runtime_template_database lagodb_runtime_template
@@ -12,24 +10,14 @@
 SET client_min_messages = warning;
 
 -- 1. Initial recovery and state normalization.
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT FROM pg_database
-        WHERE datname = 'lagodb_runtime_template_copy'
-          AND datistemplate
-    ) THEN
-        EXECUTE 'ALTER DATABASE lagodb_runtime_template_copy IS_TEMPLATE false';
-    END IF;
-    IF EXISTS (
-        SELECT FROM pg_database
-        WHERE datname = 'lagodb_runtime_template'
-          AND datistemplate
-    ) THEN
-        EXECUTE 'ALTER DATABASE lagodb_runtime_template IS_TEMPLATE false';
-    END IF;
-END
-$$;
+\set ECHO none
+SELECT format('ALTER DATABASE %I IS_TEMPLATE false', datname)
+FROM pg_database
+WHERE datname IN ('lagodb_runtime_template_copy', 'lagodb_runtime_template')
+  AND datistemplate
+ORDER BY datname DESC
+\gexec
+\set ECHO all
 DROP DATABASE IF EXISTS :runtime_database WITH (FORCE);
 DROP DATABASE IF EXISTS :runtime_template_copy WITH (FORCE);
 DROP DATABASE IF EXISTS :runtime_template_database WITH (FORCE);
@@ -57,47 +45,36 @@ RESET client_min_messages;
 -- registration, explicit wake, ALTER DATABASE SET, or deregistration.
 \connect :runtime_template_database
 CREATE EXTENSION lagodb_base;
-CREATE PROCEDURE public.assert_template_worker_excluded(test_case text)
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    database_id oid := (
-        SELECT oid FROM pg_database WHERE datname = current_database()
-    );
-BEGIN
-    IF EXISTS (
-           SELECT FROM lagodb.process_status
-           WHERE process_kind = 'coordinator'
-             AND database_oid = database_id
-       ) OR EXISTS (
-           SELECT FROM lagodb.worker_status
-           WHERE database_oid = database_id
-       ) OR EXISTS (
-           SELECT FROM pg_stat_activity
-           WHERE datid = database_id
-             AND backend_type IN (
-                 'lagodb coordinator',
-                 'lagodb worker'
-             )
-       )
-    THEN
-        RAISE EXCEPTION '% started a LagoDB worker', test_case;
-    END IF;
-END
+CREATE FUNCTION public.template_worker_excluded() RETURNS boolean
+LANGUAGE SQL AS $$
+    SELECT NOT EXISTS (
+               SELECT FROM lagodb.process_status
+               WHERE process_kind = 'coordinator'
+                 AND database_oid = db.oid
+           ) AND NOT EXISTS (
+               SELECT FROM lagodb.worker_status
+               WHERE database_oid = db.oid
+           ) AND NOT EXISTS (
+               SELECT FROM pg_stat_activity
+               WHERE datid = db.oid
+                 AND backend_type IN ('lagodb coordinator', 'lagodb worker')
+           )
+    FROM pg_database AS db
+    WHERE datname = current_database();
 $$;
 SELECT pg_sleep(1);
-CALL public.assert_template_worker_excluded('template registration');
+SELECT public.template_worker_excluded() AS template_registration_excluded;
 SELECT lagodb.request_worker_wakeup('lagodb_base', 'maintenance');
 SELECT pg_sleep(1);
-CALL public.assert_template_worker_excluded('template SQL wake');
+SELECT public.template_worker_excluded() AS template_sql_wake_excluded;
 ALTER DATABASE :runtime_template_database
     SET lagodb.customscan_mode = auto;
 SELECT pg_sleep(1);
-CALL public.assert_template_worker_excluded('template ALTER DATABASE SET');
+SELECT public.template_worker_excluded() AS template_alter_database_excluded;
 SELECT lagodb.deregister_worker('maintenance');
 SELECT pg_sleep(1);
-CALL public.assert_template_worker_excluded('template deregistration');
-DROP PROCEDURE public.assert_template_worker_excluded(text);
+SELECT public.template_worker_excluded() AS template_deregistration_excluded;
+DROP FUNCTION public.template_worker_excluded();
 \connect :regress_database
 CREATE DATABASE :runtime_template_copy
     WITH TEMPLATE :runtime_template_database IS_TEMPLATE true;
@@ -108,51 +85,33 @@ DROP DATABASE :runtime_template_database;
 
 -- 2. Runtime CREATE/DROP transaction lifecycle in an isolated database.
 \connect :runtime_database
-DO $$
-DECLARE
-    denied boolean := false;
-BEGIN
-    SET LOCAL ROLE lagodb_runtime_non_superuser;
-    BEGIN
-        EXECUTE 'CREATE EXTENSION lagodb_base';
-    EXCEPTION WHEN insufficient_privilege THEN
-        denied := true;
-    END;
-    IF NOT denied OR EXISTS (
-        SELECT FROM pg_extension WHERE extname = 'lagodb_base'
-    ) THEN
-        RAISE EXCEPTION 'non-superuser LagoDB installation was allowed';
-    END IF;
-END
-$$;
+BEGIN;
+SET LOCAL ROLE lagodb_runtime_non_superuser;
+SAVEPOINT runtime_install;
+CREATE EXTENSION lagodb_base;
+\echo worker_install_sqlstate: :SQLSTATE
+ROLLBACK TO SAVEPOINT runtime_install;
+RELEASE SAVEPOINT runtime_install;
+SELECT NOT EXISTS (
+    SELECT FROM pg_extension WHERE extname = 'lagodb_base'
+) AS worker_install_left_no_extension;
+COMMIT;
 
 BEGIN;
 CREATE EXTENSION lagodb_base;
 ROLLBACK;
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT FROM pg_extension WHERE extname = 'lagodb_base'
-    ) THEN
-        RAISE EXCEPTION 'CREATE EXTENSION rollback leaked the extension';
-    END IF;
-END
-$$;
+SELECT NOT EXISTS (
+    SELECT FROM pg_extension WHERE extname = 'lagodb_base'
+) AS worker_create_rollback;
 
 BEGIN;
 SAVEPOINT before_runtime;
 CREATE EXTENSION lagodb_base;
 ROLLBACK TO SAVEPOINT before_runtime;
 COMMIT;
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT FROM pg_extension WHERE extname = 'lagodb_base'
-    ) THEN
-        RAISE EXCEPTION 'savepoint rollback leaked the extension';
-    END IF;
-END
-$$;
+SELECT NOT EXISTS (
+    SELECT FROM pg_extension WHERE extname = 'lagodb_base'
+) AS worker_savepoint_rollback;
 
 BEGIN;
 SAVEPOINT commit_runtime;
@@ -222,27 +181,18 @@ ROLLBACK;
 CALL public.worker_regress_assert_runtime_idle('DROP EXTENSION rollback');
 
 CREATE EXTENSION lagodb_iceberg;
-DO $$
-DECLARE
-    rejected boolean := false;
-BEGIN
-    BEGIN
-        EXECUTE 'DROP EXTENSION lagodb_base';
-    EXCEPTION WHEN dependent_objects_still_exist THEN
-        rejected := true;
-    END;
-    IF NOT rejected
-       OR NOT EXISTS (
+BEGIN;
+SAVEPOINT runtime_restrict;
+DROP EXTENSION lagodb_base;
+\echo worker_drop_native_restrict_sqlstate: :SQLSTATE
+ROLLBACK TO SAVEPOINT runtime_restrict;
+RELEASE SAVEPOINT runtime_restrict;
+SELECT EXISTS (
            SELECT FROM pg_extension WHERE extname = 'lagodb_base'
-       )
-       OR NOT EXISTS (
+       ) AND EXISTS (
            SELECT FROM pg_extension WHERE extname = 'lagodb_iceberg'
-       )
-    THEN
-        RAISE EXCEPTION 'PostgreSQL RESTRICT did not preserve dependent extensions';
-    END IF;
-END
-$$;
+       ) AS worker_drop_native_restrict;
+COMMIT;
 
 INSERT INTO lagodb.maintenance_queue (
     item_id, operation, volume_id, object_namespace, object_path, producer,
@@ -255,17 +205,10 @@ INSERT INTO lagodb.maintenance_queue (
 BEGIN;
 SET LOCAL client_min_messages = warning;
 DROP EXTENSION lagodb_base CASCADE;
-DO $$
-BEGIN
-    IF EXISTS (
+SELECT NOT EXISTS (
            SELECT FROM pg_extension
            WHERE extname IN ('lagodb_base', 'lagodb_iceberg')
-       ) OR to_regclass('lagodb.maintenance_queue') IS NOT NULL
-    THEN
-        RAISE EXCEPTION 'CASCADE did not remove runtime-owned SQL state';
-    END IF;
-END
-$$;
+       ) AND to_regclass('lagodb.maintenance_queue') IS NULL AS worker_cascade_removed_sql_state;
 ROLLBACK;
 CALL public.worker_regress_assert_runtime_idle(
     'DROP EXTENSION CASCADE rollback'
@@ -304,21 +247,14 @@ BEGIN
 END
 $$;
 
-DO $$
-DECLARE
-    denied boolean := false;
-BEGIN
-    SET LOCAL ROLE lagodb_runtime_non_superuser;
-    BEGIN
-        PERFORM lagodb.deregister_worker('maintenance');
-    EXCEPTION WHEN insufficient_privilege THEN
-        denied := true;
-    END;
-    IF NOT denied THEN
-        RAISE EXCEPTION 'non-superuser worker deregistration was allowed';
-    END IF;
-END
-$$;
+BEGIN;
+SET LOCAL ROLE lagodb_runtime_non_superuser;
+SAVEPOINT runtime_deregister;
+SELECT lagodb.deregister_worker('maintenance');
+\echo worker_deregister_sqlstate: :SQLSTATE
+ROLLBACK TO SAVEPOINT runtime_deregister;
+RELEASE SAVEPOINT runtime_deregister;
+COMMIT;
 
 -- 3. Worker deregistration transaction lifecycle in the regression database.
 \connect :regress_database
@@ -485,13 +421,9 @@ CREATE EXTENSION lagodb_iceberg;
 CALL pg_temp.assert_iceberg_worker_registered('final registration');
 DELETE FROM worker_deregister_results WHERE test_case = 'final registration';
 
-\pset format unaligned
-\pset tuples_only on
-\set QUIET 0
 SELECT test_case || ': true'
 FROM worker_deregister_results
 ORDER BY test_case;
-\set QUIET 1
 
 -- 4. Wake, RunAfter, and crash-backoff scheduling.
 \connect :runtime_database
@@ -651,17 +583,10 @@ DROP PROCEDURE public.worker_regress_assert_runtime_idle(text);
 SET client_min_messages = warning;
 DROP EXTENSION lagodb_base CASCADE;
 RESET client_min_messages;
-DO $$
-BEGIN
-    IF EXISTS (
+SELECT NOT EXISTS (
            SELECT FROM pg_extension
            WHERE extname IN ('lagodb_base', 'lagodb_iceberg')
-       ) OR to_regclass('lagodb.maintenance_queue') IS NOT NULL
-    THEN
-        RAISE EXCEPTION 'committed CASCADE retained runtime-owned SQL state';
-    END IF;
-END
-$$;
+       ) AND to_regclass('lagodb.maintenance_queue') IS NULL AS worker_drop_commit;
 \connect :regress_database
 SELECT set_config(
     'lagodb.worker_regress_runtime_database_oid',
@@ -948,21 +873,3 @@ SELECT 'worker_test_restored_iceberg_registration: ' || EXISTS (
              AND process_state = 'stopped'
              AND NOT needs_restart
        );
-
-\set QUIET 0
-\echo worker_create_rollback: true
-\echo worker_savepoint_rollback: true
-\echo worker_savepoint_commit: true
-\echo worker_drop_rollback: true
-\echo worker_drop_savepoint_rollback: true
-\echo worker_drop_commit: true
-\echo worker_drop_native_restrict: true
-\echo worker_drop_cascade_rollback: true
-\echo worker_drop_queue_discard: true
-\echo worker_non_superuser_guard: true
-\echo worker_non_superuser_wakeup: true
-\echo worker_scheduled_wakeup: true
-\echo worker_template_database_excluded: true
-\echo worker_drop_database: true
-\echo worker_cancel_entered_backoff: true
-\echo worker_cancel_recovered: true

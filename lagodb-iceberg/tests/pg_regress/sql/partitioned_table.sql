@@ -1,6 +1,4 @@
 -- Managed partitioned tables: definitions, PostgreSQL catalog policy, COPY, and DML.
-\pset format unaligned
-\pset footer off
 
 -- Managed partition definitions, storage identity, and PostgreSQL catalog policy.
 
@@ -43,13 +41,11 @@ WHERE relid IN (
 )
   AND name = 'relfilenumber';
 
-\set VERBOSITY terse
 CREATE TABLE partitioned_ddl.unsupported_hash_t (id integer)
 PARTITION BY HASH (id) USING iceberg;
 -- UUID partition literals cannot currently round-trip through upstream Avro.
 CREATE TABLE partitioned_ddl.unsupported_uuid_t (id uuid)
 PARTITION BY LIST (id) USING iceberg;
-\set VERBOSITY default
 
 DROP TABLE partitioned_ddl.date_t, partitioned_ddl.timestamp_t, partitioned_ddl.timestamptz_t;
 
@@ -96,11 +92,9 @@ west
 SELECT region FROM partitioned_ddl.native_index_t ORDER BY region;
 
 -- One representative topology rejection: Iceberg partitions do not use PG child tables.
-\set VERBOSITY terse
 CREATE TABLE partitioned_ddl.root_index_t_child
 PARTITION OF partitioned_ddl.root_index_t
 FOR VALUES IN ('east') USING heap;
-\set VERBOSITY default
 
 SET client_min_messages = warning;
 DROP SCHEMA partitioned_ddl CASCADE;
@@ -140,13 +134,10 @@ WITH (FORMAT csv) WHERE id >= 2;
 2,west
 3,east
 \.
-COPY (
-    SELECT id, region, label FROM partitioned_copy.execution_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, region, label FROM partitioned_copy.execution_t ORDER BY id;
 
 -- A current-database-qualified root must still select the root consumer.
-SELECT current_database() AS copy_database \gset
-COPY :"copy_database".partitioned_copy.root_t TO '/dev/null' WITH (FORMAT csv);
+COPY :"DBNAME".partitioned_copy.root_t TO '/dev/null' WITH (FORMAT csv);
 
 ALTER TABLE partitioned_copy.root_t ENABLE ROW LEVEL SECURITY;
 CREATE POLICY visible_root_rows ON partitioned_copy.root_t
@@ -154,9 +145,7 @@ FOR SELECT TO partitioned_copy_user USING (id = 1);
 SET ROLE partitioned_copy_user;
 
 -- A representative endpoint error must precede relation ACL checks.
-\set VERBOSITY terse
 COPY partitioned_copy.root_t FROM '/dev/null';
-\set VERBOSITY default
 
 -- Native relation COPY continues to use the parent executor.
 COPY partitioned_copy.native_t FROM stdin WITH (FORMAT csv);
@@ -217,12 +206,10 @@ WHERE id IN (10, 20) AND EXISTS (SELECT 1);
 UPDATE dml_lifecycle.part_t SET region = 'west' WHERE id = 10;
 DELETE FROM dml_lifecycle.part_t WHERE id = 30;
 
-COPY (
-    SELECT id, region, label,
-           tableoid = 'dml_lifecycle.part_t'::regclass AS partitioned_tableoid
-    FROM dml_lifecycle.part_t
-    ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, region, label,
+       tableoid = 'dml_lifecycle.part_t'::regclass AS partitioned_tableoid
+FROM dml_lifecycle.part_t
+ORDER BY id;
 
 SELECT count(*) = 3 AS only_partitioned_table_reads_data
 FROM ONLY dml_lifecycle.part_t;
@@ -241,9 +228,7 @@ WHEN NOT MATCHED THEN
     INSERT (id, region, label)
     VALUES (source.id, source.region, source.label);
 
-COPY (
-    SELECT id, region, label FROM dml_lifecycle.part_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, region, label FROM dml_lifecycle.part_t ORDER BY id;
 
 BEGIN;
 INSERT INTO dml_lifecycle.part_t VALUES (60, 'west', 'tx');
@@ -253,9 +238,7 @@ SELECT count(*) = 3 AS transaction_delta_visible
 FROM dml_lifecycle.part_t;
 ROLLBACK;
 
-COPY (
-    SELECT id, region, label FROM dml_lifecycle.part_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, region, label FROM dml_lifecycle.part_t ORDER BY id;
 
 -- Partition-aware v3 deletion vectors use a different delete-file path from v2.
 CREATE TABLE dml_lifecycle.part_v3 (
@@ -267,13 +250,9 @@ INSERT INTO dml_lifecycle.part_v3
 VALUES (1, 'east', 'one'), (2, 'west', 'two'), (3, 'east', 'three');
 UPDATE dml_lifecycle.part_v3 SET region = 'west', label = 'moved' WHERE id = 1;
 DELETE FROM dml_lifecycle.part_v3 WHERE id = 2;
-COPY (
-    SELECT id, region, label FROM dml_lifecycle.part_v3 ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
+SELECT id, region, label FROM dml_lifecycle.part_v3 ORDER BY id;
 
 SET client_min_messages = warning;
 DROP SCHEMA dml_lifecycle CASCADE;
 RESET client_min_messages;
 
-\pset format aligned
-\pset footer on

@@ -12,6 +12,9 @@ setup
   INSERT INTO truncate_iso.multi_first_t VALUES (4);
   CREATE TABLE truncate_iso.multi_second_t (id int) USING iceberg;
   INSERT INTO truncate_iso.multi_second_t VALUES (5);
+  CREATE TABLE truncate_iso.partitioned_t (id int, region text)
+    PARTITION BY LIST (region) USING iceberg;
+  INSERT INTO truncate_iso.partitioned_t VALUES (6, 'east'), (7, 'west');
 }
 
 # INSERT metadata is materialized when the first setup transaction commits.
@@ -24,7 +27,8 @@ setup
     'truncate_iso.target_t'::regclass,
     'truncate_iso.abort_t'::regclass,
     'truncate_iso.multi_first_t'::regclass,
-    'truncate_iso.multi_second_t'::regclass
+    'truncate_iso.multi_second_t'::regclass,
+    'truncate_iso.partitioned_t'::regclass
   );
 }
 
@@ -43,6 +47,7 @@ step s1_abort { ROLLBACK; }
 step s1_begin_multi { BEGIN; }
 step s1_truncate_multi { TRUNCATE truncate_iso.multi_first_t, truncate_iso.multi_second_t; }
 step s1_commit_multi { COMMIT; }
+step s1_truncate_partitioned { TRUNCATE truncate_iso.partitioned_t; }
 
 session s2
 step s2_location_unchanged {
@@ -60,6 +65,8 @@ step s2_abort_location_unchanged {
   WHERE current.relid = 'truncate_iso.abort_t'::regclass;
 }
 step s2_abort_rows { SELECT array_agg(id ORDER BY id) AS rows FROM truncate_iso.abort_t; }
+step s2_multi_first_rows { SELECT count(*) AS rows FROM truncate_iso.multi_first_t; }
+step s2_multi_second_rows { SELECT count(*) AS rows FROM truncate_iso.multi_second_t; }
 step s2_multi_rows { SELECT (SELECT count(*) FROM truncate_iso.multi_first_t) = 0 AND (SELECT count(*) FROM truncate_iso.multi_second_t) = 0 AS both_empty; }
 step s2_multi_locations_changed {
   SELECT bool_and(current.metadata_location <> original.metadata_location) AS changed
@@ -67,7 +74,22 @@ step s2_multi_locations_changed {
   JOIN truncate_iso.locations AS original USING (relid)
   WHERE current.relid IN ('truncate_iso.multi_first_t'::regclass, 'truncate_iso.multi_second_t'::regclass);
 }
+step s2_partitioned_location_unchanged {
+  SELECT current.metadata_location = original.metadata_location AS unchanged
+  FROM iceberg.iceberg_metadata AS current
+  JOIN truncate_iso.locations AS original USING (relid)
+  WHERE current.relid = 'truncate_iso.partitioned_t'::regclass;
+}
+step s2_partitioned_insert { INSERT INTO truncate_iso.partitioned_t VALUES (8, 'north'); }
+step s2_partitioned_rows { SELECT array_agg(id ORDER BY id) AS rows FROM truncate_iso.partitioned_t; }
 
 permutation s1_begin s1_truncate s2_location_unchanged s2_insert s1_commit s2_target_rows
 permutation s1_begin_abort s1_truncate_abort s2_abort_location_unchanged s1_abort s2_abort_location_unchanged s2_abort_rows
-permutation s1_begin_multi s1_truncate_multi s2_multi_rows s1_commit_multi s2_multi_locations_changed
+
+# Check each table's lock independently; a combined query can wait on either.
+permutation s1_begin_multi s1_truncate_multi s2_multi_first_rows s1_commit_multi s2_multi_rows s2_multi_locations_changed
+permutation s1_begin_multi s1_truncate_multi s2_multi_second_rows s1_commit_multi s2_multi_rows s2_multi_locations_changed
+
+# Provider-owned partitioned roots retain commit and rollback lock semantics.
+permutation s1_begin s1_truncate_partitioned s2_partitioned_location_unchanged s2_partitioned_insert s1_commit s2_partitioned_rows
+permutation s1_begin s1_truncate_partitioned s2_partitioned_location_unchanged s2_partitioned_rows s1_abort s2_partitioned_location_unchanged

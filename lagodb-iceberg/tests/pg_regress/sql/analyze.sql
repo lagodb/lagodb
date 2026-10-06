@@ -172,7 +172,7 @@ IMMUTABLE LANGUAGE SQL
 AS 'SELECT $1 FROM analyze_test.nested_analyze()';
 CREATE INDEX ON recursion_t (recursion_index(id));
 INSERT INTO recursion_t VALUES (1), (2);
--- Catch the outer error only after both maintenance executors have unwound.
+-- Catch the outer error after native maintenance has unwound its scope.
 DO $$
 BEGIN
     EXECUTE 'ANALYZE analyze_test.recursion_t';
@@ -184,9 +184,7 @@ EXCEPTION WHEN feature_not_supported THEN
 END;
 $$;
 ANALYZE partitioned_table_t;
--- The mixed command routes the native target through LagoDB's executor.
--- Let its recursion error escape, then observe maintenance-scope teardown
--- with a successful provider ANALYZE before catching inner errors below.
+-- Repeat through LagoDB's mixed executor, without internal transaction commits.
 DO $$
 BEGIN
     EXECUTE 'ANALYZE analyze_test.recursion_t, analyze_test.partitioned_table_t';

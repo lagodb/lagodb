@@ -1,6 +1,4 @@
 -- Managed partitioned tables: definitions, PostgreSQL catalog policy, COPY, and DML.
-\pset format unaligned
-\pset footer off
 -- Managed partition definitions, storage identity, and PostgreSQL catalog policy.
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION lagodb_iceberg;
@@ -25,10 +23,13 @@ FROM (VALUES ('partitioned_ddl.date_t'::regclass),
 JOIN iceberg.iceberg_metadata ON relid = definition.table_id
 CROSS JOIN LATERAL (SELECT pg_read_file(metadata_location)::jsonb AS metadata) AS file
 ORDER BY relation;
-relation|fields|transform|field_name|source_id
-partitioned_ddl.date_t|1|day|event_date_day|1
-partitioned_ddl.timestamp_t|1|month|event_time_month|1
-partitioned_ddl.timestamptz_t|1|day|event_time_day|1
+           relation            | fields | transform |    field_name    | source_id 
+-------------------------------+--------+-----------+------------------+-----------
+ partitioned_ddl.date_t        |      1 | day       | event_date_day   | 1
+ partitioned_ddl.timestamp_t   |      1 | month     | event_time_month | 1
+ partitioned_ddl.timestamptz_t |      1 | day       | event_time_day   | 1
+(3 rows)
+
 -- Partitioned tables reserve native file numbers without a physical pg_class locator.
 SELECT count(*) = 3
        AND count(DISTINCT value) = 3
@@ -41,9 +42,11 @@ WHERE relid IN (
     'partitioned_ddl.timestamptz_t'::regclass
 )
   AND name = 'relfilenumber';
-reserved_file_numbers
-t
-\set VERBOSITY terse
+ reserved_file_numbers 
+-----------------------
+ t
+(1 row)
+
 CREATE TABLE partitioned_ddl.unsupported_hash_t (id integer)
 PARTITION BY HASH (id) USING iceberg;
 ERROR:  unsupported managed Iceberg partition definition: PARTITION BY HASH cannot define an Iceberg bucket transform because PostgreSQL's parent-table syntax has no bucket count
@@ -51,7 +54,6 @@ ERROR:  unsupported managed Iceberg partition definition: PARTITION BY HASH cann
 CREATE TABLE partitioned_ddl.unsupported_uuid_t (id uuid)
 PARTITION BY LIST (id) USING iceberg;
 ERROR:  unsupported managed Iceberg partition definition: PostgreSQL type OID 2950 is not supported for an Iceberg identity partition
-\set VERBOSITY default
 DROP TABLE partitioned_ddl.date_t, partitioned_ddl.timestamp_t, partitioned_ddl.timestamptz_t;
 -- Partitioned tables must not advertise PostgreSQL uniqueness without enforcement.
 CREATE TABLE partitioned_ddl.root_index_t (
@@ -68,13 +70,19 @@ ERROR:  0A000
 COPY partitioned_ddl.root_index_t FROM stdin WITH (FORMAT csv);
 SELECT count(*) AS root_indexes
 FROM pg_index WHERE indrelid = 'partitioned_ddl.root_index_t'::regclass;
-root_indexes
-0
+ root_indexes 
+--------------
+            0
+(1 row)
+
 SELECT count(*) AS join_rows
 FROM partitioned_ddl.root_index_t a
 LEFT JOIN partitioned_ddl.root_index_t b ON a.region = b.region;
-join_rows
-5
+ join_rows 
+-----------
+         5
+(1 row)
+
 -- Native partitioned tables retain PostgreSQL's metadata-only index behavior.
 CREATE TABLE partitioned_ddl.native_index_t (
     region text
@@ -84,8 +92,11 @@ ON partitioned_ddl.native_index_t (region);
 SELECT indisunique, indisvalid
 FROM pg_index
 WHERE indexrelid = 'partitioned_ddl.native_root_unique_idx'::regclass;
-indisunique|indisvalid
-t|t
+ indisunique | indisvalid 
+-------------+------------
+ t           | t
+(1 row)
+
 -- Native child partitions must still route INSERT and COPY after provider registration.
 CREATE TABLE partitioned_ddl.native_east
 PARTITION OF partitioned_ddl.native_index_t FOR VALUES IN ('east') USING heap;
@@ -94,16 +105,18 @@ PARTITION OF partitioned_ddl.native_index_t FOR VALUES IN ('west') USING heap;
 INSERT INTO partitioned_ddl.native_index_t VALUES ('east');
 COPY partitioned_ddl.native_index_t FROM stdin WITH (FORMAT csv);
 SELECT region FROM partitioned_ddl.native_index_t ORDER BY region;
-region
-east
-west
+ region 
+--------
+ east
+ west
+(2 rows)
+
 -- One representative topology rejection: Iceberg partitions do not use PG child tables.
-\set VERBOSITY terse
 CREATE TABLE partitioned_ddl.root_index_t_child
 PARTITION OF partitioned_ddl.root_index_t
 FOR VALUES IN ('east') USING heap;
 ERROR:  managed Iceberg partitioned tables do not use PostgreSQL child partitions
-\set VERBOSITY default
+DETAIL:  while running utility hook 'iceberg table options' in pre phase for T_CreateStmt
 SET client_min_messages = warning;
 DROP SCHEMA partitioned_ddl CASCADE;
 RESET client_min_messages;
@@ -135,23 +148,25 @@ BEFORE INSERT ON partitioned_copy.execution_t
 FOR EACH ROW EXECUTE FUNCTION partitioned_copy.before_insert();
 COPY partitioned_copy.execution_t (id, region) FROM stdin
 WITH (FORMAT csv) WHERE id >= 2;
-COPY (
-    SELECT id, region, label FROM partitioned_copy.execution_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
-2,west,base_before
-3,east,base_before
+SELECT id, region, label FROM partitioned_copy.execution_t ORDER BY id;
+ id | region |    label    
+----+--------+-------------
+  2 | west   | base_before
+  3 | east   | base_before
+(2 rows)
+
 -- A current-database-qualified root must still select the root consumer.
-SELECT current_database() AS copy_database \gset
-COPY :"copy_database".partitioned_copy.root_t TO '/dev/null' WITH (FORMAT csv);
+COPY :"DBNAME".partitioned_copy.root_t TO '/dev/null' WITH (FORMAT csv);
 ALTER TABLE partitioned_copy.root_t ENABLE ROW LEVEL SECURITY;
 CREATE POLICY visible_root_rows ON partitioned_copy.root_t
 FOR SELECT TO partitioned_copy_user USING (id = 1);
 SET ROLE partitioned_copy_user;
 -- A representative endpoint error must precede relation ACL checks.
-\set VERBOSITY terse
 COPY partitioned_copy.root_t FROM '/dev/null';
 ERROR:  permission denied to COPY from a file
-\set VERBOSITY default
+DETAIL:  while running utility hook 'lagodb-iceberg.partitioned-table-copy' in consume phase for T_CopyStmt
+Only roles with privileges of the "pg_read_server_files" role may COPY from a file.
+HINT:  Anyone can COPY to stdout or from stdin. psql's \copy command also works for anyone.
 -- Native relation COPY continues to use the parent executor.
 COPY partitioned_copy.native_t FROM stdin WITH (FORMAT csv);
 COPY partitioned_copy.native_t TO STDOUT WITH (FORMAT csv);
@@ -185,8 +200,11 @@ SELECT relkind = 'p' AND NOT relhassubclass AS partitioned_table_catalog_shape,
        pg_get_partkeydef(oid) = 'LIST (region)' AS pg_partition_key_visible
 FROM pg_class
 WHERE oid = 'dml_lifecycle.part_t'::regclass;
-partitioned_table_catalog_shape|pg_partition_key_visible
-t|t
+ partitioned_table_catalog_shape | pg_partition_key_visible 
+---------------------------------+--------------------------
+ t                               | t
+(1 row)
+
 -- COPY FROM is bound directly to the provider-owned partitioned table; PostgreSQL child
 -- partition routing must not run.
 COPY dml_lifecycle.part_t FROM stdin WITH (FORMAT csv);
@@ -198,19 +216,24 @@ WHERE id IN (10, 20) AND EXISTS (SELECT 1);
 -- update; it must not ask PostgreSQL for a destination child partition.
 UPDATE dml_lifecycle.part_t SET region = 'west' WHERE id = 10;
 DELETE FROM dml_lifecycle.part_t WHERE id = 30;
-COPY (
-    SELECT id, region, label,
-           tableoid = 'dml_lifecycle.part_t'::regclass AS partitioned_tableoid
-    FROM dml_lifecycle.part_t
-    ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
-10,west,a_u,t
-20,west,b_u,t
-40,west,d,t
+SELECT id, region, label,
+       tableoid = 'dml_lifecycle.part_t'::regclass AS partitioned_tableoid
+FROM dml_lifecycle.part_t
+ORDER BY id;
+ id | region | label | partitioned_tableoid 
+----+--------+-------+----------------------
+ 10 | west   | a_u   | t
+ 20 | west   | b_u   | t
+ 40 | west   | d     | t
+(3 rows)
+
 SELECT count(*) = 3 AS only_partitioned_table_reads_data
 FROM ONLY dml_lifecycle.part_t;
-only_partitioned_table_reads_data
-t
+ only_partitioned_table_reads_data 
+-----------------------------------
+ t
+(1 row)
+
 MERGE INTO dml_lifecycle.part_t AS target
 USING (VALUES
     (20, 'east', 'merged'),
@@ -224,27 +247,34 @@ WHEN MATCHED THEN
 WHEN NOT MATCHED THEN
     INSERT (id, region, label)
     VALUES (source.id, source.region, source.label);
-COPY (
-    SELECT id, region, label FROM dml_lifecycle.part_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
-10,west,a_u
-20,east,merged
-50,east,new
+SELECT id, region, label FROM dml_lifecycle.part_t ORDER BY id;
+ id | region | label  
+----+--------+--------
+ 10 | west   | a_u
+ 20 | east   | merged
+ 50 | east   | new
+(3 rows)
+
 BEGIN;
 INSERT INTO dml_lifecycle.part_t VALUES (60, 'west', 'tx');
 UPDATE dml_lifecycle.part_t SET label = 'tx-updated' WHERE id = 20;
 DELETE FROM dml_lifecycle.part_t WHERE id = 10;
 SELECT count(*) = 3 AS transaction_delta_visible
 FROM dml_lifecycle.part_t;
-transaction_delta_visible
-t
+ transaction_delta_visible 
+---------------------------
+ t
+(1 row)
+
 ROLLBACK;
-COPY (
-    SELECT id, region, label FROM dml_lifecycle.part_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
-10,west,a_u
-20,east,merged
-50,east,new
+SELECT id, region, label FROM dml_lifecycle.part_t ORDER BY id;
+ id | region | label  
+----+--------+--------
+ 10 | west   | a_u
+ 20 | east   | merged
+ 50 | east   | new
+(3 rows)
+
 -- Partition-aware v3 deletion vectors use a different delete-file path from v2.
 CREATE TABLE dml_lifecycle.part_v3 (
     id integer,
@@ -255,13 +285,13 @@ INSERT INTO dml_lifecycle.part_v3
 VALUES (1, 'east', 'one'), (2, 'west', 'two'), (3, 'east', 'three');
 UPDATE dml_lifecycle.part_v3 SET region = 'west', label = 'moved' WHERE id = 1;
 DELETE FROM dml_lifecycle.part_v3 WHERE id = 2;
-COPY (
-    SELECT id, region, label FROM dml_lifecycle.part_v3 ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
-1,west,moved
-3,east,three
+SELECT id, region, label FROM dml_lifecycle.part_v3 ORDER BY id;
+ id | region | label 
+----+--------+-------
+  1 | west   | moved
+  3 | east   | three
+(2 rows)
+
 SET client_min_messages = warning;
 DROP SCHEMA dml_lifecycle CASCADE;
 RESET client_min_messages;
-\pset format aligned
-\pset footer on

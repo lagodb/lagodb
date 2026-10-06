@@ -4,7 +4,6 @@
 -- verifies that each basic operator family accepts foreign scan providers and
 -- preserves PostgreSQL results.
 
-\set ECHO none
 \setenv PGDATABASE :DBNAME
 \set iceberg_fixture query-offload-writes
 \i include/iceberg_fixture.sql
@@ -14,6 +13,7 @@ FROM lagodb_regress.object_storage_fixture
 
 SET client_min_messages = warning;
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+RESET client_min_messages;
 CREATE EXTENSION lagodb_iceberg;
 CREATE SCHEMA query_offload_foreign;
 CREATE SERVER query_offload_foreign_rest
@@ -21,9 +21,7 @@ TYPE 'rest'
 FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (uri :'regress_rest_uri');
 CREATE USER MAPPING FOR CURRENT_USER SERVER query_offload_foreign_rest;
-RESET client_min_messages;
 
-\set ECHO all
 CREATE FOREIGN TABLE query_offload_foreign.left_source (
     id integer,
     group_key integer,

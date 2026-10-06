@@ -1,27 +1,13 @@
--- customscan_pushdown.sql
--- Predicate classification, pushdown contracts, pruning, fallback, and costing.
+-- Predicate pushdown, residual filtering, pruning, and path costing.
 
--- ============================================================================
--- Section: Basic exact predicate smoke test
--- ============================================================================
--- EXPLAIN and results for simple `WHERE a = 1` CustomScan pushdown.
+-- Exact equality: plans and results.
 
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 
--- This suite validates relation-level CustomScan behavior independently from
--- upper query offload.
+-- Disable upper query offload to isolate relation-level CustomScan behavior.
 SET lagodb.query_offload_mode = 'off';
 
--- ============================================================================
--- Setup: an Iceberg table whose schema (`a integer, b text`) matches the
--- Each INSERT opens a fresh DML session and finalizes one
--- Parquet data file. We populate three rows so:
---   - `WHERE a = 1` matches exactly one row, exercising the
---     "single-row hit" shape that.
---   - The other rows give us non-trivial result-set parity to verify
---     against the SeqScan baseline.
--- ============================================================================
 CREATE TABLE customscan_where_eq_t (
     a integer,
     b text
@@ -33,32 +19,16 @@ INSERT INTO customscan_where_eq_t VALUES (3, 'three');
 
 SELECT COUNT(*) AS total_rows FROM customscan_where_eq_t;
 
--- ============================================================================
--- Test 1: EXPLAIN parity
--- ============================================================================
 
--- CustomScan path. Expected EXPLAIN shape (default TEXT):
---   Custom Scan (lagodb-iceberg) on customscan_where_eq_t
---     Pushed Filter: (a = 1)
--- (no old-style diagnostic title, no default-mode provider-identity
--- line, no count lines; `a = 1` is Exact and stripped from
--- `plan.qual`, so there is no local residual `Filter:` line either)
+-- An exact equality is pushed without a local residual.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT a, b FROM customscan_where_eq_t WHERE a = 1;
 
--- SeqScan baseline. Expected EXPLAIN shape:
---   Seq Scan on customscan_where_eq_t
---     Filter: (a = 1)
 SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT a, b FROM customscan_where_eq_t WHERE a = 1;
 
--- ============================================================================
--- Test 2: Result-set parity
--- ============================================================================
--- Both modes must return the exact same row set. `ORDER BY` makes the
--- output deterministic so pg_regress diffs are stable.
 
 SET lagodb.customscan_mode = 'force';
 SELECT a, b FROM customscan_where_eq_t WHERE a = 1 ORDER BY a, b;
@@ -66,40 +36,19 @@ SELECT a, b FROM customscan_where_eq_t WHERE a = 1 ORDER BY a, b;
 SET lagodb.customscan_mode = 'off';
 SELECT a, b FROM customscan_where_eq_t WHERE a = 1 ORDER BY a, b;
 
--- ============================================================================
--- Test 3: EXPLAIN VERBOSE carries the provider identity and the
--- classified labeled predicate lines.
--- Under `force` and VERBOSE, the output carries `Scan Purpose: Read` and a `Provider:` line
--- plus the deparsed predicate text on labeled lines `Pushed Filter
--- Exact:` and `Recheck:` (both non-empty for this plan). The empty
--- classes (`Pushed Filter Conservative:`, and any local residual) are
--- omitted — only non-empty classes print labeled predicate lines
---. No numeric count lines appear.
--- ============================================================================
+-- VERBOSE exposes the provider, exact filter, and recheck expression.
 
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT a, b FROM customscan_where_eq_t WHERE a = 1;
 
--- ============================================================================
--- Cleanup
--- ============================================================================
 RESET lagodb.customscan_mode;
 DROP TABLE customscan_where_eq_t;
--- Section: Exact predicate contract
--- Exact-pushdown results and EXPLAIN match SeqScan (force vs off) for integer ops.
+-- Exact integer predicates.
 
 
--- ============================================================================
--- Setup: create two parallel Iceberg tables, one with `int4` `id` and one
--- with `int8` `id`, each populated across multiple data files so file-level
--- pruning has something to do. Each INSERT statement opens a fresh DML
--- session and produces one Parquet file with bounded `lower_bounds[id]` /
--- `upper_bounds[id]` statistics.
--- The second file in each table includes NULL ids. Exact comparisons omit the
--- original qual from `plan.qual`, so the Iceberg predicate itself must match
--- PostgreSQL three-valued WHERE semantics for these NULL-bearing files.
--- ============================================================================
+-- Use three files with disjoint integer ranges. The second includes NULL ids to check
+-- strict comparison semantics.
 
 CREATE TABLE customscan_exact_pushdown_int4 (
     id integer,
@@ -153,11 +102,8 @@ SELECT COUNT(*) AS int8_total_rows FROM customscan_exact_pushdown_int8;
 SELECT COUNT(*) AS int8_null_rows
 FROM customscan_exact_pushdown_int8 WHERE id IS NULL;
 
--- ============================================================================
--- int4 Exact-promoted operators (opnos 96, 518, 97, 523, 521, 525)
--- ============================================================================
+-- Exact int4 comparisons.
 
--- int4eq (=), opno 96
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -182,8 +128,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id = 25;
 
--- int4ne (<>), opno 518. This also checks NULL semantics: the three
--- NULL rows must not satisfy `NULL <> 25`.
+-- NULL ids must not satisfy the inequality.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -208,7 +153,6 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id <> 25;
 
--- int4lt (<), opno 97
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -233,7 +177,6 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id < 120;
 
--- int4le (<=), opno 523
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -258,7 +201,6 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id <= 120;
 
--- int4gt (>), opno 521
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -283,7 +225,6 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id > 120;
 
--- int4ge (>=), opno 525
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -308,12 +249,9 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id >= 120;
 
--- ============================================================================
--- int8 Exact-promoted operators (opnos 410, 411, 412, 414, 413, 415)
--- ============================================================================
+-- Exact int8 comparisons.
 
--- int8eq (=), opno 410. The literal lives in the >2^32 file to exercise
--- the 64-bit comparison path specifically.
+-- Use a literal above 2^32 to exercise the 64-bit comparison path.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -338,7 +276,6 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int8
 WHERE id = 10000000025;
 
--- int8ne (<>), opno 411
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -363,7 +300,6 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int8
 WHERE id <> 25::bigint;
 
--- int8lt (<), opno 412
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -388,7 +324,6 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int8
 WHERE id < 120::bigint;
 
--- int8le (<=), opno 414
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -413,7 +348,6 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int8
 WHERE id <= 120::bigint;
 
--- int8gt (>), opno 413
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -438,7 +372,6 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int8
 WHERE id > 9999999999::bigint;
 
--- int8ge (>=), opno 415
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -463,9 +396,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int8
 WHERE id >= 10000000000::bigint;
 
--- ============================================================================
 -- NULL semantics and AND composition
--- ============================================================================
 
 -- Equality on the NULL-bearing int4 file.
 SET lagodb.customscan_mode = 'force';
@@ -492,8 +423,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id = 119;
 
--- Inequality on the NULL-bearing int4 file. NULL ids must not satisfy
--- `NULL <> 119` on either path.
+-- NULL ids must not satisfy the inequality.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -518,8 +448,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id <> 119;
 
--- AND of two Exact range clauses. Both clauses should be pushed and
--- recorded for recheck; neither should remain residual.
+-- Both exact range clauses are pushed without a residual.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -544,12 +473,9 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int4
 WHERE id >= 100 AND id <= 150;
 
--- ============================================================================
 -- Type resolution through PG's resolved operator identity
--- ============================================================================
 
--- Explicit int8 literal against an int8 column. This is the same
--- allowlisted operator reached without relying on unknown-literal coercion.
+-- An explicitly typed int8 literal resolves to the same pushdown operator.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -574,13 +500,8 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_int8
 WHERE id = 25::bigint;
 
--- ============================================================================
--- Exact text equality under resolved deterministic collations.
--- PostgreSQL text equality is byte equality for deterministic collations, so
--- the provider can remove the executor residual after resolving the catalog
--- collation semantics during planning.  The table itself uses the database
--- default collation; no storage schema in this test hard-codes C/POSIX.
--- ============================================================================
+-- Text equality is exact under deterministic collations. Keep the column on the
+-- database default collation.
 
 CREATE TABLE customscan_exact_pushdown_text (
     id integer,
@@ -594,7 +515,7 @@ INSERT INTO customscan_exact_pushdown_text VALUES
     (4, 'Cherry'),
     (5, 'cherry');
 
--- Equality under the column's default deterministic collation is Exact.
+-- Equality under the column default collation.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -619,8 +540,7 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_text
 WHERE label = 'banana';
 
--- An explicit deterministic predicate collation is resolved by the same
--- equality policy.  It does not alter the table column's default collation.
+-- An explicit deterministic predicate collation uses the same equality policy.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) AS row_count,
@@ -645,24 +565,13 @@ SELECT COUNT(*) AS row_count,
 FROM customscan_exact_pushdown_text
 WHERE label COLLATE "POSIX" = 'banana';
 
--- ============================================================================
--- Cleanup
--- ============================================================================
 RESET lagodb.customscan_mode;
 DROP TABLE customscan_exact_pushdown_int4;
 DROP TABLE customscan_exact_pushdown_int8;
 DROP TABLE customscan_exact_pushdown_text;
--- Section: Partial predicate pushdown
--- Partial pushdown: pushed + residual filters and results.
+-- Partial pushdown and residual composition.
 
 
--- ============================================================================
--- Setup: an Iceberg table whose schema (`a integer, b text`) lets us
--- exercise both an Exact pushable predicate (`a = 1`) and a
--- structurally-unsupported predicate (`length(b) > 0`) over the same
--- row population. Three rows give us non-trivial result-set parity
--- against the SeqScan baseline.
--- ============================================================================
 CREATE TABLE customscan_partial_pushdown_t (
     a integer,
     b text
@@ -674,34 +583,18 @@ INSERT INTO customscan_partial_pushdown_t VALUES (3, '');
 
 SELECT COUNT(*) AS total_rows FROM customscan_partial_pushdown_t;
 
--- ============================================================================
--- Test 1: AND-partial pushdown
--- ============================================================================
--- `a = 1 AND length(b) > 0`:
---   - `a = 1` is planned Exact and pushed; its contract derives EPQ recheck.
---   - `length(b) > 0` stays in residual.
---   - Result set must equal the SeqScan baseline (single row: (1, 'one')).
+-- Push a = 1 while PostgreSQL evaluates length(b) > 0 as a residual.
 
--- CustomScan path (default TEXT): the CustomScan node carries a
--- single `Pushed Filter: (a = 1)` line for the pushed (remote)
--- predicate, while the local residual `length(b) > 0` is shown only
--- by PG's standard `Filter:` line above it:
---   Filter: (length(b) > 0)
---   Pushed Filter: (a = 1)
--- (no old-style diagnostic title, no default-mode provider-identity
--- line, no counts)
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT a, b FROM customscan_partial_pushdown_t
 WHERE a = 1 AND length(b) > 0;
 
--- SeqScan baseline: filter is the original AND clause verbatim.
 SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT a, b FROM customscan_partial_pushdown_t
 WHERE a = 1 AND length(b) > 0;
 
--- Result-set parity.
 SET lagodb.customscan_mode = 'force';
 SELECT a, b FROM customscan_partial_pushdown_t
 WHERE a = 1 AND length(b) > 0
@@ -712,45 +605,23 @@ SELECT a, b FROM customscan_partial_pushdown_t
 WHERE a = 1 AND length(b) > 0
 ORDER BY a, b;
 
--- VERBOSE: under VERBOSE the deparsed predicate text appears on
--- labeled lines for each non-empty class.
--- `Pushed Filter Exact:` and `Recheck:` both print the deparsed
--- `(a = 1)`: the plan stores one pushed-expression provenance entry and
--- derives the Exact recheck from its persisted contract. The
--- `Pushed Filter Conservative:` class is
--- empty and its label line is omitted because only non-empty classes print
--- labeled predicate lines; no numeric count
--- lines appear.
+-- VERBOSE separates the exact filter and recheck from the local residual.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT a, b FROM customscan_partial_pushdown_t
 WHERE a = 1 AND length(b) > 0;
 
--- ============================================================================
--- Test 2: OR-no-pushdown
--- ============================================================================
--- `a = 1 OR length(b) > 0`:
---   - The Unsupported child kills both the OR-Exact and the
---     OR-ConservativePruning-widening branches.
---   - The whole OR is Unsupported; `split.pushed` is empty;
---     the CustomScan retains the complete OR clause as a local Filter.
---   - Result set must equal the SeqScan baseline run with
---     `customscan_mode = 'off'`.
+-- An OR with an unsupported child remains entirely residual.
 
--- Under `force`, the relation path is selected without inventing a pushed
--- filter; PostgreSQL evaluates the complete residual OR.
-SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT a, b FROM customscan_partial_pushdown_t
 WHERE a = 1 OR length(b) > 0;
 
--- SeqScan baseline: same filter shape.
 SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT a, b FROM customscan_partial_pushdown_t
 WHERE a = 1 OR length(b) > 0;
 
--- Result-set parity.
 SET lagodb.customscan_mode = 'force';
 SELECT a, b FROM customscan_partial_pushdown_t
 WHERE a = 1 OR length(b) > 0
@@ -761,15 +632,8 @@ SELECT a, b FROM customscan_partial_pushdown_t
 WHERE a = 1 OR length(b) > 0
 ORDER BY a, b;
 
--- ============================================================================
--- Test 3: row-valued NullTest residual survives OR widening
--- ============================================================================
--- PostgreSQL's row-valued IS NULL and IS NOT NULL tests are not complements.
--- The negotiator may widen the OR to `(a = 1) OR (a = 2)` for conservative
--- pruning, but PostgreSQL must evaluate the original `NOT (t IS NULL)` tree as
--- the local residual. The additional `(1, NULL)` row distinguishes the correct
--- three-row result from the incorrect two-row result produced by rewriting the
--- row test to `t IS NOT NULL`.
+-- Row-valued IS NULL and IS NOT NULL are not complements. Keep NOT (t IS NULL) as the
+-- original residual when widening the OR; row (1, NULL) distinguishes the results.
 INSERT INTO customscan_partial_pushdown_t VALUES (1, NULL);
 
 SET lagodb.customscan_mode = 'force';
@@ -778,7 +642,6 @@ SELECT a, b
 FROM customscan_partial_pushdown_t AS t
 WHERE (a = 1 AND NOT (t IS NULL)) OR a = 2;
 
-SET lagodb.customscan_mode = 'force';
 SELECT count(*) AS matched_rows
 FROM customscan_partial_pushdown_t AS t
 WHERE (a = 1 AND NOT (t IS NULL)) OR a = 2;
@@ -788,49 +651,13 @@ SELECT count(*) AS matched_rows
 FROM customscan_partial_pushdown_t AS t
 WHERE (a = 1 AND NOT (t IS NULL)) OR a = 2;
 
--- ============================================================================
--- Cleanup
--- ============================================================================
 RESET lagodb.customscan_mode;
 DROP TABLE customscan_partial_pushdown_t;
--- Section: Automatic path cost selection
--- Cost-based path selection under the default lagodb.customscan_mode = 'auto'.
+-- Cost-based path selection in auto mode.
 
--- ============================================================================
--- Auto-mode cost-based selection (the PRODUCTION default).
--- Every other block in this suite pins 'force' or 'off' so the plan SHAPE is
--- deterministic regardless of cost. This block instead exercises the default
--- mode ('auto'), where the planner chooses purely on cost — the path the real
--- workload takes:
---   * A pushable predicate makes `create_path` emit a CustomPath. Its cost
---     model (lagodb-core `compute_costs`) does NOT reduce output rows
---     (`path.rows` stays `parent->rows`); pruning savings land only in the
---     SCANNED-volume terms: `scanned_pages = baserel.pages * fraction` and
---     `scanned_tuples = baserel.tuples * fraction`, which drive the disk
---     (`seq_page_cost * scanned_pages`) and per-tuple-CPU costs. `fraction` is
---     `clauselist_selectivity` of ONLY the costed-pruning pushed clauses
---     (`split.costed_pruning_exprs()`), clamped from below by
---     `lagodb_iceberg.scan_min_fraction` (0.02). `id = 1500` is
---     int4eq → ExactRowFilter → CostedPruning, so it counts; an unANALYZEd
---     table gives it PG's DEFAULT_EQ_SEL (0.005), which the floor lifts to
---     0.02. Either way fraction << 1, so the scaled disk+CPU cost sits far
---     below the full SeqScan and 'auto' picks the Custom Scan WITHOUT any force
---     bias. (The floor is a guard against a bogus near-zero selectivity, not
---     the reason CustomScan wins.)
---   * With NO pushable predicate, `create_path` returns `None` — no CustomPath
---     is emitted at all — so 'auto' can only fall back to the Seq Scan
---     baseline; the cost model never even gets a CustomScan to weigh.
---   * A date equality is ConservativePruning + UncostedBestEffort. It still
---     emits a CustomPath and is applied for runtime pruning, but it is excluded
---     from `costed_pruning_exprs()`, leaving `fraction = 1.0`. Consequently its
---     CustomPath does not beat the full SeqScan in 'auto'; the matching 'force'
---     plan below proves that the CustomPath existed and lost solely on cost.
--- The relation is sized across two data files so the Iceberg snapshot summary
--- (`total-records` / `total-files-size`, surfaced via `relation_estimate_size`)
--- gives the planner a real, non-zero (pages, tuples) baseline. EXPLAIN
--- (COSTS OFF) asserts plan SHAPE only, so the exact cost numbers (which depend
--- on parquet file size) never reach the .out and the assertion stays stable.
--- ============================================================================
+-- Compare costed integer pushdown, uncosted date pruning, and an unfiltered scan. Two
+-- data files provide nonzero size estimates; COSTS OFF keeps file-size-dependent costs
+-- out of expected.
 CREATE TABLE customscan_auto_cost_t (
     id integer,
     payload text,
@@ -849,95 +676,50 @@ FROM generate_series(10000, 11999) AS g;
 
 SELECT COUNT(*) AS auto_cost_rows FROM customscan_auto_cost_t;
 
--- The default mode is already 'auto'; set it explicitly so the block is
--- self-documenting and independent of any prior section's GUC state.
 SET lagodb.customscan_mode = 'auto';
 
--- Pushable equality under 'auto': the CustomPath's scan cost (disk +
--- per-tuple CPU, scaled down by the costed-pruning selectivity) sits far below
--- the full SeqScan, so the planner picks the Custom Scan on cost alone (no
--- force bias). Default TEXT shows the `Pushed Filter: (id = 1500)` line; the
--- Exact clause is stripped from `plan.qual`, so there is no residual `Filter:`.
+-- Costed integer equality selects CustomScan in auto mode.
 EXPLAIN (COSTS OFF)
 SELECT id, payload FROM customscan_auto_cost_t WHERE id = 1500;
 
--- UncostedBestEffort under 'auto': the date equality emits a CustomPath,
--- but contributes no pruning selectivity to its cost. The Seq Scan therefore
--- remains selected.
+-- Uncosted date pruning leaves SeqScan selected in auto mode.
 EXPLAIN (COSTS OFF)
 SELECT id, payload FROM customscan_auto_cost_t
 WHERE event_date = DATE '2024-01-01';
 
--- The same UncostedBestEffort predicate under 'force' selects the
--- CustomPath and exposes both its Conservative pushed filter and mandatory
--- residual. Together these plans distinguish "uncosted" from "unsupported".
+-- Force selects the date CustomPath, distinguishing uncosted pruning from an
+-- unsupported predicate.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, payload FROM customscan_auto_cost_t
 WHERE event_date = DATE '2024-01-01';
 
--- No predicate under 'auto': `create_path` sees an empty pushed set and
--- gives the CustomPath no pruning discount, so the Seq Scan remains selected
--- on cost.
+-- An unfiltered scan remains a SeqScan in auto mode.
 SET lagodb.customscan_mode = 'auto';
 EXPLAIN (COSTS OFF)
 SELECT id, payload FROM customscan_auto_cost_t;
 
--- The same predicate-free query under 'force' selects the ordinary relation
--- CustomScan. Keeping this path available is required for native-parallel
--- partial scans even when there is no storage predicate.
+-- Force keeps an unfiltered relation CustomScan available.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, payload FROM customscan_auto_cost_t;
 
--- Result-set parity: the cost-selected Custom Scan ('auto') returns the
--- same row as the SeqScan baseline ('off').
 SET lagodb.customscan_mode = 'auto';
 SELECT id, payload FROM customscan_auto_cost_t WHERE id = 1500 ORDER BY id, payload;
 
 SET lagodb.customscan_mode = 'off';
 SELECT id, payload FROM customscan_auto_cost_t WHERE id = 1500 ORDER BY id, payload;
 
--- ============================================================================
--- Cleanup
--- ============================================================================
 RESET lagodb.customscan_mode;
 DROP TABLE customscan_auto_cost_t;
 
--- ============================================================================
--- Section: Conservative pruning
--- ============================================================================
--- ConservativePruning: file-level pushed filter + residual plan.qual parity vs SeqScan.
+-- Conservative pruning retains the PostgreSQL residual.
 
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 
--- ============================================================================
--- Setup: four Iceberg data files with disjoint `val` ranges (date column).
--- Each INSERT finalizes one Parquet file with min/max statistics for
--- `InclusiveMetricsEvaluator` pruning.
---
--- `val` is a `date` column: dates are mapped from disjoint integer ranges via
--- `DATE '2001-01-01' + g`, so the four files keep disjoint, gap-separated
--- min/max bounds (the same shape the original numeric fixture used) while
--- exercising a still-enabled pushdown type.
---
--- The capability oracle (`predicate_pushdown_policy.rs`) tiers date comparisons
--- (`date_eq`, `date_lt`, …) as `ConservativePruning`: the clause is pushed for
--- pruning AND copied into `plan.qual` (residual). CustomScan therefore shows
--- BOTH `Pushed Filter:` and `Filter:` with the same predicate text — unlike
--- `ExactRowFilter`, which is stripped from `plan.qual` and appears only on
--- `Pushed Filter:`.
---
--- Note: `numeric` comparison is intentionally NOT used here. With
--- `NUMERIC_COMPARISON_PUSHDOWN_ENABLED = false` (exact row filtering needs the
--- bound Iceberg decimal precision/scale; a scale-naive row filter can produce
--- false negatives the residual qual cannot recover), numeric comparisons are
--- `Unsupported` and would not be
--- pushed. `date` is a collation-free, fixed-offset `int32` comparison that maps
--- exactly between PostgreSQL and Iceberg, so its row filter has no false
--- negatives.
--- ============================================================================
+-- Use four files with disjoint date ranges. Conservative filters prune files while
+-- PostgreSQL rechecks returned rows.
 CREATE TABLE customscan_conservative_pruning_t (
     val date,
     payload text
@@ -965,11 +747,7 @@ FROM generate_series(800, 900) AS g;
 
 SELECT COUNT(*) AS total_rows FROM customscan_conservative_pruning_t;
 
--- ============================================================================
--- Test 1: equality on a value in exactly one file (file 2).
--- Pruning narrows to file 2; residual `Filter:` re-evaluates the equality on
--- rows returned from the AM (ConservativePruning correctness backstop).
--- ============================================================================
+-- Equality selects a value in the second file.
 
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -995,10 +773,7 @@ FROM customscan_conservative_pruning_t
 WHERE val = DATE '2001-01-01' + 250
 ORDER BY val, payload;
 
--- ============================================================================
--- Test 2: equality in a gap between files (no row matches).
--- Pruning may exclude every file; residual qual still yields zero rows.
--- ============================================================================
+-- Equality in a gap between files returns no rows.
 
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -1024,11 +799,7 @@ FROM customscan_conservative_pruning_t
 WHERE val = DATE '2001-01-01' + 150
 ORDER BY val, payload;
 
--- ============================================================================
--- Test 3: range spanning file 1 and part of file 2 (`val < base + 250`).
--- Pruning drops files 3 and 4; residual `Filter:` applies the bound on
--- surviving rows (100 from file 1 + 50 from file 2 = 150 rows).
--- ============================================================================
+-- The range covers file 1 and part of file 2: 150 rows.
 
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -1050,11 +821,7 @@ SELECT COUNT(*) AS baseline_count
 FROM customscan_conservative_pruning_t
 WHERE val < DATE '2001-01-01' + 250;
 
--- ============================================================================
--- Test 4: range straddling file boundaries (`val >= base + 50 AND val <= base + 550`).
--- Both conjuncts are ConservativePruning; each appears on pushed and residual.
--- Expected count: 51 + 101 + 51 = 203 rows.
--- ============================================================================
+-- The range crosses three files: 51 + 101 + 51 = 203 rows.
 
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -1076,29 +843,13 @@ SELECT COUNT(*) AS baseline_count
 FROM customscan_conservative_pruning_t
 WHERE val >= DATE '2001-01-01' + 50 AND val <= DATE '2001-01-01' + 550;
 
--- ============================================================================
--- Cleanup
--- ============================================================================
 RESET lagodb.customscan_mode;
 DROP TABLE customscan_conservative_pruning_t;
--- Section: EXPLAIN pushdown contract split
--- EXPLAIN splits ExactRowFilter vs ConservativePruning pushed filters (VERBOSE).
+-- EXPLAIN separates exact filters from conservative pruning.
 
 
--- ============================================================================
--- Setup: an Iceberg table with an integer column (ExactRowFilter-pushable), a
--- date column (ConservativePruning-pushable), and a default-collation text
--- column (ordered comparison Unsupported). Two INSERT statements give two data
--- files so file-level pruning is non-trivial; the assertions here are on plan
--- shape and result-set parity.
---
--- The Conservative half uses `date` rather than `numeric`: with
--- `NUMERIC_COMPARISON_PUSHDOWN_ENABLED = false` numeric comparisons are
--- `Unsupported` (exact row filtering needs bound decimal precision/scale).
--- `date` is a collation-free, fixed-offset `int32` comparison that
--- maps exactly between PostgreSQL and Iceberg, so it remains a valid
--- ConservativePruning clause for exercising the Exact-vs-Conservative split.
--- ============================================================================
+-- Integer comparisons are exact, date comparisons conservative, and ordered default-
+-- collation text comparisons residual.
 CREATE TABLE customscan_explain_split_t (
     id integer,
     d date,
@@ -1118,43 +869,19 @@ INSERT INTO customscan_explain_split_t VALUES
 
 SELECT COUNT(*) AS total_rows FROM customscan_explain_split_t;
 
--- ============================================================================
--- Test 1: a query mixing an integer `ExactRowFilter` clause and a date
--- `ConservativePruning` clause shows the expected ExactRowFilter vs
--- ConservativePruning split.
--- `WHERE id = 2 AND d < DATE '2024-01-01'`:
---   - `id = 2` is `int4 =` (opno 96), which the oracle marks `ExactRowFilter`. The
---     framework strips it from `plan.qual`, so it appears ONLY on the
---     `Pushed Filter:` line — never as a residual `Filter:` clause.
---   - `d < DATE '2024-01-01'` is `date_lt` (opno 1095), which the oracle marks
---     `ConservativePruning`. It is pushed for pruning (so it joins the
---     `Pushed Filter:` line) AND kept in `plan.qual` for PG to re-evaluate (so
---     it ALSO shows on the residual `Filter:` line).
--- Expected EXPLAIN under `force` (default TEXT):
---   Custom Scan (lagodb-iceberg) on customscan_explain_split_t
---     Filter: (d < '2024-01-01'::date)                          <- ConservativePruning only (residual)
---     Pushed Filter: (d < '2024-01-01'::date) AND (id = 2)      <- ConservativePruning + ExactRowFilter (pushed)
--- The integer ExactRowFilter clause `id = 2` is absent from `Filter:` (stripped
--- from `plan.qual`); the date ConservativePruning clause `d < '2024-01-01'` is
--- present on BOTH lines. The ` AND `-join order on the `Pushed Filter:` line
--- follows `custom_exprs` order, which is incidental — what this test pins is
--- the ExactRowFilter vs ConservativePruning SPLIT (which clause is residual vs
--- pushed), not the conjunct order.
--- ============================================================================
+-- Only the date clause remains in the residual; both date and integer clauses appear in
+-- the pushed filter.
 
--- CustomScan path: the ExactRowFilter vs ConservativePruning split is visible on the scan node.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, d FROM customscan_explain_split_t
 WHERE id = 2 AND d < DATE '2024-01-01';
 
--- SeqScan baseline: the original AND clause is the verbatim Filter.
 SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT id, d FROM customscan_explain_split_t
 WHERE id = 2 AND d < DATE '2024-01-01';
 
--- Result-set parity.
 SET lagodb.customscan_mode = 'force';
 SELECT id, d FROM customscan_explain_split_t
 WHERE id = 2 AND d < DATE '2024-01-01'
@@ -1165,31 +892,19 @@ SELECT id, d FROM customscan_explain_split_t
 WHERE id = 2 AND d < DATE '2024-01-01'
 ORDER BY id;
 
--- ============================================================================
--- Test 2: a query whose ONLY predicate is an `Unsupported`-collation `text`
--- clause shows NO discounted CustomPath.
--- `WHERE descr < 'mango'` is ordered `text` comparison (`text_lt`, opno 664)
--- under the DEFAULT database collation. The provider planner treats the default
--- collation as unsafe for ordered text (only the explicit C/POSIX OID is
--- safe), so the clause is `Unsupported`: the path summary has no planned
--- filter or pruning discount. Under `force`, the ordinary relation CustomScan
--- is still selected for native-parallel eligibility, while the `<` clause
--- remains a verbatim PostgreSQL Filter and no `Pushed Filter:` line appears.
--- ============================================================================
+-- Ordered text comparison under the default collation stays residual even on a forced
+-- CustomScan.
 
--- Under `force`: CustomScan with a PostgreSQL residual and no pushed filter.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, descr FROM customscan_explain_split_t
 WHERE descr < 'mango';
 
--- SeqScan baseline: same filter shape.
 SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT id, descr FROM customscan_explain_split_t
 WHERE descr < 'mango';
 
--- Result-set parity (residual qual decides matches).
 SET lagodb.customscan_mode = 'force';
 SELECT id, descr FROM customscan_explain_split_t
 WHERE descr < 'mango'
@@ -1200,37 +915,15 @@ SELECT id, descr FROM customscan_explain_split_t
 WHERE descr < 'mango'
 ORDER BY id;
 
--- ============================================================================
--- Cleanup
--- ============================================================================
 RESET lagodb.customscan_mode;
 DROP TABLE customscan_explain_split_t;
--- Section: Type and residual equivalence
--- Residual result parity across pushdown operand types.
+-- Result parity across operand types.
 
 
--- Pin the session timezone so `timestamptz` literals and stored values are
--- compared against a fixed absolute instant (the writer pins the Arrow column
--- timezone to '+00:00').
+-- Fix the timezone for timestamptz comparisons.
 SET timezone = 'UTC';
 
--- ============================================================================
--- Part 1: numeric — comparison pushdown is DISABLED (residual-only), plus the
--- NaN / out-of-range literals must still evaluate without error
--- ============================================================================
--- `NUMERIC_COMPARISON_PUSHDOWN_ENABLED = false`: the only filter API the
--- provider has applies the predicate as a row-level Arrow filter. Numeric
--- comparison can only be exact with bound decimal precision/scale and
--- operator-aware literal conversion; otherwise scale handling can produce false
--- negatives the residual qual cannot recover. The provider planner therefore
--- marks numeric comparison `Unsupported`, so `val < 100.5` is NOT pushed.
--- Because it is the only
--- predicate, the path summary has no planned filter, `create_path`
--- returns `None`, and no CustomPath is emitted — under `force` the plan falls
--- back to SeqScan, identical to `off`. The residual qual decides every row, so
--- force/off results stay in parity. This Part is a regression guard that
--- numeric stays disabled; date/timestamp (Part 2) carry the live
--- ConservativePruning coverage.
+-- Numeric comparisons stay residual, including NaN and out-of-range literals.
 CREATE TABLE rq_numeric (
     id integer,
     val numeric(10, 2)
@@ -1243,9 +936,7 @@ INSERT INTO rq_numeric VALUES (4, 100.50), (5, 200.00), (6, 999.99);
 
 SELECT COUNT(*) AS rq_numeric_rows FROM rq_numeric;
 
--- 1.1 numeric ordered comparison (`< 100.5`): Unsupported ⇒ no pushdown ⇒
--- SeqScan under `force` (no `Pushed Filter:`, no `Custom Scan` node), and the
--- residual qual decides. force/off EXPLAIN and results match.
+-- Numeric ordered comparison remains residual.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, val FROM rq_numeric WHERE val < 100.5 ORDER BY id;
@@ -1260,37 +951,26 @@ SELECT id, val FROM rq_numeric WHERE val < 100.5 ORDER BY id;
 SET lagodb.customscan_mode = 'off';
 SELECT id, val FROM rq_numeric WHERE val < 100.5 ORDER BY id;
 
--- 1.2 numeric 'NaN' literal: numeric comparison is not pushed at all, so the
--- residual qual decides — WITHOUT error. PG sorts NaN greater than every
--- number, so `val < 'NaN'` matches every non-NULL row. Both modes must agree
--- and neither may raise.
+-- NaN sorts above finite numeric values, so every stored value matches without error.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, val FROM rq_numeric WHERE val < 'NaN'::numeric ORDER BY id;
 
-SET lagodb.customscan_mode = 'force';
 SELECT id, val FROM rq_numeric WHERE val < 'NaN'::numeric ORDER BY id;
 
 SET lagodb.customscan_mode = 'off';
 SELECT id, val FROM rq_numeric WHERE val < 'NaN'::numeric ORDER BY id;
 
--- 1.3 numeric out-of-range literal (wider than the Iceberg decimal /
--- Decimal128/D128 38-digit range): also never pushed; the residual qual decides without
--- error. `val < 1e40` is true for every stored value.
+-- An out-of-range numeric literal must be evaluated by PostgreSQL without a storage
+-- conversion error.
 SET lagodb.customscan_mode = 'force';
 SELECT id, val FROM rq_numeric WHERE val < 1e40::numeric ORDER BY id;
 
 SET lagodb.customscan_mode = 'off';
 SELECT id, val FROM rq_numeric WHERE val < 1e40::numeric ORDER BY id;
 
--- ============================================================================
--- Part 2: date / timestamp / timestamptz — pushable ConservativePruning
--- ============================================================================
--- date_ge (1098) / timestamp_ge (2065) / timestamptz_ge (1325) are all marked
--- `ConservativePruning` by the provider planner and bound using the shared
--- `PG_EPOCH_DAYS_DIFF` / `PG_EPOCH_USECS_DIFF` constants, so pushed bounds
--- align with the storage write side. File 1 (2020/2021) is pruned by the
--- `>= 2024-01-01` predicates; file 2 survives.
+-- Temporal pruning must agree with PostgreSQL epoch conversion across the 2024
+-- boundary.
 CREATE TABLE rq_temporal (
     id integer,
     d date,
@@ -1309,45 +989,37 @@ INSERT INTO rq_temporal VALUES
 
 SELECT COUNT(*) AS rq_temporal_rows FROM rq_temporal;
 
--- 2.1 date comparison (`>= DATE '2024-01-01'`).
+-- Date comparison.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, d FROM rq_temporal WHERE d >= DATE '2024-01-01' ORDER BY id;
 
-SET lagodb.customscan_mode = 'force';
 SELECT id, d FROM rq_temporal WHERE d >= DATE '2024-01-01' ORDER BY id;
 
 SET lagodb.customscan_mode = 'off';
 SELECT id, d FROM rq_temporal WHERE d >= DATE '2024-01-01' ORDER BY id;
 
--- 2.2 timestamp comparison (`>= TIMESTAMP '2024-01-01 00:00:00'`).
+-- Timestamp comparison.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, ts FROM rq_temporal WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' ORDER BY id;
 
-SET lagodb.customscan_mode = 'force';
 SELECT id, ts FROM rq_temporal WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' ORDER BY id;
 
 SET lagodb.customscan_mode = 'off';
 SELECT id, ts FROM rq_temporal WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' ORDER BY id;
 
--- 2.3 timestamptz comparison (`>= TIMESTAMPTZ '2024-01-01 00:00:00+00'`).
+-- Timestamptz comparison.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
 
-SET lagodb.customscan_mode = 'force';
 SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
 
 SET lagodb.customscan_mode = 'off';
 SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
 
--- ============================================================================
--- Part 3: default-collation text comparison capabilities
--- ============================================================================
--- Both text columns use the database's default collation. These cases protect
--- the predicate policy for equality, ordering, and inequality without making
--- the regression database depend on an explicit collation.
+-- Default-collation text equality, ordering, and inequality.
 CREATE TABLE rq_text (
     id integer,
     label text,
@@ -1361,67 +1033,54 @@ INSERT INTO rq_text VALUES (4, 'delta', 'date'), (5, 'echo', 'elderberry'), (6, 
 
 SELECT COUNT(*) AS rq_text_rows FROM rq_text;
 
--- 3.1 Text equality under the database's default collation.
+-- Text equality under the database default collation.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
 
-SET lagodb.customscan_mode = 'force';
 SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
 
 SET lagodb.customscan_mode = 'off';
 SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
 
--- 3.2 Ordered text comparison under the database's default collation remains
--- a PostgreSQL residual on the forced relation CustomScan.
+-- Ordered text comparison under the database default collation remains residual.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, label FROM rq_text WHERE label < 'delta' ORDER BY id;
 
-SET lagodb.customscan_mode = 'force';
 SELECT id, label FROM rq_text WHERE label < 'delta' ORDER BY id;
 
 SET lagodb.customscan_mode = 'off';
 SELECT id, label FROM rq_text WHERE label < 'delta' ORDER BY id;
 
--- 3.3 Inequality has the same byte-equality semantics as equality under a
--- deterministic default collation and is therefore Exact-pushable.
+-- Text inequality is exact under a deterministic default collation.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
 
-SET lagodb.customscan_mode = 'force';
 SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
 
 SET lagodb.customscan_mode = 'off';
 SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
 
--- 3.4 The same residual policy on a second default-collated column.
+-- Repeat the ordered residual comparison on another column.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, note FROM rq_text WHERE note < 'cherry' ORDER BY id;
 
-SET lagodb.customscan_mode = 'force';
 SELECT id, note FROM rq_text WHERE note < 'cherry' ORDER BY id;
 
 SET lagodb.customscan_mode = 'off';
 SELECT id, note FROM rq_text WHERE note < 'cherry' ORDER BY id;
 
--- ============================================================================
--- Cleanup
--- ============================================================================
 RESET lagodb.customscan_mode;
 RESET timezone;
 DROP TABLE rq_numeric;
 DROP TABLE rq_temporal;
 DROP TABLE rq_text;
--- Section: Default-collation text inequality pushdown
+-- Exact text inequality under the default deterministic collation.
 
 
--- ============================================================================
--- Setup: an Iceberg table with Exact-pushable integer and deterministic-text
--- comparisons. Three rows give non-trivial result-set parity.
--- ============================================================================
 CREATE TABLE customscan_unsupported_only_t (
     id integer,
     label text
@@ -1433,27 +1092,20 @@ INSERT INTO customscan_unsupported_only_t VALUES (3, 'charlie');
 
 SELECT COUNT(*) AS total_rows FROM customscan_unsupported_only_t;
 
--- ============================================================================
--- Test 1: `text <>` under the database's deterministic default collation is
--- Exact-pushable. The force plan must select CustomScan and remove the local
--- residual; the off plan and both result sets provide the PostgreSQL oracle.
--- ============================================================================
+-- Text inequality is pushed without a local residual.
 
--- Under `force`, the text inequality appears as a pushed filter.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, label FROM customscan_unsupported_only_t
 WHERE label <> 'bravo'
 ORDER BY id, label;
 
--- SeqScan baseline.
 SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT id, label FROM customscan_unsupported_only_t
 WHERE label <> 'bravo'
 ORDER BY id, label;
 
--- Result-set parity.
 SET lagodb.customscan_mode = 'force';
 SELECT id, label FROM customscan_unsupported_only_t
 WHERE label <> 'bravo'
@@ -1464,28 +1116,20 @@ SELECT id, label FROM customscan_unsupported_only_t
 WHERE label <> 'bravo'
 ORDER BY id, label;
 
--- ============================================================================
--- Test 2: integer Exact-pushdown control on the same table. `WHERE id = 2` is
--- `int4 =` (opno 96), so force selects CustomScan and removes the residual.
--- ============================================================================
+-- Use integer equality as the exact-pushdown control on the same table.
 
--- Under `force`: the Exact integer clause is pushable, so a CustomPath
--- exists and is selected. The Exact clause is stripped from `plan.qual`
--- (no local residual `Filter:` line) and shown on the `Pushed Filter:` line.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT id, label FROM customscan_unsupported_only_t
 WHERE id = 2
 ORDER BY id, label;
 
--- SeqScan baseline.
 SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT id, label FROM customscan_unsupported_only_t
 WHERE id = 2
 ORDER BY id, label;
 
--- Result-set parity.
 SET lagodb.customscan_mode = 'force';
 SELECT id, label FROM customscan_unsupported_only_t
 WHERE id = 2
@@ -1496,9 +1140,6 @@ SELECT id, label FROM customscan_unsupported_only_t
 WHERE id = 2
 ORDER BY id, label;
 
--- ============================================================================
--- Cleanup
--- ============================================================================
 RESET lagodb.customscan_mode;
 RESET lagodb.query_offload_mode;
 DROP TABLE customscan_unsupported_only_t;

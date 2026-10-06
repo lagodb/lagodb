@@ -1,6 +1,5 @@
 -- Iceberg FDW read, pushdown, plan identity and no-vending routing coverage.
 
-\set ECHO none
 \setenv PGDATABASE :DBNAME
 
 SELECT rest_uri AS regress_rest_uri,
@@ -19,6 +18,7 @@ FROM lagodb_regress.object_storage_fixture
 
 SET client_min_messages = warning;
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+RESET client_min_messages;
 CREATE EXTENSION lagodb_iceberg;
 CREATE SCHEMA iceberg_fdw_read;
 CREATE SERVER iceberg_read_rest
@@ -83,9 +83,7 @@ OPTIONS (
     access_key_id :'regress_s3_access_key_id',
     secret_access_key :'regress_s3_secret_access_key'
 );
-RESET client_min_messages;
 
-\set ECHO all
 CREATE FOREIGN TABLE iceberg_fdw_read.filters (
     id integer,
     payload text,
@@ -219,13 +217,9 @@ OPTIONS (
 PREPARE iceberg_stale_read AS
 SELECT payload FROM iceberg_fdw_read.cached_plan WHERE id = 2;
 EXECUTE iceberg_stale_read;
-\set ECHO none
 \set iceberg_fixture cached-plan
 \i include/iceberg_fixture.sql
-\set ECHO all
-\set VERBOSITY terse
 EXECUTE iceberg_stale_read;
-\set VERBOSITY default
 DEALLOCATE iceberg_stale_read;
 DEALLOCATE iceberg_read_by_id;
 
@@ -283,9 +277,7 @@ OPTIONS (
     access_key_id :'regress_s3_access_key_id',
     secret_access_key :'regress_s3_secret_access_key'
 );
-\set VERBOSITY terse
 SELECT * FROM iceberg_fdw_read.fallback_main;
-\set VERBOSITY default
 
 SET client_min_messages = warning;
 DROP SCHEMA iceberg_fdw_read CASCADE;

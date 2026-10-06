@@ -1,6 +1,5 @@
 -- Release global fixtures after the complete regression run.
 \setenv PGDATABASE :DBNAME
-\set QUIET 1
 SET client_min_messages = warning;
 SELECT pid::text AS lagodb_regress_storage_pid
 FROM pg_stat_activity
@@ -37,9 +36,6 @@ WHERE item_id = '00000000-0000-0000-0000-000000000004';
 SELECT lagodb.drop_storage_volume(:'cancel_volume_name')
 FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'cancel_volume_name';
-RESET client_min_messages;
-\set QUIET 0
-SET client_min_messages = warning;
 DROP TABLE IF EXISTS remote_cleanup_drop;
 DROP TABLE IF EXISTS remote_cleanup_rollback;
 DROP TABLESPACE IF EXISTS regress_object;
@@ -47,6 +43,4 @@ DROP TABLE IF EXISTS lagodb_regress.object_storage_fixture;
 DROP SCHEMA IF EXISTS lagodb_regress;
 RESET client_min_messages;
 \! python3 ../../../scripts/pg_regress/regress_fixture.py teardown
-\set ECHO none
 \i ../../../scripts/pg_regress/fixture_command_result.sql
-\set ECHO all

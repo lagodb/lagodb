@@ -57,12 +57,18 @@ rows
 (1 row)
 
 
-starting permutation: s1_begin_multi s1_truncate_multi s2_multi_rows s1_commit_multi s2_multi_locations_changed
+starting permutation: s1_begin_multi s1_truncate_multi s2_multi_first_rows s1_commit_multi s2_multi_rows s2_multi_locations_changed
 step s1_begin_multi: BEGIN;
 step s1_truncate_multi: TRUNCATE truncate_iso.multi_first_t, truncate_iso.multi_second_t;
-step s2_multi_rows: SELECT (SELECT count(*) FROM truncate_iso.multi_first_t) = 0 AND (SELECT count(*) FROM truncate_iso.multi_second_t) = 0 AS both_empty; <waiting ...>
+step s2_multi_first_rows: SELECT count(*) AS rows FROM truncate_iso.multi_first_t; <waiting ...>
 step s1_commit_multi: COMMIT;
-step s2_multi_rows: <... completed>
+step s2_multi_first_rows: <... completed>
+rows
+----
+   0
+(1 row)
+
+step s2_multi_rows: SELECT (SELECT count(*) FROM truncate_iso.multi_first_t) = 0 AND (SELECT count(*) FROM truncate_iso.multi_second_t) = 0 AS both_empty;
 both_empty
 ----------
 t         
@@ -77,5 +83,92 @@ step s2_multi_locations_changed:
 changed
 -------
 t      
+(1 row)
+
+
+starting permutation: s1_begin_multi s1_truncate_multi s2_multi_second_rows s1_commit_multi s2_multi_rows s2_multi_locations_changed
+step s1_begin_multi: BEGIN;
+step s1_truncate_multi: TRUNCATE truncate_iso.multi_first_t, truncate_iso.multi_second_t;
+step s2_multi_second_rows: SELECT count(*) AS rows FROM truncate_iso.multi_second_t; <waiting ...>
+step s1_commit_multi: COMMIT;
+step s2_multi_second_rows: <... completed>
+rows
+----
+   0
+(1 row)
+
+step s2_multi_rows: SELECT (SELECT count(*) FROM truncate_iso.multi_first_t) = 0 AND (SELECT count(*) FROM truncate_iso.multi_second_t) = 0 AS both_empty;
+both_empty
+----------
+t         
+(1 row)
+
+step s2_multi_locations_changed: 
+  SELECT bool_and(current.metadata_location <> original.metadata_location) AS changed
+  FROM iceberg.iceberg_metadata AS current
+  JOIN truncate_iso.locations AS original USING (relid)
+  WHERE current.relid IN ('truncate_iso.multi_first_t'::regclass, 'truncate_iso.multi_second_t'::regclass);
+
+changed
+-------
+t      
+(1 row)
+
+
+starting permutation: s1_begin s1_truncate_partitioned s2_partitioned_location_unchanged s2_partitioned_insert s1_commit s2_partitioned_rows
+step s1_begin: BEGIN;
+step s1_truncate_partitioned: TRUNCATE truncate_iso.partitioned_t;
+step s2_partitioned_location_unchanged: 
+  SELECT current.metadata_location = original.metadata_location AS unchanged
+  FROM iceberg.iceberg_metadata AS current
+  JOIN truncate_iso.locations AS original USING (relid)
+  WHERE current.relid = 'truncate_iso.partitioned_t'::regclass;
+
+unchanged
+---------
+t        
+(1 row)
+
+step s2_partitioned_insert: INSERT INTO truncate_iso.partitioned_t VALUES (8, 'north'); <waiting ...>
+step s1_commit: COMMIT;
+step s2_partitioned_insert: <... completed>
+step s2_partitioned_rows: SELECT array_agg(id ORDER BY id) AS rows FROM truncate_iso.partitioned_t;
+rows
+----
+{8} 
+(1 row)
+
+
+starting permutation: s1_begin s1_truncate_partitioned s2_partitioned_location_unchanged s2_partitioned_rows s1_abort s2_partitioned_location_unchanged
+step s1_begin: BEGIN;
+step s1_truncate_partitioned: TRUNCATE truncate_iso.partitioned_t;
+step s2_partitioned_location_unchanged: 
+  SELECT current.metadata_location = original.metadata_location AS unchanged
+  FROM iceberg.iceberg_metadata AS current
+  JOIN truncate_iso.locations AS original USING (relid)
+  WHERE current.relid = 'truncate_iso.partitioned_t'::regclass;
+
+unchanged
+---------
+t        
+(1 row)
+
+step s2_partitioned_rows: SELECT array_agg(id ORDER BY id) AS rows FROM truncate_iso.partitioned_t; <waiting ...>
+step s1_abort: ROLLBACK;
+step s2_partitioned_rows: <... completed>
+rows 
+-----
+{6,7}
+(1 row)
+
+step s2_partitioned_location_unchanged: 
+  SELECT current.metadata_location = original.metadata_location AS unchanged
+  FROM iceberg.iceberg_metadata AS current
+  JOIN truncate_iso.locations AS original USING (relid)
+  WHERE current.relid = 'truncate_iso.partitioned_t'::regclass;
+
+unchanged
+---------
+t        
 (1 row)
 

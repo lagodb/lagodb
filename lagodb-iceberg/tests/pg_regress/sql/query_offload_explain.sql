@@ -102,15 +102,6 @@ ORDER BY l.key;
 
 -- JSON protects real Plans nesting and native numeric property types without
 -- snapshotting the complete structured document into the expected file.
-WITH document AS (
-    SELECT query_offload_explain_json(
-        'VERBOSE, COSTS ON',
-        'SELECT l.key, count(*)
-         FROM query_offload_explain_left AS l
-         JOIN query_offload_explain_right AS r USING (key)
-         GROUP BY l.key'
-    ) AS plan
-)
 SELECT (plan #> '{0,Plan}') ? 'Plans' AS has_main_plans,
        NOT ((plan #> '{0,Plan}') ?| ARRAY['Relation Tree', 'Table Scans'])
            AS has_no_competing_tree,
@@ -126,47 +117,47 @@ SELECT (plan #> '{0,Plan}') ? 'Plans' AS has_main_plans,
            plan,
            '$.**."Scan ID"'
        )) = 'number' AS scan_id_is_number
-FROM document;
+FROM query_offload_explain_json(
+    'VERBOSE, COSTS ON',
+    'SELECT l.key, count(*)
+     FROM query_offload_explain_left AS l
+     JOIN query_offload_explain_right AS r USING (key)
+     GROUP BY l.key'
+) AS document(plan);
 
 -- A NULL-aware anti join contributes a custom boolean property. COSTS OFF
 -- removes estimates from structured output as well as text output.
-WITH document AS (
-    SELECT query_offload_explain_json(
-        'COSTS OFF',
-        'SELECT l.id
-         FROM query_offload_explain_left AS l
-         WHERE l.key NOT IN (
-             SELECT r.key FROM query_offload_explain_right AS r
-         )'
-    ) AS plan
-)
 SELECT jsonb_typeof(jsonb_path_query_first(
            plan,
            '$.**."Null Aware"'
        )) = 'boolean' AS null_aware_is_boolean,
        NOT jsonb_path_exists(plan, '$.**."Estimated Rows Read"')
            AS costs_off_hides_estimates
-FROM document;
+FROM query_offload_explain_json(
+    'COSTS OFF',
+    'SELECT l.id
+     FROM query_offload_explain_left AS l
+     WHERE l.key NOT IN (
+         SELECT r.key FROM query_offload_explain_right AS r
+     )'
+) AS document(plan);
 
 -- TIMING controls engine duration metrics independently of actual counters.
 -- Numeric predicates avoid unstable wall-clock values in regression output.
-WITH documents AS (
-    SELECT query_offload_explain_json(
-               'ANALYZE, VERBOSE, COSTS OFF, TIMING ON, SUMMARY OFF',
-               'SELECT count(*) FROM query_offload_explain_left'
-           ) AS timed,
-           query_offload_explain_json(
-               'ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF',
-               'SELECT count(*) FROM query_offload_explain_left'
-           ) AS untimed
-)
 SELECT jsonb_typeof(jsonb_path_query_first(
            timed,
            '$.**."Metric: elapsed_compute"'
        )) = 'number' AS timing_metric_is_number,
        NOT jsonb_path_exists(untimed, '$.**."Metric: elapsed_compute"')
            AS timing_off_hides_engine_time
-FROM documents;
+FROM query_offload_explain_json(
+    'ANALYZE, VERBOSE, COSTS OFF, TIMING ON, SUMMARY OFF',
+    'SELECT count(*) FROM query_offload_explain_left'
+) AS timed_plan(timed)
+CROSS JOIN query_offload_explain_json(
+    'ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF',
+    'SELECT count(*) FROM query_offload_explain_left'
+) AS untimed_plan(untimed);
 
 -- Zero fallback counts stay hidden; a real PostgreSQL evaluator boundary is
 -- visible without restoring the old aggregate/join summary inventory.
@@ -176,8 +167,6 @@ FROM query_offload_explain_left;
 
 -- Runtime filter diagnostics must use complete binding expressions and the
 -- scan's PlannerInfo scope. Reuse the JSON adapter and join fixtures above.
-\pset format unaligned
-\pset footer off
 
 -- varchar -> text is a binary-compatible RelabelType around the generic
 -- Param. Both the display binding and execution retain that boundary.
@@ -186,17 +175,14 @@ INSERT INTO query_offload_explain_labels VALUES ('east'), ('west'), ('east');
 SET plan_cache_mode = force_generic_plan;
 PREPARE query_offload_explain_relabel (varchar) AS
 SELECT count(*) FROM query_offload_explain_labels WHERE label = $1;
-WITH document AS (
-    SELECT query_offload_explain_json(
-        'VERBOSE, COSTS OFF',
-        'EXECUTE query_offload_explain_relabel(''east'')'
-    ) AS plan
-)
 SELECT plan #>> '{0,Plan,Custom Plan Provider}' AS provider,
        jsonb_path_query_first(plan,
            '$[0].Plan.** ? (@."Node Type" == "Table Scan")')->>'Filter'
            LIKE '%$1%' AS has_binding
-FROM document;
+FROM query_offload_explain_json(
+    'VERBOSE, COSTS OFF',
+    'EXECUTE query_offload_explain_relabel(''east'')'
+) AS document(plan);
 EXECUTE query_offload_explain_relabel('east');
 EXECUTE query_offload_explain_relabel(NULL);
 DEALLOCATE query_offload_explain_relabel;
@@ -213,14 +199,11 @@ WHERE l.id >= $1 AND l.id NOT IN (
     SELECT scoped.id FROM query_offload_explain_left AS scoped
     WHERE scoped.id > $1
 ) ORDER BY l.id;
-WITH document AS (
-    SELECT query_offload_explain_json(
-        'VERBOSE, COSTS OFF', 'EXECUTE query_offload_explain_scoped(2)'
-    ) AS plan
-)
 SELECT (scan->>'Filter') LIKE '%id > $2%' AS scoped_filter,
        (scan->>'Pushed Filter Conservative') LIKE '%id > $2%' AS scoped_pruning
-FROM document
+FROM query_offload_explain_json(
+    'VERBOSE, COSTS OFF', 'EXECUTE query_offload_explain_scoped(2)'
+) AS document(plan)
 CROSS JOIN LATERAL jsonb_path_query_first(plan,
     '$[0].Plan.** ? (@."Node Type" == "Table Scan" && @."Alias" == "scoped")') AS scan;
 EXECUTE query_offload_explain_scoped(2);
@@ -236,20 +219,6 @@ INSERT INTO query_offload_explain_outer VALUES (1), (2);
 SET enable_hashjoin = off;
 SET enable_mergejoin = off;
 SET enable_material = off;
-WITH document AS (
-    SELECT query_offload_explain_json(
-        'ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF',
-        'SELECT nested.id FROM query_offload_explain_outer AS o
-         CROSS JOIN LATERAL (
-             SELECT l.id FROM query_offload_explain_left AS l
-             JOIN query_offload_explain_right AS r ON l.key = r.key
-             WHERE l.id = o.id AND l.id NOT IN (
-                 SELECT scoped.id FROM query_offload_explain_left AS scoped
-                 WHERE scoped.id > 2
-             )
-         ) AS nested ORDER BY nested.id'
-    ) AS plan
-)
 SELECT (scan->>'Filter') LIKE '%id > 2%'
            AND (scan->>'Filter') NOT LIKE '%$%' AS scoped_filter,
        (scan->>'Pushed Filter Conservative') LIKE '%id > 2%'
@@ -264,7 +233,18 @@ SELECT (scan->>'Filter') LIKE '%id > 2%'
           FROM jsonb_path_query(plan,
               'strict $[0].Plan.** ? (@."Node Type" == "Table Scan")') AS node)
            AS scan_metrics_match
-FROM document
+FROM query_offload_explain_json(
+    'ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF',
+    'SELECT nested.id FROM query_offload_explain_outer AS o
+     CROSS JOIN LATERAL (
+         SELECT l.id FROM query_offload_explain_left AS l
+         JOIN query_offload_explain_right AS r ON l.key = r.key
+         WHERE l.id = o.id AND l.id NOT IN (
+             SELECT scoped.id FROM query_offload_explain_left AS scoped
+             WHERE scoped.id > 2
+         )
+     ) AS nested ORDER BY nested.id'
+) AS document(plan)
 CROSS JOIN LATERAL jsonb_path_query_first(plan,
     '$[0].Plan.** ? (@."Node Type" == "Table Scan" && @."Alias" == "scoped")') AS scan;
 SELECT nested.id FROM query_offload_explain_outer AS o
@@ -280,8 +260,6 @@ RESET enable_hashjoin;
 RESET enable_mergejoin;
 RESET enable_material;
 DROP TABLE query_offload_explain_outer;
-\pset format aligned
-\pset footer on
 
 DROP FUNCTION query_offload_explain_json(text, text);
 DROP TABLE query_offload_explain_right;

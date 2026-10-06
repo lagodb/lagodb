@@ -1,8 +1,6 @@
 -- Managed partition reads, typed pruning/pushdown, rescans, and native planning.
 -- Managed file counts include both partition and column-metrics pruning.
 -- The external FDW fixture separately disables column metrics.
-\pset format unaligned
-\pset footer off
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION lagodb_iceberg;
 SET lagodb.query_offload_mode = 'off';
@@ -75,17 +73,6 @@ FROM partition_read_cases ORDER BY case_name
 \gexec
 
 -- Display the actual transform/source identity, file count, and heap equality.
-WITH reads AS MATERIALIZED (
-    SELECT case_name,
-           pg_temp.partition_query_json(format(
-               'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-                SELECT id FROM partitioned_reads.%I', case_name)) AS plan,
-           pg_temp.partition_query_json(format(
-               'SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM partitioned_reads.%I t', case_name)) AS rows,
-           pg_temp.partition_query_json(format(
-               'SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM partitioned_reads.%I t', case_name || '_heap')) AS heap_rows
-    FROM partition_read_cases
-)
 SELECT case_name,
        metadata->'partition-specs'->0->'fields'->0->>'transform' AS transform,
        metadata->'partition-specs'->0->'fields'->0->>'source-id' AS source_id,
@@ -93,7 +80,14 @@ SELECT case_name,
            '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")')
            ->>'Data Files Selected' AS files,
        rows IS NOT DISTINCT FROM heap_rows AS heap_match
-FROM reads
+FROM partition_read_cases
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
+     SELECT id FROM partitioned_reads.%I', case_name)) AS explained(plan)
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM partitioned_reads.%I t', case_name)) AS results(rows)
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM partitioned_reads.%I t', case_name || '_heap')) AS heap_results(heap_rows)
 JOIN iceberg.iceberg_metadata ON relid = format('partitioned_reads.%I', case_name)::regclass
 CROSS JOIN LATERAL (SELECT pg_read_file(metadata_location)::jsonb AS metadata) AS file
 ORDER BY case_name;
@@ -102,40 +96,34 @@ ORDER BY case_name;
 -- In the selected partition's single file, id=0 passes the residual but fails
 -- id >= 2; id=5 passes id >= 2 but fails the residual; only id=2 survives.
 -- id=3 in the other partition passes both non-partition predicates.
-WITH plans AS MATERIALIZED (
-    SELECT case_name,
-           pg_temp.partition_query_json(format(
-               'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-                SELECT id FROM partitioned_reads.%I
-                WHERE part_key = %L::%s AND id >= 2 AND length(payload) = 5',
-               case_name, first_value, sql_type)) AS plan,
-           pg_temp.partition_query_json(format(
-               'SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.%I
-                WHERE part_key = %L::%s AND id >= 2 AND length(payload) = 5',
-               case_name, first_value, sql_type)) AS ids
-    FROM partition_read_cases
-), scans AS (
-    SELECT case_name, ids, jsonb_path_query_first(plan,
-        '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS scan
-    FROM plans
-), filters AS (
-    SELECT *, concat_ws(' ', scan #>> '{LagoDB Pushdown,Pushed Filter Exact}',
-                            scan #>> '{LagoDB Pushdown,Pushed Filter Conservative}') AS pushed
-    FROM scans
-)
+-- As in PG17 gin.sql, LATERAL queries expose plan fields and actual results.
 SELECT case_name, scan->>'Data Files Selected' AS files,
        strpos(pushed, 'part_key') > 0 AND strpos(pushed, ' = ') > 0 AS partition_pushed,
        strpos(pushed, 'id >= 2') > 0 AS id_pushed,
        coalesce(strpos(scan->>'Filter', 'length'), 0) > 0 AS pg_residual,
        ids
-FROM filters ORDER BY case_name;
+FROM partition_read_cases
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
+     SELECT id FROM partitioned_reads.%I
+     WHERE part_key = %L::%s AND id >= 2 AND length(payload) = 5',
+    case_name, first_value, sql_type)) AS explained(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS selected(scan)
+CROSS JOIN LATERAL concat_ws(' ', scan #>> '{LagoDB Pushdown,Pushed Filter Exact}',
+                                scan #>> '{LagoDB Pushdown,Pushed Filter Conservative}') AS filters(pushed)
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.%I
+     WHERE part_key = %L::%s AND id >= 2 AND length(payload) = 5',
+    case_name, first_value, sql_type)) AS results(ids)
+ORDER BY case_name;
 
 -- Each admitted comparison and NULL test has its own visible expected row.
 -- Temporal <> stays in PG (3 files); other <> retains the NULL file (2 files).
 -- The other pushed comparisons select 1 file. IS NOT NULL selects 2 files.
 WITH predicates AS (
-    SELECT c.*, o.ordinal, o.operator,
-           format('part_key %s %L::%s', o.operator, o.value, sql_type) AS predicate
+    SELECT c.case_name, o.ordinal, o.operator,
+           format('part_key %s %L::%s', o.operator, o.value, c.sql_type) AS predicate
     FROM partition_read_cases c
     CROSS JOIN LATERAL (VALUES
         (1, '=', first_value), (2, '<', second_value), (3, '<=', first_value),
@@ -143,34 +131,30 @@ WITH predicates AS (
     ) AS o(ordinal, operator, value)
     WHERE comparison_pushes
     UNION ALL
-    SELECT c.*, o.ordinal, o.operator, 'part_key ' || o.operator
+    SELECT c.case_name, o.ordinal, o.operator, 'part_key ' || o.operator
     FROM partition_read_cases c
     CROSS JOIN (VALUES (7, 'IS NULL'), (8, 'IS NOT NULL')) AS o(ordinal, operator)
-), plans AS MATERIALIZED (
-    SELECT case_name, ordinal, operator,
-           pg_temp.partition_query_json(format(
-               'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-                SELECT id FROM partitioned_reads.%I WHERE %s', case_name, predicate)) AS plan,
-           pg_temp.partition_query_json(format(
-               'SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.%I WHERE %s', case_name, predicate)) AS ids,
-           pg_temp.partition_query_json(format(
-               'SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.%I WHERE %s', case_name || '_heap', predicate)) AS heap_ids
-    FROM predicates
-), scans AS (
-    SELECT *, jsonb_path_query_first(plan,
-        '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS scan
-    FROM plans
-), filters AS (
-    SELECT *, concat_ws(' ', scan #>> '{LagoDB Pushdown,Pushed Filter Exact}',
-                            scan #>> '{LagoDB Pushdown,Pushed Filter Conservative}') AS pushed
-    FROM scans
 )
 SELECT case_name, operator, scan->>'Data Files Selected' AS files,
        strpos(pushed, 'part_key') > 0 AS partition_pushed,
        strpos(pushed, ' ' || operator || ' ') > 0
            OR (operator IN ('IS NULL', 'IS NOT NULL') AND strpos(pushed, operator) > 0) AS operator_pushed,
        ids, ids IS NOT DISTINCT FROM heap_ids AS heap_match
-FROM filters ORDER BY case_name, ordinal;
+FROM predicates
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
+     SELECT id FROM partitioned_reads.%I WHERE %s', case_name, predicate)) AS explained(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS selected(scan)
+CROSS JOIN LATERAL concat_ws(' ', scan #>> '{LagoDB Pushdown,Pushed Filter Exact}',
+                                scan #>> '{LagoDB Pushdown,Pushed Filter Conservative}') AS filters(pushed)
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.%I WHERE %s',
+    case_name, predicate)) AS results(ids)
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.%I WHERE %s',
+    case_name || '_heap', predicate)) AS heap_results(heap_ids)
+ORDER BY case_name, ordinal;
 
 -- Generic plans must rebind exact integer and conservative date filters.
 SET plan_cache_mode = force_generic_plan;
@@ -229,7 +213,6 @@ RESET lagodb.customscan_mode;
 
 -- Provider-owned partitioned-table planning and native join costing.
 
-SET lagodb.query_offload_mode = 'off';
 CREATE SCHEMA partitioned_planning;
 
 CREATE TABLE partitioned_planning.part_t (
@@ -261,26 +244,22 @@ SET LOCAL enable_indexonlyscan = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
 
-WITH plans AS MATERIALIZED (
-    SELECT pg_temp.partition_query_json(
-               'EXPLAIN (FORMAT JSON) SELECT n.payload
-                FROM partitioned_planning.native_lookup n JOIN partitioned_planning.part_t r
-                ON n.id = r.id') AS native_first,
-           pg_temp.partition_query_json(
-               'EXPLAIN (FORMAT JSON) SELECT n.payload
-                FROM partitioned_planning.part_t r JOIN partitioned_planning.native_lookup n
-                ON n.id = r.id') AS partitioned_first
-), indexes AS (
-    SELECT jsonb_path_query_first(native_first,
-               '$[0].Plan.** ? (@."Node Type" == "Index Scan" && @."Alias" == "n")') AS native_index,
-           jsonb_path_query_first(partitioned_first,
-               '$[0].Plan.** ? (@."Node Type" == "Index Scan" && @."Alias" == "n")') AS partitioned_index
-    FROM plans
-)
+-- Compare original JSON costs without putting unstable estimates in expected.
 SELECT native_index->>'Index Cond' IS NOT NULL AS native_first_parameterized,
        partitioned_index->>'Index Cond' IS NOT NULL AS partitioned_first_parameterized,
        native_index->'Total Cost' = partitioned_index->'Total Cost' AS costs_match
-FROM indexes;
+FROM pg_temp.partition_query_json(
+    'EXPLAIN (FORMAT JSON) SELECT n.payload
+     FROM partitioned_planning.native_lookup n JOIN partitioned_planning.part_t r
+     ON n.id = r.id') AS native_first(plan)
+CROSS JOIN pg_temp.partition_query_json(
+    'EXPLAIN (FORMAT JSON) SELECT n.payload
+     FROM partitioned_planning.part_t r JOIN partitioned_planning.native_lookup n
+     ON n.id = r.id') AS partitioned_first(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(native_first.plan,
+    '$[0].Plan.** ? (@."Node Type" == "Index Scan" && @."Alias" == "n")') AS native_scan(native_index)
+CROSS JOIN LATERAL jsonb_path_query_first(partitioned_first.plan,
+    '$[0].Plan.** ? (@."Node Type" == "Index Scan" && @."Alias" == "n")') AS partitioned_scan(partitioned_index);
 
 ROLLBACK;
 DROP TABLE partitioned_planning.native_lookup;
@@ -291,5 +270,3 @@ RESET client_min_messages;
 RESET lagodb.query_offload_mode;
 
 DROP FUNCTION pg_temp.partition_query_json(text);
-\pset format aligned
-\pset footer on

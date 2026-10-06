@@ -1,25 +1,92 @@
 -- Runtime remote-object cleanup: asynchronous DROP and queue semantics.
-\set ECHO none
+-- End-to-end asynchronous remote DROP. setup.sql provisions
+-- the MinIO fixture and records its connection details in the test database.
+-- pg_regress unsets PGDATABASE and passes the database only via psql -d. Export
+-- it so the \! helper scripts connect to this regress database. \! does not
+-- interpolate psql variables (OT_WHOLE_LINE); \setenv (OT_NORMAL) does.
+\setenv PGDATABASE :DBNAME
+SELECT endpoint AS lagodb_regress_endpoint,
+       bucket AS lagodb_regress_bucket,
+       region AS lagodb_regress_region,
+       access_key_id AS lagodb_regress_access_key_id,
+       secret_access_key AS lagodb_regress_secret_access_key
+FROM lagodb_regress.object_storage_fixture
+\gset
+SET client_min_messages = warning;
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+RESET client_min_messages;
+CREATE EXTENSION lagodb_iceberg;
+SET client_min_messages = warning;
+DROP TABLE IF EXISTS remote_cleanup_drop;
+DROP TABLE IF EXISTS remote_cleanup_rollback;
+DROP TABLESPACE IF EXISTS regress_object;
+RESET client_min_messages;
+--
+-- Test 0: Local table artifact cleanup
+--
+CREATE TABLE test_lifecycle (id int) USING iceberg;
+INSERT INTO test_lifecycle VALUES (1), (2), (3);
+-- Capture the PG relation-file root while the table exists.
+SELECT pg_relation_filepath('test_lifecycle'::regclass) || '_iceberg' AS path_1 \gset
+-- Verify directory exists
+SELECT (pg_stat_file(:'path_1')).isdir as directory_found;
  directory_found 
 -----------------
  t
 (1 row)
 
+SELECT EXISTS (
+    SELECT 1 FROM pg_ls_dir(:'path_1', true, false)
+) AS root_has_iceberg_artifacts;
  root_has_iceberg_artifacts 
 ----------------------------
  t
 (1 row)
 
+DROP TABLE test_lifecycle;
+-- Verify directory is gone
+SELECT (pg_stat_file(:'path_1', true)) is null as directory_missing;
  directory_missing 
 -------------------
  t
 (1 row)
 
+SELECT count(*) AS local_drop_remote_items
+FROM lagodb.maintenance_queue
+WHERE producer = 'iceberg-drop';
  local_drop_remote_items 
 -------------------------
                        0
 (1 row)
 
+\! mkdir -p /tmp/iceberg_regress_object
+\! rm -rf /tmp/iceberg_regress_object/*
+SELECT 'regress-object-' || gen_random_uuid() AS volume_name \gset
+SELECT lagodb.create_storage_volume(
+    :'volume_name',
+    format('s3://%s', :'lagodb_regress_bucket'),
+    jsonb_build_object(
+        'type', 's3_access_key',
+        'access_key_id', :'lagodb_regress_access_key_id',
+        'secret_access_key', :'lagodb_regress_secret_access_key'
+    ),
+    jsonb_build_object(
+        'region', :'lagodb_regress_region',
+        'endpoint', :'lagodb_regress_endpoint',
+        'allow_http', true
+    )
+) AS created_volume \gset
+CREATE TABLESPACE regress_object
+LOCATION '/tmp/iceberg_regress_object'
+WITH (storage_volume = :'volume_name');
+SELECT internal_volume_id AS volume_id,
+       regexp_replace(effective_location, '^[^:]+://[^/]+/', '') AS effective_root
+FROM lagodb.storage_volumes
+WHERE storage_volume_name = :'volume_name'
+\gset
+\setenv LAGODB_REGRESS_VOLUME_ID :volume_id
+\setenv LAGODB_REGRESS_OBJECT_NAMESPACE :lagodb_regress_bucket
+\! bin/wait_for_object_store 30
 object_store_ready: true
 SELECT list_succeeded
        AND write_succeeded

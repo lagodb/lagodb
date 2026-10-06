@@ -221,13 +221,11 @@ DROP TABLE iceberg_string_mapping;
 -- 5. Negative Test: Numeric Precision > 38
 -- ============================================================================
 -- This should fail because Iceberg only supports up to precision 38.
-\set VERBOSITY terse
 CREATE TABLE iceberg_numeric_fallback (
     id integer,
     n_huge numeric(40, 2)
 ) USING iceberg;
 ERROR:  column 'numeric(40, 2) precision exceeds maximum supported precision (38)' data type is not supported
-\set VERBOSITY default
 -- ============================================================================
 -- 6. Numeric with Negative Scale: round-trip via decimal(p+|s|, 0)
 -- ============================================================================
@@ -257,13 +255,11 @@ DROP TABLE iceberg_numeric_negscale;
 -- 7. Negative Test: Numeric Negative Scale Widens Beyond 38
 -- ============================================================================
 -- numeric(20, -20) would map to decimal(40, 0) which exceeds Iceberg's cap.
-\set VERBOSITY terse
 CREATE TABLE iceberg_numeric_negscale_overflow (
     id integer,
     n_too_wide numeric(20, -20)
 ) USING iceberg;
 ERROR:  column 'numeric(20, -20) maps to decimal(40, 0) which exceeds maximum supported precision (38)' data type is not supported
-\set VERBOSITY default
 -- ============================================================================
 -- 8. Timestamp Round Trip Across the Unix and PG Epochs
 -- ============================================================================
@@ -276,7 +272,6 @@ ERROR:  column 'numeric(20, -20) maps to decimal(40, 0) which exceeds maximum su
 -- Asserting through boolean predicates (`actual = literal`) rather than
 -- printing values directly keeps the expected output independent of
 -- DateStyle, the same pattern section 3.1 already uses for decimal codecs.
-SET timezone = 'UTC';
 CREATE TABLE iceberg_ts_round_trip (
     label text,
     ts    timestamp

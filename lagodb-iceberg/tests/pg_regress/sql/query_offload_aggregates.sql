@@ -4,9 +4,8 @@
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 
--- A tiny batch limit makes every positive query consume more than one Arrow
--- batch without requiring a large fixture. Each test case sets both planner
--- modes locally instead of depending on session state from an earlier case.
+-- A small batch limit exercises multiple Arrow batches.
+-- Keep CustomScan off while comparing query offload with PostgreSQL.
 SET lagodb.query_batch_rows = 2;
 SET timezone = 'UTC';
 
@@ -78,8 +77,6 @@ WHERE id = 1;
 -- ============================================================================
 
 -- Query offload plan and result.
-SET lagodb.customscan_mode = 'off';
-SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT group_i4,
        group_i8,
@@ -106,7 +103,6 @@ GROUP BY group_i4, group_i8
 ORDER BY group_i4, group_i8;
 
 -- PostgreSQL native result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT group_i4,
        group_i8,
@@ -121,7 +117,6 @@ GROUP BY group_i4, group_i8
 ORDER BY group_i4, group_i8;
 
 -- Query offload filtered plan and result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT group_i4,
@@ -143,7 +138,6 @@ GROUP BY group_i4
 ORDER BY group_i4;
 
 -- PostgreSQL native filtered result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT group_i4,
        count(*) AS rows,
@@ -155,7 +149,6 @@ GROUP BY group_i4
 ORDER BY group_i4;
 
 -- Query offload plan and result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT group_i4, group_i8
@@ -169,7 +162,6 @@ GROUP BY group_i4, group_i8
 ORDER BY group_i4, group_i8;
 
 -- PostgreSQL native result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT group_i4, group_i8
 FROM query_offload_aggregate_basic
@@ -183,7 +175,6 @@ ORDER BY group_i4, group_i8;
 -- ============================================================================
 
 -- Query offload plan and result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT group_i4,
@@ -215,7 +206,6 @@ HAVING count(*) >= 2
 ORDER BY group_i4;
 
 -- PostgreSQL native result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT group_i4,
        count(*) FILTER (WHERE id >= 2) AS filtered_rows,
@@ -234,7 +224,6 @@ ORDER BY group_i4;
 -- HAVING over integer SUM and integer AVG exercises the Int64 and Float64
 -- physical result domains used by the query engine.
 -- Query offload plan and result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT group_i4,
@@ -254,7 +243,6 @@ HAVING sum(value_i4) >= 0 AND avg(value_i4) >= 10
 ORDER BY group_i4;
 
 -- PostgreSQL native result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT group_i4,
        sum(value_i4) AS sum_i4,
@@ -269,7 +257,6 @@ ORDER BY group_i4;
 -- ============================================================================
 
 -- Query offload plan and result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT min(value_numeric) AS min_numeric,
@@ -285,7 +272,6 @@ SELECT min(value_numeric) AS min_numeric,
 FROM query_offload_aggregate_basic;
 
 -- PostgreSQL native result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT min(value_numeric) AS min_numeric,
        max(value_numeric) AS max_numeric,
@@ -301,7 +287,6 @@ FROM query_offload_aggregate_basic;
 -- ============================================================================
 
 -- Query offload plan and result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT min(value_f4) AS min_f4,
@@ -351,7 +336,6 @@ SELECT min(value_f4) AS min_f4,
 FROM query_offload_aggregate_basic;
 
 -- PostgreSQL native result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT min(value_f4) AS min_f4,
        max(value_f4) AS max_f4,
@@ -381,7 +365,6 @@ FROM query_offload_aggregate_basic;
 -- ============================================================================
 
 -- Query offload plan and result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT round(var_pop(value_i4), 6) AS var_pop_i4,
@@ -399,7 +382,6 @@ FROM query_offload_aggregate_basic
 WHERE id <= 2;
 
 -- PostgreSQL native result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT round(var_pop(value_i4), 6) AS var_pop_i4,
        round(var_samp(value_i4), 6) AS var_samp_i4,
@@ -409,7 +391,6 @@ FROM query_offload_aggregate_basic
 WHERE id <= 2;
 
 -- Query offload plan and result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT count(*) AS rows,
@@ -431,7 +412,6 @@ FROM query_offload_aggregate_basic
 WHERE id > 100;
 
 -- PostgreSQL native result.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT count(*) AS rows,
        count(value_i4) AS nonnull_i4,
@@ -451,7 +431,6 @@ WHERE id > 100;
 -- The exact filter contains both conjuncts, while Iceberg receives only the
 -- independently safe integer conjunct. VERBOSE also locks the shared
 -- `Filter` / `Pushed Filter Conservative` EXPLAIN vocabulary.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT group_i4, count(*) AS rows
@@ -466,7 +445,6 @@ WHERE id >= 2 AND lower(value_text) = 'alpha'
 GROUP BY group_i4
 ORDER BY group_i4;
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT group_i4, count(*) AS rows
 FROM query_offload_aggregate_basic
@@ -475,7 +453,6 @@ GROUP BY group_i4
 ORDER BY group_i4;
 
 -- Aggregate FILTER and HAVING use the same exact-expression planner.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT group_i4,
@@ -492,7 +469,6 @@ GROUP BY group_i4
 HAVING mod(sum(value_i4), 7) >= 0
 ORDER BY group_i4;
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SELECT group_i4,
        count(*) FILTER (WHERE lower(value_text) = 'alpha') AS alpha_rows
@@ -503,7 +479,6 @@ ORDER BY group_i4;
 
 -- PostgreSQL evaluates FILTER before aggregate arguments. This expression
 -- argument must therefore keep the complete query on the native path.
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT sum(abs(value_i4)) FILTER (WHERE id >= 2)
@@ -512,7 +487,6 @@ FROM query_offload_aggregate_basic;
 SELECT sum(abs(value_i4)) FILTER (WHERE id >= 2)
 FROM query_offload_aggregate_basic;
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 EXPLAIN (COSTS OFF)
 SELECT sum(abs(value_i4)) FILTER (WHERE id >= 2)
@@ -529,7 +503,6 @@ FROM query_offload_aggregate_basic;
 
 SET plan_cache_mode = force_generic_plan;
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
 PREPARE query_offload_aggregate_param(integer) AS
 SELECT count(*)
@@ -542,7 +515,6 @@ EXECUTE query_offload_aggregate_param(2);
 EXECUTE query_offload_aggregate_param(100);
 DEALLOCATE query_offload_aggregate_param;
 
-SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 PREPARE query_native_aggregate_param(integer) AS
 SELECT count(*)

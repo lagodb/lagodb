@@ -53,10 +53,8 @@ SELECT * FROM dml_lifecycle.savepoint_t WHERE id >= 10 ORDER BY id;
 CREATE TABLE dml_lifecycle.copy_t (
     id integer
 ) USING iceberg;
-\set VERBOSITY terse
 COPY dml_lifecycle.copy_t FROM stdin;
 ERROR:  invalid input syntax for type integer: "bad"
-\set VERBOSITY default
 SELECT 'no resource leak' AS check;
       check       
 ------------------
@@ -94,15 +92,19 @@ SET label = 'two_updated'
 WHERE id = 2;
 DELETE FROM dml_lifecycle.same_tx_dml_t
 WHERE id IN (1, 2);
-COPY (
-    SELECT id, label FROM dml_lifecycle.same_tx_dml_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
-3,three
+SELECT id, label FROM dml_lifecycle.same_tx_dml_t ORDER BY id;
+ id | label 
+----+-------
+  3 | three
+(1 row)
+
 COMMIT;
-COPY (
-    SELECT id, label FROM dml_lifecycle.same_tx_dml_t ORDER BY id
-) TO STDOUT WITH (FORMAT csv);
-3,three
+SELECT id, label FROM dml_lifecycle.same_tx_dml_t ORDER BY id;
+ id | label 
+----+-------
+  3 | three
+(1 row)
+
 SET client_min_messages = warning;
 DROP SCHEMA dml_lifecycle CASCADE;
 RESET client_min_messages;

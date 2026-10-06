@@ -132,18 +132,14 @@ ALTER TABLE schema_evolution_replace_same_stmt_t
 INSERT INTO schema_evolution_replace_same_stmt_t (id, a)
 VALUES (2, 20);
 
-COPY (
-    SELECT string_agg(attname || ':' || atttypid::regtype::text, ',' ORDER BY attnum) AS live_columns
-    FROM pg_attribute
-    WHERE attrelid = 'schema_evolution_replace_same_stmt_t'::regclass
-      AND attnum > 0
-      AND NOT attisdropped
-) TO STDOUT WITH (FORMAT csv, HEADER true);
+SELECT string_agg(attname || ':' || atttypid::regtype::text, ',' ORDER BY attnum) AS live_columns
+FROM pg_attribute
+WHERE attrelid = 'schema_evolution_replace_same_stmt_t'::regclass
+  AND attnum > 0
+  AND NOT attisdropped;
 
-COPY (
-    SELECT count(*) AS rows, count(a) AS a_values, sum(a) AS a_sum
-    FROM schema_evolution_replace_same_stmt_t
-) TO STDOUT WITH (FORMAT csv, HEADER true);
+SELECT count(*) AS rows, count(a) AS a_values, sum(a) AS a_sum
+FROM schema_evolution_replace_same_stmt_t;
 
 CREATE TABLE schema_evolution_drop_required_t (
     id integer NOT NULL,
@@ -183,10 +179,8 @@ INSERT INTO schema_evolution_part_root_t (id, region, payload, extra)
 VALUES (2, 'east', 'two', 20),
        (102, 'west', 'one hundred two', 120);
 
-COPY (
-    SELECT count(*) AS rows, count(extra) AS extra_values, sum(extra) AS extra_sum
-    FROM schema_evolution_part_root_t
-) TO STDOUT WITH (FORMAT csv, HEADER true);
+SELECT count(*) AS rows, count(extra) AS extra_values, sum(extra) AS extra_sum
+FROM schema_evolution_part_root_t;
 
 ALTER TABLE schema_evolution_part_root_t DROP COLUMN extra;
 ALTER TABLE schema_evolution_part_root_t RENAME COLUMN payload TO body;
@@ -194,28 +188,22 @@ ALTER TABLE schema_evolution_part_root_t RENAME COLUMN payload TO body;
 INSERT INTO schema_evolution_part_root_t (id, region, body)
 VALUES (3, 'east', 'three'), (103, 'west', 'one hundred three');
 
-COPY (
-    SELECT string_agg(attname, ',' ORDER BY attnum) AS live_columns
-    FROM pg_attribute
-    WHERE attrelid = 'schema_evolution_part_root_t'::regclass
-      AND attnum > 0
-      AND NOT attisdropped
-) TO STDOUT WITH (FORMAT csv, HEADER true);
+SELECT string_agg(attname, ',' ORDER BY attnum) AS live_columns
+FROM pg_attribute
+WHERE attrelid = 'schema_evolution_part_root_t'::regclass
+  AND attnum > 0
+  AND NOT attisdropped;
 
-COPY (
-    SELECT count(*) AS rows, count(body) AS body_values
-    FROM schema_evolution_part_root_t
-) TO STDOUT WITH (FORMAT csv, HEADER true);
+SELECT count(*) AS rows, count(body) AS body_values
+FROM schema_evolution_part_root_t;
 
-COPY (
-    SELECT class.relkind = 'p' AS is_partitioned_catalog,
-           NOT class.relhassubclass AS has_no_pg_children,
-           metadata.metadata_location IS NOT NULL AS root_has_metadata
-    FROM pg_class AS class
-    LEFT JOIN iceberg.iceberg_metadata AS metadata
-      ON metadata.relid = class.oid
-    WHERE class.oid = 'schema_evolution_part_root_t'::regclass
-) TO STDOUT WITH (FORMAT csv, HEADER true);
+SELECT class.relkind = 'p' AS is_partitioned_catalog,
+       NOT class.relhassubclass AS has_no_pg_children,
+       metadata.metadata_location IS NOT NULL AS root_has_metadata
+FROM pg_class AS class
+LEFT JOIN iceberg.iceberg_metadata AS metadata
+  ON metadata.relid = class.oid
+WHERE class.oid = 'schema_evolution_part_root_t'::regclass;
 
 CREATE TABLE schema_evolution_epoch_t (
     id integer NOT NULL
@@ -317,7 +305,6 @@ SELECT count(*) AS rows,
        bool_and(must_keep IS NOT NULL) AS must_keep_not_null
 FROM schema_evolution_savepoint_t;
 
-\set VERBOSITY terse
 ALTER TABLE schema_evolution_t ADD COLUMN bad_required integer NOT NULL;
 ALTER TABLE schema_evolution_t ADD COLUMN bad_default integer DEFAULT 1;
 ALTER TABLE schema_evolution_t ADD COLUMN bad_identity integer GENERATED ALWAYS AS IDENTITY;
@@ -328,7 +315,6 @@ ALTER TABLE schema_evolution_t ALTER COLUMN id SET NOT NULL;
 ALTER TABLE schema_evolution_t ALTER COLUMN id SET DEFAULT 1;
 ALTER TABLE schema_evolution_t DROP COLUMN IF EXISTS maybe_bad;
 ALTER TABLE schema_evolution_t DROP COLUMN body CASCADE;
-\set VERBOSITY default
 
 DROP TABLE schema_evolution_savepoint_t;
 DROP TABLE schema_evolution_epoch_t;
