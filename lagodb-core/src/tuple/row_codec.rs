@@ -148,6 +148,8 @@ impl RowDatumCodec {
     /// must have selected the destination memory context, and `cells`,
     /// `values`, and `nulls` must each contain exactly one item for every bound
     /// target.
+    /// Cells must satisfy the producer value-domain contract documented by
+    /// `ColumnDatumCodec::cell_to_datum`.
     pub(crate) unsafe fn cells_to_datums<I>(
         &self,
         cells: I,
@@ -206,6 +208,8 @@ impl RowDatumCodec {
     /// PostgreSQL must be running on the current backend thread and the caller
     /// must have selected a memory context that owns returned by-reference
     /// datums. The plan must be bound to the same destination layout.
+    /// Widened integer cells must satisfy the producer value-domain contract
+    /// of `ColumnDatumCodec::cell_to_datum`.
     pub unsafe fn cell_to_datum(
         &self,
         index: usize,

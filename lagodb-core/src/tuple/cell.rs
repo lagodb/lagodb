@@ -208,7 +208,9 @@ impl Cell {
                     Date::from_datum(datum, false).map(Cell::Date)
                 }
                 PgOid::BuiltIn(PgBuiltInOids::TIMEOID) => {
-                    Time::from_datum(datum, false).map(Cell::Time)
+                    // Preserve PG's 24:00:00. FromDatum applies modulo one
+                    // day; TryFrom<Datum> retains the already valid PG value.
+                    Time::try_from(datum).ok().map(Cell::Time)
                 }
                 PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPOID) => {
                     Timestamp::from_datum(datum, false).map(Cell::Timestamp)

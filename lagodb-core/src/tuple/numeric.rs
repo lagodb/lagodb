@@ -3,6 +3,7 @@
 
 mod coefficient;
 mod comparison;
+mod read;
 
 use pgrx::pg_sys::{self, POSTGRES_EPOCH_JDATE, UNIX_EPOCH_JDATE};
 use pgrx::{AnyNumeric, IntoDatum, varlena_to_byte_slice};
@@ -13,6 +14,8 @@ pub use comparison::Decimal128ComparisonValue;
 unsafe extern "C-unwind" {
     #[link_name = "numeric_send"]
     fn pg_numeric_send(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum;
+    #[link_name = "numeric_recv"]
+    fn pg_numeric_recv(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum;
 }
 
 /// PostgreSQL epoch (2000-01-01) minus Unix epoch (1970-01-01) in days.
@@ -334,23 +337,6 @@ impl Decimal128NumericCodec {
         numeric_typmod(self.precision, self.scale as i32)
     }
 
-    /// Decodes an unscaled Decimal128 value into a freshly allocated
-    /// `AnyNumeric`, going through PostgreSQL's binary `numeric_recv` path.
-    ///
-    /// This avoids the `to_string` + `numeric_in` round-trip that pgrx's
-    /// `AnyNumeric::try_from(&str)` and `From<i128>` implementations use,
-    /// which is the dominant cost of decimal columns on million-row scans.
-    ///
-    /// `numeric_recv` also runs `apply_typmod`, so a value that does not fit
-    /// `NUMERIC(precision, scale)` is reported as
-    /// [`DecimalCodecError::ValueOutOfRange`] rather than silently truncated.
-    pub fn decode(&self, unscaled: i128) -> Result<AnyNumeric, DecimalCodecError> {
-        let external = NumericExternal::from_decimal128(unscaled, self.scale);
-        // SAFETY: only callable from a PostgreSQL backend thread; see the
-        // safety section on `numeric_recv_external`.
-        unsafe { numeric_recv_external(&external, self.typmod(), self) }
-    }
-
     /// Decodes an Avro decimal's signed big-endian two's-complement integer.
     ///
     /// Avro decimals permit arbitrary-width byte arrays. This codec admits
@@ -573,22 +559,19 @@ impl Decimal128NumericCodec {
 /// # Safety
 ///
 /// `numeric_recv` reads from the `StringInfo` it is handed and may call
-/// `ereport(ERROR, ...)`. We wrap the call in `PgTryBuilder` so the long-jump
-/// is converted to a Rust `Result`. The function is internally `unsafe`
-/// because it dereferences raw pointers; callers must only invoke it from a
-/// PostgreSQL backend thread, which is the only place pgrx datum APIs are
-/// valid.
+/// `ereport(ERROR, ...)`. The pgrx-wrapped `DirectFunctionCall3Coll` converts
+/// that longjmp into Rust unwind; `PgTryBuilder` maps only the two data errors
+/// above into a Rust `Result`. Callers must invoke this on a PostgreSQL backend
+/// thread, where pgrx datum APIs are valid.
 unsafe fn numeric_recv_external(
     external: &NumericExternal,
     typmod: i32,
     codec: &Decimal128NumericCodec,
-) -> Result<pgrx::AnyNumeric, DecimalCodecError> {
+) -> Result<AnyNumeric, DecimalCodecError> {
     use pgrx::PgTryBuilder;
     use pgrx::pg_sys::{errcodes::PgSqlErrorCode, panic::CaughtError};
 
     let external = *external; // Copy; closure becomes UnwindSafe.
-    let precision = codec.precision;
-    let scale = codec.scale;
 
     PgTryBuilder::new(move || {
         // Build StringInfoData on the call stack: numeric_recv only reads
@@ -600,33 +583,31 @@ unsafe fn numeric_recv_external(
         // and the caller guarantees execution on a PostgreSQL backend thread.
         Ok(unsafe { receive_numeric_wire(&mut buf[..len], typmod) })
     })
-    .catch_when(
-        PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-        move |e| {
-            // Only Postgres-side ereport(ERROR, ...) is converted; anything
-            // raised by Rust is rethrown so callers see the original cause.
-            let CaughtError::PostgresError(ref ereport) = e else {
-                e.rethrow();
-            };
-            Err(DecimalCodecError::ValueOutOfRange {
-                precision,
-                scale,
-                message: ereport.message().to_string(),
-            })
-        },
-    )
-    .catch_when(
-        PgSqlErrorCode::ERRCODE_INVALID_BINARY_REPRESENTATION,
-        move |e| {
-            let CaughtError::PostgresError(ref ereport) = e else {
-                e.rethrow();
-            };
-            Err(DecimalCodecError::InvalidBinaryRepresentation {
-                message: ereport.message().to_string(),
-            })
-        },
-    )
+    // Keep this handler noncapturing: catch_when allocates a dispatch map,
+    // and capturing precision/scale would allocate a boxed closure per value.
+    .catch_others(|error| {
+        let CaughtError::PostgresError(ref report) = error else {
+            error.rethrow();
+        };
+        match report.sql_error_code() {
+            code @ (PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE
+            | PgSqlErrorCode::ERRCODE_INVALID_BINARY_REPRESENTATION) => {
+                Err((code, report.message().to_owned()))
+            }
+            // Rethrow inside the handler, before PgTryBuilder flushes PG's
+            // error state on a handled error. Preserve the original cause.
+            _ => error.rethrow(),
+        }
+    })
     .execute()
+    .map_err(|(code, message)| {
+        if code == PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE {
+            codec.value_out_of_range(message)
+        } else {
+            // The handler returns only the two SQLSTATEs matched above.
+            DecimalCodecError::InvalidBinaryRepresentation { message }
+        }
+    })
 }
 
 /// Invoke PostgreSQL's binary NUMERIC receiver for one complete external wire
@@ -661,26 +642,24 @@ pub(super) unsafe fn receive_numeric_wire(
 /// Has the same backend-thread and wire-format requirements as
 /// [`receive_numeric_wire`].
 unsafe fn receive_numeric_wire_datum(wire: &mut [u8], typmod: i32) -> pg_sys::Datum {
-    use pgrx::IntoDatum;
-    use pgrx::fcinfo::direct_function_call_as_datum;
-
     let mut string_info = pg_sys::StringInfoData {
         data: wire.as_mut_ptr().cast(),
         len: wire.len() as i32,
         maxlen: wire.len() as i32,
         cursor: 0,
     };
+    // SAFETY: numeric_recv accepts this live StringInfo and typmod, needs no
+    // FmgrInfo, and returns a non-NULL Numeric. Like numeric_send above, PG
+    // builds its call frame on the stack. Error capture stays with the caller.
     unsafe {
-        direct_function_call_as_datum(
-            pg_sys::numeric_recv,
-            &[
-                Some(pg_sys::Datum::from(&mut string_info as *mut _)),
-                pg_sys::InvalidOid.into_datum(),
-                typmod.into_datum(),
-            ],
+        pg_sys::DirectFunctionCall3Coll(
+            Some(pg_numeric_recv),
+            pg_sys::InvalidOid,
+            pg_sys::Datum::from(&mut string_info as *mut _),
+            pg_sys::Datum::from(pg_sys::InvalidOid),
+            pg_sys::Datum::from(typmod),
         )
     }
-    .expect("numeric_recv must not return SQL NULL")
 }
 
 #[cfg(test)]

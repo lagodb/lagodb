@@ -33,7 +33,7 @@ impl PgOutputCString {
     ///
     /// `datum` must be a non-null pointer to a NUL-terminated string allocated
     /// by PostgreSQL memory management.
-    unsafe fn from_datum(datum: pg_sys::Datum) -> Self {
+    pub(crate) unsafe fn from_datum(datum: pg_sys::Datum) -> Self {
         let ptr = NonNull::new(datum.cast_mut_ptr::<c_char>())
             .expect("PostgreSQL output function returned a null cstring");
         Self { ptr }

@@ -72,10 +72,13 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy_from.c");
     println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy_to.c");
     println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy.h");
+    println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy_write.h");
     println!("cargo:rerun-if-changed=csrc/catalog/lagodb_partition_key.c");
     println!("cargo:rerun-if-changed=csrc/catalog/lagodb_partition_key.h");
     println!("cargo:rerun-if-changed=csrc/catalog/lagodb_relation.c");
     println!("cargo:rerun-if-changed=csrc/catalog/lagodb_relation.h");
+    println!("cargo:rerun-if-changed=csrc/tuple/lagodb_array.c");
+    println!("cargo:rerun-if-changed=csrc/tuple/lagodb_array.h");
 
     let Some(pg_feature) = active_pg_config() else {
         return;
@@ -154,6 +157,7 @@ fn main() {
             .file("csrc/truncate/lagodb_truncate.c")
             .file("csrc/catalog/lagodb_partition_key.c")
             .file("csrc/catalog/lagodb_relation.c")
+            .file("csrc/tuple/lagodb_array.c")
             .include(PathBuf::from("csrc/modify"))
             .include(PathBuf::from("csrc/analyze"))
             .include(PathBuf::from("csrc/vacuum"))

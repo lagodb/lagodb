@@ -171,32 +171,22 @@ impl ColumnDatumCodec {
     }
 
     /// Convert one semantic Cell for this already-bound destination column.
+    /// PG input errors unwind to the enclosing operation or provider/FFI
+    /// boundary; Rust conversion errors are returned directly.
     ///
     /// # Safety
     ///
     /// PostgreSQL must be running on the current backend thread, and the
     /// caller must have selected the memory context that owns any returned
     /// by-reference Datum.
+    /// An I32 cell targeting int2 must retain the range of a PG int2 value
+    /// widened by its producer. This is representation recovery, not an SQL
+    /// integer cast; external providers must establish that contract at admission.
     pub unsafe fn cell_to_datum(
         self,
         cell: Cell,
     ) -> Result<Datum, DatumConversionError> {
         unsafe { cell.into_datum_for_attribute(self.target) }
-    }
-
-    /// Convert an Arrow Int32 value for an already-bound `int2` target.
-    ///
-    /// # Safety
-    ///
-    /// This codec must have been bound from `INT2OID`. PostgreSQL must be
-    /// active on the current backend thread.
-    pub unsafe fn int2_datum_from_i32_unchecked(
-        self,
-        value: i32,
-    ) -> Result<Datum, DatumConversionError> {
-        i16::try_from(value)
-            .map(Datum::from)
-            .map_err(|_| DatumConversionError::out_of_range(self.target.oid))
     }
 
     /// Convert UTF-8 text for an already-bound PostgreSQL `name` target.
@@ -634,12 +624,7 @@ impl Cell {
                 Cell::I16(value) => value
                     .into_datum()
                     .ok_or(DatumConversionError::invalid_input(target)),
-                Cell::I32(value) => i16::try_from(value)
-                    .map_err(|_| DatumConversionError::out_of_range(target))?
-                    .into_datum()
-                    .ok_or(DatumConversionError::invalid_input(target)),
-                Cell::I64(value) => i16::try_from(value)
-                    .map_err(|_| DatumConversionError::out_of_range(target))?
+                Cell::I32(value) => (value as i16)
                     .into_datum()
                     .ok_or(DatumConversionError::invalid_input(target)),
                 _ => Err(DatumConversionError::incompatible(target)),
@@ -649,10 +634,6 @@ impl Cell {
                     .into_datum()
                     .ok_or(DatumConversionError::invalid_input(target)),
                 Cell::I32(value) => value
-                    .into_datum()
-                    .ok_or(DatumConversionError::invalid_input(target)),
-                Cell::I64(value) => i32::try_from(value)
-                    .map_err(|_| DatumConversionError::out_of_range(target))?
                     .into_datum()
                     .ok_or(DatumConversionError::invalid_input(target)),
                 _ => Err(DatumConversionError::incompatible(target)),
@@ -738,7 +719,7 @@ impl Cell {
                 PgWrapper::jsonb_input_from_cstr(text.as_ptr())
             },
             _ => return Err(DatumConversionError::incompatible(target)),
-        }?;
+        };
         result.ok_or(DatumConversionError::invalid_input(target))
     }
 

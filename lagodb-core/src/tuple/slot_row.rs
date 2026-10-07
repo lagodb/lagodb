@@ -295,6 +295,12 @@ impl<'slot> TupleSlotBatch<'slot> {
             .map(|slot| unsafe { TupleSlotRow::from_raw(*slot) })
     }
 
+    /// Borrow the slot pointers without preparing their attributes. Callers
+    /// reading Datum arrays must establish that all attributes are valid.
+    pub(crate) fn raw_slots(&self) -> &'slot [*mut pg_sys::TupleTableSlot] {
+        self.slots
+    }
+
     ///
     /// # Safety
     ///
