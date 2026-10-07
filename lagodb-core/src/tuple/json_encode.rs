@@ -5,6 +5,7 @@ use std::os::raw::c_uint;
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 
+use pgrx::pg_sys::ffi::pg_guard_ffi_boundary;
 use pgrx::pg_sys::{self, Datum};
 use pgrx::{PgMemoryContexts, PgTryBuilder};
 
@@ -107,12 +108,18 @@ impl JsonDatumEncoder {
             PgTryBuilder::new(|| {
                 let mut category = JSONTYPE_NULL;
                 let mut output_function = pg_sys::InvalidOid;
-                pg_json_categorize_type(
-                    type_oid,
-                    false,
-                    &mut category,
-                    &mut output_function,
-                );
+                // Even valid type OIDs require syscache lookups whose cache
+                // entries/resource-owner bookkeeping can allocate and ERROR.
+                // This hand-declared C call needs a guard to turn longjmp into
+                // Rust unwind before PgTryBuilder can capture it as a Result.
+                pg_guard_ffi_boundary(|| {
+                    pg_json_categorize_type(
+                        type_oid,
+                        false,
+                        &mut category,
+                        &mut output_function,
+                    );
+                });
                 Ok((category, output_function))
             })
             .catch_others(|error| Err(PgError::from(error)))

@@ -8,6 +8,7 @@ use std::ffi::{CString, NulError, c_void};
 use std::fmt;
 use std::mem::size_of;
 
+use pgrx::PgTryBuilder;
 use pgrx::pg_sys::{self, Datum};
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::varlena;
@@ -74,6 +75,13 @@ impl Drop for DetoastedJsonb {
 /// Errors raised while converting PostgreSQL and semantic JSON values.
 #[derive(Debug, Error)]
 pub enum JsonValueError {
+    #[error(
+        "expected a finite ISO date/time in the JSONB encoding range (UTC uses +00:00)"
+    )]
+    InvalidDatetime,
+    #[error("JSONB strings cannot contain a NUL byte")]
+    InvalidJsonbString,
+
     #[error("JSON text contains an interior NUL byte: {0}")]
     Nul(#[from] NulError),
 
@@ -86,7 +94,7 @@ pub enum JsonValueError {
     #[error("PostgreSQL JSON object encoding does not support {0:?} values")]
     UnsupportedOutputKind(JsonDatumKind),
 
-    #[error("PostgreSQL JSON object metadata exceeds the StringInfo size limit")]
+    #[error("PostgreSQL JSON output exceeds its buffer or representation limit")]
     OutputTooLarge,
 
     #[error(
@@ -101,7 +109,11 @@ pub enum JsonValueError {
 impl SqlStateError for JsonValueError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
+            Self::InvalidDatetime => PgSqlErrorCode::ERRCODE_INVALID_DATETIME_FORMAT,
             Self::Nul(_) => PgSqlErrorCode::ERRCODE_INVALID_TEXT_REPRESENTATION,
+            Self::InvalidJsonbString => {
+                PgSqlErrorCode::ERRCODE_UNTRANSLATABLE_CHARACTER
+            }
             Self::Postgres(error) => error.sql_error_code(),
             Self::NullInput => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
             Self::UnsupportedOutputKind(_) => {
@@ -129,8 +141,15 @@ impl JsonText {
     pub fn parse(text: &str) -> Result<Self, JsonValueError> {
         ColumnDatumTarget::validate_utf8_server_encoding()?;
         let input = CString::new(text)?;
-        let datum = unsafe { PgWrapper::json_input_from_cstr(input.as_ptr())? }
-            .ok_or(JsonValueError::NullInput)?;
+        // This standalone parser owns its Result boundary. Datum codecs let
+        // the enclosing row/FFI boundary catch PG errors instead.
+        let datum = PgTryBuilder::new(|| {
+            // SAFETY: input is NUL-terminated and lives through the PG call.
+            Ok(unsafe { PgWrapper::json_input_from_cstr(input.as_ptr()) })
+        })
+        .catch_others(|error| Err(PgError::from(error)))
+        .execute()?
+        .ok_or(JsonValueError::NullInput)?;
 
         // `json_in` returns a fresh text datum.  The semantic value keeps its
         // own Rust allocation, so the temporary PostgreSQL allocation is no
@@ -220,8 +239,15 @@ impl JsonbValue {
     pub fn parse(text: &str) -> Result<Self, JsonValueError> {
         ColumnDatumTarget::validate_utf8_server_encoding()?;
         let input = CString::new(text)?;
-        let datum = unsafe { PgWrapper::jsonb_input_from_cstr(input.as_ptr())? }
-            .ok_or(JsonValueError::NullInput)?;
+        // Preserve the standalone parser's Result contract without putting a
+        // catch in the shared input wrapper used by row decoding.
+        let datum = PgTryBuilder::new(|| {
+            // SAFETY: input is NUL-terminated and lives through the PG call.
+            Ok(unsafe { PgWrapper::jsonb_input_from_cstr(input.as_ptr()) })
+        })
+        .catch_others(|error| Err(PgError::from(error)))
+        .execute()?
+        .ok_or(JsonValueError::NullInput)?;
         let result = match unsafe {
             PgOutputCString::from_function_call(pg_sys::jsonb_out, &[Some(datum)])
         } {
@@ -284,10 +310,12 @@ impl JsonbValue {
         size_of::<Self>() + self.text.len()
     }
 
-    /// Build a PostgreSQL JSONB Datum while retaining the original PG error.
+    /// Build a PostgreSQL JSONB Datum through validating input. PG errors
+    /// unwind to the enclosing operation or provider/FFI boundary.
     pub(crate) unsafe fn to_datum_checked(&self) -> Result<Option<Datum>, PgError> {
         let input = CString::new(self.as_str()).map_err(PgError::from)?;
-        unsafe { PgWrapper::jsonb_input_from_cstr(input.as_ptr()) }
+        // SAFETY: input is NUL-terminated and lives through the PG call.
+        Ok(unsafe { PgWrapper::jsonb_input_from_cstr(input.as_ptr()) })
     }
 }
 
