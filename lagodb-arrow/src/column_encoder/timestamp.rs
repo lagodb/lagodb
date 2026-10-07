@@ -91,7 +91,7 @@ impl<U: TimestampUnit> TimestampColumn<U> {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `timestamp` Datum.
-    pub(super) unsafe fn append_timestamp(
+    pub(crate) unsafe fn append_timestamp(
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {
@@ -108,7 +108,7 @@ impl<U: TimestampUnit> TimestampColumn<U> {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `timestamptz` Datum.
-    pub(super) unsafe fn append_timestamptz(
+    pub(crate) unsafe fn append_timestamptz(
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {
@@ -121,11 +121,11 @@ impl<U: TimestampUnit> TimestampColumn<U> {
         }
     }
 
-    pub(super) fn append_null(&mut self) {
+    pub(crate) fn append_null(&mut self) {
         self.builder.append_null();
     }
 
-    pub(super) fn finish(
+    pub(crate) fn finish(
         &mut self,
         timezone: Option<&str>,
     ) -> ArrowConversionResult<ArrayRef> {
@@ -137,7 +137,7 @@ impl<U: TimestampUnit> TimestampColumn<U> {
         Ok(Arc::new(array))
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.builder.len()
     }
 }

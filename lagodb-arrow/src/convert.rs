@@ -1,6 +1,6 @@
 //! Row-world write dispatch.
 //!
-//! [`ColumnRule::build`] (buffered `Cell`s → Arrow array) is the `Cell`-based
+//! [`CellRule::build`] (buffered `Cell`s → Arrow array) is the `Cell`-based
 //! row-world write API a row-mode access method or FDW consumes. It drives the
 //! same [`ArrowColumnEncoder`] the columnar hot path uses (via `append_cell`),
 //! so a buffered `Cell` and a live datum produce a bit-identical Arrow array.
@@ -8,17 +8,17 @@
 //! The read direction has no per-value downcast here. The row-world binds
 //! semantic columns through [`ColumnReader`](crate::read::ColumnReader); the
 //! slot-first path binds provider datum codecs through
-//! [`ArrowColumnDecoder`](crate::read::ArrowColumnDecoder). Both resolve the
+//! [`ArrowColumnDecoder`](crate::ArrowColumnDecoder). Both resolve the
 //! concrete Arrow array once per batch.
 
 use arrow_array::ArrayRef;
 use lagodb_core::tuple::Row;
 
+use crate::column_encoder::ArrowColumnEncoder;
 use crate::error::ArrowConversionResult;
-use crate::rule::ColumnRule;
-use crate::types::ArrowColumnEncoder;
+use crate::rule::CellRule;
 
-impl ColumnRule {
+impl CellRule {
     /// Build an Arrow array for this rule from column `col_idx` of every row,
     /// appending one slot per row so all columns stay NULL-aligned.
     ///

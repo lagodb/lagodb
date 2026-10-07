@@ -1,43 +1,34 @@
-//! Columnar read-side adapters: the two halves core's
-//! [`BatchRowCursor<Source, Decoder>`](lagodb_core::batch) consumes.
+//! Concrete Arrow array bindings, Cell readers and batch sources.
 //!
-//! - [`ArrowBatchSource`] (impl [`AmScanBatchSource`]) feeds one Arrow
-//!   `RecordBatch` at a time from any fallible Arrow batch iterator.
-//! - [`ArrowColumnDecoder`] (impl [`BatchRowDecoder`]) decodes one batch row
-//!   into a tuple slot, per column, keyed on the same [`ColumnRule`] the write
-//!   encoder uses.
-//!
-//! Relation-bound mutation writers use
-//! [`BoundWriteBuffer`](crate::BoundWriteBuffer) when source codecs are fixed
-//! during planning.
-
-use std::rc::Rc;
+//! [`ArrowBatchSource`] feeds one Arrow `RecordBatch` at a time. [`ColumnReader`]
+//! binds concrete arrays for the Cell API and its caller-supplied semantic Datum
+//! adapter. Declared Datum plans, physical codecs, recursive readers and slot
+//! decoding belong to `datum_codec`.
 
 use arrow_array::cast::AsArray;
 use arrow_array::{
     Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array,
-    Float64Array, Int32Array, Int64Array, LargeBinaryArray, LargeStringArray,
-    ListArray, RecordBatch, StringArray, Time64MicrosecondArray,
+    Float64Array, Int16Array, Int32Array, Int64Array, LargeBinaryArray,
+    LargeStringArray, RecordBatch, StringArray, Time64MicrosecondArray,
     TimestampMicrosecondArray, TimestampNanosecondArray,
 };
 use arrow_schema::DataType;
 use lagodb_core::api::{AmError, AmResult};
-use lagodb_core::batch::{AmScanBatchSource, BatchRowDecoder};
+use lagodb_core::batch::AmScanBatchSource;
 use lagodb_core::tuple::{
     ByteaView, Cell, ColumnDatumCodec, ColumnDatumTarget, Decimal128NumericCodec,
-    SlotColumns, StringView,
+    StringView,
 };
 use pgrx::datum::Uuid;
 use pgrx::pg_sys;
 
-use crate::datum::DatumCodec;
+use crate::column_encoder::{downcast, temporal};
 use crate::error::{ArrowConversionError, ArrowConversionResult};
-use crate::rule::{ColumnRule, ListElementRule};
-use crate::types::{downcast, list, temporal};
+use crate::rule::CellRule;
 
 use arrow_array::FixedSizeBinaryArray;
 
-mod bound;
+pub(crate) mod list;
 
 /// Read one Arrow validity bit after the enclosing bound batch established the
 /// row index for every column.
@@ -46,7 +37,7 @@ mod bound;
 ///
 /// `row_idx` must be within `array`.
 #[inline]
-unsafe fn is_null_unchecked(array: &impl Array, row_idx: usize) -> bool {
+pub(crate) unsafe fn is_null_unchecked(array: &impl Array, row_idx: usize) -> bool {
     array.nulls().is_some_and(|nulls| {
         // SAFETY: upheld by this function's contract. Arrow's safe `is_null`
         // would repeat the same row bound already established by BoundBatch.
@@ -114,59 +105,9 @@ where
 // Row decoder
 // ---------------------------------------------------------------------------
 
-/// One mapped column: which Arrow batch column to read, the resolved rule, the
-/// destination slot index, and the selected datum codec. A physical codec is
-/// part of the bound plan so a generic Arrow type or PostgreSQL OID cannot
-/// silently select storage or query-result semantics.
-pub struct DecodedColumn {
-    rule: ColumnRule,
-    src_col: usize,
-    dest: usize,
-    target_oid: pg_sys::Oid,
-    codec: DatumCodec,
-}
-
-impl DecodedColumn {
-    /// Construct a decoder column from a relation-bound target.
-    ///
-    /// # Safety
-    ///
-    /// `target_oid` must be the actual type OID of the destination attribute
-    /// at `dest` in the live relation tuple descriptor. `dest` must be within
-    /// that descriptor's slot width. The caller must also keep the
-    /// relation/slot layout unchanged for the lifetime of the decoder. The
-    /// constructor validates the codec/OID pairing, but it cannot inspect an
-    /// arbitrary descriptor from these scalar arguments alone.
-    pub unsafe fn new(
-        rule: ColumnRule,
-        src_col: usize,
-        dest: usize,
-        target_oid: pg_sys::Oid,
-        codec: DatumCodec,
-    ) -> ArrowConversionResult<Self> {
-        codec.validate_target_oid(target_oid)?;
-        if rule.requires_utf8_server_encoding() {
-            ColumnDatumTarget::validate_utf8_server_encoding()
-                .map_err(ArrowConversionError::from)?;
-        }
-        Ok(Self {
-            rule,
-            src_col,
-            dest,
-            target_oid,
-            codec,
-        })
-    }
-
-    /// The relation attribute OID validated against this column's codec.
-    #[inline]
-    pub fn target_oid(&self) -> pg_sys::Oid {
-        self.target_oid
-    }
-}
-
 /// One column's concrete Arrow array, resolved (validated + downcast) **once**
-/// when a batch is bound, so the per-row read does no per-value type dispatch.
+/// when a batch is bound. Each value still dispatches on the bound reader enum,
+/// but does not repeat Arrow downcasts or rule resolution.
 ///
 /// Each held array is a cheap clone of the batch column (Arrow arrays are thin
 /// `Arc`-backed handles, so `clone` is a refcount bump, not a data copy), which
@@ -182,6 +123,7 @@ impl DecodedColumn {
 /// special case are implementation detail behind the opaque [`ColumnReader`].
 pub(crate) enum ReaderImpl {
     Bool(BooleanArray),
+    I16(Int16Array),
     I32(Int32Array),
     I64(Int64Array),
     F32(Float32Array),
@@ -206,69 +148,14 @@ pub(crate) enum ReaderImpl {
         arr: Decimal128Array,
         codec: Decimal128NumericCodec,
     },
-    List {
-        arr: ListArray,
-        element: ListElementRule,
-        element_codec: ColumnDatumCodec,
-    },
-}
-
-/// Slot-first reader with the final datum conversion encoded in its variant.
-///
-/// Unlike [`ColumnReader`], this type cannot represent a semantic-only reader
-/// or a physical codec paired with the wrong Arrow representation. Binding
-/// pays those checks once per batch; the row loop performs one exhaustive
-/// reader dispatch.
-enum BoundDatumReader {
-    Bool(BooleanArray, ColumnDatumCodec),
-    I32(Int32Array, ColumnDatumCodec),
-    I64(Int64Array, ColumnDatumCodec),
-    F32(Float32Array, ColumnDatumCodec),
-    F64(Float64Array, ColumnDatumCodec),
-    Utf8(StringArray, ColumnDatumCodec),
-    LargeUtf8(LargeStringArray, ColumnDatumCodec),
-    Binary(BinaryArray, ColumnDatumCodec),
-    LargeBinary(LargeBinaryArray, ColumnDatumCodec),
-    FixedBinary(FixedSizeBinaryArray, ColumnDatumCodec),
-    Uuid(FixedSizeBinaryArray, ColumnDatumCodec),
-    Date32(Date32Array, ColumnDatumCodec),
-    Time64Micros(Time64MicrosecondArray, ColumnDatumCodec),
-    TimestampMicros {
-        arr: TimestampMicrosecondArray,
-        tz: bool,
-        target: ColumnDatumCodec,
-    },
-    TimestampNanos {
-        arr: TimestampNanosecondArray,
-        tz: bool,
-        target: ColumnDatumCodec,
-    },
-    Decimal128 {
-        arr: Decimal128Array,
-        codec: Decimal128NumericCodec,
-        target: ColumnDatumCodec,
-    },
-    List {
-        arr: ListArray,
-        element: ListElementRule,
-        element_codec: ColumnDatumCodec,
-    },
-    PrevalidatedJsonText(StringArray),
-    PrevalidatedLargeJsonText(LargeStringArray),
-    PostgresJsonbVarlena(BinaryArray),
-    PostgresLargeJsonbVarlena(LargeBinaryArray),
-    PostgresNumericVarlena(BinaryArray),
-    PostgresLargeNumericVarlena(LargeBinaryArray),
-    Float4FromFloat64(Float64Array),
-    NumericFromInt64(Int64Array),
-    NumericFromFloat64(Float64Array),
+    List(Box<list::ListReader>),
 }
 
 /// A semantic batch column resolved (validated + downcast) to its concrete
 /// Arrow array once, then read row by row with no per-value downcast.
 ///
 /// This public reader belongs to the row-world / FDW `Cell` API. The
-/// slot-first scan path uses the private [`BoundDatumReader`], whose variants
+/// slot-first scan path uses the private `datum_codec::BoundDatumReader`, whose variants
 /// also encode the final datum conversion.
 ///
 /// Opaque by design: the inner Arrow representation can change without breaking
@@ -280,14 +167,9 @@ pub struct ColumnReader {
 
 impl ColumnReader {
     /// Bind a semantic reader for the row-world `Cell` API. Provider physical
-    /// codecs are represented separately by [`BoundDatumReader`] so their
+    /// codecs are represented separately by `datum_codec::BoundDatumReader` so their
     /// bytes cannot be materialized as a semantic `Cell`.
-    pub fn bind(rule: &ColumnRule, array: &dyn Array) -> ArrowConversionResult<Self> {
-        if matches!(rule, ColumnRule::PostgresJsonbVarlena) {
-            return Err(ArrowConversionError::InvariantViolated(
-                "PostgreSQL JSONB varlena columns require an explicit physical codec",
-            ));
-        }
+    pub fn bind(rule: &CellRule, array: &dyn Array) -> ArrowConversionResult<Self> {
         if rule.requires_utf8_server_encoding() {
             ColumnDatumTarget::validate_utf8_server_encoding()
                 .map_err(ArrowConversionError::from)?;
@@ -302,7 +184,7 @@ impl ColumnReader {
     /// provide (decimal scale, fixed width, timestamp unit/tz), so the
     /// subsequent downcast cannot fail.
     pub(crate) fn bind_reader(
-        rule: &ColumnRule,
+        rule: &CellRule,
         array: &dyn Array,
     ) -> ArrowConversionResult<ReaderImpl> {
         if !rule.accepts(array.data_type()) {
@@ -315,49 +197,63 @@ impl ColumnReader {
                 .into(),
             ));
         }
+        // SAFETY: the complete rule was checked above, including child types.
+        unsafe { Self::bind_reader_unchecked(rule, array) }
+    }
+
+    /// Bind the concrete arrays without repeating schema validation.
+    ///
+    /// # Safety
+    /// `rule.accepts(array.data_type())` must hold, including decimal scale,
+    /// fixed binary width and all nested element types.
+    pub(crate) unsafe fn bind_reader_unchecked(
+        rule: &CellRule,
+        array: &dyn Array,
+    ) -> ArrowConversionResult<ReaderImpl> {
         let reader = match rule {
-            ColumnRule::Bool => {
+            CellRule::Bool => {
                 ReaderImpl::Bool(downcast::<BooleanArray>(array, "Boolean")?.clone())
             }
-            ColumnRule::I32 => {
+            CellRule::I16 => {
+                ReaderImpl::I16(downcast::<Int16Array>(array, "Int16")?.clone())
+            }
+            CellRule::I32 => {
                 ReaderImpl::I32(downcast::<Int32Array>(array, "Int32")?.clone())
             }
-            ColumnRule::I64 => {
+            CellRule::I64 => {
                 ReaderImpl::I64(downcast::<Int64Array>(array, "Int64")?.clone())
             }
-            ColumnRule::F32 => {
+            CellRule::F32 => {
                 ReaderImpl::F32(downcast::<Float32Array>(array, "Float32")?.clone())
             }
-            ColumnRule::F64 => {
+            CellRule::F64 => {
                 ReaderImpl::F64(downcast::<Float64Array>(array, "Float64")?.clone())
             }
-            ColumnRule::Utf8 => match array.data_type() {
+            CellRule::Utf8 => match array.data_type() {
                 DataType::Utf8 => ReaderImpl::Utf8(array.as_string::<i32>().clone()),
                 _ => ReaderImpl::LargeUtf8(array.as_string::<i64>().clone()),
             },
-            ColumnRule::Binary | ColumnRule::PostgresJsonbVarlena => {
-                match array.data_type() {
-                    DataType::Binary => {
-                        ReaderImpl::Binary(array.as_binary::<i32>().clone())
-                    }
-                    _ => ReaderImpl::LargeBinary(array.as_binary::<i64>().clone()),
+            CellRule::Binary => match array.data_type() {
+                DataType::Binary => {
+                    ReaderImpl::Binary(array.as_binary::<i32>().clone())
                 }
-            }
-            ColumnRule::FixedBinary { .. } => ReaderImpl::FixedBinary(
+                _ => ReaderImpl::LargeBinary(array.as_binary::<i64>().clone()),
+            },
+            CellRule::FixedBinary { .. } => ReaderImpl::FixedBinary(
                 downcast::<FixedSizeBinaryArray>(array, "FixedSizeBinary")?.clone(),
             ),
-            ColumnRule::Uuid => ReaderImpl::Uuid(
+            CellRule::Uuid => ReaderImpl::Uuid(
                 downcast::<FixedSizeBinaryArray>(array, "FixedSizeBinary (UUID)")?
                     .clone(),
             ),
-            ColumnRule::Date32 => {
+            CellRule::Date32 => {
                 ReaderImpl::Date32(downcast::<Date32Array>(array, "Date32")?.clone())
             }
-            ColumnRule::Time64Micros => ReaderImpl::Time64Micros(
+            CellRule::Time64Micros => ReaderImpl::Time64Micros(
                 downcast::<Time64MicrosecondArray>(array, "Time64Microsecond")?
                     .clone(),
             ),
-            ColumnRule::Timestamp { nanos, tz } => {
+            CellRule::Timestamp { nanos, tz } => {
                 if *nanos {
                     ReaderImpl::TimestampNanos {
                         arr: downcast::<TimestampNanosecondArray>(
@@ -378,20 +274,15 @@ impl ColumnReader {
                     }
                 }
             }
-            ColumnRule::Decimal128 { precision, scale } => ReaderImpl::Decimal128 {
+            CellRule::Decimal128 { precision, scale } => ReaderImpl::Decimal128 {
                 arr: downcast::<Decimal128Array>(array, "Decimal128")?.clone(),
                 codec: Decimal128NumericCodec::new(*precision, *scale)?,
             },
-            ColumnRule::List {
+            CellRule::List {
                 element, elem_oid, ..
-            } => ReaderImpl::List {
-                arr: downcast::<ListArray>(array, "List")?.clone(),
-                element: *element,
-                element_codec: ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(
-                    *elem_oid,
-                ))
-                .map_err(ArrowConversionError::from)?,
-            },
+            } => ReaderImpl::List(Box::new(list::ListReader::bind(
+                array, *element, *elem_oid,
+            )?)),
         };
         Ok(reader)
     }
@@ -410,24 +301,14 @@ impl ColumnReader {
     /// array) payload should be palloc'd into. The supplied codec must match
     /// the bound column contract; physical codecs do not parse or validate
     /// producer-owned bytes.
+    /// Int32 values targeting int2 must retain the producer's PG int2 range.
     unsafe fn read_standard_datum(
         &self,
         row_idx: usize,
         target: ColumnDatumCodec,
     ) -> ArrowConversionResult<Option<pg_sys::Datum>> {
         match &self.reader {
-            ReaderImpl::List {
-                arr,
-                element,
-                element_codec,
-            } => {
-                if unsafe { is_null_unchecked(arr, row_idx) } {
-                    return Ok(None);
-                }
-                Ok(Some(unsafe {
-                    list::array_datum_at(arr, row_idx, *element, *element_codec)
-                }?))
-            }
+            ReaderImpl::List(reader) => unsafe { reader.datum(row_idx) },
             _ => {
                 // SAFETY: the borrowed-view `Cell` returned here is consumed
                 // immediately by the bound codec below (which copies into a
@@ -448,7 +329,7 @@ impl ColumnReader {
     ///
     /// The codec must be bound once for the destination column before this
     /// method is used repeatedly. Its type excludes provider-selected physical
-    /// codecs; those are bound by [`ArrowColumnDecoder`] and use the private
+    /// codecs; those are bound by [`ArrowColumnDecoder`](crate::ArrowColumnDecoder) and use the private
     /// bound-reader path directly.
     ///
     /// # Safety
@@ -483,7 +364,7 @@ impl ColumnReader {
     /// the view) after the reader is dropped — copy/materialize it first (e.g.
     /// into a slot datum) if it must live longer. The owned variants (numeric,
     /// temporal, list arrays) carry no borrow and are always safe. Provider
-    /// physical readers use the separate private [`BoundDatumReader`] type and
+    /// physical readers use the separate private `datum_codec::BoundDatumReader` type and
     /// cannot enter this API.
     pub unsafe fn read_cell_unchecked(
         &self,
@@ -500,6 +381,10 @@ impl ColumnReader {
             ReaderImpl::Bool(a) => {
                 null_guard!(a);
                 Cell::Bool(unsafe { a.value_unchecked(row_idx) })
+            }
+            ReaderImpl::I16(a) => {
+                null_guard!(a);
+                Cell::I16(unsafe { a.value_unchecked(row_idx) })
             }
             ReaderImpl::I32(a) => {
                 null_guard!(a);
@@ -573,30 +458,27 @@ impl ColumnReader {
                 null_guard!(arr);
                 Cell::Numeric(codec.decode(unsafe { arr.value_unchecked(row_idx) })?)
             }
-            ReaderImpl::List { arr, element, .. } => {
-                null_guard!(arr);
-                // Row-world list cells keep the Arrow *physical* element width
-                // (see the narrowing TODO in `types::list`); the bound datum
-                // path uses its element-OID-aware route instead.
-                unsafe { list::cell_at(arr, row_idx, *element) }?
-            }
+            ReaderImpl::List(reader) => return unsafe { reader.cell(row_idx) },
         };
         Ok(Some(cell))
     }
 }
 
-fn str_view_cell(s: &str) -> Cell {
+pub(crate) fn str_view_cell(s: &str) -> Cell {
     // SAFETY: s owns a live UTF-8 buffer for the lifetime of the returned
     // view; callers of the surrounding reader control that lifetime.
     Cell::StringView(unsafe { StringView::from_raw_parts(s.as_ptr(), s.len()) })
 }
 
-fn bytea_view_cell(bytes: &[u8]) -> Cell {
+pub(crate) fn bytea_view_cell(bytes: &[u8]) -> Cell {
     // SAFETY: bytes remains live while the returned zero-copy cell is used.
     Cell::ByteaView(unsafe { ByteaView::from_raw_parts(bytes.as_ptr(), bytes.len()) })
 }
 
-fn timestamp_cell(unix_micros: i64, tz: bool) -> ArrowConversionResult<Cell> {
+pub(crate) fn timestamp_cell(
+    unix_micros: i64,
+    tz: bool,
+) -> ArrowConversionResult<Cell> {
     if tz {
         Ok(Cell::Timestamptz(temporal::timestamptz_from_unix_micros(
             unix_micros,
@@ -605,147 +487,5 @@ fn timestamp_cell(unix_micros: i64, tz: bool) -> ArrowConversionResult<Cell> {
         Ok(Cell::Timestamp(temporal::timestamp_from_unix_micros(
             unix_micros,
         )?))
-    }
-}
-
-/// One batch with every mapped column resolved to its concrete typed array.
-/// Produced by [`ArrowColumnDecoder::bind`] and read row by row, so the
-/// validation + downcast is paid once per batch, never per value.
-pub struct BoundBatch {
-    columns: Box<[BoundColumn]>,
-    num_rows: usize,
-}
-
-struct BoundColumn {
-    reader: BoundDatumReader,
-    dest: usize,
-}
-
-/// Decodes Arrow column values into slot datums. The per-column plan is
-/// resolved once (no per-row rule resolution or allocation); unmapped slot
-/// positions are left untouched.
-///
-/// Leaving a position untouched is safe only because every column the executor
-/// can read is mapped: a whole-row reference falls back to `NeededColumns::All`
-/// (so the plan covers every live column), and a projected scan maps exactly
-/// the referenced columns — unmapped positions are therefore dropped or
-/// otherwise never-read columns. This does **not** rely on `ExecClearTuple`
-/// resetting `tts_isnull`: it does not (the slot's `tts_values`/`tts_isnull`
-/// arrays are `palloc0`'d, i.e. start non-NULL, and only `ExecStoreAllNullTuple`
-/// marks them all NULL). Correctness comes from the "unmapped == unreferenced"
-/// invariant, not from the cleared slot.
-///
-/// The immutable column plan is reference-counted with [`Rc`]: PostgreSQL scan
-/// state is backend-local, while rescans need cheap decoder handles without
-/// rebuilding or cloning every column rule. The row loop still iterates the
-/// slice directly and never touches the reference count.
-#[derive(Clone)]
-pub struct ArrowColumnDecoder {
-    columns: Rc<[DecodedColumn]>,
-}
-
-impl ArrowColumnDecoder {
-    pub fn new(columns: Vec<DecodedColumn>) -> Self {
-        Self {
-            columns: Rc::from(columns.into_boxed_slice()),
-        }
-    }
-
-    /// Decode one row directly into a slot whose layout is the one used to
-    /// validate the decoder's [`DecodedColumn`] destinations.
-    ///
-    /// This is the trusted-provider physical path. It is deliberately an
-    /// unsafe method instead of being the implementation of the safe
-    /// [`BatchRowDecoder::write_row`] API: the decoder stores scalar
-    /// destinations, not a type-level association with a particular
-    /// `SlotColumns` descriptor.
-    ///
-    /// # Safety
-    ///
-    /// `bound` must have been produced by this decoder. Every `col.dest` in
-    /// `bound` must be within `out.natts()`, and `out` must be backed by the
-    /// same relation slot layout whose width and
-    /// destination mapping were validated when these `DecodedColumn`s were
-    /// constructed. `row_idx` must be within `bound` and every bound Arrow
-    /// array. The caller must also satisfy the memory-context requirements of
-    /// [`BoundDatumReader::read_datum_unchecked`].
-    #[inline]
-    pub unsafe fn write_row_unchecked(
-        &self,
-        bound: &BoundBatch,
-        row_idx: usize,
-        out: &mut SlotColumns<'_>,
-    ) -> AmResult<()> {
-        for col in bound.columns.iter() {
-            // The shim already switched to the slot's target context, so the
-            // varlena/array palloc lands where the per-row reset expects it.
-            let datum = unsafe { col.reader.read_datum_unchecked(row_idx) }?;
-            // SAFETY: guaranteed by this method's contract.
-            unsafe { out.set_datum_unchecked(col.dest, datum) };
-        }
-        Ok(())
-    }
-}
-
-impl BatchRowDecoder for ArrowColumnDecoder {
-    type Batch = RecordBatch;
-    type Bound = BoundBatch;
-
-    /// Resolve every mapped column to its concrete typed array, once per batch.
-    /// Each `src_col` is bounds-checked and its array validated + downcast here
-    /// (see [`ColumnReader::bind`]), so `write_row` does no per-value downcast
-    /// and a producer/plan type drift surfaces as a clean
-    /// [`ArrowConversionError::ArrowTypeMismatch`] at the batch boundary.
-    fn bind(&self, batch: RecordBatch) -> AmResult<BoundBatch> {
-        let num_rows = batch.num_rows();
-        let mut columns = Vec::with_capacity(self.columns.len());
-        for col in self.columns.iter() {
-            let array = batch.columns().get(col.src_col).ok_or_else(|| {
-                ArrowConversionError::ArrowTypeMismatch(
-                    format!(
-                        "batch has {} columns but the plan reads column {}",
-                        batch.num_columns(),
-                        col.src_col
-                    )
-                    .into(),
-                )
-            })?;
-            columns.push(BoundColumn {
-                reader: BoundDatumReader::bind(&col.rule, array.as_ref(), col.codec)?,
-                dest: col.dest,
-            });
-        }
-        Ok(BoundBatch {
-            columns: columns.into_boxed_slice(),
-            num_rows,
-        })
-    }
-
-    fn num_rows(&self, bound: &BoundBatch) -> usize {
-        bound.num_rows
-    }
-
-    /// Safe generic path: the destination bound is checked by `SlotColumns`.
-    /// Trusted relation-bound providers can use
-    /// [`Self::write_row_unchecked`] after upholding its layout contract.
-    fn write_row(
-        &self,
-        bound: &BoundBatch,
-        row_idx: usize,
-        out: &mut SlotColumns<'_>,
-    ) -> AmResult<()> {
-        if row_idx >= bound.num_rows {
-            return Err(ArrowConversionError::InvariantViolated(
-                "batch row index is out of bounds",
-            )
-            .into());
-        }
-        for col in bound.columns.iter() {
-            // The shim already switched to the slot's target context, so the
-            // varlena/array palloc lands where the per-row reset expects it.
-            let datum = unsafe { col.reader.read_datum_unchecked(row_idx) }?;
-            out.set_datum(col.dest, datum);
-        }
-        Ok(())
     }
 }

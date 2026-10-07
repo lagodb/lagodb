@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use lagodb_core::diag::{PgError, SqlStateError};
 use lagodb_core::tuple::{
-    DatumConversionError, DecimalCodecError, Utf8ServerEncodingError,
+    DatumConversionError, DecimalCodecError, JsonValueError, Utf8ServerEncodingError,
 };
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
@@ -13,6 +13,10 @@ use thiserror::Error;
 /// [`SqlStateError`].
 #[derive(Error, Debug)]
 pub enum ArrowConversionError {
+    /// A nested value cannot be represented as PostgreSQL JSONB.
+    #[error("JSONB conversion error: {0}")]
+    JsonValue(#[from] JsonValueError),
+
     /// The column's Arrow `DataType` is not one this layer can materialize.
     #[error("column data type is not supported: {0}")]
     UnsupportedColumnType(String),
@@ -88,6 +92,7 @@ pub type ArrowConversionResult<T> = Result<T, ArrowConversionError>;
 impl SqlStateError for ArrowConversionError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
+            Self::JsonValue(error) => error.sql_error_code(),
             ArrowConversionError::UnsupportedColumnType(_)
             | ArrowConversionError::IncompatibleColumnType(_, _)
             | ArrowConversionError::ArrowTypeMismatch(_) => {

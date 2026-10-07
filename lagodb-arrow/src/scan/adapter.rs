@@ -10,14 +10,15 @@ use lagodb_core::expr::pushdown::{
     FilterPlanningContext, PredicatePlan, QueryExpressionNormalizer,
     QueryExpressionScope, QueryPruningPlanner,
 };
+use lagodb_core::handles::ExecutorHandle;
 use lagodb_core::hooks::register_table_scan;
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 use lagodb_core::runtime_api::{
     BoundTableScanResult, CALLBACK_OK, CallbackErrorReport, PlannedTableScanResult,
     PlannedTableScanTasks, PredicateSupport, TABLE_SCAN_FAILED, TABLE_SCAN_PLANNED,
-    TABLE_SCAN_UNSUPPORTED, TableScanBindRequest, TableScanDescriptor,
-    TableScanPlanningRequest, TableScanPredicateResult, TableScanRuntimePredicate,
-    TableScanStreamRequest, TableScanTaskPlanningRequest,
+    TABLE_SCAN_UNSUPPORTED, TableScanBindRequest, TableScanCallbacks,
+    TableScanDescriptor, TableScanPlanningRequest, TableScanPredicateResult,
+    TableScanRuntimePredicate, TableScanStreamRequest, TableScanTaskPlanningRequest,
 };
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
@@ -42,16 +43,18 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
             TableScanDescriptor::new(
                 P::ROUTES,
                 ptr::from_ref(provider).cast_mut().cast(),
-                Self::owns_foreign_server,
-                Self::plan_scan,
-                Self::bind_scan,
-                Self::get_bound_schema,
-                Self::negotiate_predicate,
-                Self::plan_scan_tasks,
-                Self::open_stream,
-                Self::release_predicate,
-                Self::release_planned,
-                Self::release_bound,
+                TableScanCallbacks {
+                    owns_foreign_server: Self::owns_foreign_server,
+                    plan_scan: Self::plan_scan,
+                    bind_scan: Self::bind_scan,
+                    get_bound_schema: Self::get_bound_schema,
+                    negotiate_predicate: Self::negotiate_predicate,
+                    plan_scan_tasks: Self::plan_scan_tasks,
+                    open_stream: Self::open_stream,
+                    release_predicate: Self::release_predicate,
+                    release_planned: Self::release_planned,
+                    release_bound: Self::release_bound,
+                },
             )
         }
     }
@@ -90,6 +93,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
         provider_context: *mut c_void,
         request: *const TableScanPlanningRequest,
         output: *mut PlannedTableScanResult,
+        schema_output: *mut c_void,
         error: *mut CallbackErrorReport,
     ) -> u32 {
         let mut outcome = TABLE_SCAN_UNSUPPORTED;
@@ -105,15 +109,23 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
             {
                 ScanSupport::Unsupported => outcome = TABLE_SCAN_UNSUPPORTED,
                 ScanSupport::Planned(planned) => {
-                    let (plan, cost) = planned.into_parts();
+                    let (plan, cost, schema) = planned.into_parts();
                     let plan_data = PlanDataWriter::encode_list(|writer| {
                         provider.encode_scan_plan(&plan, writer)
                     })
                     .map_err(PgReportError::from_domain_error)?;
                     let pruning_expression =
                         pruning.map_or(ptr::null_mut(), |pruning| pruning.expression);
+                    let schema = FFI_ArrowSchema::try_from(schema.as_ref())
+                        .map_err(|error| {
+                            PgReportError::from_message(
+                                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                                format!("table scan returned an unexportable Arrow schema: {error}"),
+                            )
+                        })?;
                     // SAFETY: output is runtime-owned writable storage.
                     unsafe {
+                        schema_output.cast::<FFI_ArrowSchema>().write(schema);
                         *output = PlannedTableScanResult {
                             struct_size: size_of::<PlannedTableScanResult>() as u32,
                             plan_data,
@@ -176,6 +188,11 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
         // costing, and EXPLAIN identity. DataFusion negotiates the final filter
         // again against the statement-bound scan and owns that execution
         // artifact through the physical plan.
+        // TODO: Measure the planning allocations from constructing this unused
+        // provider artifact. If material, let capability/cost analysis reuse the
+        // provider's predicate rules without materializing the artifact. Preserve
+        // PG costing and final DataFusion negotiation; do not add a second
+        // capability implementation or cache PG artifacts across those stages.
         drop(predicate);
         Ok(Some(AdapterPruning {
             expression: pruning_expression,
@@ -207,8 +224,10 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
                 )
             }
             .map_err(PgReportError::from_domain_error)?;
+            // SAFETY: the bind ABI borrows the initialized owning executor.
+            let executor = unsafe { ExecutorHandle::from_raw(request.estate) };
             let scan = provider
-                .bind_scan(&plan)
+                .bind_scan(&plan, &executor)
                 .map_err(PgReportError::from_domain_error)?;
             // SAFETY: runtime assumes ownership through release_bound.
             unsafe {

@@ -30,7 +30,7 @@ impl Utf8Encoder {
     /// `datum` must be a valid, non-NULL PostgreSQL `text`, `varchar`,
     /// `bpchar`, or `json` varlena Datum. The relation-bound PG_UTF8
     /// server-encoding invariant must also hold.
-    pub(super) unsafe fn append_text(
+    pub(crate) unsafe fn append_text(
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {
@@ -50,7 +50,7 @@ impl Utf8Encoder {
     /// # Safety
     /// `datum` must point to a valid, non-NULL PostgreSQL `NameData`, and the
     /// relation-bound PG_UTF8 server-encoding invariant must hold.
-    pub(super) unsafe fn append_name(
+    pub(crate) unsafe fn append_name(
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {

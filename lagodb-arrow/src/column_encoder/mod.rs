@@ -1,20 +1,19 @@
-//! Per-type-family conversion modules and the central column-encoder dispatch.
+//! Arrow column encoders and shared conversions, organized by type family.
 //!
 //! Each submodule owns one logical column type's **write** vertical slice — its
 //! value math (codec) and its write path (bound datum / `Cell` → Arrow builder) — plus
-//! any value helpers the read path reuses (epoch math, decimal codec,
-//! `list::cell_at`). The per-value **read** dispatch is not here: it lives in
+//! any value helpers the read path reuses (epoch math and decimal codec).
+//! The per-value **read** dispatch is not here: it lives in
 //! the bound [`ColumnReader`](crate::read), which downcasts a column once per
 //! batch and reads values without a per-value downcast.
 //!
 //! This module hosts the cross-cutting write dispatch that ties them together:
 //! the [`ColumnAppend`] contract every row-world encoder implements, the
 //! [`ArrowColumnEncoder`] enum that stores one concrete encoder per column,
-//! and the relation-bound [`BoundColumnEncoder`] whose source codec is selected
-//! once during plan construction. The small set of helpers shared across the
+//! Datum source binding and recursive execution live in `datum_codec`. The small set of helpers shared across the
 //! type modules (`read_bound`, `downcast`,
 //! `cell_type_mismatch`) stays here. The row-world `Cell` **write** dispatch
-//! (`ColumnRule::build`) lives in [`convert`](crate::convert).
+//! (`CellRule::build`) lives in [`convert`](crate::convert).
 
 use std::borrow::Cow;
 
@@ -23,11 +22,9 @@ use lagodb_core::tuple::Cell;
 use pgrx::pg_sys;
 
 use crate::error::{ArrowConversionError, ArrowConversionResult};
-use crate::rule::ColumnRule;
+use crate::rule::CellRule;
 
 pub(crate) mod binary;
-pub(crate) mod bound;
-pub(crate) mod bound_list;
 pub(crate) mod decimal;
 pub(crate) mod list;
 pub(crate) mod primitive;
@@ -37,12 +34,12 @@ pub(crate) mod timestamp;
 
 pub use temporal::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};
 
-pub(crate) use bound::{BoundColumnEncoder, BoundEncoderPlan};
-
-use binary::{BinaryEncoder, BinaryKind, FixedBinaryEncoder, UuidEncoder};
+use binary::{BinaryEncoder, FixedBinaryEncoder, UuidEncoder};
 use decimal::Decimal128Encoder;
 use list::ListEncoder;
-use primitive::{BoolEncoder, F32Conv, F64Conv, I32Conv, I64Conv, PrimitiveEncoder};
+use primitive::{
+    BoolEncoder, F32Conv, F64Conv, I16Conv, I32Conv, I64Conv, PrimitiveEncoder,
+};
 use string::Utf8Encoder;
 use temporal::{Date32Conv, Time64Conv};
 use timestamp::TimestampEncoder;
@@ -67,18 +64,19 @@ pub(crate) trait ColumnAppend {
 }
 
 /// A per-column Arrow builder, one variant per physical Arrow column type.
-/// Constructed from the column's resolved [`ColumnRule`] so the write and read
+/// Constructed from the column's resolved [`CellRule`] so the write and read
 /// paths share one dispatch key.
 ///
 /// This is a thin public wrapper over the private [`Encoder`] enum: the variant
 /// set and the per-type encoder structs are implementation details, so the
 /// public surface is `new` and the `Cell`/lifecycle methods used by the
 /// row-world path. Relation-bound PostgreSQL datum writes use
-/// [`BoundColumnEncoder`] so their source codec is fixed at construction.
+/// `datum_codec::DatumEncoder` so their source codec is fixed at construction.
 pub struct ArrowColumnEncoder(Encoder);
 
 enum Encoder {
     Bool(BoolEncoder),
+    I16(PrimitiveEncoder<I16Conv>),
     I32(PrimitiveEncoder<I32Conv>),
     I64(PrimitiveEncoder<I64Conv>),
     F32(PrimitiveEncoder<F32Conv>),
@@ -103,6 +101,7 @@ macro_rules! dispatch_encoder {
     ($self:expr, $e:ident => $body:expr) => {
         match $self {
             Encoder::Bool($e) => $body,
+            Encoder::I16($e) => $body,
             Encoder::I32($e) => $body,
             Encoder::I64($e) => $body,
             Encoder::F32($e) => $body,
@@ -123,49 +122,35 @@ macro_rules! dispatch_encoder {
 impl ArrowColumnEncoder {
     /// Build the encoder for a resolved column rule, pre-sizing builders to
     /// `capacity` rows.
-    pub fn new(rule: &ColumnRule, capacity: usize) -> ArrowConversionResult<Self> {
+    pub fn new(rule: &CellRule, capacity: usize) -> ArrowConversionResult<Self> {
         let encoder = match rule {
-            ColumnRule::Bool => Encoder::Bool(BoolEncoder::with_capacity(capacity)),
-            ColumnRule::I32 => {
-                Encoder::I32(PrimitiveEncoder::with_capacity(capacity))
+            CellRule::Bool => Encoder::Bool(BoolEncoder::with_capacity(capacity)),
+            CellRule::I16 => Encoder::I16(PrimitiveEncoder::with_capacity(capacity)),
+            CellRule::I32 => Encoder::I32(PrimitiveEncoder::with_capacity(capacity)),
+            CellRule::I64 => Encoder::I64(PrimitiveEncoder::with_capacity(capacity)),
+            CellRule::F32 => Encoder::F32(PrimitiveEncoder::with_capacity(capacity)),
+            CellRule::F64 => Encoder::F64(PrimitiveEncoder::with_capacity(capacity)),
+            CellRule::Utf8 => Encoder::Utf8(Utf8Encoder::with_capacity(capacity)),
+            CellRule::Binary => {
+                Encoder::Binary(BinaryEncoder::with_capacity(capacity))
             }
-            ColumnRule::I64 => {
-                Encoder::I64(PrimitiveEncoder::with_capacity(capacity))
-            }
-            ColumnRule::F32 => {
-                Encoder::F32(PrimitiveEncoder::with_capacity(capacity))
-            }
-            ColumnRule::F64 => {
-                Encoder::F64(PrimitiveEncoder::with_capacity(capacity))
-            }
-            ColumnRule::Utf8 => Encoder::Utf8(Utf8Encoder::with_capacity(capacity)),
-            ColumnRule::Binary => Encoder::Binary(BinaryEncoder::with_capacity(
-                capacity,
-                BinaryKind::Bytea,
-            )),
-            ColumnRule::PostgresJsonbVarlena => {
-                Encoder::Binary(BinaryEncoder::with_capacity(
-                    capacity,
-                    BinaryKind::PostgresJsonbVarlena,
-                ))
-            }
-            ColumnRule::FixedBinary { len } => Encoder::FixedBinary(
+            CellRule::FixedBinary { len } => Encoder::FixedBinary(
                 FixedBinaryEncoder::with_capacity(capacity, *len),
             ),
-            ColumnRule::Uuid => Encoder::Uuid(UuidEncoder::with_capacity(capacity)),
-            ColumnRule::Date32 => {
+            CellRule::Uuid => Encoder::Uuid(UuidEncoder::with_capacity(capacity)),
+            CellRule::Date32 => {
                 Encoder::Date32(PrimitiveEncoder::with_capacity(capacity))
             }
-            ColumnRule::Time64Micros => {
+            CellRule::Time64Micros => {
                 Encoder::Time64Micros(PrimitiveEncoder::with_capacity(capacity))
             }
-            ColumnRule::Timestamp { nanos, tz } => Encoder::Timestamp(
+            CellRule::Timestamp { nanos, tz } => Encoder::Timestamp(
                 TimestampEncoder::with_capacity(capacity, *nanos, *tz),
             ),
-            ColumnRule::Decimal128 { precision, scale } => Encoder::Decimal128(
+            CellRule::Decimal128 { precision, scale } => Encoder::Decimal128(
                 Decimal128Encoder::with_capacity(capacity, *precision, *scale)?,
             ),
-            ColumnRule::List { element, field, .. } => Encoder::List(
+            CellRule::List { element, field, .. } => Encoder::List(
                 ListEncoder::with_capacity(capacity, *element, field.clone()),
             ),
         };
@@ -190,16 +175,6 @@ impl ArrowColumnEncoder {
     }
 
     pub fn clear(&mut self) {
-        // Arrow builders have no separate reset entry point: `finish` is what
-        // resets their internal buffers, so calling it and discarding the
-        // produced array is the idiomatic way to clear in-progress contents.
-        //
-        // Discarding the `Result` is intentional and sound: of all variants
-        // only `Decimal128`'s `finish` is fallible (its precision/scale tag is
-        // applied to the *already-finished* — i.e. already-reset — array), so
-        // an error here still leaves every encoder empty and reusable. There is
-        // no buffered state left to report on, which is exactly what `clear`
-        // promises.
         let _ = self.finish();
     }
 
@@ -261,14 +236,14 @@ mod tests {
     #[test]
     fn scalar_rules_finish_with_their_widened_arrow_type() {
         let cases = [
-            (ColumnRule::Bool, DataType::Boolean),
-            (ColumnRule::I32, DataType::Int32),
-            (ColumnRule::I64, DataType::Int64),
-            (ColumnRule::F32, DataType::Float32),
-            (ColumnRule::F64, DataType::Float64),
-            (ColumnRule::Date32, DataType::Date32),
+            (CellRule::Bool, DataType::Boolean),
+            (CellRule::I32, DataType::Int32),
+            (CellRule::I64, DataType::Int64),
+            (CellRule::F32, DataType::Float32),
+            (CellRule::F64, DataType::Float64),
+            (CellRule::Date32, DataType::Date32),
             (
-                ColumnRule::Time64Micros,
+                CellRule::Time64Micros,
                 DataType::Time64(TimeUnit::Microsecond),
             ),
         ];
@@ -291,7 +266,7 @@ mod tests {
         ];
         for (nanos, tz, expected_unit, expected_tz) in cases {
             let mut encoder =
-                ArrowColumnEncoder::new(&ColumnRule::Timestamp { nanos, tz }, 4)
+                ArrowColumnEncoder::new(&CellRule::Timestamp { nanos, tz }, 4)
                     .expect("valid rule");
             let array = encoder.finish().expect("finish");
             match array.data_type() {

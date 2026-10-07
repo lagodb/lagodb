@@ -12,7 +12,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use arrow_array::builder::{ArrayBuilder, BooleanBuilder, PrimitiveBuilder};
-use arrow_array::types::{Float32Type, Float64Type, Int32Type, Int64Type};
+use arrow_array::types::{Float32Type, Float64Type, Int16Type, Int32Type, Int64Type};
 use arrow_array::{ArrayRef, ArrowPrimitiveType};
 use lagodb_core::tuple::Cell;
 use pgrx::{FromDatum, pg_sys};
@@ -26,7 +26,7 @@ use crate::error::ArrowConversionResult;
 
 /// Per-type conversion for an Arrow primitive column: how to read the column's
 /// native Arrow value from a present, non-null PostgreSQL datum or a buffered
-/// [`Cell`]. One zero-sized marker per primitive `ColumnRule` collapses the
+/// [`Cell`]. One zero-sized marker per primitive `CellRule` collapses the
 /// near-identical primitive encoders into the single generic
 /// [`PrimitiveEncoder`]; dispatch stays a monomorphized `match` (no `dyn`).
 pub(crate) trait PrimitiveConv {
@@ -62,7 +62,7 @@ impl<C: PrimitiveConv> PrimitiveEncoder<C> {
     const VALUE_BYTES: usize =
         std::mem::size_of::<<C::Arrow as ArrowPrimitiveType>::Native>();
 
-    pub(super) fn append_bound_value(
+    pub(crate) fn append_bound_value(
         &mut self,
         value: ArrowConversionResult<<C::Arrow as ArrowPrimitiveType>::Native>,
     ) -> ArrowConversionResult<usize> {
@@ -92,6 +92,36 @@ impl<C: PrimitiveConv> ColumnAppend for PrimitiveEncoder<C> {
     }
 }
 
+/// Native int16 storage, retaining the PostgreSQL smallint width.
+pub(crate) struct I16Conv;
+impl PrimitiveConv for I16Conv {
+    type Arrow = Int16Type;
+    const LABEL: &'static str = "int2";
+
+    fn from_cell(cell: &Cell) -> ArrowConversionResult<Option<i16>> {
+        Ok(match cell {
+            Cell::I16(value) => Some(*value),
+            _ => None,
+        })
+    }
+}
+
+impl I16Conv {
+    /// # Safety
+    /// `datum` must be a valid, non-NULL PostgreSQL int2 datum.
+    pub(crate) unsafe fn from_int2(
+        datum: pg_sys::Datum,
+    ) -> ArrowConversionResult<i16> {
+        unsafe {
+            read_bound(
+                datum,
+                i16::from_datum,
+                "I16 encoder: present int2 datum read as null",
+            )
+        }
+    }
+}
+
 /// `int4` column, widening an `int2` / `char` source as the row-build path does.
 pub(crate) struct I32Conv;
 impl PrimitiveConv for I32Conv {
@@ -113,7 +143,7 @@ impl I32Conv {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `int2` Datum.
-    pub(super) unsafe fn from_int2(
+    pub(crate) unsafe fn from_int2(
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<i32> {
         unsafe {
@@ -130,7 +160,7 @@ impl I32Conv {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `int4` Datum.
-    pub(super) unsafe fn from_int4(
+    pub(crate) unsafe fn from_int4(
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<i32> {
         unsafe {
@@ -146,7 +176,7 @@ impl I32Conv {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `char` Datum.
-    pub(super) unsafe fn from_char(
+    pub(crate) unsafe fn from_char(
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<i32> {
         unsafe {
@@ -181,7 +211,7 @@ impl I64Conv {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `int2` Datum.
-    pub(super) unsafe fn from_int2(
+    pub(crate) unsafe fn from_int2(
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<i64> {
         unsafe {
@@ -198,7 +228,7 @@ impl I64Conv {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `int4` Datum.
-    pub(super) unsafe fn from_int4(
+    pub(crate) unsafe fn from_int4(
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<i64> {
         unsafe {
@@ -215,7 +245,7 @@ impl I64Conv {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `int8` Datum.
-    pub(super) unsafe fn from_int8(
+    pub(crate) unsafe fn from_int8(
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<i64> {
         unsafe {
@@ -247,7 +277,7 @@ impl F32Conv {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `float4` Datum.
-    pub(super) unsafe fn from_float4(
+    pub(crate) unsafe fn from_float4(
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<f32> {
         unsafe {
@@ -280,7 +310,7 @@ impl F64Conv {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `float4` Datum.
-    pub(super) unsafe fn from_float4(
+    pub(crate) unsafe fn from_float4(
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<f64> {
         unsafe {
@@ -297,7 +327,7 @@ impl F64Conv {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `float8` Datum.
-    pub(super) unsafe fn from_float8(
+    pub(crate) unsafe fn from_float8(
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<f64> {
         unsafe {
@@ -329,7 +359,7 @@ impl BoolEncoder {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `bool` Datum.
-    pub(super) unsafe fn append_bound(
+    pub(crate) unsafe fn append_bound(
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {

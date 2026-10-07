@@ -1,8 +1,7 @@
-//! Binary-family conversion (`bytea` / `jsonb` / `uuid` / fixed-width `bytea`):
+//! Binary-family conversion (`bytea` / `uuid` / fixed-width `bytea`):
 //! the per-value length guard for `FixedSizeBinary(len)` plus the read
 //! (`Arrow → Cell`) and write (bound datum / `Cell` → Arrow builder) paths.
 
-use std::ffi::{CString, c_void};
 use std::sync::Arc;
 
 use arrow_array::ArrayRef;
@@ -11,11 +10,10 @@ use arrow_array::builder::{
 };
 use lagodb_core::tuple::{Cell, DetoastedVarlena};
 use pgrx::datum::Uuid;
-use pgrx::{FromDatum, PgTryBuilder, fcinfo, pg_sys};
+use pgrx::{FromDatum, pg_sys};
 
 use super::{ColumnAppend, cell_type_mismatch, read_bound};
 use crate::error::{ArrowConversionError, ArrowConversionResult};
-use lagodb_core::diag::PgError;
 
 // ---------------------------------------------------------------------------
 // Codec
@@ -43,25 +41,17 @@ impl FixedCodec {
 }
 
 // ---------------------------------------------------------------------------
-// Binary write encoder (bytea / explicit JSONB internal-varlena)
+// Binary write encoder (bytea)
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum BinaryKind {
-    Bytea,
-    PostgresJsonbVarlena,
-}
 
 pub(crate) struct BinaryEncoder {
     builder: LargeBinaryBuilder,
-    kind: BinaryKind,
 }
 
 impl BinaryEncoder {
-    pub(crate) fn with_capacity(capacity: usize, kind: BinaryKind) -> Self {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             builder: LargeBinaryBuilder::with_capacity(capacity, 1024),
-            kind,
         }
     }
 
@@ -69,7 +59,7 @@ impl BinaryEncoder {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `bytea` varlena Datum.
-    pub(super) unsafe fn append_bytea(
+    pub(crate) unsafe fn append_bytea(
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {
@@ -78,46 +68,17 @@ impl BinaryEncoder {
         self.builder.append_value(bytes);
         Ok(bytes.len())
     }
-
-    /// Append a non-NULL PostgreSQL internal `jsonb` varlena datum.
-    ///
-    /// # Safety
-    /// `datum` must be a valid, non-NULL PostgreSQL `jsonb` varlena Datum.
-    pub(super) unsafe fn append_jsonb(
-        &mut self,
-        datum: pg_sys::Datum,
-    ) -> ArrowConversionResult<usize> {
-        let guard = unsafe { DetoastedVarlena::from_datum(datum) };
-        let bytes = guard.full_varlena_bytes();
-        self.builder.append_value(bytes);
-        Ok(bytes.len())
-    }
 }
 
 impl ColumnAppend for BinaryEncoder {
     fn append_cell(&mut self, cell: &Cell) -> ArrowConversionResult<()> {
-        match self.kind {
-            BinaryKind::Bytea => match cell {
-                Cell::Bytea(b) => self.builder.append_value(b),
-                // SAFETY: a `ByteaView` cell borrows live bytes; copied synchronously.
-                Cell::ByteaView(b) => {
-                    self.builder.append_value(unsafe { b.as_slice() })
-                }
-                _ => return Err(cell_type_mismatch("bytea")),
-            },
-            BinaryKind::PostgresJsonbVarlena => match cell {
-                Cell::Jsonb(value) => {
-                    // Row-world input is already a semantic JSONB value. Borrow
-                    // its PostgreSQL output text while jsonb_in constructs the
-                    // provider's physical representation; do not deep-clone a
-                    // generic JSON tree or serialize it through serde_json.
-                    let datum =
-                        unsafe { JsonbInputDatum::from_text(value.as_str())? };
-                    let guard = unsafe { DetoastedVarlena::from_datum(datum.datum) };
-                    self.builder.append_value(guard.full_varlena_bytes());
-                }
-                _ => return Err(cell_type_mismatch("jsonb")),
-            },
+        match cell {
+            Cell::Bytea(bytes) => self.builder.append_value(bytes),
+            // SAFETY: a ByteaView borrows live bytes, copied synchronously.
+            Cell::ByteaView(bytes) => {
+                self.builder.append_value(unsafe { bytes.as_slice() })
+            }
+            _ => return Err(cell_type_mismatch("bytea")),
         }
         Ok(())
     }
@@ -132,44 +93,6 @@ impl ColumnAppend for BinaryEncoder {
 
     fn len(&self) -> usize {
         self.builder.len()
-    }
-}
-
-/// Owns the temporary Datum created by the row-world JSONB input path. The
-/// Arrow builder copies the complete varlena before this guard is dropped, so
-/// the PostgreSQL allocation does not remain in the batch memory context.
-struct JsonbInputDatum {
-    datum: pg_sys::Datum,
-}
-
-impl JsonbInputDatum {
-    unsafe fn from_text(text: &str) -> ArrowConversionResult<Self> {
-        let input = CString::new(text).map_err(|_| {
-            ArrowConversionError::InvalidInput(
-                "semantic JSONB text contains an interior NUL".to_string(),
-            )
-        })?;
-        let datum = unsafe {
-            PgTryBuilder::new(|| {
-                Ok(fcinfo::direct_function_call_as_datum(
-                    pg_sys::jsonb_in,
-                    &[Some(pg_sys::Datum::from(input.as_ptr()))],
-                ))
-            })
-            .catch_others(|error| Err(PgError::from(error)))
-            .execute()
-        }
-        .map_err(ArrowConversionError::Postgres)?
-        .ok_or(ArrowConversionError::InvariantViolated(
-            "jsonb_in returned NULL for a non-null semantic value",
-        ))?;
-        Ok(Self { datum })
-    }
-}
-
-impl Drop for JsonbInputDatum {
-    fn drop(&mut self) {
-        unsafe { pg_sys::pfree(self.datum.cast_mut_ptr::<c_void>()) };
     }
 }
 
@@ -195,7 +118,7 @@ impl FixedBinaryEncoder {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `bytea` varlena Datum.
-    pub(super) unsafe fn append_bound(
+    pub(crate) unsafe fn append_bound(
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {
@@ -252,7 +175,7 @@ impl UuidEncoder {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `uuid` Datum.
-    pub(super) unsafe fn append_bound(
+    pub(crate) unsafe fn append_bound(
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {

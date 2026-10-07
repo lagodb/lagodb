@@ -46,7 +46,7 @@ impl Decimal128Encoder {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `numeric` Datum.
-    pub(super) unsafe fn append_bound(
+    pub(crate) unsafe fn append_bound(
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {

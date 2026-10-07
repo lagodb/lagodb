@@ -15,161 +15,85 @@ use lagodb_core::tuple::{
 };
 use pgrx::pg_sys;
 
+use crate::BoundDatumPlan;
+use crate::datum_codec::DatumEncoder;
 use crate::error::{ArrowConversionError, ArrowConversionResult};
-use crate::rule::ColumnRule;
-use crate::types::{ArrowColumnEncoder, BoundColumnEncoder, BoundEncoderPlan};
 
 const DEFAULT_ROW_CAPACITY: usize = 1024;
+// Payload estimates omit offsets and validity buffers. Bound the row count
+// independently so NULL and empty values cannot accumulate until statement end.
+// Both flush checks use existing counters, without inspecting column builders.
+const MAX_BUFFERED_ROWS: usize = 65_536;
 
-/// One validated output-column plan without runtime Arrow builder state.
-///
-/// Keeping this plan separate from [`BoundWriteBuffer`] lets construction check
-/// relation-wide capabilities before allocating any per-column builders.
-enum BoundWriteInput {
-    Null {
-        rule: ColumnRule,
-    },
-    Datum {
-        index: SlotDatumIndex,
-        plan: BoundEncoderPlan,
-    },
-}
-
+/// A declared Datum plan bound to one mandatory source slot.
+/// Providers establish complete output-field coverage before constructing it.
 pub struct BoundWriteColumnPlan {
-    input: BoundWriteInput,
-    requires_utf8: bool,
+    index: SlotDatumIndex,
+    plan: BoundDatumPlan,
 }
 
-/// One validated PostgreSQL-datum input plan without a tuple-slot position.
-///
-/// This is the companion to [`BoundWriteColumnPlan`] for adapters that already
-/// own a typed datum stream, such as a COPY bridge.  The PostgreSQL source OID
-/// and Arrow rule are bound once; row appends perform no OID lookup or Arrow
-/// type dispatch.
+/// A declared Datum plan for a stream without tuple-slot positions (COPY).
 pub struct BoundDatumColumnPlan {
-    plan: BoundEncoderPlan,
-    requires_utf8: bool,
+    plan: BoundDatumPlan,
 }
 
 impl BoundDatumColumnPlan {
-    pub fn bind(
-        rule: ColumnRule,
-        source_oid: pg_sys::Oid,
-    ) -> ArrowConversionResult<Self> {
-        let requires_utf8 = rule.requires_utf8_server_encoding();
-        Ok(Self {
-            plan: BoundEncoderPlan::bind(rule, source_oid)?,
-            requires_utf8,
-        })
+    pub fn new(plan: BoundDatumPlan) -> Self {
+        Self { plan }
     }
 }
 
 impl BoundWriteColumnPlan {
-    /// Bind one output rule to an optional source slot.
-    ///
-    /// `source_slot` is zero-based and is checked against the complete
-    /// relation width.  `source_oid` must be present exactly when
-    /// `source_slot` is present; an absent pair represents a typed all-NULL
-    /// output column from a missing optional source.
+    /// Bind a mandatory source position, checked once against the slot width.
     pub fn bind(
-        rule: ColumnRule,
-        source_slot: Option<usize>,
-        source_oid: Option<pg_sys::Oid>,
+        plan: BoundDatumPlan,
+        source_slot: usize,
         slot_width: usize,
     ) -> ArrowConversionResult<Self> {
-        let requires_utf8 = rule.requires_utf8_server_encoding();
-        let input = match (source_slot, source_oid) {
-            (None, None) => BoundWriteInput::Null { rule },
-            (Some(index), Some(oid)) => {
-                let index = SlotDatumIndex::new(index, slot_width).ok_or(
-                    ArrowConversionError::InvariantViolated(
-                        "bound write source index is outside the relation slot width",
-                    ),
-                )?;
-                BoundWriteInput::Datum {
-                    index,
-                    plan: BoundEncoderPlan::bind(rule, oid)?,
-                }
-            }
-            _ => {
-                return Err(ArrowConversionError::InvariantViolated(
-                    "bound write source index and source OID must be paired",
-                ));
-            }
-        };
-        Ok(Self {
-            input,
-            requires_utf8,
-        })
+        let index = SlotDatumIndex::new(source_slot, slot_width).ok_or(
+            ArrowConversionError::InvariantViolated(
+                "bound write source index is outside the relation slot width",
+            ),
+        )?;
+        Ok(Self { index, plan })
     }
 
     fn into_column(self) -> ArrowConversionResult<BoundWriteColumn> {
-        Ok(match self.input {
-            BoundWriteInput::Null { rule } => BoundWriteColumn::Null(
-                ArrowColumnEncoder::new(&rule, DEFAULT_ROW_CAPACITY)?,
-            ),
-            BoundWriteInput::Datum { index, plan } => BoundWriteColumn::Datum {
-                index,
-                encoder: plan.materialize(DEFAULT_ROW_CAPACITY)?,
-            },
+        Ok(BoundWriteColumn {
+            index: self.index,
+            encoder: self.plan.encoder(DEFAULT_ROW_CAPACITY)?,
         })
     }
 }
 
-/// Runtime state for one bound output column.
-enum BoundWriteColumn {
-    Null(ArrowColumnEncoder),
-    Datum {
-        index: SlotDatumIndex,
-        encoder: BoundColumnEncoder,
-    },
+struct BoundWriteColumn {
+    index: SlotDatumIndex,
+    encoder: DatumEncoder,
 }
 
 impl BoundWriteColumn {
     fn append(&mut self, datums: &SlotDatums<'_>) -> ArrowConversionResult<usize> {
-        match self {
-            Self::Null(encoder) => {
-                encoder.append_null();
-                Ok(0)
-            }
-            Self::Datum { index, encoder } => {
-                // SAFETY: the index was validated against the relation width
-                // while this column was bound, and the callback supplies a slot
-                // of that same relation layout. The raw accessor reads only the
-                // two validated arrays.
-                let (raw, is_null) = unsafe { datums.datum_at_bound(*index) };
-                if is_null {
-                    encoder.append_null();
-                    Ok(0)
-                } else {
-                    // SAFETY: the bound source codec and Arrow encoder were
-                    // selected together during plan construction; `raw` is the
-                    // corresponding non-NULL slot datum.
-                    unsafe { encoder.append(raw) }
-                }
-            }
+        // SAFETY: binding establishes the slot index and declared datum type;
+        // the caller supplies that same layout for the buffer's lifetime.
+        let (raw, is_null) = unsafe { datums.datum_at_bound(self.index) };
+        if is_null {
+            self.encoder.append_null();
+            Ok(0)
+        } else {
+            unsafe { self.encoder.append(raw) }
         }
     }
 
     fn finish(&mut self) -> ArrowConversionResult<ArrayRef> {
-        match self {
-            Self::Null(encoder) => encoder.finish(),
-            Self::Datum { encoder, .. } => encoder.finish(),
-        }
+        self.encoder.finish()
     }
 
     fn clear(&mut self) {
-        match self {
-            Self::Null(encoder) => encoder.clear(),
-            Self::Datum { encoder, .. } => encoder.clear(),
-        }
+        self.encoder.clear();
     }
 
     fn len(&self) -> usize {
-        match self {
-            Self::Null(encoder) => encoder.len(),
-            Self::Datum { encoder, .. } => encoder.len(),
-        }
+        self.encoder.len()
     }
 }
 
@@ -189,7 +113,7 @@ pub struct BoundWriteBuffer {
 /// constructing an intermediate slot or owned row.
 pub struct BoundDatumBuffer {
     schema: Arc<Schema>,
-    columns: Box<[BoundColumnEncoder]>,
+    columns: Box<[DatumEncoder]>,
     rows: usize,
     estimated_bytes: usize,
 }
@@ -204,14 +128,17 @@ impl BoundDatumBuffer {
                 "bound datum column and Arrow schema counts differ",
             ));
         }
-        if plans.iter().any(|plan| plan.requires_utf8) {
+        if plans
+            .iter()
+            .any(|plan| plan.plan.requires_utf8_server_encoding())
+        {
             ColumnDatumTarget::validate_utf8_server_encoding()
                 .map_err(ArrowConversionError::from)?;
         }
         let columns = plans
             .into_vec()
             .into_iter()
-            .map(|plan| plan.plan.materialize(DEFAULT_ROW_CAPACITY))
+            .map(|plan| plan.plan.encoder(DEFAULT_ROW_CAPACITY))
             .collect::<ArrowConversionResult<Vec<_>>>()?
             .into_boxed_slice();
         Ok(Self {
@@ -287,6 +214,10 @@ impl BatchBuffer for BoundDatumBuffer {
     fn estimated_size(&self) -> usize {
         self.estimated_bytes
     }
+
+    fn should_flush(&self, max_bytes: usize) -> bool {
+        self.estimated_bytes >= max_bytes || self.rows >= MAX_BUFFERED_ROWS
+    }
 }
 
 impl BoundWriteBuffer {
@@ -303,7 +234,10 @@ impl BoundWriteBuffer {
         // Validate the relation-wide capability before materializing any
         // Arrow builders. A failed capability check must not allocate the
         // runtime column state for a writer that cannot accept rows.
-        if plans.iter().any(|plan| plan.requires_utf8) {
+        if plans
+            .iter()
+            .any(|plan| plan.plan.requires_utf8_server_encoding())
+        {
             ColumnDatumTarget::validate_utf8_server_encoding()
                 .map_err(ArrowConversionError::from)?;
         }
@@ -391,5 +325,9 @@ impl BatchBuffer for BoundWriteBuffer {
 
     fn estimated_size(&self) -> usize {
         self.estimated_bytes
+    }
+
+    fn should_flush(&self, max_bytes: usize) -> bool {
+        self.estimated_bytes >= max_bytes || self.rows >= MAX_BUFFERED_ROWS
     }
 }

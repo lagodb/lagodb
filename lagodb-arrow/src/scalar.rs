@@ -6,21 +6,22 @@
 //! selected conversion; it never re-enters the general `Cell`/OID dispatcher.
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array,
-    Int64Array, LargeStringArray, StringArray,
+    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array,
+    Int32Array, Int64Array, LargeStringArray, StringArray,
 };
 use arrow_schema::DataType;
 use lagodb_core::tuple::{ColumnDatumCodec, ColumnDatumTarget};
 use pgrx::{IntoDatum, pg_sys};
 
+use crate::datum_codec::{DatumEncoder, NativeEncoderPlan};
 use crate::error::{ArrowConversionError, ArrowConversionResult};
 use crate::read::{ColumnReader, ReaderImpl};
-use crate::rule::{PgColumnType, resolve_column_rule};
-use crate::types::{BoundColumnEncoder, BoundEncoderPlan};
+use crate::rule::{PgColumnType, resolve_cell_rule};
 
 enum PgDatumReader {
     Bool(BooleanArray),
-    Int2(Int32Array, ColumnDatumCodec),
+    Int16(Int16Array),
+    Int2(Int32Array),
     Int4(Int32Array),
     Int8(Int64Array),
     Float4(Float32Array),
@@ -45,14 +46,13 @@ impl PgDatumArrayReader {
                 "PostgreSQL type OID {type_oid:?}"
             ))
         })?;
-        let rule = resolve_column_rule(array.data_type(), pg_type)?;
+        let rule = resolve_cell_rule(array.data_type(), pg_type)?;
         let target = ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(type_oid))?;
         let reader = ColumnReader::bind_reader(&rule, array)?;
         let reader = match (reader, type_oid) {
             (ReaderImpl::Bool(array), pg_sys::BOOLOID) => PgDatumReader::Bool(array),
-            (ReaderImpl::I32(array), pg_sys::INT2OID) => {
-                PgDatumReader::Int2(array, target)
-            }
+            (ReaderImpl::I16(array), pg_sys::INT2OID) => PgDatumReader::Int16(array),
+            (ReaderImpl::I32(array), pg_sys::INT2OID) => PgDatumReader::Int2(array),
             (ReaderImpl::I32(array), pg_sys::INT4OID) => PgDatumReader::Int4(array),
             (ReaderImpl::I64(array), pg_sys::INT8OID) => PgDatumReader::Int8(array),
             (ReaderImpl::F32(array), pg_sys::FLOAT4OID) => {
@@ -87,6 +87,8 @@ impl PgDatumArrayReader {
     /// `row` must be within the array supplied to [`Self::bind`]. PostgreSQL
     /// must be active on the current backend thread and own the current memory
     /// context used for any by-reference result.
+    /// Int32 input bound to int2 must preserve the PG int2 value domain;
+    /// expression producers, including arithmetic, own its SQL overflow semantics.
     #[inline]
     pub unsafe fn datum_unchecked(
         &self,
@@ -107,11 +109,8 @@ impl PgDatumArrayReader {
 
         let datum = match &self.reader {
             PgDatumReader::Bool(array) => pg_sys::Datum::from(value!(array)),
-            PgDatumReader::Int2(array, target) => {
-                let value = value!(array);
-                unsafe { target.int2_datum_from_i32_unchecked(value) }
-                    .map_err(ArrowConversionError::from)?
-            }
+            PgDatumReader::Int16(array) => pg_sys::Datum::from(value!(array)),
+            PgDatumReader::Int2(array) => pg_sys::Datum::from(value!(array) as i16),
             PgDatumReader::Int4(array) => pg_sys::Datum::from(value!(array)),
             PgDatumReader::Int8(array) => pg_sys::Datum::from(value!(array)),
             PgDatumReader::Float4(array) => {
@@ -142,7 +141,7 @@ impl PgDatumArrayReader {
 }
 
 pub struct PgDatumArrayBuilder {
-    encoder: BoundColumnEncoder,
+    encoder: DatumEncoder,
 }
 
 impl PgDatumArrayBuilder {
@@ -156,13 +155,14 @@ impl PgDatumArrayBuilder {
                 "PostgreSQL type OID {type_oid:?}"
             ))
         })?;
-        let rule = resolve_column_rule(data_type, pg_type)?;
+        let rule = resolve_cell_rule(data_type, pg_type)?;
         // Utf8Encoder uses from_utf8_unchecked for PostgreSQL text-family and
         // NameData bytes. Match every other bound writer by establishing the
         // PG_UTF8 capability once before materializing the per-batch builder.
         ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(type_oid))?;
         Ok(Self {
-            encoder: BoundEncoderPlan::bind(rule, type_oid)?.materialize(capacity)?,
+            encoder: NativeEncoderPlan::bind(rule, type_oid)?
+                .materialize(capacity)?,
         })
     }
 

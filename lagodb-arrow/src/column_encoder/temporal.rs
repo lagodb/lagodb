@@ -156,7 +156,7 @@ impl Date32Conv {
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `date` Datum.
-    pub(super) unsafe fn from_date(
+    pub(crate) unsafe fn from_date(
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<i32> {
         let date = unsafe {
@@ -177,29 +177,35 @@ impl PrimitiveConv for Time64Conv {
     const LABEL: &'static str = "time";
 
     fn from_cell(cell: &Cell) -> ArrowConversionResult<Option<i64>> {
-        Ok(match cell {
-            Cell::Time(t) => Some(i64::from(*t)),
-            _ => None,
-        })
+        match cell {
+            Cell::Time(t) => Self::from_pg_micros(i64::from(*t)).map(Some),
+            _ => Ok(None),
+        }
     }
 }
 
 impl Time64Conv {
+    /// PG includes 24:00:00; Arrow Time excludes the end-of-day boundary.
+    /// All other PG time values already satisfy the Arrow range.
+    fn from_pg_micros(micros: pg_sys::TimeADT) -> ArrowConversionResult<i64> {
+        if micros == 86_400_000_000 {
+            return Err(invalid_datum(
+                "PostgreSQL time 24:00:00 is outside the Arrow time range",
+            ));
+        }
+        Ok(micros)
+    }
+
     /// Read a non-NULL PostgreSQL `time` datum as microseconds since midnight.
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `time` Datum.
-    pub(super) unsafe fn from_time(
+    pub(crate) unsafe fn from_time(
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<i64> {
-        let time = unsafe {
-            read_bound(
-                datum,
-                Time::from_datum,
-                "Time64 encoder: present time datum read as null",
-            )
-        }?;
-        Ok(i64::from(time))
+        // Match DatumGetTimeADT. Time::from_datum wraps 24:00:00 to midnight
+        // before the storage boundary can reject the unrepresentable value.
+        Self::from_pg_micros(datum.value() as pg_sys::TimeADT)
     }
 }
 

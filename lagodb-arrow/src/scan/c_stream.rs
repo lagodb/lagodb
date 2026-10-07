@@ -92,6 +92,9 @@ unsafe extern "C" fn get_next<S: TableScanStream>(
                 .next_batch()
                 .map_err(PgReportError::from_domain_error)?;
             Ok(batch.map(|batch| {
+                // C arrays carry buffers, not Field metadata. Import assigns
+                // the stream's get_schema contract (including nested logical
+                // annotations) to these unchanged physical buffers.
                 FFI_ArrowArray::new(&StructArray::from(batch).to_data())
             }))
         })

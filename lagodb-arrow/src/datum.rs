@@ -23,9 +23,7 @@ pub struct DatumCodec {
 enum DatumCodecKind {
     Standard(ColumnDatumCodec),
     PrevalidatedJsonText,
-    PostgresJsonbVarlena,
     PostgresNumericVarlena,
-    Float4FromFloat64,
     NumericFromInt64,
     NumericFromFloat64,
 }
@@ -47,25 +45,12 @@ impl DatumCodec {
     /// Every value passed to the resulting decoder must already be valid JSON
     /// text. The constructor is unsafe because the decoder cannot validate
     /// this provider-owned contract per value. Bind it only to a `json` target
-    /// through [`DecodedColumn::new`](crate::DecodedColumn::new).
+    /// through [`DecodedColumn::new`](crate::DecodedColumn::new) or the
+    /// recursive [`BoundDatumPlan::bind_with_prevalidated_json_text`](crate::BoundDatumPlan::bind_with_prevalidated_json_text)
+    /// entry point.
     pub unsafe fn prevalidated_json_text() -> Self {
         Self {
             kind: DatumCodecKind::PrevalidatedJsonText,
-        }
-    }
-
-    /// Bind the provider's complete internal JSONB varlena codec.
-    ///
-    /// # Safety
-    ///
-    /// Every value passed to the resulting decoder must be a complete, valid
-    /// PostgreSQL JSONB varlena. The constructor is unsafe because the decoder
-    /// cannot validate this provider-owned contract per value. Bind it only to
-    /// a `jsonb` target through
-    /// [`DecodedColumn::new`](crate::DecodedColumn::new).
-    pub unsafe fn postgres_jsonb_varlena() -> Self {
-        Self {
-            kind: DatumCodecKind::PostgresJsonbVarlena,
         }
     }
 
@@ -79,13 +64,6 @@ impl DatumCodec {
     pub unsafe fn postgres_numeric_varlena() -> Self {
         Self {
             kind: DatumCodecKind::PostgresNumericVarlena,
-        }
-    }
-
-    /// Bind DataFusion's widened Float64 aggregate result to PostgreSQL float4.
-    pub const fn float4_from_float64() -> Self {
-        Self {
-            kind: DatumCodecKind::Float4FromFloat64,
         }
     }
 
@@ -107,16 +85,8 @@ impl DatumCodec {
         matches!(self.kind, DatumCodecKind::PrevalidatedJsonText)
     }
 
-    pub(crate) fn is_postgres_jsonb_varlena(self) -> bool {
-        matches!(self.kind, DatumCodecKind::PostgresJsonbVarlena)
-    }
-
     pub(crate) fn is_postgres_numeric_varlena(self) -> bool {
         matches!(self.kind, DatumCodecKind::PostgresNumericVarlena)
-    }
-
-    pub(crate) fn is_float4_from_float64(self) -> bool {
-        matches!(self.kind, DatumCodecKind::Float4FromFloat64)
     }
 
     pub(crate) fn is_numeric_from_int64(self) -> bool {
@@ -131,9 +101,7 @@ impl DatumCodec {
         match self.kind {
             DatumCodecKind::Standard(target) => Some(target),
             DatumCodecKind::PrevalidatedJsonText
-            | DatumCodecKind::PostgresJsonbVarlena
             | DatumCodecKind::PostgresNumericVarlena
-            | DatumCodecKind::Float4FromFloat64
             | DatumCodecKind::NumericFromInt64
             | DatumCodecKind::NumericFromFloat64 => None,
         }
@@ -146,11 +114,9 @@ impl DatumCodec {
         let valid = match self.kind {
             DatumCodecKind::Standard(target) => target.oid() == target_oid,
             DatumCodecKind::PrevalidatedJsonText => target_oid == pg_sys::JSONOID,
-            DatumCodecKind::PostgresJsonbVarlena => target_oid == pg_sys::JSONBOID,
             DatumCodecKind::PostgresNumericVarlena => {
                 target_oid == pg_sys::NUMERICOID
             }
-            DatumCodecKind::Float4FromFloat64 => target_oid == pg_sys::FLOAT4OID,
             DatumCodecKind::NumericFromInt64 | DatumCodecKind::NumericFromFloat64 => {
                 target_oid == pg_sys::NUMERICOID
             }
@@ -182,20 +148,6 @@ impl DatumCodec {
         Ok(unsafe { Self::copy_json_text(text.as_ptr(), len) })
     }
 
-    /// Copy bytes owned by a bound PostgreSQL JSONB varlena reader into the
-    /// current PostgreSQL memory context.
-    ///
-    /// # Safety
-    ///
-    /// `bytes` must be a complete, valid PostgreSQL JSONB varlena, including
-    /// its header, established by the bound provider codec. PostgreSQL must be
-    /// running with the destination memory context selected.
-    pub(crate) unsafe fn copy_postgres_jsonb_varlena(
-        bytes: &[u8],
-    ) -> ArrowConversionResult<pg_sys::Datum> {
-        Ok(unsafe { Self::copy_internal_varlena(bytes) })
-    }
-
     /// Copy trusted complete PostgreSQL NUMERIC varlena bytes into the current
     /// destination memory context.
     pub(crate) unsafe fn copy_postgres_numeric_varlena(
@@ -212,16 +164,6 @@ impl DatumCodec {
                 "integer to NUMERIC conversion returned SQL NULL",
             ),
         )
-    }
-
-    pub(crate) fn float4_datum_from_float64(
-        value: f64,
-    ) -> ArrowConversionResult<pg_sys::Datum> {
-        (value as f32)
-            .into_datum()
-            .ok_or(ArrowConversionError::InvariantViolated(
-                "Float64-to-float4 conversion returned SQL NULL",
-            ))
     }
 
     pub(crate) fn numeric_datum_from_float64(

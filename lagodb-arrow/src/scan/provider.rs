@@ -8,6 +8,7 @@ use lagodb_core::expr::ExpressionCodecError;
 use lagodb_core::expr::pushdown::{
     FilterPlanningContext, FilterPushdown, PredicatePlan,
 };
+use lagodb_core::handles::ExecutorHandle;
 use lagodb_core::plan_data::{PlanDataError, PlanDataReader, PlanDataWriter};
 use lagodb_core::query_contract::{ScanCost, ScanId};
 use lagodb_core::runtime_api::{
@@ -192,22 +193,25 @@ impl<'a> ScanPlanningContext<'a> {
     }
 }
 
-/// Provider-owned scan plan paired with validated physical cost facts.
+/// Provider-owned scan plan, projected output schema, and physical cost facts.
+/// The schema follows the requested attribute order and uses the same mapping
+/// as `bound_schema`; producing it must not bind a scan or plan file tasks.
 pub struct PlannedScan<P> {
     plan: P,
     cost: ScanCost,
+    schema: SchemaRef,
 }
 
 impl<P> PlannedScan<P> {
     #[inline]
     #[must_use]
-    pub const fn new(plan: P, cost: ScanCost) -> Self {
-        Self { plan, cost }
+    pub const fn new(plan: P, cost: ScanCost, schema: SchemaRef) -> Self {
+        Self { plan, cost, schema }
     }
 
     #[inline]
-    pub fn into_parts(self) -> (P, ScanCost) {
-        (self.plan, self.cost)
+    pub fn into_parts(self) -> (P, ScanCost, SchemaRef) {
+        (self.plan, self.cost, self.schema)
     }
 }
 
@@ -473,6 +477,9 @@ pub trait TableScanProvider: Send + Sync + 'static {
         Self::Filter::begin_filter_planning(context).map_err(Into::into)
     }
 
+    /// Plan the requested source projection and expose its Arrow representation.
+    /// The query engine owns expression admission against that schema; storage
+    /// predicate negotiation remains independent of exact query execution.
     fn plan_scan(
         &self,
         context: &ScanPlanningContext<'_>,
@@ -489,9 +496,13 @@ pub trait TableScanProvider: Send + Sync + 'static {
         reader: &mut PlanDataReader<'_>,
     ) -> Result<Self::ScanPlan, Self::Error>;
 
+    /// Bind the complete source identity, schema and data visibility for this
+    /// execution. Later task planning and rescans reuse this source; physical
+    /// plan preparation may be deferred without refreshing its read view.
     fn bind_scan(
         &self,
         plan: &Self::ScanPlan,
+        executor: &ExecutorHandle<'_>,
     ) -> Result<Self::BoundScan, Self::Error>;
 
     /// Return the immutable Arrow schema established by binding without
