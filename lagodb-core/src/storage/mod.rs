@@ -8,4 +8,5 @@
 pub mod foreign;
 pub mod profile;
 pub mod service;
+pub mod tablespace;
 pub mod volume;

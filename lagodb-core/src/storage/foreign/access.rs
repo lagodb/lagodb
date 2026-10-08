@@ -1,7 +1,7 @@
 //! Object-bound storage access.
 //!
 //! [`ObjectAccess`] binds one authorized bucket/key to a configured storage
-//! user mapping. It is an object capability, not a login, connection, or
+//! identity. It is an object capability, not a login, connection, or
 //! transaction session. Providers receive raw storage primitives and own their
 //! operation lifecycle.
 

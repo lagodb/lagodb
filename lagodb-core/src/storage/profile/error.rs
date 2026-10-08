@@ -48,9 +48,6 @@ pub enum StorageProfileError {
     #[error("permission denied for foreign server {server:?}")]
     ServerUsageDenied { server: Box<str> },
 
-    #[error("foreign server {server:?} has no user mapping for the effective user")]
-    UserMappingMissing { server: Box<str> },
-
     #[error("object URI is outside foreign server {server:?} scope")]
     ServerOutsideScope { server: Box<str> },
 
@@ -90,9 +87,7 @@ impl SqlStateError for StorageProfileError {
             | Self::ProviderMismatch { .. } => {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
             }
-            Self::ServerNotFound { .. } | Self::UserMappingMissing { .. } => {
-                PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT
-            }
+            Self::ServerNotFound { .. } => PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
             Self::ServerUsageDenied { .. } | Self::ServerOutsideScope { .. } => {
                 PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE
             }

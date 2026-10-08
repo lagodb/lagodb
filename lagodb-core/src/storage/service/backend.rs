@@ -1,7 +1,7 @@
 //! PostgreSQL-backend-local access to the runtime storage service.
 //!
 //! A backend caches one healthy foreground connection for each active managed
-//! volume, foreign user mapping, or caller-owned configured generation. Every
+//! volume, foreign identity, or caller-owned configured generation. Every
 //! socket is attached to one physical storage context before object operations begin.
 //!
 //! The cached socket is deliberately backend-scoped rather than transaction-
@@ -14,12 +14,12 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::storage::foreign::StorageIdentity;
 use lagodb_storage::{
     ListSession, ObjectInfo, StagingFile, StagingPathResolver, StorageClient,
     StorageError, StorageFile, StorageProbeResult, StorageResult, StoreConfig,
     UploadInfo,
 };
-use pgrx::pg_sys;
 
 use super::StorageEndpoint;
 use super::connection::{
@@ -69,12 +69,12 @@ impl BackendStorageService {
 
     pub(crate) fn for_foreign(
         endpoint: &StorageEndpoint,
-        umid: pg_sys::Oid,
+        identity: StorageIdentity,
         config: Arc<StoreConfig>,
     ) -> StorageResult<Self> {
         let context = attached_context(
             endpoint.socket_path(),
-            BackendContextKey::Foreign(u32::from(umid) as u64),
+            BackendContextKey::Foreign(identity),
             BackendAttach::Configured(config),
             endpoint.max_idle_connections(),
         )?;

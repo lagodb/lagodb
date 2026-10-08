@@ -246,6 +246,16 @@ impl ObjectUriPrefix {
         self.key_prefix.as_deref()
     }
 
+    /// Associates an already decoded object key with this URI's namespace.
+    pub fn object(&self, key: &str) -> ObjectUri {
+        ObjectUri {
+            scheme: self.scheme,
+            bucket: self.bucket.clone(),
+            account: self.account.clone(),
+            key: key.into(),
+        }
+    }
+
     pub fn contains(&self, object: &ObjectUri) -> bool {
         self.scheme == object.scheme
             && self.bucket == object.bucket

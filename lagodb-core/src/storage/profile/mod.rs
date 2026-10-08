@@ -3,11 +3,12 @@
 mod catalog;
 mod config;
 mod error;
+mod mapping;
 mod resolver;
 mod uri;
 mod validation;
 
-pub use catalog::{ScopedStorageProfile, StorageProfiles};
+pub use catalog::{SelectedStorageProfile, StorageProfiles};
 pub use config::{StorageProfileConfig, StorageServerOptions};
 pub use error::StorageProfileError;
 pub use resolver::{

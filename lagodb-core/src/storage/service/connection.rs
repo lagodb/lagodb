@@ -18,6 +18,8 @@ use lagodb_storage::{
 };
 use pgrx::pg_sys;
 
+use crate::storage::foreign::StorageIdentity;
+
 use super::socket_wait::PostgresSocketWait;
 
 thread_local! {
@@ -72,7 +74,7 @@ pub(crate) fn acquire_attached_client(
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum BackendContextKey {
     Managed(u64),
-    Foreign(u64),
+    Foreign(StorageIdentity),
     Configured(u64),
 }
 

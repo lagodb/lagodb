@@ -12,6 +12,17 @@ unsafe extern "C-unwind" {
 }
 
 impl PgWrapper {
+    pub(crate) fn relation_open(
+        relation_id: pg_sys::Oid,
+        lockmode: pg_sys::LOCKMODE,
+    ) -> Result<pg_sys::Relation, PgError> {
+        PgTryBuilder::new(move || {
+            Ok(unsafe { pg_sys::relation_open(relation_id, lockmode) })
+        })
+        .catch_others(|err| Err(PgError::from_caught(err)))
+        .execute()
+    }
+
     pub(crate) fn table_open(
         relation_id: pg_sys::Oid,
         lockmode: pg_sys::LOCKMODE,

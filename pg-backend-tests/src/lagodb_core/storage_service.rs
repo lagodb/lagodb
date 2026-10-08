@@ -18,14 +18,12 @@ mod tests {
     #[pg_test]
     fn explicit_paths_are_returned_verbatim() {
         let endpoint = StorageEndpoint::from_config(
-            true,
             Some(PathBuf::from("/tmp/lagodb.sock")),
             Some(PathBuf::from("/tmp/lagodb-cache")),
             8,
         )
         .expect("explicit paths resolve without consulting the data directory");
 
-        assert!(endpoint.is_enabled());
         assert_eq!(endpoint.socket_path(), Path::new("/tmp/lagodb.sock"));
         assert_eq!(endpoint.cache_dir(), Path::new("/tmp/lagodb-cache"));
         assert_eq!(endpoint.max_idle_connections(), 8);
@@ -33,10 +31,9 @@ mod tests {
 
     #[pg_test]
     fn missing_paths_fall_back_to_the_data_directory() {
-        let endpoint = StorageEndpoint::from_config(true, None, None, 8)
+        let endpoint = StorageEndpoint::from_config(None, None, 8)
             .expect("default paths resolve from the backend data directory");
 
-        assert!(endpoint.is_enabled());
         assert!(
             endpoint.socket_path().ends_with("lagodb/storage.sock"),
             "unexpected default socket path: {}",

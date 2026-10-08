@@ -5,7 +5,7 @@ use std::ffi::CStr;
 use pgrx::pg_sys;
 
 use crate::catalog::{CatalogRelation, CatalogSnapshot};
-use crate::storage::foreign::{ForeignCatalog, ForeignOptionView};
+use crate::storage::foreign::ForeignOptionView;
 
 use super::{
     ObjectUri, StorageProfileError, StorageProvider, StorageScope,
@@ -31,7 +31,7 @@ impl<'a> StorageServerPolicy<'a> {
     }
 }
 
-/// One server selected after wrapper, privilege, mapping, provider and scope
+/// One server selected after wrapper, privilege, provider and scope
 /// validation.
 #[derive(Clone, Copy, Debug)]
 pub struct ResolvedStorageServer<'a> {
@@ -46,6 +46,12 @@ impl ResolvedStorageServer<'_> {
     pub fn name(&self) -> &str {
         &self.route.server_name
     }
+    pub fn validate_object(
+        &self,
+        object: &ObjectUri,
+    ) -> Result<(), StorageProfileError> {
+        self.route.validate_object(object)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -58,22 +64,6 @@ pub(crate) struct StorageServerRoute {
 }
 
 impl StorageServerRoute {
-    pub(crate) fn oid(&self) -> pg_sys::Oid {
-        self.server_oid
-    }
-
-    pub(crate) fn name(&self) -> &str {
-        &self.server_name
-    }
-
-    pub(crate) fn scope_text(&self) -> Option<&str> {
-        self.scope_text.as_deref()
-    }
-
-    pub(crate) fn scope(&self) -> Option<&StorageScope> {
-        self.scope.as_ref()
-    }
-
     fn contains(&self, object: &ObjectUri) -> bool {
         self.provider.matches_scheme(object.scheme())
             && self
@@ -182,11 +172,6 @@ impl StorageServerCatalog {
                 server: server_name,
             });
         }
-        if !ForeignCatalog::mapping_exists(server_oid, effective_user) {
-            return Err(StorageProfileError::UserMappingMissing {
-                server: server_name,
-            });
-        }
         let route = Self::parse_route(server_oid, server_name)?;
         Self::from_routes(vec![route])
     }
@@ -212,7 +197,6 @@ impl StorageServerCatalog {
         if server.fdwid != policy.owner_fdw_oid
             || !Self::server_type_matches(server_oid, policy.server_type)
             || !Self::has_usage(server_oid, effective_user)
-            || !ForeignCatalog::mapping_exists(server_oid, effective_user)
         {
             return Ok(None);
         }
@@ -256,6 +240,19 @@ impl StorageServerCatalog {
         })
     }
 
+    pub fn resolve_named(
+        &self,
+        server_name: &str,
+    ) -> Result<ResolvedStorageServer<'_>, StorageProfileError> {
+        self.routes
+            .iter()
+            .find(|route| route.server_name.as_ref() == server_name)
+            .map(|route| ResolvedStorageServer { route })
+            .ok_or_else(|| StorageProfileError::UnavailableServer {
+                server: server_name.into(),
+            })
+    }
+
     pub fn resolve_explicit(
         &self,
         server_name: &str,
@@ -292,22 +289,37 @@ impl StorageServerCatalog {
         &self,
         object: &ObjectUri,
     ) -> Result<ResolvedStorageServer<'_>, StorageProfileError> {
-        let mut matches = self
-            .routes
-            .iter()
-            .filter(|route| route.scope.is_some() && route.contains(object));
-        let selected =
-            matches
-                .next()
-                .ok_or_else(|| StorageProfileError::NoMatchingProfile {
-                    location: format!(
-                        "{}://{}/{}",
-                        object.scheme(),
-                        object.bucket(),
-                        object.key()
-                    )
-                    .into(),
-                })?;
+        self.resolve_implicit_optional(object)?.ok_or_else(|| {
+            StorageProfileError::NoMatchingProfile {
+                location: format!(
+                    "{}://{}/{}",
+                    object.scheme(),
+                    object.bucket(),
+                    object.key()
+                )
+                .into(),
+            }
+        })
+    }
+
+    pub(crate) fn resolve_implicit_optional(
+        &self,
+        object: &ObjectUri,
+    ) -> Result<Option<ResolvedStorageServer<'_>>, StorageProfileError> {
+        self.select(
+            self.routes
+                .iter()
+                .filter(|route| route.scope.is_some() && route.contains(object)),
+        )
+    }
+
+    fn select<'a>(
+        &'a self,
+        mut matches: impl Iterator<Item = &'a StorageServerRoute>,
+    ) -> Result<Option<ResolvedStorageServer<'a>>, StorageProfileError> {
+        let Some(selected) = matches.next() else {
+            return Ok(None);
+        };
         if let Some(other) = matches.next()
             && other.specificity() == selected.specificity()
         {
@@ -320,11 +332,7 @@ impl StorageServerCatalog {
                     .expect("implicit candidates always have a scope"),
             });
         }
-        Ok(ResolvedStorageServer { route: selected })
-    }
-
-    pub(crate) fn scoped_routes(&self) -> impl Iterator<Item = &StorageServerRoute> {
-        self.routes.iter().filter(|route| route.scope.is_some())
+        Ok(Some(ResolvedStorageServer { route: selected }))
     }
 
     fn server_type_matches(server_oid: pg_sys::Oid, expected: Option<&CStr>) -> bool {

@@ -1,11 +1,13 @@
 use std::ffi::CStr;
 use std::fmt;
 use std::marker::PhantomData;
+use std::ptr::null_mut;
 use std::str::Utf8Error;
 
 use pgrx::pg_sys;
 
 use super::identity::StorageIdentity;
+use super::mapping::ForeignUserMapping;
 
 /// One borrowed PostgreSQL foreign option.
 #[derive(Clone, Copy)]
@@ -159,7 +161,7 @@ impl<'a> Iterator for ForeignOptionIter<'a> {
 /// Borrowed server and user-mapping options passed to a shared store-config builder.
 ///
 /// Foreign-table options are intentionally not part of this type. A store is
-/// cached by effective user mapping, so allowing table options here would let
+/// cached by server and effective identity, so allowing table options here would let
 /// one table silently reuse another table's configuration.
 #[derive(Clone, Copy, Debug)]
 pub struct StorageOptions<'a> {
@@ -187,39 +189,12 @@ impl<'a> StorageOptions<'a> {
 /// Catalog values needed to attach a configured foreign storage context.
 pub(crate) struct ForeignCatalog {
     server: pg_sys::ForeignServer,
-    mapping: pg_sys::UserMapping,
+    mapping: Option<ForeignUserMapping>,
     identity: StorageIdentity,
     server_hashvalue: u32,
-    mapping_hashvalue: u32,
 }
 
 impl ForeignCatalog {
-    pub(crate) fn mapping_exists(
-        server_oid: pg_sys::Oid,
-        effective_user: pg_sys::Oid,
-    ) -> bool {
-        [effective_user, pg_sys::InvalidOid]
-            .into_iter()
-            .any(|user_oid| {
-                // SAFETY: USERMAPPINGUSERSERVER has exactly the (user, server)
-                // OID keys supplied here. A non-null tuple owns one syscache pin.
-                let tuple = unsafe {
-                    pg_sys::SearchSysCache2(
-                        pg_sys::SysCacheIdentifier::USERMAPPINGUSERSERVER as i32,
-                        pg_sys::Datum::from(u32::from(user_oid) as usize),
-                        pg_sys::Datum::from(u32::from(server_oid) as usize),
-                    )
-                };
-                if tuple.is_null() {
-                    false
-                } else {
-                    // SAFETY: the successful lookup above owns this syscache pin.
-                    unsafe { pg_sys::ReleaseSysCache(tuple) };
-                    true
-                }
-            })
-    }
-
     pub(crate) fn load(
         relation_oid: pg_sys::Oid,
         effective_user: pg_sys::Oid,
@@ -237,31 +212,26 @@ impl ForeignCatalog {
         // SAFETY: `server_oid` is a live foreign-server OID from either a
         // ForeignTable catalog entry or PostgreSQL's name resolver.
         let server = unsafe { *pg_sys::GetForeignServer(server_oid) };
-        // SAFETY: PostgreSQL resolves the effective user, including PUBLIC
-        // fallback, and owns the returned UserMapping object.
-        let mapping =
-            unsafe { *pg_sys::GetUserMapping(effective_user, server.serverid) };
+        let mapping = ForeignUserMapping::lookup(server.serverid, effective_user);
 
         let server_hashvalue = Self::syscache_hash(
             pg_sys::SysCacheIdentifier::FOREIGNSERVEROID as i32,
             server.serverid,
         );
 
-        let mapping_hashvalue = Self::syscache_hash(
-            pg_sys::SysCacheIdentifier::USERMAPPINGOID as i32,
-            mapping.umid,
-        );
-
         // SAFETY: MyDatabaseId is initialized in a connected PostgreSQL backend.
         let database_oid = unsafe { pg_sys::MyDatabaseId };
-        let identity =
-            StorageIdentity::new(database_oid, server.serverid, mapping.umid);
+        let identity = StorageIdentity::new(
+            database_oid,
+            server.serverid,
+            effective_user,
+            mapping.as_ref().map(ForeignUserMapping::oid),
+        );
         Self {
             server,
             mapping,
             identity,
             server_hashvalue,
-            mapping_hashvalue,
         }
     }
 
@@ -273,14 +243,13 @@ impl ForeignCatalog {
         self.server_hashvalue
     }
 
-    pub(crate) fn mapping_hashvalue(&self) -> u32 {
-        self.mapping_hashvalue
-    }
-
     pub(crate) fn options(&self) -> StorageOptions<'_> {
         StorageOptions::new(
             ForeignOptionView::new(self.server.options),
-            ForeignOptionView::new(self.mapping.options),
+            self.mapping.as_ref().map_or_else(
+                || ForeignOptionView::new(null_mut()),
+                ForeignUserMapping::options,
+            ),
         )
     }
 

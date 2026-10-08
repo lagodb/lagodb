@@ -10,6 +10,7 @@ mod catalog;
 mod handle;
 mod identity;
 mod manager;
+mod mapping;
 
 use lagodb_storage::{StorageError, StorageErrorKind};
 use pgrx::prelude::PgSqlErrorCode;
@@ -44,10 +45,10 @@ impl SqlStateError for StorageError {
 }
 
 pub use access::{ObjectAccess, ObjectPrefixAccess};
-pub(crate) use catalog::ForeignCatalog;
 pub use catalog::{
     ForeignOption, ForeignOptionIter, ForeignOptionView, StorageOptions,
 };
 pub use handle::StorageHandle;
 pub use identity::StorageIdentity;
 pub use manager::{StorageAcquireError, StorageConfigProvider, StorageManager};
+pub use mapping::ForeignUserMapping;

@@ -17,8 +17,8 @@ use super::handle::StorageHandle;
 /// Provider-owned translation from borrowed server/mapping options to an owned
 /// storage configuration.
 ///
-/// The returned configuration is shared by the effective user mapping and must
-/// therefore be identical for every table using that mapping. Table-specific
+/// The returned configuration is shared by the server and effective identity
+/// and must therefore be identical for every table using that identity. Table-specific
 /// options are not accepted by this builder; the
 /// provider keeps that schema in its own table state.
 pub trait StorageConfigProvider {
@@ -62,7 +62,7 @@ impl StorageManager {
     }
 
     pub fn from_pg_gucs() -> StorageResult<Self> {
-        let endpoint = StorageEndpoint::from_pg_gucs()?.require_enabled()?;
+        let endpoint = StorageEndpoint::from_pg_gucs()?;
         Ok(Self::from_endpoint(&endpoint))
     }
 
@@ -84,7 +84,7 @@ impl StorageManager {
     }
 
     /// Acquires a configured store from an explicit foreign server and the
-    /// effective user mapping. This is the operation-level entry point used
+    /// effective user, with an optional mapping. This is the operation-level entry point used
     /// by direct COPY object URIs; it does not fabricate a foreign relation in
     /// order to reuse the relation-based FDW path.
     pub fn acquire_server<P>(
@@ -145,10 +145,9 @@ impl StorageManager {
     {
         initialize_callbacks();
 
-        let identity = catalog.identity().clone();
-        let umid = identity.umid();
+        let identity = *catalog.identity();
         if let Some(entry) =
-            StorageCache::with_current(|cache| cache.find_matching(umid, &identity))
+            StorageCache::with_current(|cache| cache.find_matching(&identity))
         {
             return Ok(StorageHandle::new(entry));
         }
@@ -159,15 +158,13 @@ impl StorageManager {
         );
         let service = BackendStorageService::for_foreign(
             &self.endpoint,
-            umid,
+            identity,
             Arc::clone(&config),
         )?;
 
         let entry = StorageCache::with_current(|cache| {
             cache.insert(StorageCacheEntry {
-                umid,
                 server_hashvalue: catalog.server_hashvalue(),
-                mapping_hashvalue: catalog.mapping_hashvalue(),
                 identity,
                 config,
                 service,

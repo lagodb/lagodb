@@ -18,16 +18,14 @@ thread_local! {
 
 /// One backend-local storage entry.
 pub(crate) struct StorageCacheEntry {
-    pub(crate) umid: pg_sys::Oid,
     pub(crate) server_hashvalue: u32,
-    pub(crate) mapping_hashvalue: u32,
     pub(crate) identity: StorageIdentity,
     pub(crate) config: Arc<StoreConfig>,
     pub(crate) service: BackendStorageService,
 }
 
 pub(crate) struct StorageCache {
-    entries: HashMap<pg_sys::Oid, Rc<StorageCacheEntry>>,
+    entries: HashMap<StorageIdentity, Rc<StorageCacheEntry>>,
     callbacks_registered: bool,
 }
 
@@ -45,13 +43,9 @@ impl StorageCache {
 
     pub(crate) fn find_matching(
         &mut self,
-        umid: pg_sys::Oid,
         identity: &StorageIdentity,
     ) -> Option<Rc<StorageCacheEntry>> {
-        let entry = self.entries.get(&umid)?;
-        if entry.identity != *identity {
-            return None;
-        }
+        let entry = self.entries.get(identity)?;
         Some(Rc::clone(entry))
     }
 
@@ -60,7 +54,7 @@ impl StorageCache {
         entry: StorageCacheEntry,
     ) -> Rc<StorageCacheEntry> {
         let entry = Rc::new(entry);
-        self.entries.insert(entry.umid, Rc::clone(&entry));
+        self.entries.insert(entry.identity, Rc::clone(&entry));
         entry
     }
 
@@ -77,7 +71,7 @@ impl StorageCache {
                 0.into(),
             );
             CacheRegisterSyscacheCallback(
-                pg_sys::SysCacheIdentifier::USERMAPPINGOID as i32,
+                pg_sys::SysCacheIdentifier::USERMAPPINGUSERSERVER as i32,
                 Some(invalidate_storage_cache_callback),
                 0.into(),
             );
@@ -87,13 +81,19 @@ impl StorageCache {
 
     fn invalidate(&mut self, cache_id: i32, hashvalue: u32) {
         let server_cache_id = pg_sys::SysCacheIdentifier::FOREIGNSERVEROID as i32;
-        let mapping_cache_id = pg_sys::SysCacheIdentifier::USERMAPPINGOID as i32;
+        let mapping_cache_id =
+            pg_sys::SysCacheIdentifier::USERMAPPINGUSERSERVER as i32;
+        // A new per-user mapping changes PUBLIC fallback and a previously
+        // unmapped identity. Evict all parsed identities on mapping changes;
+        // active handles retain their existing entry through Rc.
+        if cache_id == mapping_cache_id {
+            self.entries.clear();
+            return;
+        }
         self.entries.retain(|_, entry| {
             let matches = hashvalue == 0
                 || (cache_id == server_cache_id
-                    && entry.server_hashvalue == hashvalue)
-                || (cache_id == mapping_cache_id
-                    && entry.mapping_hashvalue == hashvalue);
+                    && entry.server_hashvalue == hashvalue);
             !matches
         });
     }

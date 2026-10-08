@@ -11,8 +11,10 @@ pub struct RelationTablespace {
 }
 
 impl RelationTablespace {
+    /// Interpret a `pg_class.reltablespace` value, including zero for the
+    /// connected database's default tablespace.
     #[inline]
-    pub(crate) fn from_catalog_oid(oid: pg_sys::Oid) -> Self {
+    pub fn from_catalog_oid(oid: pg_sys::Oid) -> Self {
         Self { catalog_oid: oid }
     }
 
@@ -20,8 +22,8 @@ impl RelationTablespace {
     #[inline]
     pub fn resolved_oid(self) -> pg_sys::Oid {
         if self.is_database_default() {
-            // SAFETY: a live relation handle exists only in a connected
-            // backend after PostgreSQL initialized the database identity.
+            // SAFETY: relation placement is resolved in a connected backend
+            // after PostgreSQL initialized the database identity.
             unsafe { pg_sys::MyDatabaseTableSpace }
         } else {
             self.catalog_oid

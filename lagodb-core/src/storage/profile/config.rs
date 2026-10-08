@@ -9,7 +9,10 @@ use lagodb_storage::{
 };
 use url::Url;
 
-use super::{StorageProfileError, StorageProvider, StorageScope};
+use super::mapping::MappingOptions;
+use super::{
+    ObjectScheme, ObjectUriPrefix, StorageProfileError, StorageProvider, StorageScope,
+};
 
 pub struct StorageProfileConfig;
 
@@ -21,7 +24,9 @@ impl StorageConfigProvider for StorageProfileConfig {
     ) -> Result<StoreConfig, Self::Error> {
         let server = StorageServerOptions::from_view(options.server())?;
         let mapping = MappingOptions::from_view(options.mapping())?;
-        server.into_profile(mapping)
+        let config = server.into_profile(mapping)?;
+        config.validate()?;
+        Ok(config)
     }
 }
 
@@ -54,34 +59,53 @@ impl<'a> StorageServerOptions<'a> {
             let value = option.value_str().map_err(|_| {
                 StorageProfileError::invalid_option(name, "must be valid UTF-8")
             })?;
-            match name {
-                "provider" => Self::set(&mut parsed.provider, name, value)?,
-                "scope" => Self::set(&mut parsed.scope, name, value)?,
-                "region" => Self::set(&mut parsed.region, name, value)?,
-                "endpoint" => Self::set(&mut parsed.endpoint, name, value)?,
-                "allow_http" => Self::set(&mut parsed.allow_http, name, value)?,
-                "virtual_hosted_style_request" => {
-                    Self::set(&mut parsed.virtual_hosted_style_request, name, value)?
-                }
-                "skip_signature" => {
-                    Self::set(&mut parsed.skip_signature, name, value)?
-                }
-                "base_url" => Self::set(&mut parsed.base_url, name, value)?,
-                "account" => Self::set(&mut parsed.account, name, value)?,
-                "use_emulator" => Self::set(&mut parsed.use_emulator, name, value)?,
-                _ => {
-                    return Err(StorageProfileError::invalid_option(
-                        name,
-                        "is not a supported foreign server option",
-                    ));
-                }
-            }
+            parsed.set_option(name, value)?;
         }
         Ok(parsed)
     }
 
+    pub(super) fn set_option(
+        &mut self,
+        name: &str,
+        value: &'a str,
+    ) -> Result<(), StorageProfileError> {
+        match name {
+            "provider" => Self::set(&mut self.provider, name, value)?,
+            "scope" => Self::set(&mut self.scope, name, value)?,
+            "region" => Self::set(&mut self.region, name, value)?,
+            "endpoint" => Self::set(&mut self.endpoint, name, value)?,
+            "allow_http" => Self::set(&mut self.allow_http, name, value)?,
+            "virtual_hosted_style_request" => {
+                Self::set(&mut self.virtual_hosted_style_request, name, value)?
+            }
+            "skip_signature" => Self::set(&mut self.skip_signature, name, value)?,
+            "base_url" => Self::set(&mut self.base_url, name, value)?,
+            "account" => Self::set(&mut self.account, name, value)?,
+            "use_emulator" => Self::set(&mut self.use_emulator, name, value)?,
+            _ => {
+                return Err(StorageProfileError::invalid_option(
+                    name,
+                    "is not a supported foreign server option",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn provider(&self) -> Result<Option<StorageProvider>, StorageProfileError> {
-        self.provider.map(StorageProvider::parse).transpose()
+        if let Some(provider) = self.provider {
+            return StorageProvider::parse(provider).map(Some);
+        }
+        self.scope
+            .map(|scope| {
+                let scheme = ObjectUriPrefix::parse(scope)?.scheme();
+                Ok(match scheme {
+                    ObjectScheme::S3 => StorageProvider::S3,
+                    ObjectScheme::Gcs => StorageProvider::Gcs,
+                    ObjectScheme::Azure => StorageProvider::Azure,
+                })
+            })
+            .transpose()
     }
 
     pub fn scope(&self) -> Option<&str> {
@@ -111,7 +135,10 @@ impl<'a> StorageServerOptions<'a> {
         mapping: MappingOptions<'a>,
     ) -> Result<StoreConfig, StorageProfileError> {
         let provider = self.provider()?.ok_or_else(|| {
-            StorageProfileError::invalid_option("provider", "is required")
+            StorageProfileError::invalid_option(
+                "provider",
+                "is required when scope is absent",
+            )
         })?;
         mapping.validate_provider_independent()?;
         if let Some(scope) = self.scope {
@@ -132,18 +159,14 @@ impl<'a> StorageServerOptions<'a> {
                 reject_server_option(self.account, "account")?;
                 reject_server_option(self.use_emulator, "use_emulator")?;
                 reject_mapping_options(&mapping, provider)?;
-                reject_skip_signature_credentials(skip_signature, &mapping)?;
                 S3StoreConfig {
                     region: self.region.map(str::to_owned),
                     endpoint: self.endpoint.map(str::to_owned),
-                    access_key_id: mapping.access_key_id.map(SecretString::new),
-                    secret_access_key: mapping
-                        .secret_access_key
-                        .map(SecretString::new),
-                    token: mapping.token.map(SecretString::new),
+                    authentication: mapping
+                        .aws_options()
+                        .into_authentication(skip_signature)?,
                     allow_http,
                     virtual_hosted_style_request: virtual_hosted,
-                    skip_signature,
                     encryption: None,
                 }
                 .into_canonical()
@@ -153,7 +176,6 @@ impl<'a> StorageServerOptions<'a> {
                 reject_server_option(self.account, "account")?;
                 reject_server_option(self.use_emulator, "use_emulator")?;
                 reject_mapping_options(&mapping, provider)?;
-                reject_skip_signature_credentials(skip_signature, &mapping)?;
                 let endpoint = self.endpoint.ok_or_else(|| {
                     StorageProfileError::invalid_option(
                         "endpoint",
@@ -163,18 +185,16 @@ impl<'a> StorageServerOptions<'a> {
                 StoreConfig::S3Compatible(S3CompatibleStoreConfig {
                     endpoint: endpoint.to_owned(),
                     region: self.region.map(str::to_owned),
-                    access_key_id: mapping.access_key_id.map(SecretString::new),
-                    secret_access_key: mapping
-                        .secret_access_key
-                        .map(SecretString::new),
-                    token: mapping.token.map(SecretString::new),
+                    authentication: mapping
+                        .aws_options()
+                        .into_authentication(skip_signature)?,
                     allow_http,
                     virtual_hosted_style_request: virtual_hosted,
-                    skip_signature,
                     encryption: None,
                 })
             }
             StorageProvider::Gcs => {
+                mapping.reject_aws_options()?;
                 reject_server_option(self.region, "region")?;
                 reject_server_option(self.endpoint, "endpoint")?;
                 reject_server_option(self.account, "account")?;
@@ -202,6 +222,7 @@ impl<'a> StorageServerOptions<'a> {
                 })
             }
             StorageProvider::Azure => {
+                mapping.reject_aws_options()?;
                 reject_server_option(self.region, "region")?;
                 reject_server_option(
                     self.virtual_hosted_style_request,
@@ -224,7 +245,6 @@ impl<'a> StorageServerOptions<'a> {
                 })
             }
         };
-        config.validate()?;
         Ok(config)
     }
 
@@ -276,149 +296,6 @@ fn endpoint_has_userinfo(endpoint: &str) -> bool {
     let authority = &endpoint[(scheme_end + 3)..];
     let authority_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
     authority[..authority_end].contains('@')
-}
-
-#[derive(Default)]
-pub(super) struct MappingOptions<'a> {
-    access_key_id: Option<&'a str>,
-    secret_access_key: Option<&'a str>,
-    token: Option<&'a str>,
-    service_account_path: Option<&'a str>,
-    service_account_key: Option<&'a str>,
-    application_credentials_path: Option<&'a str>,
-    access_key: Option<&'a str>,
-    bearer_token: Option<&'a str>,
-    client_id: Option<&'a str>,
-    client_secret: Option<&'a str>,
-    tenant_id: Option<&'a str>,
-}
-
-impl<'a> MappingOptions<'a> {
-    pub(super) fn parse(
-        options: &'a [Option<String>],
-    ) -> Result<Self, StorageProfileError> {
-        let mut parsed = Self::default();
-        for option in options.iter().flatten() {
-            let (name, value) = option.split_once('=').ok_or_else(|| {
-                StorageProfileError::invalid_option(
-                    "user mapping option",
-                    "expected name=value",
-                )
-            })?;
-            parsed.set(name, value)?;
-        }
-        Ok(parsed)
-    }
-
-    fn from_view(
-        options: ForeignOptionView<'a>,
-    ) -> Result<Self, StorageProfileError> {
-        let mut parsed = Self::default();
-        for option in options.iter() {
-            let name = option.name().to_str().map_err(|_| {
-                StorageProfileError::invalid_option(
-                    "user mapping option",
-                    "must be valid UTF-8",
-                )
-            })?;
-            let value = option.value_str().map_err(|_| {
-                StorageProfileError::invalid_option(name, "must be valid UTF-8")
-            })?;
-            parsed.set(name, value)?;
-        }
-        Ok(parsed)
-    }
-
-    fn set(&mut self, name: &str, value: &'a str) -> Result<(), StorageProfileError> {
-        let slot = match name {
-            "access_key_id" => &mut self.access_key_id,
-            "secret_access_key" => &mut self.secret_access_key,
-            "token" => &mut self.token,
-            "service_account_path" => &mut self.service_account_path,
-            "service_account_key" => &mut self.service_account_key,
-            "application_credentials_path" => &mut self.application_credentials_path,
-            "access_key" => &mut self.access_key,
-            "bearer_token" => &mut self.bearer_token,
-            "client_id" => &mut self.client_id,
-            "client_secret" => &mut self.client_secret,
-            "tenant_id" => &mut self.tenant_id,
-            _ => {
-                return Err(StorageProfileError::invalid_option(
-                    name,
-                    "is not a supported user mapping option",
-                ));
-            }
-        };
-        if slot.replace(value).is_some() {
-            return Err(StorageProfileError::invalid_option(
-                name,
-                "must not be specified more than once",
-            ));
-        }
-        Ok(())
-    }
-
-    pub(super) fn validate_provider_independent(
-        &self,
-    ) -> Result<(), StorageProfileError> {
-        let has_s3 = self.access_key_id.is_some()
-            || self.secret_access_key.is_some()
-            || self.token.is_some();
-        let gcs_sources = usize::from(self.service_account_path.is_some())
-            + usize::from(self.service_account_key.is_some())
-            + usize::from(self.application_credentials_path.is_some());
-        let has_gcs = gcs_sources != 0;
-        let azure_secret_fields = usize::from(self.client_id.is_some())
-            + usize::from(self.client_secret.is_some())
-            + usize::from(self.tenant_id.is_some());
-        let has_azure = self.access_key.is_some()
-            || self.bearer_token.is_some()
-            || azure_secret_fields != 0;
-
-        if usize::from(has_s3) + usize::from(has_gcs) + usize::from(has_azure) > 1 {
-            return Err(StorageProfileError::invalid_option(
-                "user mapping credentials",
-                "credential sources for different providers cannot be combined",
-            ));
-        }
-        if self.access_key_id.is_some() != self.secret_access_key.is_some() {
-            return Err(StorageProfileError::invalid_option(
-                "access_key_id/secret_access_key",
-                "must be specified together",
-            ));
-        }
-        if self.token.is_some()
-            && (self.access_key_id.is_none() || self.secret_access_key.is_none())
-        {
-            return Err(StorageProfileError::invalid_option(
-                "token",
-                "requires access_key_id and secret_access_key",
-            ));
-        }
-        if gcs_sources > 1 {
-            return Err(StorageProfileError::invalid_option(
-                "GCS credential source",
-                "only one of service_account_path, service_account_key, or application_credentials_path is allowed",
-            ));
-        }
-        if azure_secret_fields != 0 && azure_secret_fields != 3 {
-            return Err(StorageProfileError::invalid_option(
-                "client_id/client_secret/tenant_id",
-                "must be specified together",
-            ));
-        }
-        if usize::from(self.access_key.is_some())
-            + usize::from(self.bearer_token.is_some())
-            + usize::from(azure_secret_fields == 3)
-            > 1
-        {
-            return Err(StorageProfileError::invalid_option(
-                "Azure credential source",
-                "access_key, bearer_token, and client-secret auth are mutually exclusive",
-            ));
-        }
-        Ok(())
-    }
 }
 
 fn parse_bool(value: Option<&str>, name: &str) -> Result<bool, StorageProfileError> {
@@ -505,9 +382,7 @@ fn reject_skip_signature_credentials(
     mapping: &MappingOptions<'_>,
 ) -> Result<(), StorageProfileError> {
     if skip_signature
-        && (mapping.access_key_id.is_some()
-            || mapping.secret_access_key.is_some()
-            || mapping.token.is_some()
+        && (mapping.aws_options().is_configured()
             || mapping.service_account_path.is_some()
             || mapping.service_account_key.is_some()
             || mapping.application_credentials_path.is_some())

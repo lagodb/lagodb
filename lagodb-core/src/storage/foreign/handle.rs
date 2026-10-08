@@ -41,8 +41,8 @@ impl StorageHandle {
         &self.entry.identity
     }
 
-    pub fn umid(&self) -> pg_sys::Oid {
-        self.entry.umid
+    pub fn mapping_oid(&self) -> Option<pg_sys::Oid> {
+        self.entry.identity.mapping_oid()
     }
 
     /// Returns the validated configuration owned by this catalog-backed handle.
