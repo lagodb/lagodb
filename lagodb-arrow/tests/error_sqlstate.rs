@@ -115,6 +115,7 @@ fn decimal_codec_invalid_binary_is_internal_error() {
 fn every_conv_error_variant_has_a_classification() {
     fn classify(err: &ArrowConversionError) -> PgSqlErrorCode {
         match err {
+            ArrowConversionError::JsonValue(source) => source.sql_error_code(),
             ArrowConversionError::UnsupportedColumnType(_)
             | ArrowConversionError::IncompatibleColumnType(_, _)
             | ArrowConversionError::ArrowTypeMismatch(_) => {

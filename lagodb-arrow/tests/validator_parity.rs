@@ -1,4 +1,4 @@
-//! `validate_supported` parity with `resolve_column_rule`: it accepts a schema
+//! `validate_cell_schema` parity with `resolve_cell_rule`: it accepts a schema
 //! iff every column resolves, and otherwise returns the lowest-positioned
 //! failing column's error variant. A zero-column schema is accepted. Host
 //! tests; the harness only builds schemas from `DataType`s, never arrays, so it
@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use lagodb_arrow::{
-    ArrowConversionError, PgColumnType, resolve_column_rule, validate_supported,
+    ArrowConversionError, PgColumnType, resolve_cell_rule, validate_cell_schema,
 };
 use pgrx::pg_sys;
 use proptest::prelude::*;
@@ -18,6 +18,7 @@ use proptest::prelude::*;
 /// `PartialEq` impl on `ArrowConversionError` itself.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum ErrTag {
+    JsonValue,
     Unsupported,
     Incompatible,
     ArrowTypeMismatch,
@@ -33,6 +34,7 @@ enum ErrTag {
 
 fn tag(e: &ArrowConversionError) -> ErrTag {
     match e {
+        ArrowConversionError::JsonValue(_) => ErrTag::JsonValue,
         ArrowConversionError::UnsupportedColumnType(_) => ErrTag::Unsupported,
         ArrowConversionError::IncompatibleColumnType(_, _) => ErrTag::Incompatible,
         ArrowConversionError::ArrowTypeMismatch(_) => ErrTag::ArrowTypeMismatch,
@@ -52,7 +54,7 @@ fn tag(e: &ArrowConversionError) -> ErrTag {
 /// Build an `arrow_schema::Schema` from an aligned list of `(DataType, _)`
 /// columns. Column `i` becomes a nullable field named `c{i}`; the PG type is
 /// carried separately to keep the two views position-aligned, exactly as
-/// `validate_supported` consumes them.
+/// `validate_cell_schema` consumes them.
 fn schema_from(columns: &[(DataType, PgColumnType)]) -> Schema {
     let fields: Vec<Field> = columns
         .iter()
@@ -71,7 +73,7 @@ fn pg_types_from(columns: &[(DataType, PgColumnType)]) -> Vec<PgColumnType> {
 /// when every column resolves.
 fn first_failing(columns: &[(DataType, PgColumnType)]) -> Option<(usize, ErrTag)> {
     columns.iter().enumerate().find_map(|(i, (dt, pg))| {
-        resolve_column_rule(dt, *pg).err().map(|e| (i, tag(&e)))
+        resolve_cell_rule(dt, *pg).err().map(|e| (i, tag(&e)))
     })
 }
 
@@ -132,7 +134,7 @@ fn arb_data_type() -> impl Strategy<Value = DataType> {
         // single-level lists with supported and unsupported elements
         arb_list_element()
             .prop_map(|et| DataType::List(Arc::new(Field::new("item", et, true)))),
-        // --- unsupported (resolve_column_rule always rejects) ---
+        // --- unsupported (resolve_cell_rule always rejects) ---
         Just(DataType::Null),
         Just(DataType::Int16),
         Just(DataType::Int8),
@@ -182,8 +184,8 @@ fn arb_columns() -> impl Strategy<Value = Vec<(DataType, PgColumnType)>> {
 // ----------------------------------------------------------------------------
 
 proptest! {
-    /// `validate_supported` returns `Ok(())` iff
-    /// `resolve_column_rule` resolves every column, and when it
+    /// `validate_cell_schema` returns `Ok(())` iff
+    /// `resolve_cell_rule` resolves every column, and when it
     /// rejects, it returns the same `ArrowConversionError` variant as the lowest-positioned
     /// failing column. The harness only ever builds a `Schema` from `DataType`s
     /// and never an array (types only, never values).
@@ -192,7 +194,7 @@ proptest! {
         let schema = schema_from(&columns);
         let pg_types = pg_types_from(&columns);
 
-        let result = validate_supported(&schema, &pg_types);
+        let result = validate_cell_schema(&schema, &pg_types);
         let oracle = first_failing(&columns);
 
         match (result, oracle) {
@@ -200,11 +202,11 @@ proptest! {
             (Ok(()), None) => {}
             (Ok(()), Some((idx, t))) => prop_assert!(
                 false,
-                "validate_supported returned Ok but column {idx} fails to resolve with {t:?}"
+                "validate_cell_schema returned Ok but column {idx} fails to resolve with {t:?}"
             ),
             (Err(e), None) => prop_assert!(
                 false,
-                "validate_supported rejected with {:?} but every column resolves",
+                "validate_cell_schema rejected with {:?} but every column resolves",
                 tag(&e)
             ),
             // reject parity: same variant as the lowest-positioned failing column
@@ -227,8 +229,8 @@ proptest! {
         let schema = schema_from(&columns);
         let pg_types = pg_types_from(&columns);
 
-        let result = validate_supported(&schema, &pg_types);
-        let resolved = resolve_column_rule(&col.0, col.1);
+        let result = validate_cell_schema(&schema, &pg_types);
+        let resolved = resolve_cell_rule(&col.0, col.1);
 
         match (result, resolved) {
             (Ok(()), Ok(_)) => {}
@@ -251,7 +253,7 @@ proptest! {
 #[test]
 fn zero_column_schema_is_ok() {
     let schema = Schema::new(Vec::<Field>::new());
-    assert!(validate_supported(&schema, &[]).is_ok());
+    assert!(validate_cell_schema(&schema, &[]).is_ok());
 }
 
 /// an all-supported schema resolves and is accepted.
@@ -272,7 +274,7 @@ fn all_supported_schema_is_ok() {
     ];
     let schema = schema_from(&columns);
     let pg_types = pg_types_from(&columns);
-    assert!(validate_supported(&schema, &pg_types).is_ok());
+    assert!(validate_cell_schema(&schema, &pg_types).is_ok());
 }
 
 /// with a single failing column, the validator surfaces that column's
@@ -285,7 +287,7 @@ fn single_failing_column_surfaces_its_variant() {
     ];
     let schema = schema_from(&columns);
     let pg_types = pg_types_from(&columns);
-    let err = validate_supported(&schema, &pg_types)
+    let err = validate_cell_schema(&schema, &pg_types)
         .expect_err("an unsupported column must reject");
     assert_eq!(tag(&err), ErrTag::Unsupported);
 }
@@ -304,26 +306,26 @@ fn multiple_failures_report_lowest_positioned_variant() {
     ];
     let schema = schema_from(&columns);
     let pg_types = pg_types_from(&columns);
-    let err = validate_supported(&schema, &pg_types)
+    let err = validate_cell_schema(&schema, &pg_types)
         .expect_err("schema with failing columns must reject");
 
     // Lowest-positioned failure is column 1 (Unsupported), not column 3.
     assert_eq!(tag(&err), ErrTag::Unsupported);
-    // And it matches what resolve_column_rule says for that column.
-    let col1_err = resolve_column_rule(&columns[1].0, columns[1].1)
+    // And it matches what resolve_cell_rule says for that column.
+    let col1_err = resolve_cell_rule(&columns[1].0, columns[1].1)
         .expect_err("column 1 must fail to resolve");
     assert_eq!(tag(&err), tag(&col1_err));
 }
 
 /// a `FixedSizeBinary(16)` paired with neither uuid nor bytea yields
 /// the `Incompatible` variant (distinct from `Unsupported`), confirming the
-/// validator forwards the exact `resolve_column_rule` variant.
+/// validator forwards the exact `resolve_cell_rule` variant.
 #[test]
 fn incompatible_fixed16_variant_is_forwarded() {
     let columns = vec![(DataType::FixedSizeBinary(16), PgColumnType::Numeric)];
     let schema = schema_from(&columns);
     let pg_types = pg_types_from(&columns);
-    let err = validate_supported(&schema, &pg_types)
+    let err = validate_cell_schema(&schema, &pg_types)
         .expect_err("FixedSizeBinary(16) with non-uuid/bytea must reject");
     assert_eq!(tag(&err), ErrTag::Incompatible);
 }

@@ -1,35 +1,31 @@
-//! UUID vs bytea disambiguation in `resolve_column_rule`. Pure resolution-table
-//! assertions; no PostgreSQL backend required. `ColumnRule` is not `PartialEq`,
+//! UUID vs bytea disambiguation in `resolve_cell_rule`. Pure resolution-table
+//! assertions; no PostgreSQL backend required. `CellRule` is not `PartialEq`,
 //! so assertions use `matches!`.
 
 use arrow_schema::DataType;
-use lagodb_arrow::{
-    ArrowConversionError, ColumnRule, PgColumnType, resolve_column_rule,
-};
+use lagodb_arrow::{ArrowConversionError, CellRule, PgColumnType, resolve_cell_rule};
 use proptest::prelude::*;
 
-/// `FixedSizeBinary(16)` + `uuid` resolves to [`ColumnRule::Uuid`].
+/// `FixedSizeBinary(16)` + `uuid` resolves to [`CellRule::Uuid`].
 #[test]
 fn fixed16_uuid_resolves_to_uuid() {
-    let rule =
-        resolve_column_rule(&DataType::FixedSizeBinary(16), PgColumnType::Uuid)
-            .expect("FixedSizeBinary(16) + Uuid must resolve");
+    let rule = resolve_cell_rule(&DataType::FixedSizeBinary(16), PgColumnType::Uuid)
+        .expect("FixedSizeBinary(16) + Uuid must resolve");
     assert!(
-        matches!(rule, ColumnRule::Uuid),
-        "expected ColumnRule::Uuid, got {rule:?}"
+        matches!(rule, CellRule::Uuid),
+        "expected CellRule::Uuid, got {rule:?}"
     );
 }
 
 /// `FixedSizeBinary(16)` paired with `bytea` resolves to a 16-wide
-/// [`ColumnRule::FixedBinary`], *not* to `Uuid`.
+/// [`CellRule::FixedBinary`], *not* to `Uuid`.
 #[test]
 fn fixed16_bytea_resolves_to_fixed_binary() {
-    let rule =
-        resolve_column_rule(&DataType::FixedSizeBinary(16), PgColumnType::Bytea)
-            .expect("FixedSizeBinary(16) + Bytea must resolve");
+    let rule = resolve_cell_rule(&DataType::FixedSizeBinary(16), PgColumnType::Bytea)
+        .expect("FixedSizeBinary(16) + Bytea must resolve");
     assert!(
-        matches!(rule, ColumnRule::FixedBinary { len: 16 }),
-        "expected ColumnRule::FixedBinary {{ len: 16 }}, got {rule:?}"
+        matches!(rule, CellRule::FixedBinary { len: 16 }),
+        "expected CellRule::FixedBinary {{ len: 16 }}, got {rule:?}"
     );
 }
 
@@ -37,7 +33,7 @@ fn fixed16_bytea_resolves_to_fixed_binary() {
 /// is rejected with [`ArrowConversionError::IncompatibleColumnType`].
 #[test]
 fn fixed16_other_pg_type_is_incompatible() {
-    let err = resolve_column_rule(&DataType::FixedSizeBinary(16), PgColumnType::Text)
+    let err = resolve_cell_rule(&DataType::FixedSizeBinary(16), PgColumnType::Text)
         .expect_err("FixedSizeBinary(16) + Text must be rejected");
     assert!(
         matches!(err, ArrowConversionError::IncompatibleColumnType(_, _)),
@@ -55,25 +51,25 @@ proptest! {
     #[test]
     fn prop_fixed16_disambiguation(_seed in any::<u8>()) {
         let uuid_rule =
-            resolve_column_rule(&DataType::FixedSizeBinary(16), PgColumnType::Uuid)
+            resolve_cell_rule(&DataType::FixedSizeBinary(16), PgColumnType::Uuid)
                 .expect("uuid must resolve");
         let bytea_rule =
-            resolve_column_rule(&DataType::FixedSizeBinary(16), PgColumnType::Bytea)
+            resolve_cell_rule(&DataType::FixedSizeBinary(16), PgColumnType::Bytea)
                 .expect("bytea must resolve");
 
         // uuid -> Uuid, never FixedBinary
-        prop_assert!(matches!(uuid_rule, ColumnRule::Uuid), "uuid must resolve to Uuid");
+        prop_assert!(matches!(uuid_rule, CellRule::Uuid), "uuid must resolve to Uuid");
         prop_assert!(
-            !matches!(uuid_rule, ColumnRule::FixedBinary { .. }),
+            !matches!(uuid_rule, CellRule::FixedBinary { .. }),
             "uuid must not resolve to FixedBinary"
         );
 
         // bytea -> FixedBinary{len:16}, never Uuid
         prop_assert!(
-            matches!(bytea_rule, ColumnRule::FixedBinary { len: 16 }),
+            matches!(bytea_rule, CellRule::FixedBinary { len: 16 }),
             "bytea must resolve to FixedBinary len 16"
         );
-        prop_assert!(!matches!(bytea_rule, ColumnRule::Uuid), "bytea must not resolve to Uuid");
+        prop_assert!(!matches!(bytea_rule, CellRule::Uuid), "bytea must not resolve to Uuid");
     }
 
     /// `(FixedSizeBinary(n), Bytea)` resolves to
@@ -81,15 +77,15 @@ proptest! {
     /// such a result is never the `Uuid` rule (the two never alias).
     #[test]
     fn prop_fixed_n_bytea_resolves_to_fixed_binary(n in 1..=i32::MAX) {
-        let rule = resolve_column_rule(&DataType::FixedSizeBinary(n), PgColumnType::Bytea)
+        let rule = resolve_cell_rule(&DataType::FixedSizeBinary(n), PgColumnType::Bytea)
             .expect("FixedSizeBinary(n) + Bytea must resolve for n in 1..=i32::MAX");
 
         prop_assert!(
-            matches!(rule, ColumnRule::FixedBinary { len } if len == n as usize),
+            matches!(rule, CellRule::FixedBinary { len } if len == n as usize),
             "expected FixedBinary {{ len: {n} }}, got {rule:?}"
         );
         // bytea resolution never aliases the uuid rule.
-        prop_assert!(!matches!(rule, ColumnRule::Uuid));
+        prop_assert!(!matches!(rule, CellRule::Uuid));
     }
 
     /// only width 16 may resolve to `Uuid`. For any width `n`
@@ -99,10 +95,10 @@ proptest! {
     fn prop_non16_uuid_never_resolves_to_uuid(
         n in (1..=i32::MAX).prop_filter("exclude 16", |n| *n != 16),
     ) {
-        let resolved = resolve_column_rule(&DataType::FixedSizeBinary(n), PgColumnType::Uuid);
+        let resolved = resolve_cell_rule(&DataType::FixedSizeBinary(n), PgColumnType::Uuid);
         match resolved {
             Ok(rule) => prop_assert!(
-                !matches!(rule, ColumnRule::Uuid),
+                !matches!(rule, CellRule::Uuid),
                 "width {n} must not resolve to Uuid"
             ),
             Err(_) => { /* rejected, which is also non-aliasing */ }
