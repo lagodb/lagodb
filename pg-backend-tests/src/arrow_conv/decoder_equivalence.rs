@@ -24,7 +24,7 @@ mod tests {
     };
     use arrow_array::types::{Int16Type, Int32Type};
     use arrow_array::{Array, ArrayRef, ListArray};
-    use lagodb_arrow::{ColumnReader, ColumnRule, PgColumnType, resolve_column_rule};
+    use lagodb_arrow::{CellRule, ColumnReader, PgColumnType, resolve_cell_rule};
     use lagodb_core::tuple::{Cell, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
     use pgrx::pg_sys;
     use pgrx::prelude::*;
@@ -35,7 +35,7 @@ mod tests {
     /// row (None = null).
     #[derive(Debug)]
     struct GeneratedColumn {
-        rule: ColumnRule,
+        rule: CellRule,
         array: ArrayRef,
         expected: Vec<Option<ExpectedValue>>,
     }
@@ -86,7 +86,7 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: ColumnRule::Bool,
+            rule: CellRule::Bool,
             array: Arc::new(builder.finish()),
             expected,
         }
@@ -103,7 +103,7 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: ColumnRule::I32,
+            rule: CellRule::I32,
             array: Arc::new(builder.finish()),
             expected,
         }
@@ -120,7 +120,7 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: ColumnRule::I64,
+            rule: CellRule::I64,
             array: Arc::new(builder.finish()),
             expected,
         }
@@ -137,7 +137,7 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: ColumnRule::F32,
+            rule: CellRule::F32,
             array: Arc::new(builder.finish()),
             expected,
         }
@@ -154,7 +154,7 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: ColumnRule::F64,
+            rule: CellRule::F64,
             array: Arc::new(builder.finish()),
             expected,
         }
@@ -173,7 +173,7 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: ColumnRule::Date32,
+            rule: CellRule::Date32,
             array: Arc::new(builder.finish()),
             expected,
         }
@@ -190,7 +190,7 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: ColumnRule::Time64Micros,
+            rule: CellRule::Time64Micros,
             array: Arc::new(builder.finish()),
             expected,
         }
@@ -213,7 +213,7 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: ColumnRule::Timestamp {
+            rule: CellRule::Timestamp {
                 nanos: false,
                 tz: false,
             },
@@ -317,11 +317,12 @@ mod tests {
     /// row-world `read_cell_unchecked` output ignores the OID — it keeps the
     /// physical width — but resolution validates the element kind against the
     /// OID).
-    fn list_rule(array: &ArrayRef) -> ColumnRule {
+    fn list_rule(array: &ArrayRef) -> CellRule {
         use arrow_schema::DataType;
         let elem_oid = match array.data_type() {
             DataType::List(field) => match field.data_type() {
                 DataType::Boolean => pg_sys::BOOLOID,
+                DataType::Int16 => pg_sys::INT2OID,
                 DataType::Int32 => pg_sys::INT4OID,
                 DataType::Int64 => pg_sys::INT8OID,
                 DataType::Float32 => pg_sys::FLOAT4OID,
@@ -331,7 +332,7 @@ mod tests {
             },
             other => panic!("not a list type: {other:?}"),
         };
-        resolve_column_rule(array.data_type(), PgColumnType::Array(elem_oid))
+        resolve_cell_rule(array.data_type(), PgColumnType::Array(elem_oid))
             .expect("list column rule")
     }
 
@@ -361,23 +362,14 @@ mod tests {
         }
     }
 
-    // `ListElementRule::Int` only resolves from an `Int32` element schema, but
-    // the physical batch array may be narrower (`Int16`). The read path must
-    // then keep i16 (`Cell::I16Array` / `int2[]`); only the build path widens
-    // Int16 to Int32. Resolve the rule from an Int32 list, then feed it an Int16
-    // array.
+    // Resolve the native Int16 list contract and retain its element width.
     #[pg_test]
     fn extract_int16_list_stays_i16_no_widening() {
-        let schema_array: ArrayRef =
-            Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
-                Some(vec![Some(1)]),
-            ]));
-        let rule = list_rule(&schema_array);
-
         let array: ArrayRef =
             Arc::new(ListArray::from_iter_primitive::<Int16Type, _, _>(vec![
                 Some(vec![Some(7i16), None, Some(9)]),
             ]));
+        let rule = list_rule(&array);
         let reader = ColumnReader::bind(&rule, array.as_ref()).expect("bind");
 
         // SAFETY: list cells are owned (`Cell::I16Array`), no borrow of reader.
@@ -437,7 +429,7 @@ mod tests {
     fn null_append_adds_one_slot_per_call() {
         use arrow_array::Array;
         use lagodb_arrow::ArrowColumnEncoder;
-        let mut encoder = ArrowColumnEncoder::new(&ColumnRule::I32, 4)
+        let mut encoder = ArrowColumnEncoder::new(&CellRule::I32, 4)
             .expect("I32 encoder construction is infallible");
         encoder.append_null();
         encoder.append_null();

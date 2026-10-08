@@ -1,8 +1,8 @@
 //! Backend equivalence property between the slot/datum write path and the
 //! buffered-row write path.
 //!
-//! Both paths read the *same* PostgreSQL datum: `ArrowColumnEncoder` reads it
-//! through a tuple-slot view, while `ColumnRule::build` reads it after it has
+//! Both paths read the *same* PostgreSQL datum: `BoundWriteBuffer` reads it
+//! through a tuple-slot view, while `CellRule::build` reads it after it has
 //! been materialized into a `Cell`. The property asserts the two produce a
 //! bit-identical Arrow array (physical type, values, null mask, timezone, and
 //! decimal precision/scale), so the slot path can replace the row path without
@@ -20,10 +20,11 @@ mod tests {
     use arrow_array::Array;
     use arrow_schema::{Field, Schema};
     use lagodb_arrow::{
-        ArrowColumnEncoder, BoundWriteBuffer, BoundWriteColumnPlan, ColumnRule,
+        ArrowColumnEncoder, BoundDatumPlan, BoundWriteBuffer, BoundWriteColumnPlan,
+        CellRule,
     };
     use lagodb_core::batch::BatchBuffer;
-    use lagodb_core::tuple::{Row, RowDatumCodec, TupleSlotRow};
+    use lagodb_core::tuple::{Cell, PgType, Row, RowDatumCodec, TupleSlotRow};
     use pgrx::prelude::*;
     use pgrx::{IntoDatum, pg_sys};
     use proptest::prelude::*;
@@ -33,15 +34,15 @@ mod tests {
     type TsParts = (i32, u8, u8, u8, u8, u32);
 
     /// One generated column: the resolved rule plus the per-row source values.
-    /// Each variant pins a source PostgreSQL type and an Arrow target so the
-    /// integer/float widening arms are exercised both at and across widths.
+    /// Each variant uses a provider-admitted PostgreSQL/Arrow mapping, including
+    /// managed smallint's widening to Int32 storage.
     #[derive(Debug, Clone)]
     enum Case {
         Bool(Vec<Option<bool>>),
         Int2AsI32(Vec<Option<i16>>),
-        Int4AsI64(Vec<Option<i32>>),
+        Int4AsI32(Vec<Option<i32>>),
         Int8AsI64(Vec<Option<i64>>),
-        Float4AsF64(Vec<Option<f32>>),
+        Float4AsF32(Vec<Option<f32>>),
         Float8AsF64(Vec<Option<f64>>),
         Text(Vec<Option<String>>),
         Bytea(Vec<Option<Vec<u8>>>),
@@ -61,60 +62,46 @@ mod tests {
             rows: Vec<Option<TsParts>>,
         },
         /// `name` is a fixed `NameData` cstring, not a varlena, and maps to an
-        /// Iceberg string (`ColumnRule::Utf8`).
+        /// Iceberg string (`CellRule::Utf8`).
         Name(Vec<Option<String>>),
         /// `json` keeps its validated input text and maps to an Iceberg string
-        /// (`ColumnRule::Utf8`).
+        /// (`CellRule::Utf8`).
         Json(Vec<Option<String>>),
-        /// `jsonb` is stored as Iceberg binary holding PostgreSQL's internal
-        /// varlena verbatim (header included), so it maps to the explicit
-        /// `ColumnRule::PostgresJsonbVarlena` codec.
+        /// Managed JSONB uses portable PostgreSQL output text.
         Jsonb(Vec<Option<String>>),
     }
 
     /// Lower a generated case to the rule, source OID, and per-row datums. Runs
     /// in-backend because building numeric/temporal datums calls PG functions.
-    fn into_parts(
-        case: Case,
-    ) -> (ColumnRule, pg_sys::Oid, Vec<Option<pg_sys::Datum>>) {
+    fn into_parts(case: Case) -> (CellRule, pg_sys::Oid, Vec<Option<pg_sys::Datum>>) {
         match case {
-            Case::Bool(v) => (
-                ColumnRule::Bool,
-                pg_sys::BOOLOID,
-                conv(v, |b| b.into_datum()),
-            ),
-            Case::Int2AsI32(v) => (
-                ColumnRule::I32,
-                pg_sys::INT2OID,
-                conv(v, |x| x.into_datum()),
-            ),
-            Case::Int4AsI64(v) => (
-                ColumnRule::I64,
-                pg_sys::INT4OID,
-                conv(v, |x| x.into_datum()),
-            ),
-            Case::Int8AsI64(v) => (
-                ColumnRule::I64,
-                pg_sys::INT8OID,
-                conv(v, |x| x.into_datum()),
-            ),
-            Case::Float4AsF64(v) => (
-                ColumnRule::F64,
+            Case::Bool(v) => {
+                (CellRule::Bool, pg_sys::BOOLOID, conv(v, |b| b.into_datum()))
+            }
+            Case::Int2AsI32(v) => {
+                (CellRule::I32, pg_sys::INT2OID, conv(v, |x| x.into_datum()))
+            }
+            Case::Int4AsI32(v) => {
+                (CellRule::I32, pg_sys::INT4OID, conv(v, |x| x.into_datum()))
+            }
+            Case::Int8AsI64(v) => {
+                (CellRule::I64, pg_sys::INT8OID, conv(v, |x| x.into_datum()))
+            }
+            Case::Float4AsF32(v) => (
+                CellRule::F32,
                 pg_sys::FLOAT4OID,
                 conv(v, |x| x.into_datum()),
             ),
             Case::Float8AsF64(v) => (
-                ColumnRule::F64,
+                CellRule::F64,
                 pg_sys::FLOAT8OID,
                 conv(v, |x| x.into_datum()),
             ),
-            Case::Text(v) => (
-                ColumnRule::Utf8,
-                pg_sys::TEXTOID,
-                conv(v, |s| s.into_datum()),
-            ),
+            Case::Text(v) => {
+                (CellRule::Utf8, pg_sys::TEXTOID, conv(v, |s| s.into_datum()))
+            }
             Case::Bytea(v) => (
-                ColumnRule::Binary,
+                CellRule::Binary,
                 pg_sys::BYTEAOID,
                 conv(v, |b| b.as_slice().into_datum()),
             ),
@@ -123,19 +110,19 @@ mod tests {
                 scale,
                 units,
             } => (
-                ColumnRule::Decimal128 { precision, scale },
+                CellRule::Decimal128 { precision, scale },
                 pg_sys::NUMERICOID,
                 conv(units, |u| numeric_from_units(u, scale).into_datum()),
             ),
             Case::Date(v) => (
-                ColumnRule::Date32,
+                CellRule::Date32,
                 pg_sys::DATEOID,
                 conv(v, |(y, m, d)| {
                     Date::new(y, m, d).expect("valid date").into_datum()
                 }),
             ),
             Case::Time(v) => (
-                ColumnRule::Time64Micros,
+                CellRule::Time64Micros,
                 pg_sys::TIMEOID,
                 conv(v, |(h, m, us)| {
                     Time::new(h, m, us as f64 / 1_000_000.0)
@@ -144,7 +131,7 @@ mod tests {
                 }),
             ),
             Case::Timestamp { nanos, rows } => (
-                ColumnRule::Timestamp { nanos, tz: false },
+                CellRule::Timestamp { nanos, tz: false },
                 pg_sys::TIMESTAMPOID,
                 conv(rows, |(y, mo, d, h, mi, us)| {
                     Timestamp::new(y, mo, d, h, mi, us as f64 / 1_000_000.0)
@@ -153,7 +140,7 @@ mod tests {
                 }),
             ),
             Case::Timestamptz { nanos, rows } => (
-                ColumnRule::Timestamp { nanos, tz: true },
+                CellRule::Timestamp { nanos, tz: true },
                 pg_sys::TIMESTAMPTZOID,
                 conv(rows, |(y, mo, d, h, mi, us)| {
                     TimestampWithTimeZone::new(
@@ -169,17 +156,17 @@ mod tests {
                 }),
             ),
             Case::Name(v) => (
-                ColumnRule::Utf8,
+                CellRule::Utf8,
                 pg_sys::NAMEOID,
                 conv(v, |s| unsafe { name_datum(&s) }),
             ),
             Case::Json(v) => (
-                ColumnRule::Utf8,
+                CellRule::Utf8,
                 pg_sys::JSONOID,
                 conv(v, |s| unsafe { json_datum(&s) }),
             ),
             Case::Jsonb(v) => (
-                ColumnRule::PostgresJsonbVarlena,
+                CellRule::Utf8,
                 pg_sys::JSONBOID,
                 conv(v, |s| unsafe { jsonb_datum(&s) }),
             ),
@@ -305,11 +292,9 @@ mod tests {
             let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
                 "c", data_type, true,
             )]));
-            let plan =
-                BoundWriteColumnPlan::bind(rule.clone(), Some(0), Some(oid), 1)
-                    .map_err(|e| {
-                        TestCaseError::fail(format!("bind failed: {e:?}"))
-                    })?;
+            let plan = BoundDatumPlan::bind(schema.field(0), PgType::new(oid, -1))
+                .and_then(|plan| BoundWriteColumnPlan::bind(plan, 0, 1))
+                .map_err(|e| TestCaseError::fail(format!("bind failed: {e:?}")))?;
             let mut buffer =
                 BoundWriteBuffer::new(schema, vec![plan].into_boxed_slice())
                     .map_err(|e| {
@@ -332,6 +317,12 @@ mod tests {
                     })?,
                     None => None,
                 };
+                // JSONB now has a text storage representation. The Cell-side
+                // reference explicitly materializes that semantic output text.
+                let cell = cell.map(|cell| match cell {
+                    Cell::Jsonb(value) => Cell::String(value.to_string()),
+                    cell => cell,
+                });
                 let mut row = Row::with_width(1);
                 row.set_cell(0, cell);
                 rows.push(row);
@@ -413,13 +404,13 @@ mod tests {
                 .prop_map(Case::Int2AsI32)
                 .boxed(),
             prop::collection::vec(prop::option::of(any::<i32>()), n.clone())
-                .prop_map(Case::Int4AsI64)
+                .prop_map(Case::Int4AsI32)
                 .boxed(),
             prop::collection::vec(prop::option::of(any::<i64>()), n.clone())
                 .prop_map(Case::Int8AsI64)
                 .boxed(),
             prop::collection::vec(prop::option::of(finite_f32()), n.clone())
-                .prop_map(Case::Float4AsF64)
+                .prop_map(Case::Float4AsF32)
                 .boxed(),
             prop::collection::vec(prop::option::of(finite_f64()), n.clone())
                 .prop_map(Case::Float8AsF64)
@@ -463,7 +454,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn encoder_output_matches_column_rule_build() {
+    fn encoder_output_matches_cell_rule_build() {
         let config = Config {
             cases: 48,
             failure_persistence: None,
@@ -472,14 +463,10 @@ mod tests {
         let mut runner = TestRunner::new(config);
         runner
             .run(&cases(), run_case)
-            .expect("encoder output must match ColumnRule::build");
+            .expect("encoder output must match CellRule::build");
     }
 
-    // `name`, `json`, and `jsonb` are not in the proptest generator (their
-    // datums are built via input functions, not `IntoDatum`), so they get deterministic
-    // equivalence checks. Both encoders previously diverged from `build`:
-    // `name` was dropped to NULL (not a varlena) and `jsonb` had its varlena
-    // header stripped (crashing the backend on read).
+    // Type I/O-backed values also exercise deterministic NULL and text cases.
     #[pg_test]
     fn encoder_output_matches_build_for_name() {
         run_case(Case::Name(vec![
@@ -488,7 +475,7 @@ mod tests {
             Some(String::new()),
             Some("another_name".to_string()),
         ]))
-        .expect("name encoder output must match ColumnRule::build");
+        .expect("name encoder output must match CellRule::build");
     }
 
     #[pg_test]
@@ -498,7 +485,7 @@ mod tests {
             None,
             Some("[true, null]".to_string()),
         ]))
-        .expect("json encoder output must match ColumnRule::build");
+        .expect("json encoder output must match CellRule::build");
     }
 
     #[pg_test]
@@ -509,6 +496,6 @@ mod tests {
             Some("[1, 2, 3]".to_string()),
             Some("\"scalar\"".to_string()),
         ]))
-        .expect("jsonb encoder output must match ColumnRule::build");
+        .expect("jsonb encoder output must match CellRule::build");
     }
 }

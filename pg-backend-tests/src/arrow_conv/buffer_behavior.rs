@@ -10,9 +10,9 @@ mod tests {
 
     use arrow_array::{Array, LargeBinaryArray};
     use arrow_schema::{DataType, Field, Schema};
-    use lagodb_arrow::{BoundWriteBuffer, BoundWriteColumnPlan, ColumnRule};
+    use lagodb_arrow::{BoundDatumPlan, BoundWriteBuffer, BoundWriteColumnPlan};
     use lagodb_core::batch::BatchBuffer;
-    use lagodb_core::tuple::TupleSlotRow;
+    use lagodb_core::tuple::{PgType, TupleSlotRow};
     use pgrx::prelude::*;
     use pgrx::{IntoDatum, pg_sys};
 
@@ -65,17 +65,17 @@ mod tests {
 
     fn bound_buffer(
         schema: Arc<Schema>,
-        bindings: &[(ColumnRule, pg_sys::Oid)],
+        bindings: &[pg_sys::Oid],
     ) -> BoundWriteBuffer {
         let slot_width = bindings.len();
         let plans = bindings
             .iter()
             .enumerate()
-            .map(|(index, (rule, oid))| {
+            .map(|(index, oid)| {
                 BoundWriteColumnPlan::bind(
-                    rule.clone(),
-                    Some(index),
-                    Some(*oid),
+                    BoundDatumPlan::bind(schema.field(index), PgType::new(*oid, -1))
+                        .expect("bind datum plan"),
+                    index,
                     slot_width,
                 )
                 .expect("bind bound write column")
@@ -121,8 +121,7 @@ mod tests {
                 DataType::LargeBinary,
                 true,
             )]));
-            let mut buffer =
-                bound_buffer(schema, &[(ColumnRule::Binary, pg_sys::BYTEAOID)]);
+            let mut buffer = bound_buffer(schema, &[pg_sys::BYTEAOID]);
             buffer
                 .append_slot_row(TupleSlotRow::from_raw(slot))
                 .expect("append toasted bytea");
@@ -152,10 +151,7 @@ mod tests {
                 DataType::FixedSizeBinary(16),
                 true,
             )]));
-            let mut buffer = bound_buffer(
-                schema,
-                &[(ColumnRule::FixedBinary { len: 16 }, pg_sys::BYTEAOID)],
-            );
+            let mut buffer = bound_buffer(schema, &[pg_sys::BYTEAOID]);
             let result = buffer.append_slot_row(TupleSlotRow::from_raw(slot));
             assert!(result.is_err(), "width mismatch must fail");
         }
@@ -170,14 +166,9 @@ mod tests {
             Field::new("b", DataType::Utf8, true),
             Field::new("c", DataType::Boolean, true),
         ]));
-        let rules = [ColumnRule::I32, ColumnRule::Utf8, ColumnRule::Bool];
         let mut buffer = bound_buffer(
             schema,
-            &[
-                (rules[0].clone(), pg_sys::INT4OID),
-                (rules[1].clone(), pg_sys::TEXTOID),
-                (rules[2].clone(), pg_sys::BOOLOID),
-            ],
+            &[pg_sys::INT4OID, pg_sys::TEXTOID, pg_sys::BOOLOID],
         );
 
         unsafe {
@@ -214,8 +205,7 @@ mod tests {
     fn empty_buffer_flushes_schema_only_batch() {
         let schema =
             Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, true)]));
-        let mut buffer =
-            bound_buffer(schema.clone(), &[(ColumnRule::I32, pg_sys::INT4OID)]);
+        let mut buffer = bound_buffer(schema.clone(), &[pg_sys::INT4OID]);
 
         assert!(buffer.is_empty());
         let batch = buffer.finish_batch().expect("finish empty");
@@ -229,7 +219,7 @@ mod tests {
     fn flush_signals_at_configured_byte_threshold() {
         let schema =
             Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, true)]));
-        let mut buffer = bound_buffer(schema, &[(ColumnRule::I32, pg_sys::INT4OID)]);
+        let mut buffer = bound_buffer(schema, &[pg_sys::INT4OID]);
         let threshold = 40; // 10 Int32 rows * 4 bytes
 
         unsafe {

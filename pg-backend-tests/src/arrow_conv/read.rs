@@ -13,9 +13,11 @@ mod tests {
     use arrow_array::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
     use lagodb_arrow::{
-        ArrowBatchSource, ArrowConversionError, ColumnRule, DatumCodec, DecodedColumn,
+        ArrowBatchSource, ArrowConversionError, BoundDatumPlan, CellRule, DatumCodec,
+        DecodedColumn,
     };
     use lagodb_core::batch::AmScanBatchSource;
+    use lagodb_core::tuple::PgType;
     use pgrx::pg_sys;
     use pgrx::prelude::*;
 
@@ -33,24 +35,17 @@ mod tests {
     fn prevalidated_json_text_codec_rejects_non_json_target() {
         let codec = unsafe { DatumCodec::prevalidated_json_text() };
         let result = unsafe {
-            DecodedColumn::new(ColumnRule::Utf8, 0, 0, pg_sys::INT4OID, codec)
+            DecodedColumn::new(CellRule::Utf8, 0, 0, pg_sys::INT4OID, codec)
         };
         assert!(result.is_err());
     }
 
     #[pg_test]
-    fn postgres_jsonb_varlena_codec_rejects_non_jsonb_target() {
-        let codec = unsafe { DatumCodec::postgres_jsonb_varlena() };
-        let result = unsafe {
-            DecodedColumn::new(
-                ColumnRule::PostgresJsonbVarlena,
-                0,
-                0,
-                pg_sys::BYTEAOID,
-                codec,
-            )
-        };
-        assert!(result.is_err());
+    fn jsonb_rejects_postgres_varlena_binary_storage() {
+        let field = Field::new("j", DataType::Binary, true);
+        assert!(
+            BoundDatumPlan::bind(&field, PgType::new(pg_sys::JSONBOID, -1)).is_err()
+        );
     }
 
     #[pg_test]

@@ -1,21 +1,92 @@
 //! Slot-first behavior for a batch-bound datum reader.
 
-use super::*;
+use arrow_array::{
+    Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array,
+    FixedSizeBinaryArray, Float32Array, Float64Array, Int16Array, Int32Array,
+    Int64Array, LargeBinaryArray, LargeStringArray, StringArray,
+    Time64MicrosecondArray, TimestampMicrosecondArray, TimestampNanosecondArray,
+};
+use lagodb_core::tuple::{Cell, ColumnDatumCodec, Decimal128NumericCodec};
+use pgrx::{datum::Uuid, pg_sys};
+
+use super::recursive_read::RecursiveDatumReader;
+use crate::column_encoder::temporal;
+use crate::jsonb::BoundNestedJsonb;
+use crate::read::list::ListReader;
+use crate::read::{
+    ColumnReader, ReaderImpl, bytea_view_cell, is_null_unchecked, str_view_cell,
+    timestamp_cell,
+};
+use crate::{ArrowConversionError, ArrowConversionResult, CellRule, DatumCodec};
+
+/// Slot-first reader with the final datum conversion encoded in its variant.
+///
+/// Unlike [`ColumnReader`], this type cannot represent a semantic-only reader
+/// or a physical codec paired with the wrong Arrow representation. Binding
+/// pays those checks once per batch. Each value dispatches on the bound variant;
+/// recursive containers then visit their bound child readers.
+pub(crate) enum BoundDatumReader {
+    Recursive(Box<RecursiveDatumReader>),
+    NestedJsonb(Box<BoundNestedJsonb>),
+    Bool(BooleanArray, ColumnDatumCodec),
+    I16(Int16Array, ColumnDatumCodec),
+    I32(Int32Array, ColumnDatumCodec),
+    I64(Int64Array, ColumnDatumCodec),
+    F32(Float32Array, ColumnDatumCodec),
+    F64(Float64Array, ColumnDatumCodec),
+    Utf8(StringArray, ColumnDatumCodec),
+    LargeUtf8(LargeStringArray, ColumnDatumCodec),
+    Binary(BinaryArray, ColumnDatumCodec),
+    LargeBinary(LargeBinaryArray, ColumnDatumCodec),
+    FixedBinary(FixedSizeBinaryArray, ColumnDatumCodec),
+    Uuid(FixedSizeBinaryArray, ColumnDatumCodec),
+    Date32(Date32Array, ColumnDatumCodec),
+    Time64Micros(Time64MicrosecondArray, ColumnDatumCodec),
+    TimestampMicros {
+        arr: TimestampMicrosecondArray,
+        tz: bool,
+        target: ColumnDatumCodec,
+    },
+    TimestampNanos {
+        arr: TimestampNanosecondArray,
+        tz: bool,
+        target: ColumnDatumCodec,
+    },
+    Decimal128 {
+        arr: Decimal128Array,
+        codec: Decimal128NumericCodec,
+        target_typmod: i32,
+    },
+    List(Box<ListReader>),
+    PrevalidatedJsonText(StringArray),
+    PrevalidatedLargeJsonText(LargeStringArray),
+    PostgresNumericVarlena(BinaryArray),
+    PostgresLargeNumericVarlena(LargeBinaryArray),
+    NumericFromInt64(Int64Array),
+    NumericFromFloat64(Float64Array),
+}
 
 impl BoundDatumReader {
-    pub(super) fn bind(
-        rule: &ColumnRule,
+    /// Install a declared numeric target once per batch; physical readers keep
+    /// their source typmod. Other scalar readers have no numeric conversion.
+    pub(super) fn with_numeric_typmod(mut self, typmod: i32) -> Self {
+        if let Self::Decimal128 { target_typmod, .. } = &mut self {
+            *target_typmod = typmod;
+        }
+        self
+    }
+
+    /// # Safety
+    /// `rule.accepts(array.data_type())` must hold for the complete type.
+    pub(crate) unsafe fn bind_unchecked(
+        rule: &CellRule,
         array: &dyn Array,
         codec: DatumCodec,
     ) -> ArrowConversionResult<Self> {
-        let reader = ColumnReader::bind_reader(rule, array)?;
+        // SAFETY: inherited from this binding entry point.
+        let reader = unsafe { ColumnReader::bind_reader_unchecked(rule, array) }?;
         if let Some(target) = codec.standard_target() {
-            if matches!(rule, ColumnRule::PostgresJsonbVarlena) {
-                return Err(ArrowConversionError::InvariantViolated(
-                    "the PostgreSQL JSONB varlena rule requires its physical codec",
-                ));
-            }
-            return Ok(Self::from_standard(reader, target));
+            return Self::from_standard(reader, target);
         }
 
         if codec.is_prevalidated_json_text() {
@@ -30,25 +101,8 @@ impl BoundDatumReader {
             };
         }
 
-        if codec.is_postgres_jsonb_varlena() {
-            if !matches!(rule, ColumnRule::PostgresJsonbVarlena) {
-                return Err(ArrowConversionError::InvariantViolated(
-                    "the PostgreSQL JSONB varlena codec requires its physical rule",
-                ));
-            }
-            return match reader {
-                ReaderImpl::Binary(array) => Ok(Self::PostgresJsonbVarlena(array)),
-                ReaderImpl::LargeBinary(array) => {
-                    Ok(Self::PostgresLargeJsonbVarlena(array))
-                }
-                _ => Err(ArrowConversionError::InvariantViolated(
-                    "the PostgreSQL JSONB varlena codec requires its physical rule",
-                )),
-            };
-        }
-
         if codec.is_postgres_numeric_varlena() {
-            if !matches!(rule, ColumnRule::Binary) {
+            if !matches!(rule, CellRule::Binary) {
                 return Err(ArrowConversionError::InvariantViolated(
                     "the PostgreSQL NUMERIC varlena codec requires a binary rule",
                 ));
@@ -60,15 +114,6 @@ impl BoundDatumReader {
                 }
                 _ => Err(ArrowConversionError::InvariantViolated(
                     "the PostgreSQL NUMERIC varlena codec requires a binary rule",
-                )),
-            };
-        }
-
-        if codec.is_float4_from_float64() {
-            return match reader {
-                ReaderImpl::F64(array) => Ok(Self::Float4FromFloat64(array)),
-                _ => Err(ArrowConversionError::InvariantViolated(
-                    "the Float64-to-float4 codec requires a Float64 rule",
                 )),
             };
         }
@@ -96,9 +141,13 @@ impl BoundDatumReader {
         ))
     }
 
-    fn from_standard(reader: ReaderImpl, target: ColumnDatumCodec) -> Self {
-        match reader {
+    fn from_standard(
+        reader: ReaderImpl,
+        target: ColumnDatumCodec,
+    ) -> ArrowConversionResult<Self> {
+        Ok(match reader {
             ReaderImpl::Bool(array) => Self::Bool(array, target),
+            ReaderImpl::I16(array) => Self::I16(array, target),
             ReaderImpl::I32(array) => Self::I32(array, target),
             ReaderImpl::I64(array) => Self::I64(array, target),
             ReaderImpl::F32(array) => Self::F32(array, target),
@@ -118,29 +167,33 @@ impl BoundDatumReader {
                 Self::TimestampNanos { arr, tz, target }
             }
             ReaderImpl::Decimal128 { arr, codec } => {
-                Self::Decimal128 { arr, codec, target }
+                // Direct Datum decoding bypasses Cell's target dispatch, so
+                // establish its numeric destination once while binding.
+                if target.oid() != pg_sys::NUMERICOID {
+                    return Err(ArrowConversionError::InvariantViolated(
+                        "the Decimal128 datum reader requires a NUMERIC target",
+                    ));
+                }
+                Self::Decimal128 {
+                    arr,
+                    target_typmod: codec.typmod(),
+                    codec,
+                }
             }
-            ReaderImpl::List {
-                arr,
-                element,
-                element_codec,
-            } => Self::List {
-                arr,
-                element,
-                element_codec,
-            },
-        }
+            ReaderImpl::List(reader) => Self::List(reader),
+        })
     }
 
-    /// Read one datum after the enclosing [`BoundBatch`] established the row
+    /// Read one datum after the enclosing [`BoundBatch`](super::BoundBatch) established the row
     /// index against every array in the batch.
     ///
     /// # Safety
     ///
     /// `row_idx` must be within the bound RecordBatch. PostgreSQL must be
     /// active with the destination memory context selected.
+    /// PostgreSQL errors unwind to the enclosing provider/FFI boundary.
     #[inline]
-    pub(super) unsafe fn read_datum_unchecked(
+    pub(crate) unsafe fn read_datum_unchecked(
         &self,
         row_idx: usize,
     ) -> ArrowConversionResult<Option<pg_sys::Datum>> {
@@ -156,10 +209,17 @@ impl BoundDatumReader {
             }};
         }
         match self {
+            Self::Recursive(reader) => unsafe { reader.read_datum(row_idx) },
+            Self::NestedJsonb(reader) => unsafe { reader.read_datum(row_idx) },
             Self::Bool(array, target) => standard!(
                 array,
                 *target,
                 Cell::Bool(unsafe { array.value_unchecked(row_idx) })
+            ),
+            Self::I16(array, target) => standard!(
+                array,
+                *target,
+                Cell::I16(unsafe { array.value_unchecked(row_idx) })
             ),
             Self::I32(array, target) => standard!(
                 array,
@@ -249,24 +309,31 @@ impl BoundDatumReader {
                     )?
                 )
             }
-            Self::Decimal128 { arr, codec, target } => standard!(
+            Self::Decimal128 {
                 arr,
-                *target,
-                Cell::Numeric(codec.decode(unsafe { arr.value_unchecked(row_idx) })?)
-            ),
-            Self::List {
-                arr,
-                element,
-                element_codec,
+                codec,
+                target_typmod,
             } => {
                 if unsafe { is_null_unchecked(arr, row_idx) } {
                     return Ok(None);
                 }
-                unsafe {
-                    list::array_datum_at(arr, row_idx, *element, *element_codec)
-                }
-                .map(Some)
+                // Keep the numeric_recv result in the destination PG context.
+                // The owned Cell reader uses decode(); using it here would
+                // copy PG Numeric into AnyNumeric and back, and register
+                // per-value error handlers. As in the JSONB decimal reader,
+                // PG errors retain their original SQLSTATE at the outer FFI
+                // boundary; numeric_recv applies the bound target typmod.
+                // SAFETY: binding established the numeric target and codec;
+                // the caller supplies a valid row and destination context.
+                let datum = unsafe {
+                    codec.decode_datum_with_typmod(
+                        arr.value_unchecked(row_idx),
+                        *target_typmod,
+                    )
+                };
+                Ok(Some(datum))
             }
+            Self::List(reader) => unsafe { reader.datum(row_idx) },
             Self::PrevalidatedJsonText(array) => {
                 if unsafe { is_null_unchecked(array, row_idx) } {
                     return Ok(None);
@@ -281,20 +348,6 @@ impl BoundDatumReader {
                 let text: &str = unsafe { array.value_unchecked(row_idx) };
                 unsafe { DatumCodec::copy_prevalidated_json_text(text) }.map(Some)
             }
-            Self::PostgresJsonbVarlena(array) => {
-                if unsafe { is_null_unchecked(array, row_idx) } {
-                    return Ok(None);
-                }
-                let bytes: &[u8] = unsafe { array.value_unchecked(row_idx) };
-                unsafe { DatumCodec::copy_postgres_jsonb_varlena(bytes) }.map(Some)
-            }
-            Self::PostgresLargeJsonbVarlena(array) => {
-                if unsafe { is_null_unchecked(array, row_idx) } {
-                    return Ok(None);
-                }
-                let bytes: &[u8] = unsafe { array.value_unchecked(row_idx) };
-                unsafe { DatumCodec::copy_postgres_jsonb_varlena(bytes) }.map(Some)
-            }
             Self::PostgresNumericVarlena(array) => {
                 if unsafe { is_null_unchecked(array, row_idx) } {
                     return Ok(None);
@@ -308,15 +361,6 @@ impl BoundDatumReader {
                 }
                 let bytes: &[u8] = unsafe { array.value_unchecked(row_idx) };
                 unsafe { DatumCodec::copy_postgres_numeric_varlena(bytes) }.map(Some)
-            }
-            Self::Float4FromFloat64(array) => {
-                if unsafe { is_null_unchecked(array, row_idx) } {
-                    return Ok(None);
-                }
-                DatumCodec::float4_datum_from_float64(unsafe {
-                    array.value_unchecked(row_idx)
-                })
-                .map(Some)
             }
             Self::NumericFromInt64(array) => {
                 if unsafe { is_null_unchecked(array, row_idx) } {

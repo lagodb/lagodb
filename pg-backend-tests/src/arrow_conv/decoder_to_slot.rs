@@ -21,12 +21,15 @@ mod tests {
     };
     use arrow_schema::{Field, Schema};
     use lagodb_arrow::{
-        ArrowBatchSource, ArrowColumnDecoder, ArrowConversionError, ColumnReader,
-        ColumnRule, DatumCodec, DecodedColumn, PgColumnType, resolve_column_rule,
+        ArrowBatchSource, ArrowColumnDecoder, ArrowConversionError, BoundDatumPlan,
+        CellRule, ColumnReader, DatumCodec, DecodedColumn, PgColumnType,
+        resolve_cell_rule,
     };
     use lagodb_core::batch::{BatchRowCursor, BatchRowDecoder};
     use lagodb_core::handles::ScanDirection;
-    use lagodb_core::tuple::{ColumnDatumCodec, ColumnDatumTarget, SlotColumns};
+    use lagodb_core::tuple::{
+        ColumnDatumCodec, ColumnDatumTarget, PgType, SlotColumns,
+    };
     use pgrx::prelude::*;
     use pgrx::{FromDatum, datum::Uuid, pg_sys};
 
@@ -113,45 +116,45 @@ mod tests {
         ];
 
         // Each column: (Arrow array with [value, NULL], rule, target oid).
-        let plan: Vec<(ArrayRef, ColumnRule, pg_sys::Oid)> = vec![
+        let plan: Vec<(ArrayRef, CellRule, pg_sys::Oid)> = vec![
             (
                 Arc::new(BooleanArray::from(vec![Some(true), None])),
-                ColumnRule::Bool,
+                CellRule::Bool,
                 pg_sys::BOOLOID,
             ),
             (
                 Arc::new(Int32Array::from(vec![Some(42), None])),
-                ColumnRule::I32,
+                CellRule::I32,
                 pg_sys::INT4OID,
             ),
             (
                 Arc::new(Int64Array::from(vec![Some(9_000_000_000), None])),
-                ColumnRule::I64,
+                CellRule::I64,
                 pg_sys::INT8OID,
             ),
             (
                 Arc::new(Float32Array::from(vec![Some(1.5f32), None])),
-                ColumnRule::F32,
+                CellRule::F32,
                 pg_sys::FLOAT4OID,
             ),
             (
                 Arc::new(Float64Array::from(vec![Some(2.25f64), None])),
-                ColumnRule::F64,
+                CellRule::F64,
                 pg_sys::FLOAT8OID,
             ),
             (
                 Arc::new(StringArray::from(vec![Some("hello"), None])),
-                ColumnRule::Utf8,
+                CellRule::Utf8,
                 pg_sys::TEXTOID,
             ),
             (
                 Arc::new(BinaryArray::from(vec![Some(&[1u8, 2, 3][..]), None])),
-                ColumnRule::Binary,
+                CellRule::Binary,
                 pg_sys::BYTEAOID,
             ),
             (
                 decimal(vec![Some(12345), None], 10, 2),
-                ColumnRule::Decimal128 {
+                CellRule::Decimal128 {
                     precision: 10,
                     scale: 2,
                 },
@@ -159,7 +162,7 @@ mod tests {
             ),
             (
                 Arc::new(Date32Array::from(vec![Some(0), None])),
-                ColumnRule::Date32,
+                CellRule::Date32,
                 pg_sys::DATEOID,
             ),
             (
@@ -167,12 +170,12 @@ mod tests {
                     Some(3_600_000_000),
                     None,
                 ])),
-                ColumnRule::Time64Micros,
+                CellRule::Time64Micros,
                 pg_sys::TIMEOID,
             ),
             (
                 Arc::new(TimestampMicrosecondArray::from(vec![Some(0), None])),
-                ColumnRule::Timestamp {
+                CellRule::Timestamp {
                     nanos: false,
                     tz: false,
                 },
@@ -183,7 +186,7 @@ mod tests {
                     TimestampMicrosecondArray::from(vec![Some(0), None])
                         .with_timezone("+00:00"),
                 ),
-                ColumnRule::Timestamp {
+                CellRule::Timestamp {
                     nanos: false,
                     tz: true,
                 },
@@ -191,7 +194,7 @@ mod tests {
             ),
             (
                 uuid16(vec![Some(uuid_bytes), None]),
-                ColumnRule::Uuid,
+                CellRule::Uuid,
                 pg_sys::UUIDOID,
             ),
         ];
@@ -286,7 +289,7 @@ mod tests {
         let decoder = ArrowColumnDecoder::new(vec![
             unsafe {
                 DecodedColumn::new(
-                    ColumnRule::I32,
+                    CellRule::I32,
                     0,
                     0,
                     pg_sys::INT4OID,
@@ -297,7 +300,7 @@ mod tests {
             },
             unsafe {
                 DecodedColumn::new(
-                    ColumnRule::I32,
+                    CellRule::I32,
                     1,
                     3,
                     pg_sys::INT4OID,
@@ -339,7 +342,7 @@ mod tests {
         ]))]);
         let decoder = ArrowColumnDecoder::new(vec![unsafe {
             DecodedColumn::new(
-                ColumnRule::Utf8,
+                CellRule::Utf8,
                 0,
                 0,
                 pg_sys::TEXTOID,
@@ -407,7 +410,7 @@ mod tests {
         );
         let decoder = ArrowColumnDecoder::new(vec![unsafe {
             DecodedColumn::new(
-                ColumnRule::I32,
+                CellRule::I32,
                 0,
                 0,
                 pg_sys::INT4OID,
@@ -459,7 +462,7 @@ mod tests {
                 None,
                 Some(vec![]),
             ]));
-        let int_rule = resolve_column_rule(
+        let int_rule = resolve_cell_rule(
             int_list.data_type(),
             PgColumnType::Array(pg_sys::INT4OID),
         )
@@ -473,7 +476,7 @@ mod tests {
         sb.append(false);
         sb.append(true); // empty, non-null
         let str_list: ArrayRef = Arc::new(sb.finish());
-        let str_rule = resolve_column_rule(
+        let str_rule = resolve_cell_rule(
             str_list.data_type(),
             PgColumnType::Array(pg_sys::TEXTOID),
         )
@@ -553,7 +556,7 @@ mod tests {
     #[pg_test]
     fn canonical_list_datum_matches_cell_path() {
         unsafe fn assert_parity<T>(
-            rule: &ColumnRule,
+            rule: &CellRule,
             array: ArrayRef,
             array_oid: pg_sys::Oid,
         ) where
@@ -562,13 +565,14 @@ mod tests {
             unsafe {
                 // Direct: bind the one-column batch and decode row 0 into a slot.
                 let decoder = ArrowColumnDecoder::new(vec![
-                    DecodedColumn::new(
-                        rule.clone(),
+                    DecodedColumn::bind(
+                        BoundDatumPlan::bind(
+                            &Field::new("values", array.data_type().clone(), true),
+                            PgType::new(array_oid, -1),
+                        )
+                        .expect("bind native list plan"),
                         0,
                         0,
-                        array_oid,
-                        DatumCodec::standard(array_oid)
-                            .expect("bind standard datum codec"),
                     )
                     .expect("bind decoded column"),
                 ]);
@@ -603,20 +607,18 @@ mod tests {
             Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
                 Some(vec![Some(1), None, Some(3)]),
             ]));
-        let int_rule = resolve_column_rule(
+        let int_rule = resolve_cell_rule(
             int_list.data_type(),
             PgColumnType::Array(pg_sys::INT4OID),
         )
         .expect("int list rule");
 
-        // int2[] backed by an Int16 element source: physical i16 already matches
-        // the int2 target, so both paths agree. (Resolve from Int32 — the only
-        // schema `Int` resolves from — then apply to a narrower Int16 array.)
+        // int2[] backed by its native Int16 element source.
         let i16_schema: ArrayRef =
-            Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+            Arc::new(ListArray::from_iter_primitive::<Int16Type, _, _>(vec![
                 Some(vec![Some(1)]),
             ]));
-        let i16_rule = resolve_column_rule(
+        let i16_rule = resolve_cell_rule(
             i16_schema.data_type(),
             PgColumnType::Array(pg_sys::INT2OID),
         )
@@ -633,7 +635,7 @@ mod tests {
         sb.values().append_value("z");
         sb.append(true);
         let str_list: ArrayRef = Arc::new(sb.finish());
-        let str_rule = resolve_column_rule(
+        let str_rule = resolve_cell_rule(
             str_list.data_type(),
             PgColumnType::Array(pg_sys::TEXTOID),
         )
@@ -680,7 +682,7 @@ mod tests {
         }
 
         unsafe fn read_list_datum(
-            rule: &ColumnRule,
+            rule: &CellRule,
             array: &ArrayRef,
             target_oid: pg_sys::Oid,
         ) -> pg_sys::Datum {
@@ -701,7 +703,7 @@ mod tests {
             Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
                 Some(vec![Some(1), None, Some(3)]),
             ]));
-        let int2_rule = resolve_column_rule(
+        let int2_rule = resolve_cell_rule(
             i32_list.data_type(),
             PgColumnType::Array(pg_sys::INT2OID),
         )
@@ -714,7 +716,7 @@ mod tests {
         sb.values().append_value("z");
         sb.append(true);
         let str_list: ArrayRef = Arc::new(sb.finish());
-        let name_rule = resolve_column_rule(
+        let name_rule = resolve_cell_rule(
             str_list.data_type(),
             PgColumnType::Array(pg_sys::NAMEOID),
         )
