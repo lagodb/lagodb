@@ -17,6 +17,10 @@ use pgrx::prelude::*;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
+mod context;
+
+pub use context::IndexBuildContext;
+
 struct IndexFetchState<T> {
     am_instance: T,
     row: Row,
@@ -180,6 +184,7 @@ where
 }
 
 #[pg_guard]
+#[allow(clippy::too_many_arguments)] // PG TableAmRoutine::index_build_range_scan ABI.
 pub extern "C-unwind" fn index_build_range_scan<A>(
     table_rel: pg_sys::Relation,
     index_rel: pg_sys::Relation,
@@ -209,19 +214,18 @@ where
     let scan_handle = NonNull::new(scan)
         .map(|scan| unsafe { TableScanDescHandle::from_non_null(scan) });
 
-    A::index_build_range_scan(
-        &table_rel_handle,
-        &index_rel_handle,
-        &index_info_handle,
+    let context = IndexBuildContext {
+        table_rel: &table_rel_handle,
+        index_rel: &index_rel_handle,
+        index_info: &index_info_handle,
         allow_sync,
         anyvisible,
         progress,
         start_blockno,
         numblocks,
-        &mut callback_handle,
-        scan_handle.as_ref(),
-    )
-    .report_unwrap()
+        scan: scan_handle.as_ref(),
+    };
+    A::index_build_range_scan(&context, &mut callback_handle).report_unwrap()
 }
 
 #[pg_guard]

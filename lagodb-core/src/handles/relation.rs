@@ -265,6 +265,31 @@ pub struct RelationGuard {
 }
 
 impl RelationGuard {
+    /// Open any relation kind for scoped inspection, releasing this lock on drop.
+    pub fn open_relation(
+        oid: pg_sys::Oid,
+        lock_mode: pg_sys::LOCKMODE,
+    ) -> Result<Self, PgError> {
+        Ok(Self {
+            rel: PgWrapper::relation_open(oid, lock_mode)?,
+            lock_mode,
+        })
+    }
+
+    /// Open a relation of any kind, retaining the lock until transaction end.
+    /// Unlike table_open, this also admits standalone composite relations,
+    /// which PostgreSQL permits as CREATE TABLE LIKE sources. The caller owns
+    /// admission of relation kinds for its operation.
+    pub fn open_relation_retain_lock(
+        oid: pg_sys::Oid,
+        lock_mode: pg_sys::LOCKMODE,
+    ) -> Result<Self, PgError> {
+        Ok(Self {
+            rel: PgWrapper::relation_open(oid, lock_mode)?,
+            lock_mode: pg_sys::NoLock as _,
+        })
+    }
+
     /// Opens a table relation with the specified lock mode.
     ///
     /// PostgreSQL rejects indexes, partitioned indexes, and composite types at
@@ -374,6 +399,15 @@ impl<'a> SnapshotHandle<'a> {
     #[inline]
     pub fn as_raw(&self) -> pg_sys::Snapshot {
         self.inner.as_ptr()
+    }
+
+    /// Command boundary for transaction-local changes in an MVCC read.
+    /// Special snapshots (ANALYZE/maintenance/self visibility) do not impose
+    /// an ordinary executor command boundary.
+    pub fn command_id(&self) -> Option<pg_sys::CommandId> {
+        // SAFETY: the handle borrows a live PostgreSQL snapshot.
+        (self.snapshot_type() == pg_sys::SnapshotType::SNAPSHOT_MVCC)
+            .then(|| unsafe { self.inner.as_ref().curcid })
     }
 
     /// Returns PostgreSQL's snapshot kind.

@@ -18,7 +18,9 @@ pub(crate) struct ForeignModifyStateWrapper<P: FdwModify> {
     pub(crate) payload: ProviderPayload<P::ModifyPrivateData, P::ModifyState>,
     pub(crate) row_layout: ModifyRowLayout,
     pub(crate) operation: ForeignModifyOperation,
-    pub(crate) command_id: pg_sys::CommandId,
+    /// ModifyTable CID for UPDATE/DELETE SelfModified comparisons. States
+    /// created through BeginForeignInsert do not need this comparison.
+    pub(crate) command_id: Option<pg_sys::CommandId>,
     pub(crate) updated_columns: Box<[pg_sys::AttrNumber]>,
     pub(crate) row_identity_layout: RowIdentityLayout,
     pub(crate) plan_tuple_desc: pg_sys::TupleDesc,
@@ -28,48 +30,10 @@ pub(crate) struct ForeignModifyStateWrapper<P: FdwModify> {
     pub(crate) return_requirements: ForeignModifyReturnRequirements,
     pub(crate) return_layout: ForeignModifyReturnLayout,
     pub(crate) return_slot_required: bool,
-    _marker: PhantomData<fn() -> P>,
+    pub(super) _marker: PhantomData<fn() -> P>,
 }
 
 impl<P: FdwModify> ForeignModifyStateWrapper<P> {
-    /// # Safety
-    ///
-    /// `relation` must be the live result relation for this modify state and
-    /// retain a stable valid TupleDesc until executor cleanup.
-    pub(crate) unsafe fn new(
-        private_data: P::ModifyPrivateData,
-        relation: pg_sys::Relation,
-        operation: ForeignModifyOperation,
-        command_id: pg_sys::CommandId,
-        updated_columns: Box<[pg_sys::AttrNumber]>,
-        row_identity_layout: RowIdentityLayout,
-        plan_tuple_desc: pg_sys::TupleDesc,
-        per_tuple_context: pg_sys::MemoryContext,
-        returned_identity: ForeignReturnedIdentity,
-        returned_item_pointer_required: bool,
-        return_requirements: ForeignModifyReturnRequirements,
-        return_layout: ForeignModifyReturnLayout,
-        return_slot_required: bool,
-    ) -> Self {
-        let row_layout = unsafe { ModifyRowLayout::from_relation(relation) };
-        Self {
-            payload: ProviderPayload::with_private(private_data),
-            row_layout,
-            operation,
-            command_id,
-            updated_columns,
-            row_identity_layout,
-            plan_tuple_desc,
-            per_tuple_context,
-            returned_identity,
-            returned_item_pointer_required,
-            return_requirements,
-            return_layout,
-            return_slot_required,
-            _marker: PhantomData,
-        }
-    }
-
     /// # Safety
     ///
     /// `relation` must be the live result relation for this insert state and
@@ -80,14 +44,13 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         returned_item_pointer_required: bool,
         return_slot_required: bool,
         per_tuple_context: pg_sys::MemoryContext,
-        command_id: pg_sys::CommandId,
     ) -> Self {
         let row_layout = unsafe { ModifyRowLayout::from_relation(relation) };
         Self {
             payload: ProviderPayload::empty(),
             row_layout,
             operation: ForeignModifyOperation::Insert,
-            command_id,
+            command_id: None,
             updated_columns: Vec::new().into_boxed_slice(),
             row_identity_layout: RowIdentityLayout::empty(),
             plan_tuple_desc: ptr::null_mut(),

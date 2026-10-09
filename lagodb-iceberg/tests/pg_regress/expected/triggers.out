@@ -170,12 +170,119 @@ FOR EACH ROW EXECUTE FUNCTION dml_trigger_query_state.audit_spill();
 INSERT INTO dml_trigger_query_state.spill_target
 SELECT id, repeat('x', 8192)
 FROM generate_series(1, 80) AS id;
+-- SPI subtransaction cleanup must abandon spilled rows even after the
+-- ModifyTable node finished and its AFTER trigger raised an error.
+ALTER TABLE dml_trigger_query_state.spill_audit
+ADD CONSTRAINT reject_spill_update CHECK (new_length <= 8192);
+SET client_min_messages = notice;
+DO $$
+BEGIN
+    UPDATE dml_trigger_query_state.spill_target SET payload = payload || 'y';
+    RAISE EXCEPTION 'expected AFTER trigger constraint failure';
+EXCEPTION
+    WHEN check_violation THEN
+        RAISE NOTICE 'caught AFTER trigger constraint failure';
+END;
+$$;
+NOTICE:  caught AFTER trigger constraint failure
+RESET client_min_messages;
+SELECT count(*) = 80 AND bool_and(length(payload) = 8192) AS rows_restored,
+       NOT EXISTS (SELECT FROM dml_trigger_query_state.spill_audit) AS audit_empty
+FROM dml_trigger_query_state.spill_target;
+ rows_restored | audit_empty 
+---------------+-------------
+ t             | t
+(1 row)
+
+ALTER TABLE dml_trigger_query_state.spill_audit
+DROP CONSTRAINT reject_spill_update;
 UPDATE dml_trigger_query_state.spill_target SET payload = payload || 'y';
 SELECT count(*), min(old_length), max(new_length)
 FROM dml_trigger_query_state.spill_audit;
  count | min  | max  
 -------+------+------
     80 | 8192 | 8193
+(1 row)
+
+-- COPY stores tokens with spilled rows, including rows skipped by WHEN.
+-- Two triggers reuse each selected row, with a nested COPY between them
+-- using a separate COPY owner.
+SELECT current_setting('data_directory') || '/copy-trigger-input-' || pg_backend_pid()
+       AS copy_trigger_input
+\gset
+\set copy_trigger_nested :copy_trigger_input '.nested'
+COPY (SELECT id, CASE WHEN id <> 89 THEN repeat('c', 8192 + id) END
+      FROM generate_series(81, 160) AS id)
+TO :'copy_trigger_input';
+COPY (SELECT -1, repeat('n', 4096)) TO :'copy_trigger_nested';
+TRUNCATE dml_trigger_query_state.spill_audit;
+DROP TRIGGER spill_audit ON dml_trigger_query_state.spill_target;
+CREATE TRIGGER spill_copy_a
+AFTER INSERT ON dml_trigger_query_state.spill_target
+FOR EACH ROW WHEN (NEW.id < 0 OR NEW.id % 2 = 1)
+EXECUTE FUNCTION dml_trigger_query_state.audit_spill();
+CREATE FUNCTION dml_trigger_query_state.nested_copy()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    EXECUTE format('COPY dml_trigger_query_state.spill_target FROM %L',
+                   current_setting('data_directory') || '/copy-trigger-input-' ||
+                   pg_backend_pid() || '.nested');
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER spill_copy_nested
+AFTER INSERT ON dml_trigger_query_state.spill_target
+FOR EACH ROW WHEN (NEW.id = 81) EXECUTE FUNCTION dml_trigger_query_state.nested_copy();
+CREATE TRIGGER spill_copy_z
+AFTER INSERT ON dml_trigger_query_state.spill_target
+FOR EACH ROW WHEN (NEW.id < 0 OR NEW.id % 2 = 1)
+EXECUTE FUNCTION dml_trigger_query_state.audit_spill();
+COPY dml_trigger_query_state.spill_target FROM :'copy_trigger_input';
+SELECT array_agg(id ORDER BY id) = ARRAY[-1] ||
+           ARRAY(SELECT generate_series(81, 159, 2)) AS correct_ids,
+       bool_and(copies = 2 AND correct_length) AS correct_rows
+FROM (
+    SELECT id, count(*) AS copies,
+           bool_and(new_length IS NOT DISTINCT FROM
+                    CASE WHEN id = -1 THEN 4096
+                         WHEN id <> 89 THEN 8192 + id END) AS correct_length
+    FROM dml_trigger_query_state.spill_audit
+    GROUP BY id
+) AS audited_rows;
+ correct_ids | correct_rows 
+-------------+--------------
+ t           | t
+(1 row)
+
+-- An AFTER-trigger error must release spilled COPY state on savepoint rollback.
+-- Retrying in the same transaction must not reuse the failed owner's row store.
+TRUNCATE dml_trigger_query_state.spill_audit;
+ALTER TABLE dml_trigger_query_state.spill_audit
+ADD CONSTRAINT reject_copy_row CHECK (id <> 101);
+BEGIN;
+SAVEPOINT failed_copy;
+\set VERBOSITY terse
+COPY dml_trigger_query_state.spill_target FROM :'copy_trigger_input';
+ERROR:  new row for relation "spill_audit" violates check constraint "reject_copy_row"
+\set VERBOSITY default
+ROLLBACK TO SAVEPOINT failed_copy;
+ALTER TABLE dml_trigger_query_state.spill_audit DROP CONSTRAINT reject_copy_row;
+COPY dml_trigger_query_state.spill_target FROM :'copy_trigger_input';
+COMMIT;
+SELECT array_agg(id ORDER BY id) = ARRAY[-1] ||
+           ARRAY(SELECT generate_series(81, 159, 2)) AS correct_ids,
+       bool_and(copies = 2 AND correct_length) AS correct_rows
+FROM (
+    SELECT id, count(*) AS copies,
+           bool_and(new_length IS NOT DISTINCT FROM
+                    CASE WHEN id = -1 THEN 4096
+                         WHEN id <> 89 THEN 8192 + id END) AS correct_length
+    FROM dml_trigger_query_state.spill_audit
+    GROUP BY id
+) AS audited_rows;
+ correct_ids | correct_rows 
+-------------+--------------
+ t           | t
 (1 row)
 
 RESET work_mem;
@@ -355,6 +462,100 @@ SELECT * FROM dml_lifecycle.trigger_ud_after_audit ORDER BY action;
  insert |             | old
  update | old         | new_trigger
 (3 rows)
+
+-- A BEFORE trigger forces single-row COPY. AFTER sees the adjusted NEW row;
+-- a suppressed row must not produce an event.
+CREATE FUNCTION dml_lifecycle.adjust_copy_row()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.id < 0 THEN RETURN NULL; END IF;
+    NEW.label := NEW.label || '_copy';
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER copy_before
+BEFORE INSERT ON dml_lifecycle.trigger_ud
+FOR EACH ROW EXECUTE FUNCTION dml_lifecycle.adjust_copy_row();
+TRUNCATE dml_lifecycle.trigger_ud_after_audit;
+COPY dml_lifecycle.trigger_ud FROM stdin;
+SELECT new_label FROM dml_lifecycle.trigger_ud_after_audit;
+ new_label  
+------------
+ input_copy
+(1 row)
+
+-- COPY has the same statement-lifetime restriction as ModifyTable.
+CREATE CONSTRAINT TRIGGER copy_deferred
+AFTER INSERT ON dml_lifecycle.trigger_ud
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION dml_lifecycle.audit_after_write();
+\set VERBOSITY terse
+COPY dml_lifecycle.trigger_ud FROM stdin;
+ERROR:  LagoDB does not support deferrable AFTER ROW triggers; retained OLD/NEW rows have statement lifetime
+\set VERBOSITY default
+DROP TRIGGER copy_deferred ON dml_lifecycle.trigger_ud;
+-- Standard Iceberg COPY now enters the fork. Publishing precedes both kinds
+-- of AFTER event, while row images survive nested UPDATE execution.
+CREATE TABLE dml_lifecycle.copy_visible (id integer, label text) USING iceberg;
+CREATE TABLE dml_lifecycle.copy_visibility_audit (
+    event text, id integer, visible_rows bigint
+);
+CREATE FUNCTION dml_lifecycle.check_copy_visibility()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_LEVEL = 'ROW' THEN
+        INSERT INTO dml_lifecycle.copy_visibility_audit
+        SELECT TG_LEVEL, NEW.id, count(*) FROM dml_lifecycle.copy_visible;
+        UPDATE dml_lifecycle.copy_visible
+        SET label = label || '_after' WHERE id = NEW.id;
+    ELSE
+        INSERT INTO dml_lifecycle.copy_visibility_audit
+        SELECT TG_LEVEL, NULL, count(*) FROM dml_lifecycle.copy_visible;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER copy_visible_row
+AFTER INSERT ON dml_lifecycle.copy_visible
+FOR EACH ROW EXECUTE FUNCTION dml_lifecycle.check_copy_visibility();
+CREATE TRIGGER copy_visible_statement
+AFTER INSERT ON dml_lifecycle.copy_visible
+FOR EACH STATEMENT EXECUTE FUNCTION dml_lifecycle.check_copy_visibility();
+COPY dml_lifecycle.copy_visible FROM stdin;
+SELECT * FROM dml_lifecycle.copy_visibility_audit ORDER BY event, id;
+   event   | id | visible_rows 
+-----------+----+--------------
+ ROW       |  1 |            2
+ ROW       |  2 |            2
+ STATEMENT |    |            2
+(3 rows)
+
+-- Empty COPY still fires its statement trigger without opening an AM writer.
+TRUNCATE dml_lifecycle.copy_visibility_audit;
+COPY dml_lifecycle.copy_visible FROM stdin;
+SELECT * FROM dml_lifecycle.copy_visibility_audit;
+   event   | id | visible_rows 
+-----------+----+--------------
+ STATEMENT |    |            2
+(1 row)
+
+-- Input shutdown can still fail after publication and nested trigger writes.
+\set VERBOSITY sqlstate
+COPY dml_lifecycle.copy_visible FROM PROGRAM 'printf "3\tlate\n"; exit 1';
+ERROR:  38000
+\set VERBOSITY default
+SELECT * FROM dml_lifecycle.copy_visible ORDER BY id;
+ id |   label   
+----+-----------
+  1 | one_after
+  2 | two_after
+(2 rows)
+
+SELECT count(*) AS audit_rows FROM dml_lifecycle.copy_visibility_audit;
+ audit_rows 
+------------
+          1
+(1 row)
 
 -- PostgreSQL queues one event per AFTER trigger. The tuplestore adapter must
 -- retain both OLD and NEW while multiple events reuse the same row pair.

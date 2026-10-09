@@ -74,7 +74,7 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_delete<P: FdwModify>(
                         ForeignModifyOutcome::Skipped => Ok(ptr::null_mut()),
                         ForeignModifyOutcome::SelfModified {
                             modifying_command_id,
-                        } if modifying_command_id == command_id => {
+                        } if Some(modifying_command_id) == command_id => {
                             Ok(ptr::null_mut())
                         }
                         ForeignModifyOutcome::SelfModified { .. } => {
@@ -94,7 +94,7 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_delete<P: FdwModify>(
                         ForeignModifyOutcome::Skipped => Ok(ptr::null_mut()),
                         ForeignModifyOutcome::SelfModified {
                             modifying_command_id,
-                        } if modifying_command_id == command_id => {
+                        } if Some(modifying_command_id) == command_id => {
                             Ok(ptr::null_mut())
                         }
                         ForeignModifyOutcome::SelfModified { .. } => {

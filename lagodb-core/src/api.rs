@@ -67,6 +67,7 @@
 //! with PostgreSQL.
 
 use crate::TableAmRoutine;
+use crate::access::index::IndexBuildContext;
 use crate::access::mutation::trigger_rows::TriggerQueryState;
 use crate::batch::ScanBatchDriver;
 use crate::diag::{PgReportError, SqlStateError};
@@ -75,8 +76,8 @@ use crate::handles::{
     IndexBuildCallbackHandle, IndexInfoHandle, ItemPointer, OwnedScanKeys,
     ParallelTableScanDescHandle, RelFileLocator, RelationHandle,
     SampleScanStateHandle, ScanDirection, SnapshotHandle, TBMIterateResultHandle,
-    TMIndexDeleteOpHandle, TableScanDescHandle, TupleTableSlotHandle,
-    VacuumParamsHandle, ValidateIndexStateHandle, VarlenaHandle,
+    TMIndexDeleteOpHandle, TupleTableSlotHandle, VacuumParamsHandle,
+    ValidateIndexStateHandle, VarlenaHandle,
 };
 use crate::tuple::{Row, SlotColumns, TupleSlotBatch, TupleSlotRow};
 use pgrx::pg_sys;
@@ -580,39 +581,20 @@ pub trait AmIndexFetchSession {
 ///
 /// These are not callbacks for PostgreSQL index access methods such as B-tree,
 /// GiST, or GIN. Relation arguments may refer to the table relation and, where
-/// present, the index relation. The `scan` argument is `None` for serial index
-/// builds, where PostgreSQL expects the table AM to create its own scan.
+/// present, the index relation. `IndexBuildContext::scan` is `None` for serial
+/// index builds, where PostgreSQL expects the table AM to create its own scan.
 /// The callback handle is permanently bound to the matching index relation and
 /// opaque callback state. It is borrowed only for this invocation and must not
 /// be retained by a provider.
 pub trait AmIndexCallbacks {
     fn index_build_range_scan(
-        table_rel: &RelationHandle,
-        index_rel: &RelationHandle,
-        index_info: &IndexInfoHandle,
-        allow_sync: bool,
-        anyvisible: bool,
-        progress: bool,
-        start_blockno: pg_sys::BlockNumber,
-        numblocks: pg_sys::BlockNumber,
+        context: &IndexBuildContext<'_>,
         callback: &mut IndexBuildCallbackHandle,
-        scan: Option<&TableScanDescHandle>,
     ) -> AmResult<f64>
     where
         Self: Sized,
     {
-        let _ = (
-            table_rel,
-            index_rel,
-            index_info,
-            allow_sync,
-            anyvisible,
-            progress,
-            start_blockno,
-            numblocks,
-            callback,
-            scan,
-        );
+        let _ = (context, callback);
         unsupported_callback("index_build_range_scan")
     }
 
@@ -785,6 +767,12 @@ impl<Q: AmModifyQueryState> ModifyQueryState<Q> {
         operation(&mut state)
     }
 
+    /// Abandon core-owned rows when this executor query is being discarded.
+    /// This is independent of whether provider writes have already finished.
+    pub(crate) fn abandon_trigger_rows(&self) {
+        self.inner.trigger_rows.borrow_mut().abandon();
+    }
+
     /// Preserve one complete relation-shaped row for a queued AFTER ROW
     /// trigger in the core-owned query state.
     ///
@@ -851,6 +839,7 @@ pub trait AmModifyQueryState: 'static {
 pub struct ModifyStateContext<Q: AmModifyQueryState, C> {
     query_state: ModifyQueryState<Q>,
     cmd_type: pg_sys::CmdType::Type,
+    command_id: pg_sys::CommandId,
     actions: ModifyActions,
     scan_context: Option<C>,
 }
@@ -861,10 +850,12 @@ impl<Q: AmModifyQueryState, C> ModifyStateContext<Q, C> {
         query_state: ModifyQueryState<Q>,
         cmd_type: pg_sys::CmdType::Type,
         actions: ModifyActions,
+        command_id: pg_sys::CommandId,
     ) -> Self {
         Self {
             query_state,
             cmd_type,
+            command_id,
             actions,
             scan_context: None,
         }
@@ -875,11 +866,13 @@ impl<Q: AmModifyQueryState, C> ModifyStateContext<Q, C> {
         query_state: ModifyQueryState<Q>,
         cmd_type: pg_sys::CmdType::Type,
         actions: ModifyActions,
+        command_id: pg_sys::CommandId,
         scan_context: C,
     ) -> Self {
         Self {
             query_state,
             cmd_type,
+            command_id,
             actions,
             scan_context: Some(scan_context),
         }
@@ -888,6 +881,11 @@ impl<Q: AmModifyQueryState, C> ModifyStateContext<Q, C> {
     /// PostgreSQL command type for the owning ModifyTable execution.
     pub fn cmd_type(&self) -> pg_sys::CmdType::Type {
         self.cmd_type
+    }
+
+    /// Output CID fixed by the owning executor or COPY command.
+    pub fn command_id(&self) -> pg_sys::CommandId {
+        self.command_id
     }
 
     /// Concrete row operations present in the owning plan.
@@ -1010,7 +1008,7 @@ pub trait AmModifyState {
 }
 
 /// Relation-local COPY FROM state. COPY bypasses ModifyTable and therefore has
-/// a separate utility-scoped lifecycle and callback surface. PostgreSQL's
+/// a separate driver-owned lifecycle and callback surface. PostgreSQL's
 /// heap-specific `BulkInsertStateData` remains at the FFI boundary; providers
 /// own any state needed by their insertion session.
 pub trait AmCopySession {
@@ -1018,11 +1016,19 @@ pub trait AmCopySession {
     ///
     /// The relation handle is borrowed only during construction. A successful
     /// return is a fully usable session; a failed construction is never
-    /// published into the COPY frame.
-    fn begin_copy(rel: &RelationHandle) -> AmResult<Self>
+    /// installed in the relation binding. `command_id` is COPY's original output
+    /// CID and must be retained even if nested SPI advances the backend CID.
+    fn begin_copy(
+        rel: &RelationHandle,
+        command_id: pg_sys::CommandId,
+    ) -> AmResult<Self>
     where
         Self: Sized;
 
+    /// Finish and publish this session's writes into transaction-local visibility.
+    /// Called once after all COPY inserts, before AFTER triggers. Later failures
+    /// (including triggers and PROGRAM/input shutdown) must still roll back the
+    /// staged data. Core retains the session and trigger rows through shutdown.
     fn end_copy(&mut self) -> AmResult<()>;
 
     fn abort_copy(&mut self) {}
@@ -1037,6 +1043,12 @@ pub trait AmCopySession {
         unsupported_callback("copy tuple_insert_slot")
     }
 
+    /// Insert the entire batch. On success, every input slot must retain its
+    /// row with all attributes populated and valid for subsequent core and PG
+    /// processing. Iterating through `rows.iter()` prepares those attributes;
+    /// providers must not clear or invalidate the slots afterward. Core reuses
+    /// their Datum arrays to preserve AFTER ROW images without preparing them
+    /// again.
     fn multi_insert_slots(
         &mut self,
         rows: TupleSlotBatch<'_>,

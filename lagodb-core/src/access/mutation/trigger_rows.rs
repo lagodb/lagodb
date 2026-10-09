@@ -1,9 +1,9 @@
 //! Query-scoped tuple preservation for PostgreSQL AFTER ROW triggers.
 //!
 //! PostgreSQL normally queues a table-AM row identity and later calls
-//! `tuple_fetch_row_version`. LagoDB already has the complete OLD/NEW row in
-//! `nodeModifyTable`, so the core Modify query state preserves those rows in
-//! one spillable tuplestore per `(access method, relation)`.
+//! `tuple_fetch_row_version`. ModifyTable query state and COPY relation
+//! sessions retain complete rows in spillable tuplestores, using the same
+//! temporary identity namespace and fetch routing.
 //!
 //! TODO(pg-trigger-materialization-hook): this extension-only implementation
 //! must preserve a row before PostgreSQL's `TriggerEnabled` decision, because
@@ -15,7 +15,6 @@
 use std::any::TypeId;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
 
 use pgrx::pg_sys;
@@ -24,6 +23,11 @@ use pgrx::prelude::PgSqlErrorCode;
 use crate::api::{AmResult, TRIGGER_ROW_BLOCK_BASE, TableAccessMethod};
 use crate::diag::PgReportError;
 use crate::handles::ItemPointer;
+
+use self::store::TriggerRowStore;
+
+mod layout;
+mod store;
 
 /// Core-reserved top quarter of the ItemPointer block-number space.
 ///
@@ -85,167 +89,16 @@ impl TriggerRowId {
     fn is_encoded(row_id: ItemPointer) -> bool {
         row_id.offset != 0 && row_id.block_number >= TRIGGER_ROW_BLOCK_BASE
     }
+
+    /// Decode an identity allocated by this codec, preserving token order.
+    fn token(row_id: ItemPointer) -> u64 {
+        u64::from(row_id.block_number - TRIGGER_ROW_BLOCK_BASE) * OFFSET_BASE
+            + u64::from(row_id.offset - 1)
+    }
 }
 
 thread_local! {
     static NEXT_TRIGGER_ROW_TOKEN: Cell<u64> = const { Cell::new(0) };
-}
-
-struct TriggerRowStore {
-    tuple_desc: pg_sys::TupleDesc,
-    tuplestore: Option<NonNull<pg_sys::Tuplestorestate>>,
-    read_slot: Option<NonNull<pg_sys::TupleTableSlot>>,
-    previous_slot: Option<NonNull<pg_sys::TupleTableSlot>>,
-    row_ids: Vec<ItemPointer>,
-    next_read: usize,
-    current_row_id: Option<ItemPointer>,
-    previous_row_id: Option<ItemPointer>,
-}
-
-impl TriggerRowStore {
-    /// # Safety
-    ///
-    /// `tuple_desc` must remain valid for the query lifetime.
-    unsafe fn new(tuple_desc: pg_sys::TupleDesc) -> Self {
-        debug_assert!(!tuple_desc.is_null());
-        Self {
-            tuple_desc,
-            tuplestore: None,
-            read_slot: None,
-            previous_slot: None,
-            row_ids: Vec::new(),
-            next_read: 0,
-            current_row_id: None,
-            previous_row_id: None,
-        }
-    }
-
-    unsafe fn ensure_initialized(&mut self) {
-        if self.tuplestore.is_some() {
-            return;
-        }
-        let tuplestore = NonNull::new(unsafe {
-            pg_sys::tuplestore_begin_heap(false, false, pg_sys::work_mem)
-        })
-        .expect("tuplestore_begin_heap returned NULL");
-        let read_slot = NonNull::new(unsafe {
-            pg_sys::MakeSingleTupleTableSlot(
-                self.tuple_desc,
-                &pg_sys::TTSOpsMinimalTuple,
-            )
-        })
-        .expect("MakeSingleTupleTableSlot returned NULL");
-        let previous_slot = NonNull::new(unsafe {
-            pg_sys::MakeSingleTupleTableSlot(
-                self.tuple_desc,
-                &pg_sys::TTSOpsMinimalTuple,
-            )
-        })
-        .expect("MakeSingleTupleTableSlot returned NULL");
-        self.tuplestore = Some(tuplestore);
-        self.read_slot = Some(read_slot);
-        self.previous_slot = Some(previous_slot);
-    }
-
-    /// # Safety
-    ///
-    /// `slot` must be live and relation-shaped for `tuple_desc`.
-    unsafe fn preserve(
-        &mut self,
-        row_id: ItemPointer,
-        slot: *mut pg_sys::TupleTableSlot,
-    ) {
-        unsafe { self.ensure_initialized() };
-        unsafe {
-            pg_sys::slot_getallattrs(slot);
-            pg_sys::tuplestore_putvalues(
-                self.tuplestore
-                    .expect("trigger tuplestore is initialized")
-                    .as_ptr(),
-                self.tuple_desc,
-                (*slot).tts_values,
-                (*slot).tts_isnull,
-            );
-        }
-        self.row_ids.push(row_id);
-    }
-
-    /// Copy a preserved row into the TableAM destination slot.
-    ///
-    /// Rows are consumed in event order, matching PostgreSQL's FDW
-    /// tuplestore. `current` and `previous` allow multiple triggers for the
-    /// same event to reuse one materialized tuple.
-    unsafe fn fetch(
-        &mut self,
-        row_id: ItemPointer,
-        destination: *mut pg_sys::TupleTableSlot,
-    ) -> bool {
-        let Some(tuplestore) = self.tuplestore else {
-            return false;
-        };
-        let read_slot = self
-            .read_slot
-            .expect("trigger tuplestore read slot is initialized");
-        let previous_slot = self
-            .previous_slot
-            .expect("trigger tuplestore previous slot is initialized");
-
-        if self.current_row_id == Some(row_id) {
-            unsafe { pg_sys::ExecCopySlot(destination, read_slot.as_ptr()) };
-            return true;
-        }
-        if self.previous_row_id == Some(row_id) {
-            unsafe { pg_sys::ExecCopySlot(destination, previous_slot.as_ptr()) };
-            return true;
-        }
-
-        let Some(relative_index) = self.row_ids[self.next_read..]
-            .iter()
-            .position(|id| *id == row_id)
-        else {
-            return false;
-        };
-        let target_index = self.next_read + relative_index;
-        while self.next_read <= target_index {
-            if self.current_row_id.is_some() {
-                unsafe {
-                    pg_sys::ExecCopySlot(previous_slot.as_ptr(), read_slot.as_ptr())
-                };
-                self.previous_row_id = self.current_row_id;
-            }
-            let found = unsafe {
-                pg_sys::tuplestore_gettupleslot(
-                    tuplestore.as_ptr(),
-                    true,
-                    false,
-                    read_slot.as_ptr(),
-                )
-            };
-            if !found {
-                return false;
-            }
-            self.current_row_id = Some(self.row_ids[self.next_read]);
-            self.next_read += 1;
-        }
-        unsafe { pg_sys::ExecCopySlot(destination, read_slot.as_ptr()) };
-        true
-    }
-}
-
-impl Drop for TriggerRowStore {
-    fn drop(&mut self) {
-        unsafe {
-            if let Some(slot) = self.read_slot.take() {
-                pg_sys::ExecDropSingleTupleTableSlot(slot.as_ptr());
-            }
-            if let Some(slot) = self.previous_slot.take() {
-                pg_sys::ExecDropSingleTupleTableSlot(slot.as_ptr());
-            }
-            if let Some(tuplestore) = self.tuplestore.take() {
-                pg_sys::tuplestore_end(tuplestore.as_ptr());
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -269,10 +122,22 @@ thread_local! {
 /// query. Provider business state remains separate in `AmModifyQueryState`.
 #[derive(Default)]
 pub(crate) struct TriggerQueryState {
-    stores: HashMap<StoreKey, Rc<RefCell<TriggerRowStore>>>,
+    stores: HashMap<StoreKey, TriggerRelationRows>,
 }
 
 impl TriggerQueryState {
+    /// Discard this query's rows during exceptional executor teardown.
+    /// PG owns resource reclamation; detach every store before dropping its
+    /// handle so normal Drop cannot close an already released spill file.
+    pub(crate) fn abandon(&mut self) {
+        for rows in self.stores.values_mut() {
+            rows.abandon();
+        }
+        // Dropping the handles also unregisters their exact store identities.
+        // Shared ModifyTable nodes can repeat this cleanup on the empty map.
+        self.stores.clear();
+    }
+
     /// # Safety
     ///
     /// `tuple_desc` and `slot` must remain valid for the query/call as required
@@ -287,23 +152,55 @@ impl TriggerQueryState {
             access_method: TypeId::of::<A>(),
             relation_oid,
         };
-        let store = if let Some(store) = self.stores.get(&key) {
-            Rc::clone(store)
-        } else {
-            let store =
-                Rc::new(RefCell::new(unsafe { TriggerRowStore::new(tuple_desc) }));
-            ACTIVE_STORES.with_borrow_mut(|stores| {
-                stores.push(ActiveStore {
-                    key,
-                    store: Rc::downgrade(&store),
-                });
-            });
-            self.stores.insert(key, Rc::clone(&store));
-            store
-        };
+        let rows = self.stores.entry(key).or_insert_with(|| unsafe {
+            TriggerRelationRows::new::<A>(relation_oid, tuple_desc)
+        });
+        unsafe { pg_sys::slot_getallattrs(slot) };
+        unsafe { rows.preserve(slot) }
+    }
+}
 
+/// Bound relation handle. COPY retains this directly, without a per-row
+/// relation lookup; ModifyTable shares handles through its query owner.
+pub(super) struct TriggerRelationRows {
+    store: Rc<RefCell<TriggerRowStore>>,
+}
+
+impl TriggerRelationRows {
+    /// # Safety
+    ///
+    /// The current memory context and descriptor must outlive this handle.
+    /// Abort owners must call `abandon` before PG reclaims those allocations.
+    pub(super) unsafe fn new<A: TableAccessMethod>(
+        relation_oid: pg_sys::Oid,
+        tuple_desc: pg_sys::TupleDesc,
+    ) -> Self {
+        let store =
+            Rc::new(RefCell::new(unsafe { TriggerRowStore::new(tuple_desc) }));
+        ACTIVE_STORES.with_borrow_mut(|stores| {
+            stores.push(ActiveStore {
+                key: StoreKey {
+                    access_method: TypeId::of::<A>(),
+                    relation_oid,
+                },
+                store: Rc::downgrade(&store),
+            });
+        });
+        Self { store }
+    }
+
+    /// # Safety
+    ///
+    /// `slot` must be live, fully materialized, and shaped for the bound
+    /// relation. The caller must use the store's memory context when lazily
+    /// initializing its PG objects. COPY's TupleSlotRow already materializes
+    /// its attributes, so preservation does not deform that slot again.
+    pub(super) unsafe fn preserve(
+        &mut self,
+        slot: *mut pg_sys::TupleTableSlot,
+    ) -> AmResult<ItemPointer> {
         let row_id = TriggerRowId::allocate()?;
-        let mut store = store.try_borrow_mut().map_err(|_| {
+        let mut store = self.store.try_borrow_mut().map_err(|_| {
             PgReportError::from_message(
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
                 "trigger-row store is already borrowed",
@@ -311,6 +208,26 @@ impl TriggerQueryState {
         })?;
         unsafe { store.preserve(row_id, slot) };
         Ok(row_id)
+    }
+
+    pub(super) fn abandon(&mut self) {
+        self.store.borrow_mut().abandon();
+    }
+
+    pub(super) fn finish(&mut self) {
+        self.store.borrow_mut().close();
+    }
+}
+
+impl Drop for TriggerRelationRows {
+    fn drop(&mut self) {
+        // Unregister by store identity: nested COPY/queries can retain
+        // separate stores for the same relation. This only releases Rust
+        // registry entries; the owner decides how to close or abandon PG data.
+        let pointer = Rc::as_ptr(&self.store);
+        ACTIVE_STORES.with_borrow_mut(|stores| {
+            stores.retain(|active| active.store.as_ptr() != pointer);
+        });
     }
 }
 
@@ -338,8 +255,7 @@ pub(crate) unsafe fn fetch<A: TableAccessMethod>(
         access_method: TypeId::of::<A>(),
         relation_oid,
     };
-    ACTIVE_STORES.with_borrow_mut(|stores| {
-        stores.retain(|active| active.store.strong_count() > 0);
+    ACTIVE_STORES.with_borrow(|stores| {
         for active in stores.iter().rev().filter(|active| active.key == key) {
             let Some(store) = active.store.upgrade() else {
                 continue;

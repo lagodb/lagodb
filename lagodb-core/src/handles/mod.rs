@@ -26,6 +26,7 @@
 //!   `RelationGuard` and `HeapTupleGuard`.
 
 mod borrowed;
+mod executor;
 mod index;
 mod mutation;
 mod partition_key;
@@ -37,6 +38,7 @@ mod relation_tablespace;
 mod scan;
 mod tuple;
 
+pub use executor::ExecutorHandle;
 pub use index::{
     IndexBuildCallbackHandle, IndexInfoHandle, ValidateIndexStateHandle,
 };

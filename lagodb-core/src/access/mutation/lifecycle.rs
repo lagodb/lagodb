@@ -1,7 +1,5 @@
-//! COPY FROM utility lifecycle.
-//!
-//! ModifyTable execution owns its mutation state inside the outer CustomScan. COPY
-//! FROM bypasses ModifyTable, so it alone needs utility-hook boundaries.
+//! Provider-local command lifecycle for FDWs that request the original COPY CID.
+//! AM writers are owned by COPY drivers and do not use these utility hooks.
 
 use std::sync::Once;
 
@@ -12,7 +10,7 @@ use crate::hooks::{
     register_utility_hook,
 };
 
-use super::session;
+use super::command;
 
 static MUTATION_LIFECYCLE_INIT: Once = Once::new();
 
@@ -28,7 +26,7 @@ impl UtilityHook for CopyFromLifecycle {
             return Ok(());
         };
         if copy.is_from {
-            session::begin_copy_from_frame();
+            command::begin_copy_from_frame();
         }
         Ok(())
     }
@@ -38,12 +36,16 @@ impl UtilityHook for CopyFromLifecycle {
             return Ok(());
         };
         if copy.is_from {
-            session::finish_current_copy_frame().map_err(UtilityHookError::from)?;
+            command::finish_current_copy_frame().map_err(UtilityHookError::from)?;
         }
         Ok(())
     }
 }
 
+/// Register this extension's COPY command lifecycle for FDW providers
+/// that request a COPY command ID. Call during extension initialization,
+/// before publishing hooks. The lifecycle and its consumers must belong to the
+/// same extension; providers that do not request a CID need not register it.
 pub fn init_lifecycle_hooks() {
     MUTATION_LIFECYCLE_INIT.call_once(|| {
         register_utility_hook(

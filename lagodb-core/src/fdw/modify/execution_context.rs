@@ -4,11 +4,14 @@ use core::ffi::c_int;
 
 use pgrx::pg_sys;
 
+use crate::access::mutation::current_copy_command_id;
 use crate::handles::{RelationHandle, SnapshotHandle};
 
 use super::contract::{
-    ForeignModifyOperation, ForeignModifyPrivate, ForeignReturnedIdentity,
+    FdwModify, ForeignModifyOperation, ForeignModifyPrivate, ForeignReturnedIdentity,
 };
+use super::error::ForeignModifyError;
+use super::state::ForeignModifyStateWrapper;
 
 /// Executor context passed before a normal INSERT, UPDATE, or DELETE state is created.
 pub struct ForeignModifyBeginContext<'a, D: ForeignModifyPrivate> {
@@ -29,43 +32,37 @@ pub struct ForeignModifyBeginContext<'a, D: ForeignModifyPrivate> {
     command_id: pg_sys::CommandId,
 }
 
-impl<'a, D: ForeignModifyPrivate> ForeignModifyBeginContext<'a, D> {
-    pub(crate) fn new(
-        private_data: &'a D,
+impl<P: FdwModify> ForeignModifyStateWrapper<P> {
+    pub(super) fn begin_context<'a>(
+        &'a self,
         relation: RelationHandle<'a>,
         snapshot: SnapshotHandle<'a>,
-        operation: ForeignModifyOperation,
-        updated_columns: &'a [pg_sys::AttrNumber],
-        row_identity_count: usize,
-        returned_identity: ForeignReturnedIdentity,
-        returned_item_pointer_required: bool,
-        returning_columns: &'a [pg_sys::AttrNumber],
-        returning_all_columns: bool,
-        return_slot_required: bool,
         subplan_index: c_int,
         eflags: c_int,
         effective_user_id: pg_sys::Oid,
         command_id: pg_sys::CommandId,
-    ) -> Self {
-        Self {
-            private_data,
+    ) -> ForeignModifyBeginContext<'a, P::ModifyPrivateData> {
+        ForeignModifyBeginContext {
+            private_data: self.private_data(),
             relation,
             snapshot,
-            operation,
-            updated_columns,
-            row_identity_count,
-            returned_identity,
-            returned_item_pointer_required,
-            returning_columns,
-            returning_all_columns,
-            return_slot_required,
+            operation: self.operation,
+            updated_columns: &self.updated_columns,
+            row_identity_count: self.row_identity_layout.len(),
+            returned_identity: self.returned_identity,
+            returned_item_pointer_required: self.returned_item_pointer_required,
+            returning_columns: self.return_requirements.columns(),
+            returning_all_columns: self.return_requirements.all_columns(),
+            return_slot_required: self.return_slot_required,
             subplan_index,
             eflags,
             effective_user_id,
             command_id,
         }
     }
+}
 
+impl<'a, D: ForeignModifyPrivate> ForeignModifyBeginContext<'a, D> {
     #[inline]
     pub fn private_data(&self) -> &D {
         self.private_data
@@ -144,6 +141,11 @@ impl<'a, D: ForeignModifyPrivate> ForeignModifyBeginContext<'a, D> {
     }
 }
 
+pub(super) enum InsertCommand {
+    ModifyTable(pg_sys::CommandId),
+    CopyFrom,
+}
+
 /// Executor context for INSERTs started through PostgreSQL routed or COPY
 /// callbacks.
 pub struct ForeignInsertBeginContext<'a> {
@@ -151,25 +153,46 @@ pub struct ForeignInsertBeginContext<'a> {
     returned_identity: ForeignReturnedIdentity,
     returned_item_pointer_required: bool,
     effective_user_id: pg_sys::Oid,
+    command: InsertCommand,
 }
 
 impl<'a> ForeignInsertBeginContext<'a> {
-    pub(crate) fn new(
+    pub(super) fn new(
         relation: RelationHandle<'a>,
         returned_item_pointer_required: bool,
         effective_user_id: pg_sys::Oid,
+        command: InsertCommand,
     ) -> Self {
         Self {
             relation,
             returned_identity: ForeignReturnedIdentity::None,
             returned_item_pointer_required,
             effective_user_id,
+            command,
         }
     }
 
     #[inline]
     pub fn relation(&self) -> &RelationHandle<'a> {
         &self.relation
+    }
+
+    /// Output CID fixed by the owning ModifyTable or COPY command.
+    ///
+    /// Providers that need a COPY CID must register
+    /// [`crate::access::mutation::init_lifecycle_hooks`] in their own extension
+    /// during initialization, before hooks are published. COPY context is only
+    /// accessed when this method is called; providers that do not use the CID
+    /// do not need to register that lifecycle.
+    ///
+    /// Returns an error if the required COPY command context is absent.
+    pub fn command_id(&self) -> Result<pg_sys::CommandId, ForeignModifyError> {
+        match self.command {
+            InsertCommand::ModifyTable(command_id) => Ok(command_id),
+            InsertCommand::CopyFrom => {
+                current_copy_command_id().map_err(ForeignModifyError::from)
+            }
+        }
     }
 
     /// Whether PostgreSQL will evaluate target-table ctid for this routed

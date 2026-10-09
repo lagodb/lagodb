@@ -1,4 +1,4 @@
-//! Table-AM callbacks used by COPY FROM.
+//! Native TableAM mutation boundaries. Explicit COPY writes use copy_adapter.
 //!
 //! PostgreSQL ModifyTable mutation is intercepted by `LagoDBModifyTable` and calls the
 //! slot-first Rust SPI directly. Speculative insertion can only arrive from
@@ -7,6 +7,8 @@
 //! such as logical replication, triggers, and `LockRows`; those remain normal
 //! unsupported table-AM capabilities.
 //!
+//! Native COPY that reaches these insert callbacks bypassed explicit binding
+//! (including the accepted negative-probe DDL window). Reject before writing.
 //! The PostgreSQL ABI still supplies `BulkInsertStateData` to the insert
 //! callbacks. It remains at this FFI boundary because the provider owns its
 //! insertion session state and does not consume PostgreSQL's heap-private bulk
@@ -15,13 +17,10 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use crate::api::{TableAccessMethod, unsupported_callback};
+use crate::api::unsupported_callback;
 use crate::diag::{PgReportError, ReportableError, SqlStateError};
-use crate::tuple::{TupleSlotBatch, TupleSlotRow};
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{pg_guard, pg_sys};
-
-use super::session::with_current_relation_session;
 
 #[derive(Debug, Clone, Copy)]
 struct SpeculativeInsertRoutingError {
@@ -53,53 +52,39 @@ impl SqlStateError for SpeculativeInsertRoutingError {
 }
 
 #[pg_guard]
-pub(super) extern "C-unwind" fn tuple_insert<A: TableAccessMethod>(
+pub(super) extern "C-unwind" fn tuple_insert(
     rel: pg_sys::Relation,
     slot: *mut pg_sys::TupleTableSlot,
     cid: pg_sys::CommandId,
     options: i32,
     _bistate: *mut pg_sys::BulkInsertStateData,
 ) {
-    // A TableAM owns the same transaction-local tuple counters as heapam.
-    with_current_relation_session::<A, _>(rel, |session| unsafe {
-        session.tuple_insert_slot(TupleSlotRow::from_raw(slot), cid, options)
-    })
-    .inspect(|_| unsafe { pg_sys::pgstat_count_heap_insert(rel, 1) })
-    .report_unwrap();
+    let _ = (rel, slot, cid, options);
+    unsupported_callback("COPY INSERT requires the LagoDB COPY executor")
+        .report_unwrap()
 }
 
 #[pg_guard]
-pub(super) extern "C-unwind" fn multi_insert<A>(
+pub(super) extern "C-unwind" fn multi_insert(
     rel: pg_sys::Relation,
     slots: *mut *mut pg_sys::TupleTableSlot,
     nslots: i32,
     cid: pg_sys::CommandId,
     options: i32,
     _bistate: *mut pg_sys::BulkInsertStateData,
-) where
-    A: TableAccessMethod,
-{
-    // Count the completed batch once, matching heap_multi_insert().
-    with_current_relation_session::<A, _>(rel, |session| unsafe {
-        session.multi_insert_slots(
-            TupleSlotBatch::from_raw(slots, nslots as usize),
-            cid,
-            options,
-        )
-    })
-    .inspect(|_| unsafe { pg_sys::pgstat_count_heap_insert(rel, nslots.into()) })
-    .report_unwrap();
+) {
+    let _ = (rel, slots, nslots, cid, options);
+    unsupported_callback("COPY multi-insert requires the LagoDB COPY executor")
+        .report_unwrap()
 }
 
 #[pg_guard]
-pub(super) extern "C-unwind" fn finish_bulk_insert<A: TableAccessMethod>(
+pub(super) extern "C-unwind" fn finish_bulk_insert(
     rel: pg_sys::Relation,
     options: i32,
 ) {
-    with_current_relation_session::<A, _>(rel, |session| {
-        session.finish_bulk_insert(options)
-    })
-    .report_unwrap();
+    let _ = (rel, options);
+    // Empty native COPY has no writes. Never create a writer during cleanup.
 }
 
 #[pg_guard]
@@ -131,6 +116,7 @@ pub(super) extern "C-unwind" fn tuple_complete_speculative(
 }
 
 #[pg_guard]
+#[allow(clippy::too_many_arguments)] // PG TableAmRoutine::tuple_delete ABI.
 pub(super) extern "C-unwind" fn tuple_delete(
     _rel: pg_sys::Relation,
     _tid: pg_sys::ItemPointer,
@@ -145,6 +131,7 @@ pub(super) extern "C-unwind" fn tuple_delete(
 }
 
 #[pg_guard]
+#[allow(clippy::too_many_arguments)] // PG TableAmRoutine::tuple_update ABI.
 pub(super) extern "C-unwind" fn tuple_update(
     _rel: pg_sys::Relation,
     _otid: pg_sys::ItemPointer,
@@ -161,6 +148,7 @@ pub(super) extern "C-unwind" fn tuple_update(
 }
 
 #[pg_guard]
+#[allow(clippy::too_many_arguments)] // PG TableAmRoutine::tuple_lock ABI.
 pub(super) extern "C-unwind" fn tuple_lock(
     _rel: pg_sys::Relation,
     _tid: pg_sys::ItemPointer,

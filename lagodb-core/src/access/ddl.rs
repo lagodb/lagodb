@@ -62,6 +62,7 @@ pub extern "C-unwind" fn relation_copy_data<A>(
 }
 
 #[pg_guard]
+#[allow(clippy::too_many_arguments)] // PG TableAmRoutine::relation_copy_for_cluster ABI.
 pub extern "C-unwind" fn relation_copy_for_cluster<A>(
     old_table: pg_sys::Relation,
     new_table: pg_sys::Relation,

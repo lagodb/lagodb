@@ -159,6 +159,8 @@ impl<'slot> ModifySlot<'slot> {
     ///
     /// `index` must identify a live, non-dropped attribute in this slot's
     /// relation layout.
+    /// A widened integer cell must retain its declared PG value domain, as
+    /// required by `ColumnDatumCodec::cell_to_datum`.
     pub unsafe fn set_cell(
         &mut self,
         index: usize,
@@ -490,7 +492,7 @@ impl<'layout> ForeignInsertBatch<'layout> {
                     let outcome = operation(index, slot)?;
                     map_outcome(
                         ForeignModifyOperation::Insert,
-                        0,
+                        None,
                         return_slot_required,
                         slot,
                         outcome,

@@ -89,7 +89,7 @@ pub(super) unsafe fn validate_updated_columns(
 
 pub(super) fn map_outcome(
     operation: ForeignModifyOperation,
-    command_id: pg_sys::CommandId,
+    command_id: Option<pg_sys::CommandId>,
     return_slot_required: bool,
     row: &mut ModifySlot<'_>,
     outcome: ForeignModifyOutcome,
@@ -113,7 +113,7 @@ pub(super) fn map_outcome(
         }
         ForeignModifyOutcome::SelfModified {
             modifying_command_id,
-        } if modifying_command_id == command_id => Ok(ptr::null_mut()),
+        } if Some(modifying_command_id) == command_id => Ok(ptr::null_mut()),
         ForeignModifyOutcome::SelfModified { .. } => {
             Err(ForeignModifyError::self_modified(operation))
         }

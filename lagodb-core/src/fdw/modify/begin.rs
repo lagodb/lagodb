@@ -1,24 +1,25 @@
 //! Begin-time construction of foreign modify executor state.
 
 use core::ffi::c_int;
+use core::marker::PhantomData;
 use core::ptr;
 
 use pgrx::pg_sys;
 
 use crate::handles::{RelationHandle, SnapshotHandle};
 
+use super::super::payload::ProviderPayload;
 use super::super::row_identity::RowIdentityLayout;
 use super::contract::{FdwModify, ForeignModifyOperation};
 use super::error::ForeignModifyError;
-use super::execution_context::{
-    ForeignInsertBeginContext, ForeignModifyBeginContext,
-};
+use super::execution_context::{ForeignInsertBeginContext, InsertCommand};
 use super::executor::{return_slot_required_for_modify, validate_updated_columns};
 use super::planning::analyze_returning_system_columns;
 use super::planning_context::ForeignModifyRelationContext;
 use super::private::decode_modify_private;
 use super::return_layout::ForeignModifyReturnLayout;
 use super::return_requirements::ForeignModifyReturnRequirements;
+use super::row_layout::ModifyRowLayout;
 use super::state::ForeignModifyStateWrapper;
 use super::target_scan::ForeignModifyTargetScan;
 
@@ -144,35 +145,26 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         };
         // SAFETY: PostgreSQL keeps the live result relation open for the modify
         // state.
-        let mut wrapper = unsafe {
-            Self::new(
-                decoded.private_data,
-                relation,
-                operation,
-                (*estate).es_output_cid,
-                decoded.updated_columns,
-                row_identity_layout,
-                plan_tuple_desc,
-                per_tuple_context,
-                decoded.returned_identity,
-                decoded.returned_item_pointer_required,
-                return_requirements,
-                return_layout,
-                return_slot_required,
-            )
+        let row_layout = unsafe { ModifyRowLayout::from_relation(relation) };
+        let mut wrapper = Self {
+            payload: ProviderPayload::with_private(decoded.private_data),
+            row_layout,
+            operation,
+            command_id: Some(unsafe { (*estate).es_output_cid }),
+            updated_columns: decoded.updated_columns,
+            row_identity_layout,
+            plan_tuple_desc,
+            per_tuple_context,
+            returned_identity: decoded.returned_identity,
+            returned_item_pointer_required: decoded.returned_item_pointer_required,
+            return_requirements,
+            return_layout,
+            return_slot_required,
+            _marker: PhantomData,
         };
-        let context = ForeignModifyBeginContext::new(
-            wrapper.private_data(),
+        let context = wrapper.begin_context(
             unsafe { RelationHandle::from_raw(relation) },
             unsafe { SnapshotHandle::from_raw(snapshot) },
-            operation,
-            &wrapper.updated_columns,
-            wrapper.row_identity_layout.len(),
-            wrapper.returned_identity,
-            wrapper.returned_item_pointer_required,
-            wrapper.return_requirements.columns(),
-            wrapper.return_requirements.all_columns(),
-            return_slot_required,
             subplan_index,
             eflags,
             effective_user_id,
@@ -251,10 +243,19 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         let per_tuple_context = unsafe { Self::per_tuple_context(estate) };
         let effective_user_id =
             unsafe { pg_sys::ExecGetResultRelCheckAsUser(rinfo, estate) };
+        // COPY builds a plan-less temporary ModifyTable/EState and does not
+        // set es_output_cid. Record the source without requiring COPY context
+        // from providers that do not use a local CID.
+        let command = if plan.is_null() {
+            InsertCommand::CopyFrom
+        } else {
+            InsertCommand::ModifyTable(unsafe { (*estate).es_output_cid })
+        };
         let mut context = ForeignInsertBeginContext::new(
             unsafe { RelationHandle::from_raw(relation) },
             returned_item_pointer_required,
             effective_user_id,
+            command,
         );
         let entry_context = unsafe { pg_sys::MemoryContextSwitchTo(query_context) };
         let provider_state = P::begin_insert(&mut context);
@@ -276,7 +277,6 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
                 returned_item_pointer_required,
                 return_slot_required,
                 per_tuple_context,
-                (*estate).es_output_cid,
             )
         };
         wrapper.install_provider_state(provider_state);

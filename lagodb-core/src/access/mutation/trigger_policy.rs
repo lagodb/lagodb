@@ -12,8 +12,8 @@ use crate::handles::RelationHandle;
 ///
 /// Provider-owned partitioned tables cannot enter PostgreSQL's native AFTER ROW queue:
 /// that path requires physical leaf relations for partitioned-table events.
-/// Ordinary ModifyTable targets retain the existing immediate-trigger support
-/// backed by core's query-scoped row store.
+/// Ordinary ModifyTable and COPY targets support immediate triggers backed
+/// by core's statement-scoped row stores.
 pub(crate) struct RelationTriggerPolicy<'relation> {
     triggers: &'relation [pg_sys::Trigger],
     partitioned_table: bool,
@@ -68,6 +68,28 @@ impl<'relation> RelationTriggerPolicy<'relation> {
             }
             _ => ModifyActions::NONE,
         };
+        self.validate_immediate_rows(actions)
+    }
+
+    /// Preparation also visits native heap targets, so only apply the
+    /// provider-owned partitioned-table restriction at that boundary.
+    pub(crate) fn validate_copy_from(&self) -> AmResult<()> {
+        self.validate_partitioned_table(ModifyActions::INSERT)
+    }
+
+    /// Called only when binding an actual LagoDB AM COPY session, including
+    /// a physical leaf reached by native PostgreSQL partition routing.
+    /// Returns whether successful inserts need a retained trigger row.
+    pub(super) fn bind_copy_session(&self) -> AmResult<bool> {
+        self.validate_copy_from()?;
+        self.validate_immediate_rows(ModifyActions::INSERT)?;
+        Ok(self
+            .triggers
+            .iter()
+            .any(|trigger| Self::is_after_row_for(trigger, ModifyActions::INSERT)))
+    }
+
+    fn validate_immediate_rows(&self, actions: ModifyActions) -> AmResult<()> {
         if self.triggers.iter().any(|trigger| {
             trigger.tgdeferrable && Self::is_after_row_for(trigger, actions)
         }) {
@@ -78,10 +100,6 @@ impl<'relation> RelationTriggerPolicy<'relation> {
             ));
         }
         Ok(())
-    }
-
-    pub(crate) fn validate_copy_from(&self) -> AmResult<()> {
-        self.validate_partitioned_table(ModifyActions::INSERT)
     }
 
     fn validate_partitioned_table(&self, actions: ModifyActions) -> AmResult<()> {
