@@ -21,7 +21,7 @@ impl StoreConfigSource for VolumeConfigSource {
             .into_values()
             .map(|volume| VolumeStoreSpec {
                 volume_id: volume.id.get(),
-                reload_on_force: volume.credential.uses_default_chain(),
+                reload_on_force: volume.credential.reloads_provider_on_force(),
                 location: volume.location,
                 credential: volume.credential,
             })

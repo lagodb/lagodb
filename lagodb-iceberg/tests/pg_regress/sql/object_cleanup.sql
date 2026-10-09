@@ -51,8 +51,16 @@ WHERE producer = 'iceberg-drop';
 \! rm -rf /tmp/iceberg_regress_object/*
 
 SELECT 'regress-object-' || gen_random_uuid() AS volume_name \gset
+CREATE TABLESPACE regress_object
+LOCATION '/tmp/iceberg_regress_object';
+-- Cache the local route in this backend before publishing its first binding.
+CREATE TABLE binding_local_route (id integer) USING iceberg TABLESPACE regress_object;
+DROP TABLE binding_local_route;
+
+
 SELECT lagodb.create_storage_volume(
     :'volume_name',
+    'regress_object',
     format('s3://%s', :'lagodb_regress_bucket'),
     jsonb_build_object(
         'type', 's3_access_key',
@@ -66,9 +74,6 @@ SELECT lagodb.create_storage_volume(
     )
 ) AS created_volume \gset
 
-CREATE TABLESPACE regress_object
-LOCATION '/tmp/iceberg_regress_object'
-WITH (storage_volume = :'volume_name');
 
 SELECT internal_volume_id AS volume_id,
        regexp_replace(effective_location, '^[^:]+://[^/]+/', '') AS effective_root
@@ -108,6 +113,7 @@ SELECT :'object_path' = :'effective_root' || '/' || current_database()
            AS readable_oid_remote_location;
 SELECT relfilenode::text AS remote_old_relfilenode
 FROM pg_class WHERE oid = 'remote_cleanup_drop'::regclass \gset
+SELECT pg_relation_filepath('remote_cleanup_drop'::regclass) AS remote_old_main_fork \gset
 TRUNCATE remote_cleanup_drop;
 SELECT count(*) = 0 AS remote_truncate_empty,
        (SELECT value
@@ -123,12 +129,18 @@ FROM remote_cleanup_drop;
 \setenv LAGODB_REGRESS_VOLUME_ID :volume_id
 \setenv LAGODB_REGRESS_OBJECT_NAMESPACE :object_namespace
 \setenv LAGODB_REGRESS_OBJECT_PATH :object_path
+SELECT pg_relation_filepath('remote_cleanup_drop'::regclass) AS remote_main_fork \gset
+CHECKPOINT;
+SELECT (pg_stat_file(:'remote_old_main_fork', true)) IS NULL
+       AND (pg_stat_file(:'remote_main_fork')).size = 0 AS remote_truncate_forks_correct;
 SELECT objects > 0 AS tree_exists_before_drop
 FROM lagodb.observe_object_tree(
     :'volume_id', :'object_namespace', :'object_path'
 );
 
 DROP TABLE remote_cleanup_drop;
+CHECKPOINT;
+SELECT (pg_stat_file(:'remote_main_fork', true)) IS NULL AS remote_drop_fork_removed;
 
 \! bin/wait_for_maintenance_item 30
 
@@ -142,9 +154,20 @@ FROM pg_class WHERE relname = 'remote_cleanup_drop';
 CREATE TABLE remote_cleanup_rollback (id integer)
 USING iceberg TABLESPACE regress_object;
 INSERT INTO remote_cleanup_rollback VALUES (1), (2);
+SELECT pg_relation_filepath('remote_cleanup_rollback'::regclass) AS rollback_main_fork \gset
+BEGIN;
+TRUNCATE remote_cleanup_rollback;
+SELECT pg_relation_filepath('remote_cleanup_rollback'::regclass) AS aborted_main_fork \gset
+ROLLBACK;
+CHECKPOINT;
+SELECT pg_relation_filepath('remote_cleanup_rollback'::regclass) = :'rollback_main_fork'
+       AND (pg_stat_file(:'rollback_main_fork')).size = 0
+       AND (pg_stat_file(:'aborted_main_fork', true)) IS NULL AS remote_truncate_abort_forks_correct;
 BEGIN;
 DROP TABLE remote_cleanup_rollback;
 ROLLBACK;
+CHECKPOINT;
+SELECT (pg_stat_file(:'rollback_main_fork')).size = 0 AS remote_drop_abort_fork_preserved;
 SELECT array_agg(id ORDER BY id) AS rows_after_drop_rollback
 FROM remote_cleanup_rollback;
 
@@ -167,6 +190,17 @@ FROM lagodb.observe_object_tree(
     :'volume_id', :'object_namespace', :'object_path'
 );
 
+-- Native main-fork creation is visible before commit and cleaned up on abort.
+BEGIN;
+CREATE TABLE remote_create_abort (id integer) USING iceberg TABLESPACE regress_object;
+SELECT pg_relation_filepath('remote_create_abort'::regclass) AS created_main_fork \gset
+SELECT (pg_stat_file(:'created_main_fork')).size = 0 AS remote_create_fork_visible;
+TRUNCATE remote_create_abort;
+SELECT pg_relation_filepath('remote_create_abort'::regclass) = :'created_main_fork'
+       AND (pg_stat_file(:'created_main_fork')).size = 0 AS remote_in_place_truncate_keeps_fork;
+ROLLBACK;
+CHECKPOINT;
+SELECT (pg_stat_file(:'created_main_fork', true)) IS NULL AS remote_create_abort_fork_removed;
 DROP TABLESPACE regress_object;
 \! rm -rf /tmp/iceberg_regress_object/*
 

@@ -27,13 +27,14 @@ pg19 = []
 pg_test = []
 
 [dependencies]
+arrow-schema = { workspace = true }
 pgrx = { workspace = true }
 lagodb-core = { path = "../lagodb-core", default-features = false }
 lagodb-query = { path = "../lagodb-query", default-features = false }
 lagodb-storage = { workspace = true }
 libc = "0.2"
 thiserror = "1.0.63"
-tokio = { version = "1", features = ["rt-multi-thread", "time"], default-features = false }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"], default-features = false }
 tokio-util = { version = "0.7", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "registry"] }

@@ -1,5 +1,6 @@
 //! Runtime GUC reload and storage-volume registry resynchronization state.
 
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use lagodb_storage::{StorageRuntime, StorageRuntimeConfig};
@@ -8,12 +9,36 @@ use pgrx::pg_sys;
 use super::catalog::VolumeConfigSource;
 use super::config::StorageWorkerRuntimeConfig;
 use super::logging;
-use super::reconciler::{ReconcileError, ReconcileReport, StoreConfigReconciler};
+use super::reconciler::{ReconcileReport, StoreConfigReconciler};
 
 pub(super) type StorageReconciler = StoreConfigReconciler<VolumeConfigSource>;
-pub(super) type StorageReconcileError = ReconcileError;
 
 const VOLUME_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ReconcilePhase {
+    Startup,
+    Periodic,
+    Runtime,
+    Sighup,
+}
+
+impl ReconcilePhase {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::Periodic => "periodic",
+            Self::Runtime => "runtime",
+            Self::Sighup => "SIGHUP",
+        }
+    }
+}
+
+impl fmt::Display for ReconcilePhase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 pub(super) struct SupervisorReloadState {
     config: StorageWorkerRuntimeConfig,
@@ -21,10 +46,18 @@ pub(super) struct SupervisorReloadState {
 }
 
 impl SupervisorReloadState {
-    pub(super) fn new(config: StorageWorkerRuntimeConfig) -> Self {
+    pub(super) fn new(
+        config: StorageWorkerRuntimeConfig,
+        startup_sweep_pending: bool,
+    ) -> Self {
+        let now = Instant::now();
         Self {
             config,
-            next_volume_sweep: Instant::now() + VOLUME_SWEEP_INTERVAL,
+            next_volume_sweep: if startup_sweep_pending {
+                now
+            } else {
+                now + VOLUME_SWEEP_INTERVAL
+            },
         }
     }
 
@@ -45,7 +78,11 @@ impl SupervisorReloadState {
         let until_sweep = self
             .next_volume_sweep
             .saturating_duration_since(Instant::now());
-        base.min(until_sweep.max(Duration::from_millis(1)))
+        if until_sweep.is_zero() {
+            base
+        } else {
+            base.min(until_sweep).max(Duration::from_millis(1))
+        }
     }
 
     pub(super) fn reload_from_gucs(&mut self, storage_runtime: &StorageRuntime) {
@@ -71,16 +108,8 @@ impl SupervisorReloadState {
         Self::log_config_change(&old_config, &self.config);
     }
 
-    /// Load and apply one complete machine-managed volume snapshot without a
-    /// PostgreSQL transaction or database-local catalog access.
-    pub(super) fn reconcile(
-        reconciler: &mut StorageReconciler,
-        phase: &str,
-        force_default_chain: bool,
-    ) -> Result<ReconcileReport, StorageReconcileError> {
-        let desired = reconciler.load_desired()?;
-        let report = reconciler.apply_desired(desired, force_default_chain)?;
-
+    /// Report a completed Rust task from the bgworker main thread.
+    pub(super) fn report_reconcile(phase: ReconcilePhase, report: &ReconcileReport) {
         for failure in &report.failures {
             logging::emit_pg_log(
                 pg_sys::WARNING as i32,
@@ -94,7 +123,8 @@ impl SupervisorReloadState {
         }
 
         let changed = report.added + report.replaced + report.removed > 0;
-        if phase == "startup" || changed || !report.failures.is_empty() {
+        if phase == ReconcilePhase::Startup || changed || !report.failures.is_empty()
+        {
             logging::emit_pg_log(
                 pg_sys::INFO as i32,
                 &format!(
@@ -110,7 +140,6 @@ impl SupervisorReloadState {
                 ),
             );
         }
-        Ok(report)
     }
 
     /// Re-read PostgreSQL configuration into this bgworker process.

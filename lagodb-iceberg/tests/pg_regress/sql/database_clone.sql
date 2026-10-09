@@ -1,0 +1,80 @@
+-- Database cloning must not copy ownership of managed object storage.
+\set regress_database :DBNAME
+\setenv PGDATABASE :DBNAME
+SELECT endpoint AS lagodb_regress_endpoint,
+       bucket AS lagodb_regress_bucket,
+       region AS lagodb_regress_region,
+       access_key_id AS lagodb_regress_access_key_id,
+       secret_access_key AS lagodb_regress_secret_access_key
+FROM lagodb_regress.object_storage_fixture
+\gset
+
+\! mkdir -p /tmp/iceberg_regress_clone
+SELECT 'regress-clone-' || gen_random_uuid() AS volume_name
+\gset
+CREATE TABLESPACE regress_clone_object LOCATION '/tmp/iceberg_regress_clone';
+SELECT lagodb.create_storage_volume(
+    :'volume_name',
+    'regress_clone_object',
+    format('s3://%s', :'lagodb_regress_bucket'),
+    jsonb_build_object(
+        'type', 's3_access_key',
+        'access_key_id', :'lagodb_regress_access_key_id',
+        'secret_access_key', :'lagodb_regress_secret_access_key'
+    ),
+    jsonb_build_object(
+        'region', :'lagodb_regress_region',
+        'endpoint', :'lagodb_regress_endpoint',
+        'allow_http', true
+    )
+) AS ignored
+\gset
+SELECT internal_volume_id AS volume_id
+FROM lagodb.storage_volumes
+WHERE storage_volume_name = :'volume_name'
+\gset
+\setenv LAGODB_REGRESS_VOLUME_ID :volume_id
+\setenv LAGODB_REGRESS_OBJECT_NAMESPACE :lagodb_regress_bucket
+\! bin/wait_for_object_store 30
+
+-- Template status keeps background workers from connecting during cloning.
+CREATE DATABASE iceberg_clone_source TEMPLATE template0 IS_TEMPLATE true;
+\connect iceberg_clone_source
+CREATE EXTENSION lagodb_base;
+CREATE EXTENSION lagodb_iceberg;
+CREATE TABLE clone_remote (id integer) USING iceberg TABLESPACE regress_clone_object;
+SELECT regexp_replace(value, '^[^:]+://[^/]+/', '') || '/' AS object_path
+FROM lagodb.table_option_values
+WHERE relid = 'clone_remote'::regclass AND name = 'location'
+\gset
+\setenv LAGODB_REGRESS_OBJECT_PATH :object_path
+\connect :regress_database
+
+-- A live object-backed table prevents cloning. Hook DETAIL includes an OID.
+\set VERBOSITY terse
+CREATE DATABASE iceberg_clone_copy TEMPLATE iceberg_clone_source IS_TEMPLATE true;
+
+\set VERBOSITY default
+\connect iceberg_clone_source
+DROP TABLE clone_remote;
+\connect :regress_database
+-- Do not issue CHECKPOINT: the clone guard must handle pending main-fork unlinks.
+CREATE DATABASE iceberg_clone_copy TEMPLATE iceberg_clone_source IS_TEMPLATE true;
+SELECT count(*) = 1 AS clone_after_drop
+FROM pg_database
+WHERE datname = 'iceberg_clone_copy';
+
+-- Discard the copy, then let the source worker finish its remote cleanup.
+ALTER DATABASE iceberg_clone_copy IS_TEMPLATE false;
+DROP DATABASE iceberg_clone_copy WITH (FORCE);
+ALTER DATABASE iceberg_clone_source IS_TEMPLATE false;
+\connect iceberg_clone_source
+\setenv PGDATABASE :DBNAME
+SELECT lagodb.request_worker_wakeup('lagodb_base', 'maintenance');
+
+\! bin/wait_for_maintenance_item 30
+
+\connect :regress_database
+\setenv PGDATABASE :DBNAME
+DROP DATABASE iceberg_clone_source WITH (FORCE);
+DROP TABLESPACE regress_clone_object;

@@ -6,7 +6,8 @@ use lagodb_core::catalog::{
     CatalogRelation, CatalogScanKey, CatalogSnapshot, database_path, get_relation_oid,
 };
 use lagodb_core::hooks::{HookError, UtilityHookError};
-use lagodb_core::options::is_distributed_tablespace;
+use lagodb_core::storage::tablespace::TablespaceStorage;
+use lagodb_core::wal::Checkpoint;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
@@ -33,9 +34,9 @@ struct SharedDependencyForm {
 /// Storage owned by managed tables in one PostgreSQL database.
 ///
 /// Local ownership is represented by relation-file Iceberg directories in
-/// each local tablespace. Object-backed ownership is represented by native
-/// `pg_shdepend` tablespace dependencies, which are cluster-visible and are
-/// removed transactionally with their relations.
+/// each local tablespace. Object-backed tablespaces contain only object-backed
+/// tables: native relation files identify ordinary tables without inspecting
+/// their AM. Shared dependencies cover storage-less partitioned roots.
 pub(super) struct ManagedDatabaseInventory {
     database_oid: pg_sys::Oid,
 }
@@ -136,6 +137,38 @@ impl ManagedDatabaseInventory {
                 }
             }
         }
+        if !self.contains_object_files_in(object_tablespaces)? {
+            return Ok(false);
+        }
+        // Like PG's database FILE_COPY and DROP TABLESPACE paths, finish pending
+        // main-fork unlinks before interpreting remaining files as live storage.
+        // Otherwise DROP of the last table would block cloning until checkpoint.
+        Checkpoint::immediate_and_wait()?;
+        self.contains_object_files_in(object_tablespaces)
+    }
+
+    fn contains_object_files_in(
+        &self,
+        object_tablespaces: &[pg_sys::Oid],
+    ) -> Result<bool, UtilityHookError> {
+        // Match pg_tablespace_databases: a nonempty per-database directory
+        // means this database uses the tablespace. No provider-name check.
+        for tablespace_oid in object_tablespaces {
+            let path = database_path(self.database_oid, *tablespace_oid);
+            let mut entries = match fs::read_dir(path) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(Self::io_error(error)),
+            };
+            if entries
+                .next()
+                .transpose()
+                .map_err(Self::io_error)?
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
         Ok(false)
     }
 
@@ -175,7 +208,7 @@ impl TablespacePlacements {
             if tablespace_oid == pg_sys::GLOBALTABLESPACE_OID {
                 continue;
             }
-            if is_distributed_tablespace(tablespace_oid)? {
+            if TablespaceStorage::is_object_backed(tablespace_oid)? {
                 placements.object_backed.push(tablespace_oid);
             } else {
                 placements.local.push(tablespace_oid);

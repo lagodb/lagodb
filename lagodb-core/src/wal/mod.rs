@@ -39,9 +39,11 @@
 //! ```
 //!
 
+mod checkpoint;
 mod record;
 mod rmgr;
 
+pub use checkpoint::Checkpoint;
 pub use record::{
     WalRecord, WalRecordBuilder, XLogRecPtr, buffer_flags, record_flags,
 };

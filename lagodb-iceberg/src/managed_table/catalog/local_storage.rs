@@ -90,6 +90,14 @@ impl LocalTableRoot {
         &self.directory
     }
 
+    /// Whether a generated file path belongs to this storage generation.
+    /// Managed metadata cannot override its directory with write.metadata.path;
+    /// compare the PG-generated root without filesystem access or normalization.
+    pub(crate) fn contains_path(&self, path: &str) -> bool {
+        path.strip_prefix(self.as_str())
+            .is_some_and(|suffix| suffix.starts_with('/'))
+    }
+
     pub(crate) fn into_string(self) -> String {
         self.directory
     }

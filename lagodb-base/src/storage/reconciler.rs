@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fmt;
 
+use tokio::task::{self, JoinError};
+
 use lagodb_core::diag::error_source_chain_detail;
 use lagodb_storage::{ManagedStoreRegistry, StorageError, StoreConfig};
 
@@ -33,6 +35,7 @@ pub(crate) trait StoreConfigSource {
 pub(crate) enum ReconcileError {
     Source(StorageVolumeError),
     DuplicateVolumeId(u64),
+    PrepareTask(JoinError),
 }
 
 impl fmt::Display for ReconcileError {
@@ -44,6 +47,9 @@ impl fmt::Display for ReconcileError {
             Self::DuplicateVolumeId(id) => {
                 write!(f, "duplicate storage volume id {id}")
             }
+            Self::PrepareTask(error) => {
+                write!(f, "store configuration preparation task failed: {error}")
+            }
         }
     }
 }
@@ -53,15 +59,7 @@ impl StdError for ReconcileError {
         match self {
             Self::Source(error) => Some(error),
             Self::DuplicateVolumeId(_) => None,
-        }
-    }
-}
-
-impl ReconcileError {
-    pub(crate) fn diagnostic_message(&self) -> String {
-        match error_source_chain_detail(self) {
-            Some(detail) => format!("{self}\n{detail}"),
-            None => self.to_string(),
+            Self::PrepareTask(error) => Some(error),
         }
     }
 }
@@ -170,7 +168,7 @@ impl<S: StoreConfigSource> StoreConfigReconciler<S> {
 
     /// Apply stores independently while retaining each store's last-known-good
     /// registration when its desired replacement cannot be materialized.
-    pub(crate) fn apply_desired(
+    pub(crate) async fn apply_desired(
         &mut self,
         desired: HashMap<u64, VolumeStoreSpec>,
         force_default_chain: bool,
@@ -204,6 +202,7 @@ impl<S: StoreConfigSource> StoreConfigReconciler<S> {
             report.removed += 1;
         }
 
+        let mut refresh = self.registry.begin_refresh();
         for (id, spec) in desired {
             let rejected_same = self.rejected.get(&id) == Some(&spec);
             let applied_same = self.applied.get(&id) == Some(&spec);
@@ -220,17 +219,26 @@ impl<S: StoreConfigSource> StoreConfigReconciler<S> {
                 }
             }
 
-            let apply_result = spec
-                .materialize_store_config()
-                .map_err(VolumeApplyError::Prepare)
-                .and_then(|config| {
+            // Local client validation can synchronously read credential files.
+            // Move the spec through the blocking pool rather than cloning it or
+            // blocking the Tokio worker that drives asynchronous provider setup.
+            let (spec, config) = task::spawn_blocking(move || {
+                let config = spec.materialize_store_config();
+                (spec, config)
+            })
+            .await
+            .map_err(ReconcileError::PrepareTask)?;
+            let apply_result = match config {
+                Err(error) => Err(VolumeApplyError::Prepare(error)),
+                Ok(config) => {
                     let result = if force_reload {
-                        self.registry.refresh_config(id, config)
+                        refresh.refresh_config(id, config).await
                     } else {
-                        self.registry.replace_config(id, config)
+                        self.registry.upsert_config(id, config).await
                     };
-                    result.map(|_| ()).map_err(VolumeApplyError::Register)
-                });
+                    result.map_err(VolumeApplyError::Register)
+                }
+            };
             match apply_result {
                 Ok(()) => {
                     if self.applied.insert(id, spec).is_some() {
@@ -272,6 +280,7 @@ impl<S: StoreConfigSource> StoreConfigReconciler<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::runtime::Builder;
 
     struct EmptySource;
 
@@ -304,8 +313,11 @@ mod tests {
                 .into_iter()
                 .map(|spec| (spec.volume_id, spec))
                 .collect::<HashMap<_, _>>();
-            self.reconciler
-                .apply_desired(desired, force_default_chain)
+            Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(self.reconciler.apply_desired(desired, force_default_chain))
                 .unwrap()
         }
 

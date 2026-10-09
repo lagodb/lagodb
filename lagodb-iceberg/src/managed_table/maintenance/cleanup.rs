@@ -1,3 +1,23 @@
+//! Register deletion of files selected by Iceberg maintenance.
+//!
+//! Snapshot expiration follows Iceberg's table and branch/tag retention
+//! policies. The reachability planner excludes files still referenced by
+//! retained snapshots; metadata-log retention and age-gated orphan cleanup
+//! have their own candidate rules.
+//! See <https://iceberg.apache.org/spec/#snapshot-retention-policy>.
+//!
+//! Iceberg retention does not require a PostgreSQL-style active-reader or xmin
+//! deletion barrier. LagoDB deliberately follows that contract: a PG snapshot
+//! selects visible managed-table metadata, and an IcebergReadSnapshot keeps a
+//! scan's read view stable, but neither pins its files against expiration.
+//! Retention must therefore cover the intended query lifetime; a query that
+//! outlives retention has no guarantee that its expired files remain available.
+//!
+//! Local deletion waits for commit, and remote deletion is queued
+//! transactionally, so rollback does not delete these candidates. This protects
+//! publication of the maintenance result, not completion of active readers;
+//! do not interpret the absence of reader tracking here as missing PG MVCC GC.
+
 use std::collections::HashSet;
 
 use iceberg_lite::io::FileIO;

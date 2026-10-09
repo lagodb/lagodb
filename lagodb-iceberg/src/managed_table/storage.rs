@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use iceberg_lite::io::FileIO;
 use lagodb_core::handles::RelationHandle;
-use lagodb_core::options::{CachedTablespaceOpts, get_tablespace};
 use lagodb_core::storage::service::{BackendStorageService, StorageEndpoint};
+use lagodb_core::storage::tablespace::{TablespaceStorage, TablespaceStorageBinding};
 use lagodb_storage::StagingPathResolver;
 
 use crate::error::{IcebergError, IcebergResult};
@@ -17,6 +17,8 @@ use crate::storage::{LocalStorage, ObjectStorage};
 ///
 /// Distributed/object storage never uses Iceberg file WAL. Local storage uses
 /// the owning relation's `RelationNeedsWAL` result on write and lifecycle paths.
+/// Ordinary tables in either placement also own an empty native main fork;
+/// PostgreSQL manages its storage WAL and transactional deletion separately.
 ///
 /// # UNLOGGED contract
 ///
@@ -53,7 +55,7 @@ enum ManagedStorageBackend {
     Local(Arc<LocalStorage>),
     Object {
         storage: Arc<ObjectStorage>,
-        tablespace: Rc<CachedTablespaceOpts>,
+        tablespace: Rc<TablespaceStorageBinding>,
     },
 }
 
@@ -72,11 +74,12 @@ impl StorageContext {
         rel: &RelationHandle<'_>,
         relation_needs_wal: bool,
     ) -> IcebergResult<Self> {
-        let Some(opts) = get_tablespace(rel.tablespace().resolved_oid())? else {
+        let Some(opts) = TablespaceStorage::resolve(rel.tablespace().resolved_oid())?
+        else {
             return Self::local(relation_needs_wal);
         };
 
-        let endpoint = StorageEndpoint::from_pg_gucs()?.require_enabled()?;
+        let endpoint = StorageEndpoint::from_pg_gucs()?;
         let service =
             BackendStorageService::for_managed(&endpoint, opts.volume_id().get())?;
         let resolver = StagingPathResolver::new(endpoint.cache_dir());
@@ -91,7 +94,7 @@ impl StorageContext {
         self.file_io
     }
 
-    pub(crate) fn object_tablespace(&self) -> Option<&CachedTablespaceOpts> {
+    pub(crate) fn object_tablespace(&self) -> Option<&TablespaceStorageBinding> {
         match &self.backend {
             ManagedStorageBackend::Local(_) => None,
             ManagedStorageBackend::Object { tablespace, .. } => Some(tablespace),
@@ -129,7 +132,7 @@ impl StorageContext {
     }
 
     fn object_backed(
-        opts: Rc<CachedTablespaceOpts>,
+        opts: Rc<TablespaceStorageBinding>,
         storage_service: BackendStorageService,
         staging_resolver: StagingPathResolver,
     ) -> IcebergResult<Self> {

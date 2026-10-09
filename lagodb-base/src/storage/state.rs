@@ -284,7 +284,6 @@ pub(crate) fn request_reload(force_default_chain: bool) {
 }
 
 pub(crate) struct StorageRuntimeStatus {
-    pub(crate) enabled: bool,
     pub(crate) pid: Option<i32>,
     pub(crate) state: &'static str,
     pub(crate) socket_path: String,
@@ -306,7 +305,6 @@ pub(crate) struct StorageRuntimeStatus {
 }
 
 pub(crate) fn snapshot(
-    enabled: bool,
     socket_path: PathBuf,
     cache_dir: PathBuf,
 ) -> StorageRuntimeStatus {
@@ -316,15 +314,10 @@ pub(crate) fn snapshot(
     } else {
         StorageSharedState::default()
     };
-    let process_state = if enabled {
-        StorageProcessState::from_raw(state.state).as_str()
-    } else {
-        "disabled"
-    };
+    let process_state = StorageProcessState::from_raw(state.state).as_str();
 
     StorageRuntimeStatus {
-        enabled,
-        pid: (enabled && state.pid > 0).then_some(state.pid),
+        pid: (state.pid > 0).then_some(state.pid),
         state: process_state,
         socket_path: socket_path.display().to_string(),
         cache_dir: cache_dir.display().to_string(),

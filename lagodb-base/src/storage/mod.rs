@@ -2,11 +2,12 @@
 //!
 //! `lagodb.workers` stores database-local extension workers only. The storage
 //! server is a cluster singleton owned by the `lagodb_base` extension:
-//! `_PG_init` registers its GUC backing statics and, when enabled, one static
+//! `_PG_init` registers its GUC backing statics and one static
 //! postmaster-managed background worker.
 
 mod catalog;
 mod config;
+mod error;
 mod gucs;
 mod logging;
 mod reconciler;
@@ -14,11 +15,12 @@ mod reload;
 mod sql_api;
 mod state;
 mod supervisor;
+mod tasks;
 pub(crate) mod volume_config;
 
 use std::path::PathBuf;
 
-use lagodb_core::diag::{log_info, report_warning};
+use lagodb_core::diag::{ReportableError, log_info, report_warning};
 use lagodb_core::storage::service::StorageEndpoint;
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::prelude::*;
@@ -51,10 +53,6 @@ pub(crate) fn init() {
         return;
     }
 
-    if !gucs::enabled() {
-        return;
-    }
-
     cleanup_staging_dir();
 
     // Force the linker to retain the entry-point symbol in the runtime cdylib.
@@ -74,12 +72,12 @@ pub(crate) fn init() {
 }
 
 pub(crate) fn runtime_status() -> StorageRuntimeStatus {
-    let (enabled, socket_path, cache_dir) = resolved_endpoint().into_parts();
-    state::snapshot(enabled, socket_path, cache_dir)
+    let (socket_path, cache_dir) = resolved_endpoint().into_parts();
+    state::snapshot(socket_path, cache_dir)
 }
 
 fn cleanup_staging_dir() {
-    let (_, _, cache_dir) = resolved_endpoint().into_parts();
+    let (_, cache_dir) = resolved_endpoint().into_parts();
     let staging_dir =
         lagodb_storage::StagingPathResolver::new(cache_dir).staging_dir();
     if !staging_dir.exists() {
@@ -99,7 +97,6 @@ fn cleanup_staging_dir() {
 
 fn resolved_endpoint() -> StorageEndpoint {
     StorageEndpoint::from_config(
-        gucs::enabled(),
         gucs::socket_path().map(PathBuf::from),
         gucs::cache_dir().map(PathBuf::from),
         gucs::backend_max_idle_connections(),
@@ -133,7 +130,9 @@ pub extern "C-unwind" fn lagodb_base_storage_bgworker_main(_arg: pg_sys::Datum) 
     }
 
     state::StorageStatusStore::new().mark_starting(pid);
-    supervisor::StorageWorkerSupervisor::from_gucs().run();
+    supervisor::StorageWorkerSupervisor::from_gucs()
+        .run()
+        .report_unwrap();
 }
 
 /// Final shared-state cleanup for the storage background worker.

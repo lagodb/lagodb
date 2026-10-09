@@ -32,12 +32,10 @@
 //!
 //! # Local durability limitation
 //!
-//! Local Iceberg tables are private to PostgreSQL. This adapter syncs files,
-//! but intentionally does not fsync their directories. FileSync alone does not
-//! make newly-created file or directory entries durable: an OS crash or power
-//! loss can leave committed catalog metadata referencing missing paths. Primary
-//! crash recovery skips WRITE_FILE redo and does not repair this gap. Keeping
-//! the tables private and rebuilding them on TRUNCATE does not remove it.
+//! This adapter syncs files without syncing their directories. FileSync alone
+//! does not make newly-created file or directory entries durable: an OS crash
+//! or power loss can leave committed metadata referencing missing paths. Primary
+//! crash recovery skips WRITE_FILE redo and does not repair this gap.
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -56,8 +54,8 @@ use pgrx::pg_sys;
 use crate::storage::local_file_wal::log_write_file;
 use crate::storage::local_file_wal::record::DirectoryHeader;
 use crate::storage::transaction_resources::register_local_file_created;
-use iceberg_lite::Result;
 use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
+use iceberg_lite::{Error, ErrorKind, Result};
 
 /// Local file storage implementation using PostgreSQL's VFD system.
 ///
@@ -84,6 +82,7 @@ use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
 pub(crate) struct LocalStorage {
     /// Whether Iceberg file WAL is enabled for local write operations.
     needs_wal: bool,
+    require_absolute_paths: bool,
     backend_thread: PhantomData<Rc<()>>,
 }
 
@@ -97,6 +96,17 @@ unsafe impl Send for LocalStorage {}
 unsafe impl Sync for LocalStorage {}
 
 impl LocalStorage {
+    /// Require absolute paths when resolving file locations.
+    ///
+    /// `file://` URIs must also be unescaped and contain no query or fragment;
+    /// resolution strips the prefix without decoding the URI. Bare paths are
+    /// treated literally. This preserves the configured WAL policy.
+    #[must_use]
+    pub(crate) fn with_absolute_paths(mut self) -> Self {
+        self.require_absolute_paths = true;
+        self
+    }
+
     /// Create a new LocalStorage with WAL support configured.
     ///
     /// # Arguments
@@ -112,6 +122,7 @@ impl LocalStorage {
     pub fn with_wal(needs_wal: bool) -> Self {
         Self {
             needs_wal,
+            require_absolute_paths: false,
             backend_thread: PhantomData,
         }
     }
@@ -210,6 +221,26 @@ impl LocalStorage {
 }
 
 impl Storage for LocalStorage {
+    fn resolve_uri(&self, uri: &str) -> Result<usize> {
+        let offset = if uri.starts_with("file://") {
+            "file://".len()
+        } else {
+            0
+        };
+        if self.require_absolute_paths {
+            let path = &uri[offset..];
+            if !Path::new(path).is_absolute()
+                || (offset != 0 && uri.contains(['%', '?', '#']))
+            {
+                return Err(Error::new(
+                    ErrorKind::DataInvalid,
+                    "Local storage requires an absolute path or an unescaped file:/// URI",
+                ));
+            }
+        }
+        Ok(offset)
+    }
+
     fn delete(&self, path: &str) -> Result<()> {
         match fs::remove_file(path) {
             Ok(_) => Ok(()),

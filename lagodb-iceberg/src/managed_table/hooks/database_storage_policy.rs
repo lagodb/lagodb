@@ -1,8 +1,9 @@
 //! Database-command policy for managed Iceberg storage ownership.
 //!
 //! PostgreSQL database cloning copies catalog rows without transferring the
-//! storage identity represented by LagoDB's local directories and shared
-//! tablespace dependencies. Database relocation ignores extension-owned
+//! Iceberg storage identity. Inventory uses local Iceberg directories, native
+//! files in object-backed tablespaces, and storage-less relations' shared
+//! dependencies. Database relocation ignores extension-owned
 //! subdirectories before recursively deleting the old default database
 //! directory. These two commands therefore require provider-level guards.
 //!

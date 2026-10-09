@@ -48,7 +48,6 @@ mod lagodb {
     fn storage_service_status() -> TableIterator<
         'static,
         (
-            name!(enabled, bool),
             name!(pid, Option<i32>),
             name!(state, &'static str),
             name!(socket_path, String),
@@ -74,7 +73,6 @@ mod lagodb {
             .report_unwrap();
         let status = super::super::runtime_status();
         TableIterator::new(std::iter::once((
-            status.enabled,
             status.pid,
             status.state,
             status.socket_path,

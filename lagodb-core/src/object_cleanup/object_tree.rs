@@ -22,7 +22,7 @@ pub struct ObjectTreeObserver {
 
 impl ObjectTreeObserver {
     pub fn connect(timeout: Duration) -> StorageResult<Self> {
-        let endpoint = StorageEndpoint::from_pg_gucs()?.require_enabled()?;
+        let endpoint = StorageEndpoint::from_pg_gucs()?;
         Ok(Self {
             socket_path: endpoint.socket_path().to_path_buf(),
             timeout,

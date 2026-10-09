@@ -13,6 +13,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
+use std::time::Instant;
 
 use pgrx::pg_sys;
 use tracing::level_filters::LevelFilter;
@@ -72,12 +73,36 @@ pub(super) fn new_bridge(capacity: usize) -> (PgLogBridge, PgLogWriter) {
 impl PgLogBridge {
     /// Drain all pending log events into PostgreSQL's log system.
     ///
+    /// Design choice: normal supervision drains to empty, as it has since the
+    /// bridge's introduction in 8330b55 (also retained in 3a7c7cc). Storage tasks
+    /// are expected to emit finite diagnostic bursts; a self-sustaining log
+    /// flood is a producer bug to fix at its source. We accept signal and task
+    /// polling delays while draining a burst to keep the bridge simple and
+    /// promptly reclaim channel capacity. The bounded channel limits memory,
+    /// not drain duration. Once shutdown is accepted, use `drain_until` to
+    /// respect the supervisor's shared deadline.
+    ///
     /// Must only be called from the bgworker main thread.
     pub fn drain_to_pg_log(&mut self) {
-        while let Ok(event) = self.receiver.try_recv() {
+        self.drain(None);
+    }
+
+    /// Keep shutdown log draining within the supervisor's shared wait budget.
+    pub(super) fn drain_until(&mut self, deadline: Instant) {
+        self.drain(Some(deadline));
+    }
+
+    fn drain(&mut self, deadline: Option<Instant>) {
+        while deadline.is_none_or(|deadline| Instant::now() < deadline) {
+            let Ok(event) = self.receiver.try_recv() else {
+                break;
+            };
             emit_pg_log(event.elevel, &event.message);
         }
 
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return;
+        }
         let total = self.dropped.load(Ordering::Relaxed);
         if total > self.last_reported_dropped {
             let delta = total - self.last_reported_dropped;

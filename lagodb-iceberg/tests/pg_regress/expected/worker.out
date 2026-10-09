@@ -761,11 +761,14 @@ SELECT endpoint AS lagodb_regress_endpoint,
        secret_access_key AS lagodb_regress_secret_access_key
 FROM lagodb_regress.object_storage_fixture
 \gset
-SELECT 'regress-worker-statement-cancel-' || current_database()
+\! mkdir -p /tmp/lagodb_iceberg_regress_worker_cancel
+CREATE TABLESPACE iceberg_worker_cancel LOCATION '/tmp/lagodb_iceberg_regress_worker_cancel';
+SELECT 'regress-worker-cancel-' || gen_random_uuid()
        AS cancel_volume_name
 \gset
 SELECT lagodb.create_storage_volume(
     :'cancel_volume_name',
+    'iceberg_worker_cancel',
     format('s3://%s', :'lagodb_regress_bucket'),
     jsonb_build_object(
         'type', 's3_access_key',
@@ -994,12 +997,7 @@ END
 $$;
 DELETE FROM lagodb.maintenance_queue
 WHERE item_id = '00000000-0000-0000-0000-000000000004';
-SELECT lagodb.drop_storage_volume(:'cancel_volume_name');
- drop_storage_volume 
----------------------
- 
-(1 row)
-
+DROP TABLESPACE iceberg_worker_cancel;
 SELECT 'worker_test_restored_iceberg_registration: ' || EXISTS (
            SELECT FROM lagodb.worker_status
            WHERE extension_name = 'lagodb_iceberg'

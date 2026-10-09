@@ -119,9 +119,6 @@ enum ObjectCleanupWorkerStartupError {
     #[error("failed to start maintenance actor pool: {0}")]
     ActorPool(#[source] std::io::Error),
 
-    #[error("storage server is disabled")]
-    StorageDisabled,
-
     #[error("failed to resolve storage endpoint: {0}")]
     StorageConfig(#[source] StorageError),
 }
@@ -129,12 +126,6 @@ enum ObjectCleanupWorkerStartupError {
 impl ObjectCleanupWorkerStartupError {
     fn worker_schedule(&self) -> WorkerSchedule {
         match self {
-            Self::StorageDisabled => {
-                crate::diag::report_warning(
-                    "database-local maintenance worker skipped: storage server is disabled",
-                );
-                WorkerSchedule::Idle
-            }
             Self::StorageConfig(_) => {
                 crate::diag::report_warning(format_args!(
                     "database-local maintenance worker waiting for storage: {self}"
@@ -157,9 +148,6 @@ impl ObjectCleanupWorkerSupervisor {
     ) -> Result<Self, ObjectCleanupWorkerStartupError> {
         let endpoint = StorageEndpoint::from_pg_gucs()
             .map_err(ObjectCleanupWorkerStartupError::StorageConfig)?;
-        if !endpoint.is_enabled() {
-            return Err(ObjectCleanupWorkerStartupError::StorageDisabled);
-        }
 
         let runtime_config = actor_runtime_config(settings);
         let actors = ObjectCleanupActorPool::start(

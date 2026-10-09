@@ -55,7 +55,6 @@ impl StorageWorkerConfig {
     /// Must be called from the bgworker main thread where `pg_sys::DataDir` is valid.
     pub fn from_gucs() -> Self {
         let endpoint = StorageEndpoint::from_config(
-            gucs::enabled(),
             gucs::socket_path().map(PathBuf::from),
             gucs::cache_dir().map(PathBuf::from),
             gucs::backend_max_idle_connections(),
@@ -63,7 +62,7 @@ impl StorageWorkerConfig {
         .expect(
             "PostgreSQL DataDir must be initialized before resolving storage paths",
         );
-        let (_, socket_path, cache_dir) = endpoint.into_parts();
+        let (socket_path, cache_dir) = endpoint.into_parts();
 
         Self {
             startup: StorageWorkerStartupConfig {

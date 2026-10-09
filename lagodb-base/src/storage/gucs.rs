@@ -13,8 +13,6 @@ use lagodb_storage::{
 };
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting};
 
-static ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
-
 static SOCKET_PATH: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(None);
 
@@ -55,15 +53,6 @@ static CACHE_CLEANUP_BATCH_MB: GucSetting<i32> = GucSetting::<i32>::new(
 );
 
 pub fn init() {
-    GucRegistry::define_bool_guc(
-        c"lagodb.storage_server_enabled",
-        c"Start lagodb-storage background worker",
-        c"When true, a background worker running the local storage service is started at postmaster startup.",
-        &ENABLED,
-        GucContext::Postmaster,
-        GucFlags::default(),
-    );
-
     GucRegistry::define_string_guc(
         c"lagodb.storage_server_socket_path",
         c"Unix socket path for lagodb-storage",
@@ -96,7 +85,7 @@ pub fn init() {
     GucRegistry::define_int_guc(
         c"lagodb.storage_server_shutdown_timeout_ms",
         c"Shutdown timeout in milliseconds for the storage worker",
-        c"Maximum time to stop the server task and shut down its Tokio runtime.",
+        c"Shared wait budget for storage tasks and the Tokio runtime; unfinished work ends with process exit.",
         &SHUTDOWN_TIMEOUT_MS,
         100,
         60000,
@@ -237,10 +226,6 @@ pub fn init() {
         GucContext::Sighup,
         GucFlags::default(),
     );
-}
-
-pub fn enabled() -> bool {
-    ENABLED.get()
 }
 
 pub fn socket_path() -> Option<String> {
