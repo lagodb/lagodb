@@ -6,6 +6,7 @@
 //! PostgreSQL's rendezvous variable.
 
 mod registration;
+mod storage_volume;
 
 use std::ffi::{CStr, c_char, c_void};
 use std::mem::size_of;
@@ -13,16 +14,13 @@ use std::mem::size_of;
 use lagodb_core::runtime_api::{
     RuntimeApi, STAGE_WORKER_WAKEUP_INVALID_REQUEST,
     STAGE_WORKER_WAKEUP_LOCATOR_NOT_FOUND, STAGE_WORKER_WAKEUP_OK,
-    STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED, StorageVolumeRouteOutput,
-    VOLUME_ROUTE_ERROR, VOLUME_ROUTE_INVALID_REQUEST, VOLUME_ROUTE_NOT_FOUND,
-    VOLUME_ROUTE_OK, rendezvous_slot,
+    STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED, rendezvous_slot,
 };
-use lagodb_core::storage::volume::StorageVolumeId;
-use pgrx::{PgMemoryContexts, pg_guard, pg_sys};
+use pgrx::{pg_guard, pg_sys};
 
-use crate::storage::volume_config::resolve_route;
 use crate::{gucs, object_access, process_utility, runtime_is_preloaded, worker};
 use crate::{maintenance, table_provider_registry};
+use storage_volume::load_tablespace_bindings;
 
 #[pg_guard]
 unsafe extern "C-unwind" fn customscan_mode() -> u32 {
@@ -63,44 +61,6 @@ unsafe extern "C-unwind" fn stage_worker_wakeup(
     STAGE_WORKER_WAKEUP_OK
 }
 
-#[pg_guard]
-unsafe extern "C-unwind" fn resolve_storage_volume_route(
-    volume_id: u64,
-    output: *mut StorageVolumeRouteOutput,
-) -> u32 {
-    let Some(output) = (unsafe { output.as_mut() }) else {
-        return VOLUME_ROUTE_INVALID_REQUEST;
-    };
-    *output = StorageVolumeRouteOutput::default();
-    let Ok(volume_id) = StorageVolumeId::new(volume_id) else {
-        output.error_message = unsafe {
-            PgMemoryContexts::CurrentMemoryContext
-                .pstrdup("storage volume id is outside the valid range")
-        };
-        return VOLUME_ROUTE_INVALID_REQUEST;
-    };
-    match resolve_route(volume_id) {
-        Ok(Some(route)) => {
-            output.object_namespace = unsafe {
-                PgMemoryContexts::CurrentMemoryContext
-                    .pstrdup(route.object_namespace())
-            };
-            output.effective_base_uri = unsafe {
-                PgMemoryContexts::CurrentMemoryContext
-                    .pstrdup(route.effective_base_uri())
-            };
-            VOLUME_ROUTE_OK
-        }
-        Ok(None) => VOLUME_ROUTE_NOT_FOUND,
-        Err(error) => {
-            let message = error.diagnostic_message();
-            output.error_message =
-                unsafe { PgMemoryContexts::CurrentMemoryContext.pstrdup(&message) };
-            VOLUME_ROUTE_ERROR
-        }
-    }
-}
-
 static RUNTIME_API: RuntimeApi = RuntimeApi {
     struct_size: size_of::<RuntimeApi>() as u32,
     register_provider: registration::register_provider,
@@ -109,7 +69,7 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     customscan_mode,
     maintenance_config: maintenance::maintenance_config,
     stage_worker_wakeup,
-    resolve_storage_volume_route,
+    load_tablespace_bindings,
 };
 
 pub(crate) fn init() {

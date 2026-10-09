@@ -3,7 +3,6 @@
 use std::ffi::CStr;
 
 use lagodb_core::diag::{PgReportError, SqlStateError};
-use lagodb_core::options::{TablespaceCacheError, get_tablespace};
 use lagodb_core::storage::service::BackendStorageService;
 use pgrx::datum::JsonB;
 use pgrx::prelude::*;
@@ -22,8 +21,6 @@ enum StorageVolumeSqlError {
     #[error(transparent)]
     Domain(#[from] StorageVolumeError),
     #[error(transparent)]
-    Tablespace(#[from] TablespaceCacheError),
-    #[error(transparent)]
     Retirement(#[from] StorageVolumeRetirementError),
     #[error(transparent)]
     Runtime(#[from] RuntimeNotPreloaded),
@@ -34,7 +31,6 @@ impl SqlStateError for StorageVolumeSqlError {
         match self {
             Self::RequiresSuperuser => PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
             Self::Domain(error) => error.sql_error_code(),
-            Self::Tablespace(error) => error.sql_error_code(),
             Self::Retirement(error) => error.sql_error_code(),
             Self::Runtime(error) => error.sql_error_code(),
         }
@@ -71,13 +67,15 @@ fn ensure_mutation_context() -> Result<(), StorageVolumeSqlError> {
 mod lagodb {
     use super::*;
 
+    /// Bind an empty, dedicated user tablespace. The administrator must exclude
+    /// concurrent access to that tablespace until this command's transaction ends.
     #[pg_extern]
     fn create_storage_volume(
         storage_volume_name: &str,
+        tablespace_name: &str,
         location: &str,
         credentials: default!(JsonB, "'{\"type\":\"default_chain\"}'::jsonb"),
         provider_options: default!(JsonB, "'{}'::jsonb"),
-        expires_after_seconds: default!(Option<i64>, "NULL"),
     ) -> String {
         let result = (|| -> Result<String, StorageVolumeSqlError> {
             ensure_mutation_context()?;
@@ -88,7 +86,7 @@ mod lagodb {
                 &name,
                 location,
                 credential,
-                expires_after_seconds,
+                tablespace_name,
             )?;
             Ok(name.as_str().to_owned())
         })();
@@ -102,17 +100,6 @@ mod lagodb {
             let old = StorageVolumeName::new(storage_volume_name)?;
             let new = StorageVolumeName::new(new_name)?;
             StorageVolumeControl::current().rename(&old, new)?;
-            Ok(())
-        })();
-        result.unwrap_or_else(|error| error.report())
-    }
-
-    #[pg_extern]
-    fn drop_storage_volume(storage_volume_name: &str) {
-        let result = (|| -> Result<(), StorageVolumeSqlError> {
-            ensure_mutation_context()?;
-            let name = StorageVolumeName::new(storage_volume_name)?;
-            StorageVolumeControl::current().remove(&name)?;
             Ok(())
         })();
         result.unwrap_or_else(|error| error.report())
@@ -151,7 +138,7 @@ mod lagodb {
     }
 
     #[pg_extern]
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity)] // pgrx requires named SQL columns in this tuple.
     fn probe_storage_volume(
         storage_volume_name: &str,
     ) -> TableIterator<
@@ -168,8 +155,8 @@ mod lagodb {
             name!(error, Option<String>),
         ),
     > {
-        ensure_admin_access().unwrap_or_else(|error| error.report());
         let metadata = (|| -> Result<_, StorageVolumeSqlError> {
+            ensure_admin_access()?;
             let name = StorageVolumeName::new(storage_volume_name)?;
             let snapshot = StorageVolumeControl::current().snapshot()?;
             let volume = snapshot.find(&name)?;
@@ -232,7 +219,6 @@ mod lagodb {
             name!(credential_type, &'static str),
             name!(lifecycle, &'static str),
             name!(created_at, i64),
-            name!(expires_at, Option<i64>),
             name!(bound_tablespace_oid, Option<pg_sys::Oid>),
             name!(retired_tablespace_oid, Option<pg_sys::Oid>),
             name!(marked_at, Option<i64>),
@@ -256,14 +242,6 @@ mod lagodb {
                 .map(pg_sys::Oid::from);
             let (tablespace_name, binding_present) = bound_tablespace_oid
                 .map(|oid| {
-                    let binding_matches = get_tablespace(oid)
-                        .unwrap_or_else(|error| {
-                            StorageVolumeSqlError::from(error).report()
-                        })
-                        .is_some_and(|options| options.volume_id() == volume.id);
-                    if !binding_matches {
-                        return (None, false);
-                    }
                     // SAFETY: get_tablespace_name returns null or a palloc'd C string
                     // valid in the current query context; copy it immediately.
                     let name = unsafe { pg_sys::get_tablespace_name(oid) };
@@ -271,7 +249,7 @@ mod lagodb {
                         (!name.is_null()).then(|| unsafe {
                             CStr::from_ptr(name).to_string_lossy().into_owned()
                         }),
-                        true,
+                        !name.is_null(),
                     )
                 })
                 .unwrap_or((None, false));
@@ -284,7 +262,6 @@ mod lagodb {
                 volume.credential.credential_type(),
                 volume.lifecycle.as_str(),
                 volume.created_at_ms.get(),
-                volume.lifecycle.expires_at_ms().map(|value| value.get()),
                 bound_tablespace_oid,
                 volume
                     .lifecycle

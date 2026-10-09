@@ -6,6 +6,9 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use lagodb_core::storage::tablespace::TablespaceStorage;
+
+use super::super::state;
 use super::domain::{StorageVolumeError, StorageVolumeSnapshot};
 use super::error::ConfigSecurityError;
 use super::lifecycle::UnixMillis;
@@ -77,7 +80,16 @@ impl StorageVolumeConfigStore {
             &mut StorageVolumeSnapshot,
         ) -> Result<(T, bool), StorageVolumeError>,
     ) -> Result<(T, bool), StorageVolumeError> {
-        let _guard = ConfigWriteGuard::acquire();
+        self.update_locked(ConfigWriteGuard::acquire(), mutation)
+    }
+
+    fn update_locked<T>(
+        &self,
+        _guard: ConfigWriteGuard,
+        mutation: impl FnOnce(
+            &mut StorageVolumeSnapshot,
+        ) -> Result<(T, bool), StorageVolumeError>,
+    ) -> Result<(T, bool), StorageVolumeError> {
         self.ensure_directory()?;
         let mut snapshot = self.read()?;
         let (value, changed) = mutation(&mut snapshot)?;
@@ -90,12 +102,19 @@ impl StorageVolumeConfigStore {
         Ok((value, changed))
     }
 
-    pub(crate) fn sweep_due_volumes(&self) -> Result<(), StorageVolumeError> {
-        let _ = self.update(|snapshot| {
+    /// Return `None` when the writer lock is busy, or `Some(())` after sweeping.
+    /// Due records remain in the snapshot for the next successful sweep.
+    pub(crate) fn try_sweep_due_volumes(
+        &self,
+    ) -> Result<Option<()>, StorageVolumeError> {
+        let Some(guard) = ConfigWriteGuard::try_acquire() else {
+            return Ok(None);
+        };
+        let _ = self.update_locked(guard, |snapshot| {
             let now = UnixMillis::now()?;
             Ok(((), snapshot.sweep_due(now)))
         })?;
-        Ok(())
+        Ok(Some(()))
     }
 
     fn ensure_directory(&self) -> Result<(), StorageVolumeError> {
@@ -191,19 +210,15 @@ impl StorageVolumeConfigStore {
             StorageVolumeError::config_io("publish", &self.config_path, source)
         })?;
         temp.published = true;
+        // The file is now visible and survives SQL rollback. Notify before
+        // directory sync so a later I/O error cannot suppress invalidation.
+        TablespaceStorage::invalidate_all();
+        state::request_reload(false);
         let directory = File::open(&self.directory).map_err(|source| {
-            StorageVolumeError::config_io_published(
-                "open directory",
-                &self.directory,
-                source,
-            )
+            StorageVolumeError::config_io("open directory", &self.directory, source)
         })?;
         directory.sync_all().map_err(|source| {
-            StorageVolumeError::config_io_published(
-                "sync directory",
-                &self.directory,
-                source,
-            )
+            StorageVolumeError::config_io("sync directory", &self.directory, source)
         })?;
         Ok(())
     }
@@ -221,6 +236,20 @@ impl ConfigWriteGuard {
         };
         debug_assert!(result != pg_sys::LockAcquireResult::LOCKACQUIRE_NOT_AVAIL);
         Self
+    }
+
+    fn try_acquire() -> Option<Self> {
+        let tag = Self::lock_tag();
+        // SAFETY: callers run on the PostgreSQL background-worker main thread.
+        // dontWait=true returns normally on contention without entering the
+        // heavyweight-lock wait queue. Only a successful acquire owns a guard.
+        let result = unsafe {
+            pg_sys::LockAcquire(&tag, pg_sys::ExclusiveLock as _, true, true)
+        };
+        match result {
+            pg_sys::LockAcquireResult::LOCKACQUIRE_NOT_AVAIL => None,
+            _ => Some(Self),
+        }
     }
 
     fn lock_tag() -> pg_sys::LOCKTAG {

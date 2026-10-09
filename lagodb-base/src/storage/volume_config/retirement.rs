@@ -1,10 +1,9 @@
 use std::cell::RefCell;
-use std::io::ErrorKind;
 use std::rc::Rc;
 
 use crate::runtime_is_preloaded;
+use lagodb_core::catalog::search_syscache1;
 use lagodb_core::diag::{PgReportError, SqlStateError, report_warning};
-use lagodb_core::options::{TablespaceCacheError, get_tablespace};
 use lagodb_core::storage::volume::StorageVolumeId;
 use lagodb_core::transaction::{self, TransactionResource, TransactionResult};
 use pgrx::pg_sys;
@@ -21,8 +20,6 @@ use super::store::StorageVolumeConfigStore;
 pub(crate) enum StorageVolumeRetirementError {
     #[error(transparent)]
     Volume(#[from] StorageVolumeError),
-    #[error(transparent)]
-    Tablespace(#[from] TablespaceCacheError),
     #[error(
         "storage volume {volume_id} is still bound to tablespace OID {tablespace_oid}"
     )]
@@ -36,7 +33,6 @@ impl SqlStateError for StorageVolumeRetirementError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
             Self::Volume(error) => error.sql_error_code(),
-            Self::Tablespace(error) => error.sql_error_code(),
             Self::NotOrphan { .. } => PgSqlErrorCode::ERRCODE_OBJECT_IN_USE,
         }
     }
@@ -60,23 +56,11 @@ pub(crate) fn on_object_access(
     }
 
     let control = StorageVolumeControl::current();
-    let volume_id = match control.find_bound_tablespace(object_id) {
-        Ok(volume_id) => volume_id,
-        Err(StorageVolumeError::ConfigIo { source, .. })
-            if source.kind() == ErrorKind::NotFound =>
-        {
-            // No config can contain a managed binding before the worker has
-            // initialized the file. Native tablespace drops remain independent
-            // of that startup window.
-            return Ok(());
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let Some(volume_id) = volume_id else {
+    let Some(volume) = control.find_bound_tablespace(object_id)? else {
         return Ok(());
     };
     PendingVolumeRetirementBatch::stage(PendingVolumeRetirement {
-        volume_id,
+        volume_id: volume.id,
         tablespace_oid: object_id.to_u32(),
         retirement_grace_ms: gucs::storage_volume_retirement_grace_period_ms(),
         nest_level: unsafe { pg_sys::GetCurrentTransactionNestLevel() },
@@ -93,8 +77,11 @@ pub(crate) fn repair(
     let Some(tablespace_oid) = volume.lifecycle.bound_tablespace_oid() else {
         return Err(StorageVolumeError::NotBound.into());
     };
-    if get_tablespace(pg_sys::Oid::from(tablespace_oid))?
-        .is_some_and(|binding| binding.volume_id() == volume.id)
+    if search_syscache1(
+        pg_sys::SysCacheIdentifier::TABLESPACEOID as i32,
+        pg_sys::Datum::from(tablespace_oid),
+    )
+    .is_some()
     {
         return Err(StorageVolumeRetirementError::NotOrphan {
             volume_id: volume.id,
@@ -157,7 +144,7 @@ impl PendingVolumeRetirementBatch {
             return Ok(());
         }
         let store = StorageVolumeConfigStore::for_current_data_directory();
-        let result = store.update(|snapshot| {
+        store.update(|snapshot| {
             let marked_at_ms = UnixMillis::now()?;
             let mut changed = false;
             for pending in &pending {
@@ -169,21 +156,8 @@ impl PendingVolumeRetirementBatch {
                 )?;
             }
             Ok(((), changed))
-        });
-        match result {
-            Ok((_, changed)) => {
-                if changed {
-                    StorageVolumeControl::request_reload(false);
-                }
-                Ok(())
-            }
-            Err(error) => {
-                if error.was_published() {
-                    StorageVolumeControl::request_reload(false);
-                }
-                Err(error)
-            }
-        }
+        })?;
+        Ok(())
     }
 }
 

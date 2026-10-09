@@ -1,5 +1,6 @@
 //! Provider-aware credential domain values.
 
+use lagodb_storage::{AwsCredentialConfig, AwsCredentialSource};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,7 @@ use super::service_account::ServiceAccountJson;
 pub(crate) enum CredentialConfig {
     DefaultChain,
     Anonymous,
+    Aws(AwsCredentialConfig),
     S3AccessKey {
         access_key_id: String,
         secret_access_key: String,
@@ -41,6 +43,7 @@ impl CredentialConfig {
         match self {
             Self::DefaultChain => "default_chain",
             Self::Anonymous => "anonymous",
+            Self::Aws(_) => "aws",
             Self::S3AccessKey { .. } => "s3_access_key",
             Self::GcsServiceAccount { .. } => "gcs_service_account",
             Self::AzureAccessKey { .. } => "azure_access_key",
@@ -49,8 +52,15 @@ impl CredentialConfig {
         }
     }
 
-    pub(crate) fn uses_default_chain(&self) -> bool {
-        matches!(self, Self::DefaultChain)
+    pub(crate) fn reloads_provider_on_force(&self) -> bool {
+        match self {
+            Self::DefaultChain => true,
+            Self::Aws(config) => {
+                config.assume_role.is_some()
+                    || !matches!(config.source, AwsCredentialSource::AccessKey { .. })
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn parse(
@@ -73,6 +83,7 @@ impl CredentialConfig {
                 | (StorageLocation::S3 { .. }, Self::Anonymous)
                 | (StorageLocation::Gcs { .. }, Self::Anonymous)
                 | (StorageLocation::S3 { .. }, Self::S3AccessKey { .. })
+                | (StorageLocation::S3 { .. }, Self::Aws(_))
                 | (StorageLocation::Gcs { .. }, Self::GcsServiceAccount { .. })
                 | (StorageLocation::Azure { .. }, Self::AzureAccessKey { .. })
                 | (StorageLocation::Azure { .. }, Self::AzureBearerToken { .. })
@@ -107,6 +118,10 @@ impl CredentialConfig {
                 !client_id.is_empty()
                     && !client_secret.is_empty()
                     && !tenant_id.is_empty()
+            }
+            Self::Aws(config) => {
+                config.validate().map_err(CredentialValidationError::Aws)?;
+                true
             }
             Self::DefaultChain | Self::Anonymous => true,
         };

@@ -302,6 +302,7 @@ mod tests {
             access_method_name: access_method_name.as_ptr(),
             owns_partitioned_table: false,
             supports_analyze: false,
+            copy: std::ptr::null(),
             access_method_oid,
             truncate_partitioned_table,
             execute_maintenance,

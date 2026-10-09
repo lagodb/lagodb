@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use lagodb_core::diag::{SqlStateError, error_source_chain_detail};
+use lagodb_core::diag::{PgError, SqlStateError, error_source_chain_detail};
 use lagodb_core::storage::volume::StorageVolumeId;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
@@ -21,6 +21,8 @@ pub(crate) enum LocationValidationError {
 
 #[derive(Debug, Error)]
 pub(crate) enum CredentialValidationError {
+    #[error("invalid AWS credential configuration")]
+    Aws(#[source] lagodb_storage::StorageError),
     #[error("credential JSON does not match a supported credential shape")]
     InvalidShape(#[source] serde_json::Error),
     #[error("credential type does not match location provider")]
@@ -53,8 +55,6 @@ pub(crate) enum SnapshotValidationError {
     IdNotBelowNext(StorageVolumeId),
     #[error("storage volume id {0} has an invalid creation timestamp")]
     InvalidCreatedAt(StorageVolumeId),
-    #[error("storage volume id {0} has an expiration before creation")]
-    InvalidExpiration(StorageVolumeId),
     #[error("storage volume id {0} has an invalid tablespace OID")]
     InvalidTablespaceOid(StorageVolumeId),
     #[error("tablespace OID {0} is bound to more than one storage volume")]
@@ -79,6 +79,12 @@ pub(crate) enum ConfigSecurityError {
 
 #[derive(Debug, Error)]
 pub(crate) enum StorageVolumeError {
+    #[error(transparent)]
+    Catalog(#[from] PgError),
+    #[error("only empty, dedicated user tablespaces can be bound to storage volumes")]
+    TablespaceInUse,
+    #[error("PostgreSQL built-in tablespaces cannot be bound to storage volumes")]
+    BuiltinTablespace,
     #[error("storage volume name must contain 1..=63 UTF-8 bytes and no NUL")]
     InvalidName,
     #[error("invalid storage volume location")]
@@ -89,13 +95,6 @@ pub(crate) enum StorageVolumeError {
     NotFound(String),
     #[error("storage volume id {0} does not exist")]
     NotFoundId(StorageVolumeId),
-    #[error(
-        "storage volume binding target changed while CREATE TABLESPACE was in progress (expected id {expected_id}, found id {actual_id})"
-    )]
-    BindingConflict {
-        expected_id: StorageVolumeId,
-        actual_id: StorageVolumeId,
-    },
     #[error("storage volume name {0:?} conflicts with a different configuration")]
     NameConflict(String),
     #[error("storage volume id space is exhausted")]
@@ -106,22 +105,16 @@ pub(crate) enum StorageVolumeError {
     TablespaceAlreadyBound(u32),
     #[error("storage volume is not bound to a tablespace")]
     NotBound,
-    #[error("storage volume has expired and cannot be bound")]
-    Expired,
     #[error("tablespace OID is invalid")]
     InvalidTablespaceOid,
     #[error("storage volume cannot be {operation} in its current lifecycle")]
     LifecycleOperation { operation: &'static str },
-    #[error("storage volume expiration must be a positive number of seconds")]
-    InvalidTtl,
     #[error("storage volume timestamp arithmetic overflowed")]
     TimestampOverflow,
     #[error("storage volume config {operation} failed for {path:?}")]
     ConfigIo {
         operation: &'static str,
         path: PathBuf,
-        // `true` means rename completed; only the following durability step failed.
-        published: bool,
         #[source]
         source: std::io::Error,
     },
@@ -151,39 +144,11 @@ impl StorageVolumeError {
         path: impl Into<PathBuf>,
         source: std::io::Error,
     ) -> Self {
-        Self::config_io_with_publish(operation, path, false, source)
-    }
-
-    pub(crate) fn config_io_published(
-        operation: &'static str,
-        path: impl Into<PathBuf>,
-        source: std::io::Error,
-    ) -> Self {
-        Self::config_io_with_publish(operation, path, true, source)
-    }
-
-    fn config_io_with_publish(
-        operation: &'static str,
-        path: impl Into<PathBuf>,
-        published: bool,
-        source: std::io::Error,
-    ) -> Self {
         Self::ConfigIo {
             operation,
             path: path.into(),
-            published,
             source,
         }
-    }
-
-    pub(crate) const fn was_published(&self) -> bool {
-        matches!(
-            self,
-            Self::ConfigIo {
-                published: true,
-                ..
-            }
-        )
     }
 
     pub(crate) fn diagnostic_message(&self) -> String {
@@ -200,9 +165,8 @@ impl SqlStateError for StorageVolumeError {
             Self::NotFound(_) | Self::NotFoundId(_) => {
                 PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT
             }
-            Self::BindingConflict { .. } => {
-                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
-            }
+            Self::Catalog(error) => error.sql_error_code(),
+            Self::TablespaceInUse => PgSqlErrorCode::ERRCODE_OBJECT_IN_USE,
             Self::NameConflict(_) => PgSqlErrorCode::ERRCODE_DUPLICATE_OBJECT,
             Self::AlreadyBound(_) | Self::TablespaceAlreadyBound(_) => {
                 PgSqlErrorCode::ERRCODE_OBJECT_IN_USE
@@ -210,9 +174,8 @@ impl SqlStateError for StorageVolumeError {
             Self::NotBound | Self::LifecycleOperation { .. } => {
                 PgSqlErrorCode::ERRCODE_OBJECT_IN_USE
             }
-            Self::Expired => PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
             Self::IdExhausted => PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-            Self::InvalidTablespaceOid | Self::InvalidTtl => {
+            Self::InvalidTablespaceOid | Self::BuiltinTablespace => {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
             }
             Self::ConfigIo { .. } => PgSqlErrorCode::ERRCODE_IO_ERROR,

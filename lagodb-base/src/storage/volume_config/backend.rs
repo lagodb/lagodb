@@ -1,7 +1,8 @@
 //! Conversion from validated volume domain objects to storage backends.
 
 use lagodb_storage::{
-    AzureStoreConfig, GcsStoreConfig, S3StoreConfig, SecretString, StoreConfig,
+    AwsCredentialConfig, AwsCredentialSource, AzureStoreConfig, GcsStoreConfig,
+    S3Authentication, S3StoreConfig, SecretString, StoreConfig,
 };
 
 use super::credential::CredentialConfig;
@@ -29,22 +30,15 @@ impl StorageLocation {
                     ..
                 },
                 credential,
-            ) => {
-                let (access_key_id, secret_access_key, token, skip_signature) =
-                    credential.s3_store_credentials();
-                S3StoreConfig {
-                    region: region.clone(),
-                    endpoint: endpoint.clone(),
-                    access_key_id,
-                    secret_access_key,
-                    token,
-                    allow_http: *allow_http,
-                    virtual_hosted_style_request: *virtual_hosted_style_request,
-                    skip_signature,
-                    encryption: None,
-                }
-                .into_canonical()
+            ) => S3StoreConfig {
+                region: region.clone(),
+                endpoint: endpoint.clone(),
+                authentication: credential.s3_authentication(),
+                allow_http: *allow_http,
+                virtual_hosted_style_request: *virtual_hosted_style_request,
+                encryption: None,
             }
+            .into_canonical(),
             (StorageLocation::Gcs { base_url, .. }, credential) => {
                 let (service_account_key, skip_signature) = match credential {
                     CredentialConfig::GcsServiceAccount { service_account } => (
@@ -115,7 +109,7 @@ impl StorageLocation {
         credential: &CredentialConfig,
     ) -> Result<(), StorageVolumeError> {
         let config = self.store_config(credential)?;
-        if !credential.uses_default_chain() {
+        if !credential.reloads_provider_on_force() {
             config.validate_for_bucket(self.namespace())?;
         }
         Ok(())
@@ -123,27 +117,23 @@ impl StorageLocation {
 }
 
 impl CredentialConfig {
-    fn s3_store_credentials(
-        &self,
-    ) -> (
-        Option<SecretString>,
-        Option<SecretString>,
-        Option<SecretString>,
-        bool,
-    ) {
+    fn s3_authentication(&self) -> S3Authentication {
         match self {
-            Self::DefaultChain => (None, None, None, false),
-            Self::Anonymous => (None, None, None, true),
+            Self::DefaultChain => S3Authentication::default(),
+            Self::Anonymous => S3Authentication::Anonymous,
+            Self::Aws(config) => S3Authentication::Aws(config.clone()),
             Self::S3AccessKey {
                 access_key_id,
                 secret_access_key,
                 token,
-            } => (
-                Some(SecretString::new(access_key_id.clone())),
-                Some(SecretString::new(secret_access_key.clone())),
-                token.clone().map(SecretString::new),
-                false,
-            ),
+            } => S3Authentication::Aws(AwsCredentialConfig {
+                source: AwsCredentialSource::AccessKey {
+                    access_key_id: SecretString::new(access_key_id.clone()),
+                    secret_access_key: SecretString::new(secret_access_key.clone()),
+                    token: token.clone().map(SecretString::new),
+                },
+                assume_role: None,
+            }),
             _ => unreachable!("validated S3 credential"),
         }
     }

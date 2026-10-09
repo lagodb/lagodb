@@ -1,115 +1,55 @@
-//! Runtime ABI for resolving immutable storage-volume routing metadata.
+//! Call-scoped ABI for the runtime-owned tablespace binding snapshot.
 
-use std::ffi::{CStr, c_char};
+use std::ffi::c_char;
+use std::ptr;
 
-use crate::storage::volume::{
-    StorageVolumeId, StorageVolumeRoute, StorageVolumeRouteError,
-};
+use pgrx::pg_sys;
 
-use super::{RuntimeApiError, RuntimeClient};
+use super::{CallbackErrorReport, RuntimeClient};
 
-pub const VOLUME_ROUTE_OK: u32 = 0;
-pub const VOLUME_ROUTE_NOT_FOUND: u32 = 1;
-pub const VOLUME_ROUTE_INVALID_REQUEST: u32 = 2;
-pub const VOLUME_ROUTE_ERROR: u32 = 3;
-
-/// Call-scoped output allocated in the caller's current PostgreSQL context.
+/// One Bound volume's routing metadata; credentials never cross this ABI.
+/// Strings are valid UTF-8, allocated in the caller's PostgreSQL memory context.
 #[repr(C)]
-#[derive(Clone, Copy)]
-pub struct StorageVolumeRouteOutput {
+pub struct TablespaceBindingEntry {
+    pub tablespace_oid: pg_sys::Oid,
+    pub volume_id: u64,
     pub object_namespace: *const c_char,
     pub effective_base_uri: *const c_char,
-    pub error_message: *const c_char,
 }
 
-impl Default for StorageVolumeRouteOutput {
+/// Complete Bound binding set from one validated configuration snapshot.
+///
+/// The array and its strings belong to the caller's PostgreSQL memory context.
+/// On CALLBACK_OK, entries have unique tablespace OIDs and validated routes.
+/// A zero count permits a null pointer and means every user tablespace is local,
+/// including before initial config bootstrap. Retiring volumes are excluded
+/// from this lookup snapshot, not from the storage worker's registry.
+#[repr(C)]
+pub struct TablespaceBindingsOutput {
+    pub entries: *const TablespaceBindingEntry,
+    pub count: usize,
+    pub error: CallbackErrorReport,
+}
+
+impl Default for TablespaceBindingsOutput {
     fn default() -> Self {
         Self {
-            object_namespace: std::ptr::null(),
-            effective_base_uri: std::ptr::null(),
-            error_message: std::ptr::null(),
+            entries: ptr::null(),
+            count: 0,
+            error: CallbackErrorReport::default(),
         }
     }
 }
 
-pub type ResolveStorageVolumeRouteCallback = unsafe extern "C-unwind" fn(
-    volume_id: u64,
-    output: *mut StorageVolumeRouteOutput,
-) -> u32;
-
-#[derive(Debug, thiserror::Error)]
-pub enum StorageVolumeRouteLookupError {
-    #[error(transparent)]
-    Runtime(#[from] RuntimeApiError),
-    #[error("storage volume id {0} does not exist in the runtime config")]
-    NotFound(StorageVolumeId),
-    #[error("runtime failed to resolve storage volume id {volume_id}: {message}")]
-    Resolution {
-        volume_id: StorageVolumeId,
-        message: String,
-    },
-    #[error("runtime returned invalid UTF-8 for storage volume id {0}")]
-    InvalidUtf8(StorageVolumeId),
-    #[error("runtime returned invalid routing for storage volume id {volume_id}")]
-    InvalidRoute {
-        volume_id: StorageVolumeId,
-        #[source]
-        source: StorageVolumeRouteError,
-    },
-    #[error("runtime returned unknown storage-volume route status {status}")]
-    UnknownStatus { status: u32 },
-}
+pub type LoadTablespaceBindingsCallback =
+    unsafe extern "C-unwind" fn(output: *mut TablespaceBindingsOutput) -> u32;
 
 impl RuntimeClient {
-    pub fn storage_volume_route(
+    pub(crate) fn load_tablespace_bindings(
         self,
-        volume_id: StorageVolumeId,
-    ) -> Result<StorageVolumeRoute, StorageVolumeRouteLookupError> {
-        let mut output = StorageVolumeRouteOutput::default();
-        let status = unsafe {
-            (self.api.resolve_storage_volume_route)(
-                volume_id.get(),
-                std::ptr::from_mut(&mut output),
-            )
-        };
-        match status {
-            VOLUME_ROUTE_OK => {
-                if output.object_namespace.is_null()
-                    || output.effective_base_uri.is_null()
-                {
-                    return Err(StorageVolumeRouteLookupError::Resolution {
-                        volume_id,
-                        message: "runtime returned an incomplete route".to_owned(),
-                    });
-                }
-                let namespace = unsafe { CStr::from_ptr(output.object_namespace) }
-                    .to_str()
-                    .map_err(|_| {
-                        StorageVolumeRouteLookupError::InvalidUtf8(volume_id)
-                    })?;
-                let base_uri = unsafe { CStr::from_ptr(output.effective_base_uri) }
-                    .to_str()
-                    .map_err(|_| {
-                        StorageVolumeRouteLookupError::InvalidUtf8(volume_id)
-                    })?;
-                StorageVolumeRoute::new(namespace, base_uri).map_err(|source| {
-                    StorageVolumeRouteLookupError::InvalidRoute { volume_id, source }
-                })
-            }
-            VOLUME_ROUTE_NOT_FOUND => {
-                Err(StorageVolumeRouteLookupError::NotFound(volume_id))
-            }
-            VOLUME_ROUTE_INVALID_REQUEST | VOLUME_ROUTE_ERROR => {
-                let message = if output.error_message.is_null() {
-                    "runtime returned no error detail".to_owned()
-                } else {
-                    unsafe { CStr::from_ptr(output.error_message) }
-                        .to_string_lossy()
-                        .into_owned()
-                };
-                Err(StorageVolumeRouteLookupError::Resolution { volume_id, message })
-            }
-            status => Err(StorageVolumeRouteLookupError::UnknownStatus { status }),
-        }
+        output: &mut TablespaceBindingsOutput,
+    ) -> u32 {
+        // SAFETY: synchronous call with a live output reference.
+        unsafe { (self.api.load_tablespace_bindings)(output) }
     }
 }

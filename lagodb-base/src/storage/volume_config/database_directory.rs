@@ -2,7 +2,7 @@
 
 use lagodb_core::catalog::{CatalogRelation, CatalogScanKey, CatalogSnapshot};
 use lagodb_core::diag::{PgError, SqlStateError};
-use lagodb_core::options::{TablespaceCacheError, is_distributed_tablespace};
+use lagodb_core::storage::tablespace::{TablespaceStorage, TablespaceStorageError};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
@@ -11,7 +11,7 @@ pub(crate) enum DatabaseDirectoryError {
     #[error(transparent)]
     Catalog(#[from] PgError),
     #[error(transparent)]
-    Tablespace(#[from] TablespaceCacheError),
+    Tablespace(#[from] TablespaceStorageError),
     #[error("object-backed tablespaces cannot store PostgreSQL database directories")]
     ObjectBacked,
 }
@@ -33,7 +33,7 @@ impl DatabaseDirectoryPolicy {
     pub(crate) fn check_tablespace(
         tablespace_oid: pg_sys::Oid,
     ) -> Result<(), DatabaseDirectoryError> {
-        if is_distributed_tablespace(tablespace_oid)? {
+        if TablespaceStorage::is_object_backed(tablespace_oid)? {
             return Err(DatabaseDirectoryError::ObjectBacked);
         }
         Ok(())

@@ -71,13 +71,34 @@ BEGIN
 END
 $$;
 
+SET client_min_messages = warning;
+DROP TABLESPACE IF EXISTS iceberg_volume_reload;
+RESET client_min_messages;
+\! mkdir -p /tmp/lagodb_iceberg_regress_reload
+CREATE TABLESPACE iceberg_volume_reload LOCATION '/tmp/lagodb_iceberg_regress_reload';
+
+SELECT format('s3://%s/storage-volume-credentials/', bucket) AS credential_location,
+       jsonb_build_object(
+           'endpoint', endpoint, 'region', region, 'allow_http', true,
+           'virtual_hosted_style_request', false
+       ) AS credential_options,
+       jsonb_build_object(
+           'type', 'aws', 'source', jsonb_build_object(
+               'type', 'access_key', 'access_key_id', access_key_id,
+               'secret_access_key', secret_access_key
+           )
+       ) AS volume_credentials
+FROM lagodb_regress.object_storage_fixture
+\gset
+
 SELECT 'regress-bgw-' || gen_random_uuid() AS volume_name
 \gset
 SELECT lagodb.create_storage_volume(
     :'volume_name',
-    's3://storage-bgworker-regress/root',
+    'iceberg_volume_reload',
+    :'credential_location',
     '{"type":"anonymous"}'::jsonb,
-    '{"region":"us-east-1"}'::jsonb
+    :'credential_options'::jsonb
 ) AS created_name
 \gset
 
@@ -86,7 +107,7 @@ FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'volume_name'
   AND provider = 's3'
   AND credential_type = 'anonymous'
-  AND bound_tablespace_oid IS NULL;
+  AND bound_tablespace_oid IS NOT NULL;
 
 SELECT pg_temp.storage_volume_wait_for_reload(true, false);
 
@@ -108,13 +129,12 @@ FROM lagodb.storage_service_status AS status;
 
 SELECT lagodb.update_storage_volume_credentials(
     :'renamed_volume',
-    '{"type":"s3_access_key","access_key_id":"regress-key",'
-    '"secret_access_key":"regress-secret"}'::jsonb
+    :'volume_credentials'::jsonb
 );
 SELECT count(*) = 1 AS credential_update_visible
 FROM lagodb.storage_volumes
 WHERE storage_volume_name = :'renamed_volume'
-  AND credential_type = 's3_access_key';
+  AND credential_type = 'aws';
 
 SELECT pg_temp.storage_volume_wait_for_reload(true, true);
 
@@ -131,12 +151,19 @@ SELECT lagodb.reload_storage_volumes();
 
 SELECT pg_temp.storage_volume_wait_for_reload(false, false);
 
+-- The AWS access-key configuration must perform actual object I/O.
+SELECT list_succeeded AND write_succeeded AND read_succeeded
+       AND delete_succeeded AND succeeded AND error IS NULL AS aws_probe_ok
+FROM lagodb.probe_storage_volume(:'renamed_volume');
+
 SELECT count(*) = 1 AS worker_still_running
 FROM pg_stat_activity
 WHERE backend_type = 'lagodb-storage';
 
 DROP FUNCTION pg_temp.storage_volume_wait_for_reload(boolean, boolean);
 DROP TABLE storage_volume_reload_baseline;
+
+DROP TABLESPACE iceberg_volume_reload;
 
 -- Tablespace binding and DDL rules.
 
@@ -154,21 +181,61 @@ RESET client_min_messages;
 
 SELECT 'regress-guard-' || gen_random_uuid() AS volume_name
 \gset
+CREATE TABLESPACE iceberg_guard_dist
+LOCATION '/tmp/lagodb_iceberg_regress_guard_dist';
+-- Binding cannot change the storage semantics of an existing relation.
+\set VERBOSITY terse
+SELECT lagodb.create_storage_volume(:'volume_name', 'pg_default', 's3://tablespace-guard-regress/root');
+SELECT lagodb.create_storage_volume(:'volume_name', 'pg_global', 's3://tablespace-guard-regress/root');
+CREATE TABLE binding_occupied (id integer) TABLESPACE iceberg_guard_dist;
+SELECT lagodb.create_storage_volume(:'volume_name', 'iceberg_guard_dist', 's3://tablespace-guard-regress/root');
+DROP TABLE binding_occupied;
+CREATE TABLE binding_occupied (id integer) PARTITION BY RANGE (id) TABLESPACE iceberg_guard_dist;
+SELECT lagodb.create_storage_volume(:'volume_name', 'iceberg_guard_dist', 's3://tablespace-guard-regress/root');
+DROP TABLE binding_occupied;
+\set VERBOSITY default
+
+
 SELECT lagodb.create_storage_volume(
     :'volume_name',
+    'iceberg_guard_dist',
     's3://tablespace-guard-regress/root',
     '{"type":"anonymous"}'::jsonb,
     '{"region":"us-east-1"}'::jsonb
 ) AS ignored
 \gset
+-- Repeating the same binding leaves its identity and lifecycle unchanged.
+SELECT internal_volume_id AS binding_id,
+       bound_tablespace_oid AS binding_tablespace_oid
+FROM lagodb.storage_volumes
+WHERE storage_volume_name = :'volume_name'
+\gset
+SELECT lagodb.create_storage_volume(
+    :'volume_name',
+    'iceberg_guard_dist',
+    's3://tablespace-guard-regress/root',
+    '{"type":"anonymous"}'::jsonb,
+    '{"region":"us-east-1"}'::jsonb
+) AS ignored
+\gset
+SELECT internal_volume_id = :'binding_id'
+       AND bound_tablespace_oid = :'binding_tablespace_oid'
+       AND lifecycle = 'bound'
+       AND binding_present AS binding_unchanged
+FROM lagodb.storage_volumes
+WHERE storage_volume_name = :'volume_name';
 
-CREATE TABLESPACE iceberg_guard_dist
-LOCATION '/tmp/lagodb_iceberg_regress_guard_dist'
-WITH (storage_volume = :'volume_name');
 CREATE TABLESPACE iceberg_guard_native
 LOCATION '/tmp/lagodb_iceberg_regress_guard_native';
+-- A database default tablespace cannot change its storage semantics.
+CREATE DATABASE iceberg_binding_default TEMPLATE template0 TABLESPACE iceberg_guard_native;
+\set VERBOSITY terse
+SELECT lagodb.create_storage_volume(:'volume_name' || '-database', 'iceberg_guard_native', 's3://tablespace-guard-regress/root');
+\set VERBOSITY default
+DROP DATABASE iceberg_binding_default;
 
--- Rename is allowed; every SET/RESET is rejected for a LagoDB tablespace.
+
+-- Rename and native SET/RESET remain PostgreSQL operations.
 ALTER TABLESPACE iceberg_guard_dist RENAME TO iceberg_guard_dist_renamed;
 SELECT count(*) = 1 AS rename_allowed
 FROM lagodb.storage_volumes AS volume
@@ -176,70 +243,32 @@ JOIN pg_tablespace AS tablespace
   ON tablespace.oid = volume.bound_tablespace_oid
 WHERE volume.storage_volume_name = :'volume_name'
   AND tablespace.spcname = 'iceberg_guard_dist_renamed'
-  AND EXISTS (
-      SELECT 1 FROM unnest(tablespace.spcoptions) AS option
-      WHERE option LIKE 'lagodb_volume_id=%'
-  );
+  AND volume.binding_present;
 
 -- Binding options are immutable, and native relations cannot enter a volume.
 CREATE TABLE storage_volume_move_candidate (id integer);
--- Keep each rejected command in its own rolled-back child transaction.
 \set VERBOSITY terse
-BEGIN;
-SAVEPOINT volume_guard;
 ALTER TABLESPACE iceberg_guard_dist_renamed SET (storage_volume = 'another-volume');
-\echo public_binding_alter_sqlstate: :SQLSTATE
-ROLLBACK TO SAVEPOINT volume_guard;
-RELEASE SAVEPOINT volume_guard;
-SAVEPOINT volume_guard;
 ALTER TABLESPACE iceberg_guard_dist_renamed SET (lagodb_volume_id = 999);
-\echo internal_binding_alter_sqlstate: :SQLSTATE
-ROLLBACK TO SAVEPOINT volume_guard;
-RELEASE SAVEPOINT volume_guard;
-SAVEPOINT volume_guard;
-ALTER TABLESPACE iceberg_guard_dist_renamed SET (seq_page_cost = 1.25);
-\echo native_alter_sqlstate: :SQLSTATE
-ROLLBACK TO SAVEPOINT volume_guard;
-RELEASE SAVEPOINT volume_guard;
-SAVEPOINT volume_guard;
-ALTER TABLESPACE iceberg_guard_dist_renamed RESET (seq_page_cost);
-\echo native_reset_sqlstate: :SQLSTATE
-ROLLBACK TO SAVEPOINT volume_guard;
-RELEASE SAVEPOINT volume_guard;
-SAVEPOINT volume_guard;
 CREATE TABLE storage_volume_local_table (id integer) TABLESPACE iceberg_guard_dist_renamed;
-\echo volume_local_table_sqlstate: :SQLSTATE
-ROLLBACK TO SAVEPOINT volume_guard;
-RELEASE SAVEPOINT volume_guard;
-SAVEPOINT volume_guard;
 CREATE TABLE storage_volume_local_ctas TABLESPACE iceberg_guard_dist_renamed AS SELECT 1 AS id;
-\echo volume_local_ctas_sqlstate: :SQLSTATE
-ROLLBACK TO SAVEPOINT volume_guard;
-RELEASE SAVEPOINT volume_guard;
-SAVEPOINT volume_guard;
 ALTER TABLE storage_volume_move_candidate SET TABLESPACE iceberg_guard_dist_renamed;
-\echo volume_existing_table_move_sqlstate: :SQLSTATE
-ROLLBACK TO SAVEPOINT volume_guard;
-RELEASE SAVEPOINT volume_guard;
-COMMIT;
 \set VERBOSITY default
-SET client_min_messages = warning;
-DROP TABLE IF EXISTS storage_volume_local_table;
-DROP TABLE IF EXISTS storage_volume_local_ctas;
-RESET client_min_messages;
 DROP TABLE storage_volume_move_candidate;
 
--- Native tablespaces continue to use PostgreSQL's SET/RESET path.
+-- Native options take effect and can be cleared on both kinds of tablespace.
+ALTER TABLESPACE iceberg_guard_dist_renamed SET (seq_page_cost = 1.25);
 ALTER TABLESPACE iceberg_guard_native SET (seq_page_cost = 1.25);
-ALTER TABLESPACE iceberg_guard_native RESET (seq_page_cost);
-SELECT count(*) = 1 AS internal_id_unchanged
+SELECT spcname, spcoptions
 FROM pg_tablespace
-WHERE spcname = 'iceberg_guard_dist_renamed'
-  AND array_length(spcoptions, 1) = 1
-  AND EXISTS (
-      SELECT 1 FROM unnest(spcoptions) AS option
-      WHERE option LIKE 'lagodb_volume_id=%'
-  );
+WHERE spcname IN ('iceberg_guard_dist_renamed', 'iceberg_guard_native')
+ORDER BY spcname;
+ALTER TABLESPACE iceberg_guard_dist_renamed RESET (seq_page_cost);
+ALTER TABLESPACE iceberg_guard_native RESET (seq_page_cost);
+SELECT spcname, spcoptions IS NULL AS options_cleared
+FROM pg_tablespace
+WHERE spcname IN ('iceberg_guard_dist_renamed', 'iceberg_guard_native')
+ORDER BY spcname;
 
 DROP TABLESPACE iceberg_guard_dist_renamed;
 DROP TABLESPACE iceberg_guard_native;
@@ -253,27 +282,18 @@ RESET client_min_messages;
 
 SELECT 'regress-tablespace-' || gen_random_uuid() AS volume_name
 \gset
+CREATE TABLESPACE iceberg_volume_test
+LOCATION '/tmp/lagodb_iceberg_regress_spc';
+
 SELECT lagodb.create_storage_volume(
     :'volume_name',
+    'iceberg_volume_test',
     's3://tablespace-option-regress/root',
     '{"type":"anonymous"}'::jsonb,
     '{"region":"us-east-1"}'::jsonb
 ) AS ignored
 \gset
 
-CREATE TABLESPACE iceberg_volume_test
-LOCATION '/tmp/lagodb_iceberg_regress_spc'
-WITH (storage_volume = :'volume_name');
-
-SELECT array_length(spcoptions, 1) = 1
-       AND (SELECT count(*) FROM unnest(spcoptions) AS option
-            WHERE option LIKE 'lagodb_volume_id=%') = 1
-       AND NOT EXISTS (
-           SELECT 1 FROM unnest(spcoptions) AS option
-           WHERE option LIKE 'storage_volume=%'
-       ) AS internal_id_only
-FROM pg_tablespace
-WHERE spcname = 'iceberg_volume_test';
 
 SELECT count(*) = 1 AS binding_visible
 FROM lagodb.storage_volumes AS volume
@@ -320,8 +340,12 @@ RESET client_min_messages;
 
 SELECT 'regress-cleanup-cancel-' || gen_random_uuid() AS volume_name
 \gset
+CREATE TABLESPACE regress_storage_socket_cancel_contexts
+LOCATION '/tmp/iceberg_regress_storage_socket_cancel_contexts';
+
 SELECT lagodb.create_storage_volume(
     :'volume_name',
+    'regress_storage_socket_cancel_contexts',
     format('s3://%s', :'lagodb_regress_bucket'),
     jsonb_build_object(
         'type', 's3_access_key',
@@ -336,9 +360,6 @@ SELECT lagodb.create_storage_volume(
 ) AS created_volume
 \gset
 
-CREATE TABLESPACE regress_storage_socket_cancel_contexts
-LOCATION '/tmp/iceberg_regress_storage_socket_cancel_contexts'
-WITH (storage_volume = :'volume_name');
 
 SELECT internal_volume_id AS volume_id
 FROM lagodb.storage_volumes
@@ -351,7 +372,7 @@ WHERE storage_volume_name = :'volume_name'
 CREATE TABLE storage_socket_cancel_contexts_t (id integer)
 USING iceberg
 TABLESPACE regress_storage_socket_cancel_contexts;
-SELECT count(*) = 1 AS object_tablespace_dependency_visible
+SELECT count(*) = 0 AS object_tablespace_dependency_absent
 FROM pg_catalog.pg_shdepend AS dependency
 WHERE dependency.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
   AND dependency.classid = 'pg_catalog.pg_class'::regclass
