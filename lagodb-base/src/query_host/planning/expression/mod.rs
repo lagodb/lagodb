@@ -4,6 +4,7 @@ mod decimal;
 mod fallback;
 mod native;
 mod predicate;
+mod runtime_value;
 mod shape;
 mod state;
 
@@ -69,7 +70,8 @@ impl QueryExpressionPlanner {
         self.sources.add_relations(root, relations, ptr::null_mut())
     }
 
-    /// The sole capability/lowering entry point for exact execution.
+    /// The PG-expression capability/lowering entry point. Physical representation
+    /// checks follow provider scan planning, once its Arrow schema is available.
     ///
     /// Every failed alternative rolls back newly registered columns and
     /// runtime values before another native shape or PostgreSQL fallback is
@@ -298,25 +300,6 @@ impl QueryExpressionPlanner {
                 )
             }
         }
-    }
-
-    fn lower_runtime_value(
-        &mut self,
-        root: *mut pg_sys::PlannerInfo,
-        expression: *mut pg_sys::Expr,
-        source_kind: RuntimeValueSource,
-    ) -> ExpressionPlanResult<ExecutionExpr> {
-        let value_type = Self::expr_type(expression);
-        ExecutionScalarRepr::for_runtime_value(value_type)
-            .ok_or(ExpressionDecline::UnsupportedType(value_type.type_oid))?;
-        Ok(ExecutionExpr::Value(self.push_runtime(
-            root,
-            expression,
-            RuntimeValueSpec {
-                value_type,
-                source_kind,
-            },
-        )))
     }
 
     unsafe fn lower_postgres(

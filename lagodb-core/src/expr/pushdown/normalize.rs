@@ -171,7 +171,18 @@ impl<'a> ExpressionNormalizer<'a> {
             };
         }
 
+        if expr.node_tag() == pg_sys::NodeTag::T_Var
+            && expr.type_oid() == pg_sys::BOOLOID
+        {
+            return unsafe { self.normalize_boolean_column(expr, bindings) };
+        }
         match PgPredicateLeafRef::parse(expr).ok()? {
+            PgPredicateLeafRef::BooleanTest { kind, value } => {
+                Some(PredicateExpr::BooleanTest {
+                    kind,
+                    value: self.normalize_scalar(value, bindings)?,
+                })
+            }
             PgPredicateLeafRef::Comparison { op, left, right } => {
                 if op.opno == pg_sys::Oid::from(pg_sys::OID_TEXT_LIKE_OP) {
                     return unsafe {

@@ -1,6 +1,7 @@
 //! Provider-neutral predicate-tree negotiation.
 
 use super::PredicateExpr;
+use crate::expr::BooleanTestKind;
 
 /// Provider-owned result of negotiating one predicate tree.
 pub enum PredicatePlan<P> {
@@ -159,6 +160,12 @@ pub trait PredicatePlanner<S, O> {
         right: &S,
     ) -> Result<PredicatePlan<Self::Predicate>, Self::Error>;
 
+    fn boolean_test(
+        &self,
+        kind: BooleanTestKind,
+        value: &S,
+    ) -> Result<PredicatePlan<Self::Predicate>, Self::Error>;
+
     fn is_null(
         &self,
         value: &S,
@@ -210,6 +217,7 @@ impl<S, O> PredicateExpr<S, O> {
                 left,
                 right,
             } => planner.comparison(operator, left, right),
+            Self::BooleanTest { kind, value } => planner.boolean_test(*kind, value),
             Self::IsNull(value) => planner.is_null(value),
             Self::IsNotNull(value) => planner.is_not_null(value),
             Self::IsNan(value) => planner.is_nan(value),
@@ -234,6 +242,9 @@ impl<S, O> PredicateExpr<S, O> {
                 }))
             }
             Self::Not(child) => {
+                if let Self::BooleanTest { kind, value } = child.as_ref() {
+                    return planner.boolean_test(kind.negated(), value);
+                }
                 let child = child.plan_with(planner)?;
                 Ok(child.negate(|predicate| planner.negate(predicate)))
             }

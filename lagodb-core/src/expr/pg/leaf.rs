@@ -3,10 +3,12 @@
 use pgrx::pg_sys;
 use thiserror::Error;
 
+use crate::expr::BooleanTestKind;
 use crate::expr::contract::PgComparisonOp;
 
 use super::view::{
-    PgConst, PgExprRef, PgFuncExpr, PgNullTest, PgOpExpr, PgParam, PgVar,
+    PgBooleanTest, PgConst, PgExprRef, PgFuncExpr, PgNullTest, PgOpExpr, PgParam,
+    PgVar,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -64,6 +66,10 @@ impl<'a> PgScalarExprRef<'a> {
 
 #[derive(Clone, Copy, Debug)]
 pub enum PgPredicateLeafRef<'a> {
+    BooleanTest {
+        kind: BooleanTestKind,
+        value: PgExprRef<'a>,
+    },
     Comparison {
         op: PgComparisonOp,
         left: PgExprRef<'a>,
@@ -109,6 +115,14 @@ impl<'a> PgPredicateLeafRef<'a> {
                     op: op.comparison_op(),
                     left,
                     right,
+                })
+            }
+            pg_sys::NodeTag::T_BooleanTest => {
+                let test = PgBooleanTest::try_from_expr(expr)
+                    .expect("NodeTag established a BooleanTest");
+                Ok(Self::BooleanTest {
+                    kind: test.kind(),
+                    value: test.arg(),
                 })
             }
             pg_sys::NodeTag::T_NullTest => {

@@ -8,6 +8,6 @@ pub use leaf::{
     PgNullTestKind, PgPredicateLeafRef, PgScalarExprRef, PgStructuralError,
 };
 pub use view::{
-    PgBoolExpr, PgConst, PgExprRef, PgFuncExpr, PgNullTest, PgOpExpr, PgParam,
-    PgRelabelType, PgVar,
+    PgBoolExpr, PgBooleanTest, PgConst, PgExprRef, PgFuncExpr, PgNullTest, PgOpExpr,
+    PgParam, PgRelabelType, PgVar,
 };

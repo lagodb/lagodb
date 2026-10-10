@@ -4,12 +4,43 @@ use pgrx::pg_sys;
 
 use crate::expr::pg::{PgConst, PgExprRef};
 use crate::expr::{
-    PgComparisonOp, PgNanComparison, PgTextComparisonSemantics, RuntimeValueExpr,
+    PgComparisonKind, PgComparisonOp, PgComparisonSignature, PgNanComparison,
+    PgTextComparisonSemantics, RuntimeValueExpr,
 };
 
 use super::{ExpressionNormalizer, PredicateExpr, ScalarExpr};
 
 impl ExpressionNormalizer<'_> {
+    pub(super) unsafe fn normalize_boolean_column(
+        &self,
+        value: PgExprRef<'_>,
+        bindings: &mut Vec<RuntimeValueExpr>,
+    ) -> Option<PredicateExpr> {
+        let left = self.normalize_scalar(value, bindings)?;
+        let constant = unsafe { pg_sys::makeBoolConst(true, false) };
+        let right = self.normalize_scalar(
+            unsafe { PgExprRef::from_raw(constant.cast()) },
+            bindings,
+        )?;
+        let signature = PgComparisonSignature::for_types(
+            pg_sys::BOOLOID,
+            pg_sys::BOOLOID,
+            PgComparisonKind::Equal,
+        )
+        .expect("built-in boolean equality is registered");
+        Some(PredicateExpr::Comparison {
+            operator: PgComparisonOp {
+                opno: signature.operator_oid(),
+                opfuncid: signature.function_oid(),
+                opresulttype: pg_sys::BOOLOID,
+                opcollid: pg_sys::InvalidOid,
+                inputcollid: pg_sys::InvalidOid,
+            },
+            left,
+            right,
+        })
+    }
+
     pub(super) unsafe fn normalize_starts_with(
         &self,
         value: PgExprRef<'_>,

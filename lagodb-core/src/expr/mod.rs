@@ -1,6 +1,7 @@
 //! PostgreSQL expression views, relation analysis, and planned filter pushdown.
 
 mod bindings;
+mod boolean;
 mod codec;
 mod comparison;
 pub(crate) mod contract;
@@ -17,6 +18,7 @@ mod value;
 pub(crate) use planning::{inspect, relation};
 
 pub use bindings::{RuntimeValue, RuntimeValueBindings, RuntimeValueExpr};
+pub use boolean::BooleanTestKind;
 pub use codec::{
     ExpressionCodecError, ExpressionPlanDataDecode, ExpressionPlanDataEncode,
 };

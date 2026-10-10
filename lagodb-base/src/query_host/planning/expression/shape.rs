@@ -1,8 +1,9 @@
 //! Native lowering for PostgreSQL expression shapes beyond scalar functions.
 
+use lagodb_core::expr::pg::{PgBooleanTest, PgExprRef};
 use lagodb_core::expr::{ExprType, PgComparisonKind, PgComparisonOp};
 use lagodb_query::plan::{
-    BooleanTestKind, CaseWhen, Decimal128Semantics, ExecutionExpr, ScalarFunctionKind,
+    CaseWhen, Decimal128Semantics, ExecutionExpr, ScalarFunctionKind,
 };
 use pgrx::pg_sys;
 
@@ -69,19 +70,15 @@ impl QueryExpressionPlanner {
         scope: ExpressionScope<'_>,
         domain: PredicateDomain,
     ) -> ExpressionPlanResult<ExecutionExpr> {
-        let kind = match unsafe { (*expression).booltesttype } {
-            pg_sys::BoolTestType::IS_TRUE => BooleanTestKind::IsTrue,
-            pg_sys::BoolTestType::IS_NOT_TRUE => BooleanTestKind::IsNotTrue,
-            pg_sys::BoolTestType::IS_FALSE => BooleanTestKind::IsFalse,
-            pg_sys::BoolTestType::IS_NOT_FALSE => BooleanTestKind::IsNotFalse,
-            pg_sys::BoolTestType::IS_UNKNOWN => BooleanTestKind::IsUnknown,
-            pg_sys::BoolTestType::IS_NOT_UNKNOWN => BooleanTestKind::IsNotUnknown,
-            _ => return Err(ExpressionDecline::InvalidShape),
-        };
+        let test = PgBooleanTest::try_from_expr(unsafe {
+            PgExprRef::from_raw(expression.cast())
+        })
+        .expect("BooleanTest dispatch established the node kind");
+        let kind = test.kind();
         Ok(ExecutionExpr::BooleanTest {
             kind,
             value: Box::new(unsafe {
-                self.lower((*expression).arg.cast(), scope.with_predicate(domain))
+                self.lower(test.arg().as_ptr().cast(), scope.with_predicate(domain))
             }?),
         })
     }

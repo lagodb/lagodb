@@ -8,6 +8,8 @@ use crate::plan_data::{PlanDataError, PlanDataReader, PlanDataWriter};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExpressionCodecError {
+    #[error("unknown boolean test tag {0}")]
+    UnknownBooleanTest(i32),
     #[error("expression plan-data primitive failed: {0}")]
     PlanData(#[from] PlanDataError),
     #[error("unknown scalar expression tag {0}")]

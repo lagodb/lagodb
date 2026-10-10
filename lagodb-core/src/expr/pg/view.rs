@@ -5,8 +5,8 @@ use core::ptr::NonNull;
 
 use pgrx::pg_sys;
 
-use crate::expr::PgIntegerWidening;
 use crate::expr::contract::{ParamKey, PgComparisonOp};
+use crate::expr::{BooleanTestKind, PgIntegerWidening};
 
 #[derive(Clone, Copy)]
 pub struct PgExprRef<'a> {
@@ -111,6 +111,7 @@ pg_node_view!(PgParam, Param, T_Param);
 pg_node_view!(PgOpExpr, OpExpr, T_OpExpr);
 pg_node_view!(PgBoolExpr, BoolExpr, T_BoolExpr);
 pg_node_view!(PgNullTest, NullTest, T_NullTest);
+pg_node_view!(PgBooleanTest, BooleanTest, T_BooleanTest);
 pg_node_view!(PgRelabelType, RelabelType, T_RelabelType);
 pg_node_view!(PgFuncExpr, FuncExpr, T_FuncExpr);
 
@@ -379,5 +380,25 @@ impl<'a> PgRelabelType<'a> {
     #[inline]
     pub fn arg(self) -> Option<PgExprRef<'a>> {
         unsafe { PgExprRef::from_raw_opt((*self.ptr.as_ptr()).arg) }
+    }
+}
+
+impl<'a> PgBooleanTest<'a> {
+    pub fn kind(self) -> BooleanTestKind {
+        // SAFETY: the view was constructed from a BooleanTest node.
+        match unsafe { (*self.ptr.as_ptr()).booltesttype } {
+            pg_sys::BoolTestType::IS_TRUE => BooleanTestKind::IsTrue,
+            pg_sys::BoolTestType::IS_NOT_TRUE => BooleanTestKind::IsNotTrue,
+            pg_sys::BoolTestType::IS_FALSE => BooleanTestKind::IsFalse,
+            pg_sys::BoolTestType::IS_NOT_FALSE => BooleanTestKind::IsNotFalse,
+            pg_sys::BoolTestType::IS_UNKNOWN => BooleanTestKind::IsUnknown,
+            pg_sys::BoolTestType::IS_NOT_UNKNOWN => BooleanTestKind::IsNotUnknown,
+            _ => unreachable!("PostgreSQL BooleanTest has a valid test kind"),
+        }
+    }
+
+    pub fn arg(self) -> PgExprRef<'a> {
+        // SAFETY: PostgreSQL supplies the boolean operand of this test.
+        unsafe { PgExprRef::from_raw((*self.ptr.as_ptr()).arg) }
     }
 }

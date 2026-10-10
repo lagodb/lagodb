@@ -1,7 +1,9 @@
 //! Provider-neutral, owned predicate representation constructed at plan time.
 
 use crate::expr::contract::PgComparisonOp;
-use crate::expr::{ColumnRef, RuntimeValueId, RuntimeValueLayout, RuntimeValueSpec};
+use crate::expr::{
+    BooleanTestKind, ColumnRef, RuntimeValueId, RuntimeValueLayout, RuntimeValueSpec,
+};
 
 /// Scalar operand in a filter node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +38,10 @@ pub enum PredicateExpr<S = ScalarExpr, O = PgComparisonOp> {
         operator: O,
         left: S,
         right: S,
+    },
+    BooleanTest {
+        kind: BooleanTestKind,
+        value: S,
     },
     IsNull(S),
     IsNotNull(S),
@@ -91,6 +97,10 @@ impl PredicateExpr<ScalarExpr, PgComparisonOp> {
                 operator: *operator,
                 left: left.rebase_runtime_values(offset),
                 right: right.rebase_runtime_values(offset),
+            },
+            Self::BooleanTest { kind, value } => Self::BooleanTest {
+                kind: *kind,
+                value: value.rebase_runtime_values(offset),
             },
             Self::IsNull(value) => Self::IsNull(value.rebase_runtime_values(offset)),
             Self::IsNotNull(value) => {

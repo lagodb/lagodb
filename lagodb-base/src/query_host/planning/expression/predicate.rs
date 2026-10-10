@@ -24,6 +24,14 @@ impl QueryExpressionPlanner {
         match PgPredicateLeafRef::parse(expression_ref).map_err(|_| {
             ExpressionDecline::UnsupportedNode(expression_ref.node_tag())
         })? {
+            PgPredicateLeafRef::BooleanTest { kind, value } => {
+                Ok(ExecutionExpr::BooleanTest {
+                    kind,
+                    value: Box::new(unsafe {
+                        self.lower(value.as_ptr().cast(), scope.as_scalar())
+                    }?),
+                })
+            }
             PgPredicateLeafRef::Comparison { op, left, right } => {
                 if op.opno == pg_sys::Oid::from(pg_sys::OID_TEXT_LIKE_OP) {
                     return unsafe { self.lower_like_prefix(op, left, right, scope) };

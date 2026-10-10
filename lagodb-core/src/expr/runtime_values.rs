@@ -91,9 +91,9 @@ impl RuntimeValueState {
 
     /// Evaluate statement-stable values and install typed NULL placeholders
     /// for dynamic values. A nested-loop outer parameter is not valid during
-    /// `BeginCustomScan`; its placeholder is used only to compile and validate
-    /// the immutable query template's output schema. [`Self::rebind_dynamic`]
-    /// replaces every placeholder before the first run is opened.
+    /// `BeginCustomScan`. Query execution calls [`Self::rebind_complete`] at
+    /// first execution, before physical compilation and output-schema binding;
+    /// the placeholders are never compiled into an executable query plan.
     ///
     /// # Safety
     ///
@@ -154,7 +154,8 @@ impl RuntimeValueState {
         mem::swap(&mut self.values, &mut self.pending);
     }
 
-    /// Atomically re-evaluate the complete layout for a query-plan rebuild.
+    /// Atomically re-evaluate the complete layout for initial query-plan
+    /// preparation or a later rebuild.
     /// PostgreSQL resets the expression context before `ReScanCustomScan`, so
     /// even a statement-stable by-reference Datum must be refreshed before a
     /// newly compiled physical plan reads it.

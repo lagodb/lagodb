@@ -2,8 +2,9 @@
 
 use crate::expr::contract::PgComparisonOp;
 use crate::expr::{
-    ColumnRef, ExprType, ExpressionCodecError, ExpressionPlanDataDecode,
-    ExpressionPlanDataEncode, RuntimeValueId, RuntimeValueLayout,
+    BooleanTestKind, ColumnRef, ExprType, ExpressionCodecError,
+    ExpressionPlanDataDecode, ExpressionPlanDataEncode, RuntimeValueId,
+    RuntimeValueLayout,
 };
 use crate::plan_data::{PlanDataReader, PlanDataWriter};
 use crate::query_contract::ScanId;
@@ -26,6 +27,7 @@ const PREDICATE_IS_NOT_NAN: i32 = 11;
 const PREDICATE_STARTS_WITH: i32 = 12;
 const PREDICATE_STRICT_FALSE: i32 = 13;
 const PREDICATE_STRICT_TRUE: i32 = 14;
+const PREDICATE_BOOLEAN_TEST: i32 = 15;
 
 impl PredicateFragment {
     pub fn encode_plan_data(
@@ -149,6 +151,12 @@ impl ExpressionPlanDataEncode for PredicateExpr {
                 writer.append_nested(|record| left.encode_plan_data(record));
                 writer.append_nested(|record| right.encode_plan_data(record));
             }
+            Self::BooleanTest { kind, value } => {
+                writer
+                    .append_i32(PREDICATE_BOOLEAN_TEST)
+                    .append_i32(kind.wire_id())
+                    .append_nested(|record| value.encode_plan_data(record));
+            }
             Self::IsNull(value) => {
                 writer
                     .append_i32(PREDICATE_IS_NULL)
@@ -216,6 +224,17 @@ impl ExpressionPlanDataDecode for PredicateExpr {
                 Ok(Self::StrictFalse(reader.read_nested(|record| {
                     ScalarExpr::decode_plan_data(record, runtime_value_count)
                 })?))
+            }
+            PREDICATE_BOOLEAN_TEST => {
+                let tag = reader.read_i32()?;
+                let kind = BooleanTestKind::from_wire_id(tag)
+                    .ok_or(ExpressionCodecError::UnknownBooleanTest(tag))?;
+                Ok(Self::BooleanTest {
+                    kind,
+                    value: reader.read_nested(|record| {
+                        ScalarExpr::decode_plan_data(record, runtime_value_count)
+                    })?,
+                })
             }
             PREDICATE_COMPARISON => Ok(Self::Comparison {
                 operator: PgComparisonOp::decode_plan_data(reader, ())?,

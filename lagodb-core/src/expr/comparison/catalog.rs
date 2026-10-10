@@ -121,6 +121,17 @@ mod operator_oid {
     pub const TIMESTAMPTZ_GE: u32 = 1325;
 
     pub const UUID_EQ: u32 = 2972;
+    pub const UUID_NE: u32 = 2973;
+    pub const UUID_LT: u32 = 2974;
+    pub const UUID_GT: u32 = 2975;
+    pub const UUID_LE: u32 = 2976;
+    pub const UUID_GE: u32 = 2977;
+    pub const BYTEA_EQ: u32 = 1955;
+    pub const BYTEA_NE: u32 = 1956;
+    pub const BYTEA_LT: u32 = 1957;
+    pub const BYTEA_LE: u32 = 1958;
+    pub const BYTEA_GT: u32 = 1959;
+    pub const BYTEA_GE: u32 = 1960;
 
     pub const NAME_EQ: u32 = 93;
     pub const BPCHAR_EQ: u32 = pg_sys::BpcharEqualOperator;
@@ -299,6 +310,19 @@ signatures! {
     }
     (pg_sys::UUIDOID, pg_sys::UUIDOID) {
         (op::UUID_EQ, pg_sys::F_UUID_EQ, Equal),
+        (op::UUID_NE, pg_sys::F_UUID_NE, NotEqual),
+        (op::UUID_LT, pg_sys::F_UUID_LT, Less),
+        (op::UUID_LE, pg_sys::F_UUID_LE, LessEqual),
+        (op::UUID_GT, pg_sys::F_UUID_GT, Greater),
+        (op::UUID_GE, pg_sys::F_UUID_GE, GreaterEqual),
+    }
+    (pg_sys::BYTEAOID, pg_sys::BYTEAOID) {
+        (op::BYTEA_EQ, pg_sys::F_BYTEAEQ, Equal),
+        (op::BYTEA_NE, pg_sys::F_BYTEANE, NotEqual),
+        (op::BYTEA_LT, pg_sys::F_BYTEALT, Less),
+        (op::BYTEA_LE, pg_sys::F_BYTEALE, LessEqual),
+        (op::BYTEA_GT, pg_sys::F_BYTEAGT, Greater),
+        (op::BYTEA_GE, pg_sys::F_BYTEAGE, GreaterEqual),
     }
     (pg_sys::NAMEOID, pg_sys::NAMEOID) {
         (op::NAME_EQ, pg_sys::F_NAMEEQ, Equal),
