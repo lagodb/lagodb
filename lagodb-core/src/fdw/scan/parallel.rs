@@ -37,7 +37,15 @@ pub(crate) unsafe extern "C-unwind" fn estimate_dsm<P: FdwScan>(
 ) -> pg_sys::Size {
     let result = wrapper::<P>(node)
         .and_then(ForeignScanStateWrapper::parallel_state)
-        .and_then(P::estimate_dsm);
+        .and_then(|state| {
+            if P::parallel_workers_allowed(state) {
+                P::estimate_dsm(state)
+            } else {
+                // PostgreSQL retains the TOC entry, but this scan has no
+                // provider DSM payload and never accesses its coordinate.
+                Ok(0)
+            }
+        });
     match result {
         Ok(size) => size,
         Err(error) => error
@@ -49,12 +57,22 @@ pub(crate) unsafe extern "C-unwind" fn estimate_dsm<P: FdwScan>(
 #[pg_guard]
 pub(crate) unsafe extern "C-unwind" fn initialize_dsm<P: FdwScan>(
     node: *mut pg_sys::ForeignScanState,
-    _pcxt: *mut pg_sys::ParallelContext,
+    pcxt: *mut pg_sys::ParallelContext,
     coordinate: *mut c_void,
 ) {
     let result = wrapper::<P>(node)
         .and_then(ForeignScanStateWrapper::parallel_state)
-        .and_then(|state| unsafe { P::initialize_dsm(state, coordinate) });
+        .and_then(|state| {
+            if P::parallel_workers_allowed(state) {
+                // SAFETY: PostgreSQL allocated the provider's estimated DSM.
+                unsafe { P::initialize_dsm(state, coordinate) }
+            } else {
+                // SAFETY: PostgreSQL initialized this parallel context and
+                // has not launched workers yet.
+                unsafe { pg_sys::ReinitializeParallelWorkers(pcxt, 0) };
+                Ok(())
+            }
+        });
     if let Err(error) = result {
         error
             .with_callback_phase::<P>(ForeignScanPhase::InitializeDsm)
@@ -65,12 +83,22 @@ pub(crate) unsafe extern "C-unwind" fn initialize_dsm<P: FdwScan>(
 #[pg_guard]
 pub(crate) unsafe extern "C-unwind" fn reinitialize_dsm<P: FdwScan>(
     node: *mut pg_sys::ForeignScanState,
-    _pcxt: *mut pg_sys::ParallelContext,
+    pcxt: *mut pg_sys::ParallelContext,
     coordinate: *mut c_void,
 ) {
     let result = wrapper::<P>(node)
         .and_then(ForeignScanStateWrapper::parallel_state)
-        .and_then(|state| unsafe { P::reinitialize_dsm(state, coordinate) });
+        .and_then(|state| {
+            if P::parallel_workers_allowed(state) {
+                // SAFETY: PostgreSQL retained this scan's initialized DSM.
+                unsafe { P::reinitialize_dsm(state, coordinate) }
+            } else {
+                // SAFETY: PostgreSQL reset this parallel context; workers
+                // for the new scan have not been launched yet.
+                unsafe { pg_sys::ReinitializeParallelWorkers(pcxt, 0) };
+                Ok(())
+            }
+        });
     if let Err(error) = result {
         error
             .with_callback_phase::<P>(ForeignScanPhase::ReInitializeDsm)

@@ -8,7 +8,10 @@ use super::super::row_identity::ForeignRowIdentityRequirement;
 use super::context::{ForeignPlanPrivate, PathVariantKind};
 use super::contract::FdwScan;
 use super::error::ForeignScanError;
-use super::projection::{ColumnRequirements, ScanProjection, SlotWritePlan};
+use super::projection::{
+    ColumnRequirements, PlannedProjection, ScanProjection, SlotWritePlan,
+};
+use crate::expr::pushdown::{EncodedFilterData, NegotiatedFilterSet};
 use crate::fdw::{ForeignPrivateReader, ForeignPrivateWriter};
 
 const PRIVATE_PATH: i32 = 1;
@@ -60,29 +63,30 @@ where
 }
 
 pub(crate) fn encode_scan_private<P>(
-    provider_name: &'static CStr,
     relation_oid: pg_sys::Oid,
     private_data: &P::PrivateData,
-    projection: &ScanProjection,
-    write_plan: &SlotWritePlan,
+    planned_projection: &PlannedProjection,
     row_identity: ForeignRowIdentityRequirement,
-    requirements: &ColumnRequirements,
-    planned_filter_count: usize,
-    binding_count: usize,
-    planned_filters: *mut pg_sys::List,
-    binding_slots: *mut pg_sys::List,
+    filters: &NegotiatedFilterSet<P::PlannedPredicate>,
+    encoded_filters: &EncodedFilterData,
     explain_filters: *mut pg_sys::List,
 ) -> Result<*mut pg_sys::List, ForeignScanError>
 where
     P: FdwScan,
 {
+    let PlannedProjection {
+        projection,
+        write_plan,
+        requirements,
+        ..
+    } = planned_projection;
     let payload =
         ForeignPrivateWriter::encode_list(|writer| private_data.encode(writer))?;
 
     ForeignPrivateWriter::encode_list(|envelope| {
         envelope
             .append_i32(PRIVATE_SCAN)
-            .append_cstr(provider_name)
+            .append_cstr(P::NAME)
             .append_oid(relation_oid)
             .append_i32(row_identity.wire_kind());
         unsafe { envelope.append_list(payload) };
@@ -105,11 +109,11 @@ where
                     writer.append_i32(attno as i32);
                 }
             })
-            .append_count(planned_filter_count)
-            .append_count(binding_count);
+            .append_count(filters.planned.len())
+            .append_count(filters.bindings.len());
         unsafe {
-            envelope.append_list(planned_filters);
-            envelope.append_list(binding_slots);
+            envelope.append_list(encoded_filters.planned);
+            envelope.append_list(encoded_filters.bindings);
             envelope.append_list(explain_filters);
         }
         Ok(())

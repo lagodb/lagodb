@@ -71,12 +71,16 @@ impl Default for PlannedTableScanResult {
 
 /// Begin-time request for binding one provider-owned scan to its statement
 /// snapshot and Arrow schema without planning physical file tasks.
-/// `plan_data` is borrowed read-only for the synchronous callback.
+/// `plan_data` is borrowed read-only for the synchronous callback. `estate`
+/// must be the initialized executor owning that plan; providers may retain
+/// owned read views in its query context, but must not retain borrowed handles.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TableScanBindRequest {
     pub struct_size: u32,
     pub plan_data: *const pg_sys::List,
+    /// Live executor owning the snapshot and provider read-view lifetime.
+    pub estate: *mut pg_sys::EState,
 }
 
 /// Statement binding returned by the provider.
@@ -181,10 +185,15 @@ pub struct TableScanStreamRequest {
     pub evolving_predicate: *const TableScanRuntimePredicate,
 }
 
+/// Plan a scan and export its projected Arrow schema into caller-owned
+/// `FFI_ArrowSchema` storage. The caller initializes that storage as empty and
+/// releases it on every outcome. Only `TABLE_SCAN_PLANNED` publishes a schema;
+/// no bound scan or execution tasks are created by this callback.
 pub type PlanTableScan = unsafe extern "C-unwind" fn(
     context: *mut c_void,
     request: *const TableScanPlanningRequest,
     output: *mut PlannedTableScanResult,
+    schema: *mut c_void,
     error: *mut CallbackErrorReport,
 ) -> u32;
 
@@ -320,6 +329,23 @@ impl TableScanRoutes {
     }
 }
 
+/// Complete callback set used to construct a table-scan descriptor.
+///
+/// This is a Rust construction interface. The runtime ABI retains the flat
+/// callback fields in [`TableScanDescriptor`]. Every callback is required.
+pub struct TableScanCallbacks {
+    pub owns_foreign_server: OwnsForeignServer,
+    pub plan_scan: PlanTableScan,
+    pub bind_scan: BindTableScan,
+    pub get_bound_schema: GetBoundTableScanSchema,
+    pub negotiate_predicate: NegotiateTableScanPredicate,
+    pub plan_scan_tasks: PlanTableScanTasks,
+    pub open_stream: OpenTableScanStream,
+    pub release_predicate: ReleaseTableScanPredicate,
+    pub release_planned: ReleasePlannedTableScan,
+    pub release_bound: ReleaseBoundTableScan,
+}
+
 /// One provider's base table-scan capability and stable internal routes.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -347,64 +373,17 @@ const fn size_of_u32<T>() -> u32 {
 }
 
 impl TableScanPlanningRequest {
-    #[must_use]
-    pub fn row_count(
-        scan_index: usize,
-        predicate_expression: *mut pg_sys::Node,
-        check_as_user_id: pg_sys::Oid,
-        root: *mut pg_sys::PlannerInfo,
-        relation: *mut pg_sys::RelOptInfo,
-        range_table_index: pg_sys::Index,
-        range_table_entry: *mut pg_sys::RangeTblEntry,
-    ) -> Self {
-        Self {
-            struct_size: size_of_u32::<Self>(),
-            projection_kind: TABLE_SCAN_PROJECTION_ROW_COUNT,
-            projected_attnos: ptr::null(),
-            projected_attno_count: 0,
-            predicate_expression,
-            check_as_user_id,
-            scan_index,
-            root,
-            relation,
-            range_table_index,
-            range_table_entry,
-        }
-    }
-
-    #[must_use]
-    pub fn columns(
-        scan_index: usize,
-        projected_attnos: &[pg_sys::AttrNumber],
-        predicate_expression: *mut pg_sys::Node,
-        check_as_user_id: pg_sys::Oid,
-        root: *mut pg_sys::PlannerInfo,
-        relation: *mut pg_sys::RelOptInfo,
-        range_table_index: pg_sys::Index,
-        range_table_entry: *mut pg_sys::RangeTblEntry,
-    ) -> Self {
-        Self {
-            struct_size: size_of_u32::<Self>(),
-            projection_kind: TABLE_SCAN_PROJECTION_COLUMNS,
-            projected_attnos: projected_attnos.as_ptr(),
-            projected_attno_count: projected_attnos.len(),
-            predicate_expression,
-            check_as_user_id,
-            scan_index,
-            root,
-            relation,
-            range_table_index,
-            range_table_entry,
-        }
-    }
+    /// Exact-build ABI size for a fully initialized planning request.
+    pub const STRUCT_SIZE: u32 = size_of_u32::<Self>();
 }
 
 impl TableScanBindRequest {
     #[must_use]
-    pub fn new(plan_data: *const pg_sys::List) -> Self {
+    pub fn new(plan_data: *const pg_sys::List, estate: *mut pg_sys::EState) -> Self {
         Self {
             struct_size: size_of_u32::<Self>(),
             plan_data,
+            estate,
         }
     }
 }
@@ -457,77 +436,23 @@ impl TableScanDescriptor {
     pub const unsafe fn new(
         routes: TableScanRoutes,
         context: *mut c_void,
-        owns_foreign_server: OwnsForeignServer,
-        plan_scan: PlanTableScan,
-        bind_scan: BindTableScan,
-        get_bound_schema: GetBoundTableScanSchema,
-        negotiate_predicate: NegotiateTableScanPredicate,
-        plan_scan_tasks: PlanTableScanTasks,
-        open_stream: OpenTableScanStream,
-        release_predicate: ReleaseTableScanPredicate,
-        release_planned: ReleasePlannedTableScan,
-        release_bound: ReleaseBoundTableScan,
+        callbacks: TableScanCallbacks,
     ) -> Self {
         Self {
             struct_size: size_of_u32::<Self>(),
             access_method_name: routes.access_method_name(),
             foreign_data_wrapper_name: routes.foreign_data_wrapper_name(),
             context,
-            owns_foreign_server: Some(owns_foreign_server),
-            plan_scan: Some(plan_scan),
-            bind_scan: Some(bind_scan),
-            get_bound_schema: Some(get_bound_schema),
-            negotiate_predicate: Some(negotiate_predicate),
-            plan_scan_tasks: Some(plan_scan_tasks),
-            open_stream: Some(open_stream),
-            release_predicate: Some(release_predicate),
-            release_planned: Some(release_planned),
-            release_bound: Some(release_bound),
-        }
-    }
-
-    /// Construct an arbitrary raw descriptor layout for exact-build ABI
-    /// integration or conformance testing.
-    ///
-    /// # Safety
-    ///
-    /// A descriptor that is accepted by the runtime must satisfy every
-    /// callback, lifetime, panic-containment, and single-thread contract from
-    /// [`Self::new`], including backend-lifetime NUL-terminated route names.
-    /// Supplying an intentionally invalid layout is only valid when it is
-    /// passed synchronously to runtime validation and never used.
-    #[must_use]
-    pub const unsafe fn from_raw_parts(
-        struct_size: u32,
-        access_method_name: *const c_char,
-        foreign_data_wrapper_name: *const c_char,
-        context: *mut c_void,
-        owns_foreign_server: Option<OwnsForeignServer>,
-        plan_scan: Option<PlanTableScan>,
-        bind_scan: Option<BindTableScan>,
-        get_bound_schema: Option<GetBoundTableScanSchema>,
-        negotiate_predicate: Option<NegotiateTableScanPredicate>,
-        plan_scan_tasks: Option<PlanTableScanTasks>,
-        open_stream: Option<OpenTableScanStream>,
-        release_predicate: Option<ReleaseTableScanPredicate>,
-        release_planned: Option<ReleasePlannedTableScan>,
-        release_bound: Option<ReleaseBoundTableScan>,
-    ) -> Self {
-        Self {
-            struct_size,
-            access_method_name,
-            foreign_data_wrapper_name,
-            context,
-            owns_foreign_server,
-            plan_scan,
-            bind_scan,
-            get_bound_schema,
-            negotiate_predicate,
-            plan_scan_tasks,
-            open_stream,
-            release_predicate,
-            release_planned,
-            release_bound,
+            owns_foreign_server: Some(callbacks.owns_foreign_server),
+            plan_scan: Some(callbacks.plan_scan),
+            bind_scan: Some(callbacks.bind_scan),
+            get_bound_schema: Some(callbacks.get_bound_schema),
+            negotiate_predicate: Some(callbacks.negotiate_predicate),
+            plan_scan_tasks: Some(callbacks.plan_scan_tasks),
+            open_stream: Some(callbacks.open_stream),
+            release_predicate: Some(callbacks.release_predicate),
+            release_planned: Some(callbacks.release_planned),
+            release_bound: Some(callbacks.release_bound),
         }
     }
 

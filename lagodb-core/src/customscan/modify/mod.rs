@@ -9,9 +9,13 @@ mod modify_table;
 mod planning;
 mod registry;
 mod router;
+mod scan_binder;
+mod scan_filters;
 
 pub use binding::ModifyBindContext;
-pub use contract::{LagodbCustomModifyProvider, ModifyCapabilities};
+pub use contract::{
+    LagodbCustomModifyProvider, ModifyCapabilities, PreparedModifyScan,
+};
 
 use crate::customscan::provider::RelationContext;
 

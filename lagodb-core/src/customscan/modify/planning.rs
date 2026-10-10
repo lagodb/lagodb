@@ -7,8 +7,9 @@ use pgrx::{pg_guard, pg_sys};
 
 use crate::customscan::modify::LagodbCustomModifyProvider;
 use crate::customscan::provider::RelationContext;
-use crate::diag::PgReportError;
+use crate::diag::{PgReportError, ReportableError};
 
+use super::scan_filters::ModifyScanFilters;
 use super::{methods, registry};
 
 pub(super) use crate::customscan::provider::WHOLEROW_NAME;
@@ -366,71 +367,6 @@ impl ModifyQueryPreparation {
     }
 }
 
-fn copy_node<T>(node: *mut T) -> *mut T {
-    if node.is_null() {
-        return ptr::null_mut();
-    }
-    // SAFETY: planner nodes are copyObject-compatible and live in the current
-    // planner memory context.
-    unsafe { pg_sys::copyObjectImpl(node.cast()).cast() }
-}
-
-unsafe fn replace_rowid_vars(
-    root: *mut pg_sys::PlannerInfo,
-    tlist: *mut pg_sys::List,
-    varno: pg_sys::Index,
-) -> *mut pg_sys::List {
-    let copied = unsafe { pg_sys::list_copy(tlist) };
-    let len = unsafe { pg_sys::list_length(copied) };
-    for index in 0..len {
-        let cell = unsafe { pg_sys::list_nth_cell(copied, index) };
-        let tle = unsafe { (*cell).ptr_value.cast::<pg_sys::TargetEntry>() };
-        let expr = unsafe { (*tle).expr };
-        if unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Var {
-            continue;
-        }
-        let var = expr.cast::<pg_sys::Var>();
-        if unsafe { (*var).varno } != pg_sys::ROWID_VAR {
-            continue;
-        }
-        let new_tle = copy_node(tle);
-        let row_info = unsafe {
-            list_ptr((*root).row_identity_vars, (*var).varattno as i32 - 1)
-                .cast::<pg_sys::RowIdentityVarInfo>()
-        };
-        let new_var = copy_node(unsafe { (*row_info).rowidvar });
-        unsafe {
-            (*new_var).varno = varno as i32;
-            (*new_var).varnosyn = 0;
-            (*new_var).varattnosyn = 0;
-            (*new_tle).expr = new_var.cast();
-            (*cell).ptr_value = new_tle.cast();
-        }
-    }
-    copied
-}
-
-/// Replace planner-only ROWID_VAR entries in projection/pseudoconstant Result
-/// nodes between ModifyTable and its scan tree. The lower scan/append has
-/// already resolved its row identity, so leaving the wrapper targetlist in the
-/// planner namespace makes PostgreSQL's `set_upper_references` unable to match
-/// it. This mirrors TimescaleDB's ModifyHypertable PG17 fix.
-unsafe fn replace_result_rowid_vars(
-    root: *mut pg_sys::PlannerInfo,
-    mut plan: *mut pg_sys::Plan,
-    varno: pg_sys::Index,
-) {
-    while !plan.is_null()
-        && unsafe { (*plan).type_ } == pg_sys::NodeTag::T_Result
-        && !unsafe { (*plan).lefttree }.is_null()
-    {
-        unsafe {
-            (*plan).targetlist = replace_rowid_vars(root, (*plan).targetlist, varno);
-            plan = (*plan).lefttree;
-        }
-    }
-}
-
 #[pg_guard]
 pub(super) unsafe extern "C-unwind" fn plan_modify_table<
     P: LagodbCustomModifyProvider,
@@ -447,23 +383,16 @@ pub(super) unsafe extern "C-unwind" fn plan_modify_table<
         pg_sys::palloc0(size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
     };
     let path = unsafe { &(*best_path).path };
-    let mut targetlist = copy_node(unsafe { (*root).processed_tlist });
-    if matches!(
-        unsafe { (*mt).operation },
-        pg_sys::CmdType::CMD_UPDATE
-            | pg_sys::CmdType::CMD_DELETE
-            | pg_sys::CmdType::CMD_MERGE
-    ) {
-        targetlist =
-            unsafe { replace_rowid_vars(root, targetlist, (*mt).nominalRelation) };
-        unsafe {
-            replace_result_rowid_vars(
-                root,
-                (*mt).plan.lefttree,
-                (*mt).nominalRelation,
-            )
-        };
-    }
+    // create_plan applies processed_tlist's labels to this wrapper before
+    // setrefs, so preserve its column count and types using slot references.
+    // Copying its expressions into custom_scan_tlist would let fix_upper_expr
+    // replace matching custom_exprs Params with INDEX_VARs. Those filter values
+    // bind before any row exists. Actual expressions belong to the child;
+    // fixup_plan installs its finalized RETURNING layout after setrefs.
+    let targetlist = unsafe { make_var_targetlist((*root).processed_tlist) };
+    // Native Result/Append children keep PostgreSQL's ROWID_VAR namespace
+    // until setrefs resolves their outputs. Only this wrapper uses INDEX_VAR;
+    // rewriting the children's row identities would break their tlist match.
     unsafe {
         (*scan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
         (*scan).scan.plan.startup_cost = path.startup_cost;
@@ -476,6 +405,7 @@ pub(super) unsafe extern "C-unwind" fn plan_modify_table<
         (*scan).custom_scan_tlist = targetlist;
         (*scan).methods = &methods::tables::<P>().modify_scan;
     }
+    unsafe { ModifyScanFilters::<P>::plan(root, mt, scan) }.report_unwrap();
     scan.cast()
 }
 

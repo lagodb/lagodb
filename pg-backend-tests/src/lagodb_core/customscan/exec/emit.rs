@@ -10,7 +10,6 @@ mod tests {
         TestScanState, impl_reject_all_filters,
     };
     use lagodb_core::api::AmResult;
-    use lagodb_core::batch::ScanBatchDriver;
     use lagodb_core::customscan::exec::next_slot_wrapper;
     use lagodb_core::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
@@ -21,7 +20,7 @@ mod tests {
     use lagodb_core::customscan::provider::{
         CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
     };
-    use lagodb_core::handles::{RelationHandle, ScanDirection};
+    use lagodb_core::handles::RelationHandle;
     use lagodb_core::tuple::{Cell, Row, RowDatumCodec, SlotColumns};
     use pgrx::pg_sys;
     use pgrx::pg_test;
@@ -373,19 +372,14 @@ mod tests {
         emitted: bool,
     }
 
-    /// A `ScanBatchDriver` that writes one `(int4, text)` row per fetch, always
+    /// A forward-only source that writes one `(int4, text)` row per fetch, always
     /// producing a row so the multi-row growth loop keeps emitting. The text
     /// varlena is palloc'd in whatever context `emit_columns` made current, so it
     /// witnesses the per-tuple-vs-`tts_mcxt` decision for the columnar path.
     struct EmitColumnsDriver;
 
-    impl ScanBatchDriver for EmitColumnsDriver {
-        fn next_into_slot(
-            &mut self,
-            direction: ScanDirection,
-            out: &mut SlotColumns<'_>,
-        ) -> AmResult<bool> {
-            assert_eq!(direction, ScanDirection::Forward);
+    impl EmitColumnsDriver {
+        fn next_into_slot(&mut self, out: &mut SlotColumns<'_>) -> AmResult<bool> {
             out.set_datum(0, Some(pg_sys::Datum::from(7usize)));
             let text = EMIT_COLUMNS_TEXT.into_datum().expect("text datum");
             out.set_datum(1, Some(text));
@@ -433,16 +427,21 @@ mod tests {
             ctx: NextSlotContext<'a, Self>,
         ) -> Result<NextSlotResult<'a>, CustomScanError> {
             let (state, emitter) = ctx.split();
-            Ok(match emitter.try_emit_columns(&mut EmitColumnsDriver)? {
-                NextSlotAttempt::Produced(produced) => {
-                    state.emitted = true;
-                    produced
-                }
-                NextSlotAttempt::Exhausted(emitter) => {
-                    state.emitted = false;
-                    emitter.finish_eof()
-                }
-            })
+            let mut driver = EmitColumnsDriver;
+            Ok(
+                match emitter
+                    .try_emit_columns(|columns| driver.next_into_slot(columns))?
+                {
+                    NextSlotAttempt::Produced(produced) => {
+                        state.emitted = true;
+                        produced
+                    }
+                    NextSlotAttempt::Exhausted(emitter) => {
+                        state.emitted = false;
+                        emitter.finish_eof()
+                    }
+                },
+            )
         }
 
         fn rescan(_ctx: ReScanContext<'_, Self>) -> Result<(), CustomScanError> {

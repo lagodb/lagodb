@@ -12,7 +12,7 @@ use crate::expr::relation::RelationVarsByAttno;
 use super::super::super::system_column::SystemColumnRequirement;
 use super::super::pathkeys::ForeignPathKeys;
 
-pub(super) struct ProjectionAnalysis {
+pub(in crate::fdw::scan) struct ProjectionAnalysis {
     pub(super) vars_by_attno: RelationVarsByAttno,
     pub(super) executor_vars_by_attno: RelationVarsByAttno,
     pub(super) direct_outputs: Vec<DirectOutput>,
@@ -51,13 +51,16 @@ impl Default for ProjectionAnalysis {
 impl ProjectionAnalysis {
     /// Collect finalized semantic dependencies, then determine whether
     /// PostgreSQL's plan targetlist can be backed by a narrowed scan tuple.
+    /// The physical `targetlist` proves setrefs coverage; semantic dependencies
+    /// come from `path_target_exprs`, local residual quals, pathkeys, and the
+    /// provider/recheck inputs.
     ///
     /// # Safety
     ///
     /// Every non-NULL list argument must be a live PostgreSQL planner list for
     /// the current `GetForeignPlan` callback. Every pathkey expression must
     /// remain live for this call.
-    pub(super) unsafe fn analyze(
+    pub(in crate::fdw::scan) unsafe fn analyze(
         scan_relid: pg_sys::Index,
         targetlist: *mut pg_sys::List,
         path_target_exprs: *mut pg_sys::List,

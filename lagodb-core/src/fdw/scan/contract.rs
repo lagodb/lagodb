@@ -164,6 +164,20 @@ pub trait FdwScan: ForeignDataWrapper + FilterPushdown + 'static {
 
     fn end(state: &mut Self::State) -> Result<(), ForeignScanError>;
 
+    /// Whether workers may participate in this execution of a partial plan.
+    /// Returning false keeps the initialized scan on the leader, including
+    /// when PostgreSQL reuses a cached parallel plan. Any participating scan
+    /// can disable workers for the enclosing parallel context.
+    ///
+    /// The result must remain unchanged for this scan's lifetime, including
+    /// rescans. When false, the framework estimates zero provider DSM bytes
+    /// and skips `estimate_dsm`, `initialize_dsm`, and `reinitialize_dsm`.
+    /// The provider must read the complete input without DSM initialization.
+    /// `shutdown_parallel` and `end` still run through their normal callbacks.
+    fn parallel_workers_allowed(_state: &Self::State) -> bool {
+        true
+    }
+
     fn estimate_dsm(
         _state: &mut Self::State,
     ) -> Result<pg_sys::Size, ForeignScanError> {

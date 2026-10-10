@@ -57,13 +57,11 @@ impl<D> ForeignPathBuilder<D> {
 ///
 /// # Safety
 ///
-/// `root`, `baserel`, `relation`, `param_info`, and `filters` must all refer to
+/// `relation`, `param_info`, and `filters` must all refer to
 /// live planner state for one `GetForeignPaths` callback. `required_outer`
 /// must be a PostgreSQL Bitmapset owned by the planner, and `provider_state`
 /// must remain immutably borrowed during path construction.
 pub(crate) unsafe fn build_path_variants<P: FdwScan>(
-    root: *mut pg_sys::PlannerInfo,
-    baserel: *mut pg_sys::RelOptInfo,
     relation: &ForeignRelContext<'_>,
     provider_state: &P::PlannerState,
     kind: PathVariantKind,
@@ -71,6 +69,7 @@ pub(crate) unsafe fn build_path_variants<P: FdwScan>(
     param_info: *mut pg_sys::ParamPathInfo,
     filters: &PathFilterSet,
 ) -> Result<usize, ForeignScanError> {
+    let baserel = relation.baserel();
     let relids = unsafe { (*baserel).relids };
     if unsafe { pg_sys::bms_overlap(relids, required_outer) } {
         return Err(ForeignScanError::framework(
@@ -105,19 +104,7 @@ pub(crate) unsafe fn build_path_variants<P: FdwScan>(
 
     let mut emitted = 0;
     for spec in builder.into_specs() {
-        if unsafe {
-            add_path_spec::<P>(
-                root,
-                baserel,
-                relation,
-                provider_state,
-                kind,
-                required_outer,
-                filters,
-                &context,
-                spec,
-            )
-        }? {
+        if unsafe { add_path_spec::<P>(provider_state, &context, spec) }? {
             emitted += 1;
         }
     }
@@ -129,16 +116,16 @@ pub(crate) unsafe fn build_path_variants<P: FdwScan>(
 /// A structurally unsupported ordered alternative is skipped independently;
 /// other alternatives from the same builder remain eligible.
 unsafe fn add_path_spec<P: FdwScan>(
-    root: *mut pg_sys::PlannerInfo,
-    baserel: *mut pg_sys::RelOptInfo,
-    relation: &ForeignRelContext<'_>,
     provider_state: &P::PlannerState,
-    kind: PathVariantKind,
-    required_outer: pg_sys::Relids,
-    filters: &PathFilterSet,
     context: &ForeignPathContext<'_>,
     spec: ForeignPathSpec<P::PrivateData>,
 ) -> Result<bool, ForeignScanError> {
+    let relation = context.relation();
+    let root = relation.root();
+    let baserel = relation.baserel();
+    let kind = context.kind();
+    let required_outer = context.required_outer();
+    let filters = context.path_filters();
     let Some(mut pathkeys) = unsafe {
         ForeignPathKeys::analyze(root, relation.baserel(), spec.pathkeys_ptr())
     }?

@@ -1,14 +1,10 @@
-use std::collections::HashSet;
 use std::ffi::c_void;
 use std::ptr;
 use std::rc::Rc;
 
 use crate::access::mutation::acquire_modify_query_state;
 use crate::api::TableAccessMethod;
-use crate::customscan::ScanPurpose;
 use crate::customscan::error::CustomScanError;
-use crate::customscan::execution::exec::provider_scan_purpose;
-use crate::customscan::execution::state::CustomScanStateWrapper;
 use crate::customscan::modify::LagodbCustomModifyProvider;
 use crate::diag::{PgReportError, ReportableError};
 use crate::resource::{ResourceHandle, forget_resource, remember_resource};
@@ -22,6 +18,7 @@ use pgrx::{
 use super::bridge::{LagodbModifyBridge, ModifyNodeCell};
 use super::execution::ModifyNodeState;
 use super::methods;
+use super::scan_binder::ModifyScanBinder;
 
 unsafe extern "C-unwind" {
     unsafe fn lagodb_exec_init_modify_table(
@@ -66,9 +63,11 @@ enum ModifyNodePhase {
 impl<P: LagodbCustomModifyProvider> Drop for LagodbModifyTableState<P> {
     fn drop(&mut self) {
         if let Some(execution) = self.execution.as_ref() {
+            // Normal ExecEnd clears execution. Reaching this fallback means
+            // the query is being discarded, not just one shared node ending.
             // SAFETY: backend executor callbacks are serialized; Drop cannot
             // overlap a mutation callback for this state.
-            unsafe { execution.with_mut(ModifyNodeState::abort) };
+            unsafe { execution.with_mut(ModifyNodeState::cleanup_after_error) };
         }
         if let Some(resource) = self.resource.take() {
             let _ = forget_resource(resource);
@@ -107,148 +106,6 @@ pub(super) unsafe extern "C-unwind" fn create_state<P: LagodbCustomModifyProvide
     };
     let ptr = PgMemoryContexts::CurrentMemoryContext.leak_and_drop_on_delete(wrapper);
     ptr.cast()
-}
-
-struct ModifyScanBinder<'a, P: LagodbCustomModifyProvider> {
-    execution: &'a ModifyNodeCell<P>,
-    result: Result<(), CustomScanError>,
-    target_rtis: HashSet<pg_sys::Index>,
-}
-
-unsafe fn scan_state_relation(
-    plan_state: *mut pg_sys::PlanState,
-) -> pg_sys::Relation {
-    if plan_state.is_null()
-        || !matches!(
-            unsafe { (*plan_state).type_ },
-            pg_sys::NodeTag::T_SeqScanState
-                | pg_sys::NodeTag::T_SampleScanState
-                | pg_sys::NodeTag::T_IndexScanState
-                | pg_sys::NodeTag::T_IndexOnlyScanState
-                | pg_sys::NodeTag::T_BitmapHeapScanState
-                | pg_sys::NodeTag::T_TidScanState
-                | pg_sys::NodeTag::T_TidRangeScanState
-                | pg_sys::NodeTag::T_ForeignScanState
-                | pg_sys::NodeTag::T_CustomScanState
-        )
-    {
-        return std::ptr::null_mut();
-    }
-    unsafe { (*plan_state.cast::<pg_sys::ScanState>()).ss_currentRelation }
-}
-
-unsafe fn is_provider_relation<P: LagodbCustomModifyProvider>(
-    relation: pg_sys::Relation,
-) -> bool {
-    !relation.is_null()
-        && P::AccessMethod::access_method_oid()
-            .is_some_and(|oid| unsafe { (*(*relation).rd_rel).relam } == oid)
-}
-
-unsafe fn scan_rti(plan_state: *mut pg_sys::PlanState) -> Option<pg_sys::Index> {
-    let relation = unsafe { scan_state_relation(plan_state) };
-    if relation.is_null() {
-        return None;
-    }
-    let plan = unsafe { (*plan_state).plan };
-    Some(unsafe { (*plan.cast::<pg_sys::Scan>()).scanrelid })
-}
-
-unsafe fn bind_tree<P: LagodbCustomModifyProvider>(
-    plan_state: *mut pg_sys::PlanState,
-    context: &mut ModifyScanBinder<'_, P>,
-) {
-    if plan_state.is_null() || context.result.is_err() {
-        return;
-    }
-    if unsafe { (*plan_state).type_ } == pg_sys::NodeTag::T_CustomScanState {
-        let custom = plan_state.cast::<pg_sys::CustomScanState>();
-        let purpose = match unsafe { provider_scan_purpose::<P>((*plan_state).plan) }
-        {
-            Ok(purpose) => purpose,
-            Err(error) => {
-                context.result = Err(error);
-                return;
-            }
-        };
-        if purpose == Some(ScanPurpose::ModifyTarget) {
-            let relation = unsafe { (*custom).ss.ss_currentRelation };
-            if relation.is_null() {
-                context.result = Err(PgReportError::from_message(
-                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    "ModifyTarget CustomScan has no open relation",
-                )
-                .into());
-                return;
-            }
-            let oid = unsafe { (*relation).rd_id };
-            let scan_context =
-                unsafe { CustomScanStateWrapper::<P>::from_node_ptr(custom) }
-                    .active_provider_state_mut()
-                    .and_then(|state| P::modify_scan_context(state));
-            let Some(scan_context) = scan_context else {
-                context.result = Err(PgReportError::from_message(
-                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    "ModifyTarget CustomScan provider state is not active",
-                )
-                .into());
-                return;
-            };
-            let binding = match unsafe {
-                context
-                    .execution
-                    .with_mut(|execution| execution.bind_scan(oid, scan_context))
-            } {
-                Ok(binding) => binding,
-                Err(error) => {
-                    context.result = Err(error.into());
-                    return;
-                }
-            };
-            if let Err(error) =
-                unsafe { super::binding::bind_modify_scan::<P>(custom, binding) }
-            {
-                context.result = Err(error);
-                return;
-            }
-        } else if unsafe { scan_rti(plan_state) }
-            .is_some_and(|rti| context.target_rtis.contains(&rti))
-            && unsafe { is_provider_relation::<P>((*custom).ss.ss_currentRelation) }
-        {
-            context.result = Err(PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "required Modify relation was planned with an unbindable CustomScan",
-            )
-            .into());
-            return;
-        }
-    } else if unsafe { scan_rti(plan_state) }
-        .is_some_and(|rti| context.target_rtis.contains(&rti))
-        && unsafe { is_provider_relation::<P>(scan_state_relation(plan_state)) }
-    {
-        context.result = Err(PgReportError::from_message(
-            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-            "required Modify relation was planned with a standard scan",
-        )
-        .into());
-        return;
-    }
-    unsafe {
-        pg_sys::planstate_tree_walker_impl(
-            plan_state,
-            Some(bind_walker::<P>),
-            std::ptr::from_mut(context).cast(),
-        );
-    }
-}
-
-unsafe extern "C-unwind" fn bind_walker<P: LagodbCustomModifyProvider>(
-    plan_state: *mut pg_sys::PlanState,
-    raw_context: *mut c_void,
-) -> bool {
-    let context = unsafe { &mut *raw_context.cast::<ModifyScanBinder<'_, P>>() };
-    unsafe { bind_tree::<P>(plan_state, context) };
-    context.result.is_err()
 }
 
 unsafe fn replace_aux_entry(
@@ -363,15 +220,17 @@ unsafe fn begin_impl<P: LagodbCustomModifyProvider>(
     }?);
     let cleanup = Rc::clone(&execution);
     state.resource = Some(remember_resource(move || {
+        // PG releases spill files before this callback. Detach trigger rows
+        // even for finished writes, before SPI later destroys executor memory.
         // SAFETY: ResourceOwner cleanup runs after executor control has left
         // the mutation callback and is serialized in the backend thread.
-        unsafe { cleanup.with_mut(ModifyNodeState::abort) };
+        unsafe { cleanup.with_mut(ModifyNodeState::cleanup_after_error) };
     }));
     let root_info = unsafe { (*state.inner).rootResultRelInfo };
     let root_relation = unsafe { (*root_info).ri_RelationDesc };
     debug_assert_eq!(
         provider_owned_partitioned_table,
-        unsafe { is_provider_relation::<P>(root_relation) }
+        unsafe { ModifyScanBinder::<P>::owns_relation(root_relation) }
             && unsafe { (*(*root_relation).rd_rel).relkind } as u8
                 == pg_sys::RELKIND_PARTITIONED_TABLE
     );
@@ -399,31 +258,17 @@ unsafe fn begin_impl<P: LagodbCustomModifyProvider>(
     ));
     state.execution = Some(execution);
 
-    let mut bind_context = ModifyScanBinder {
-        execution: state
-            .execution
-            .as_deref()
-            .expect("execution was just installed"),
-        result: Ok(()),
-        target_rtis: {
-            let plan =
-                unsafe { (*state.inner).ps.plan.cast::<pg_sys::ModifyTable>() };
-            let relations = unsafe { (*plan).resultRelations };
-            let count = unsafe { pg_sys::list_length(relations) };
-            let mut rtis = HashSet::with_capacity(count as usize);
-            for index in 0..count {
-                rtis.insert(unsafe {
-                    pg_sys::list_nth_int(relations, index) as pg_sys::Index
-                });
-            }
-            rtis
-        },
-    };
-    unsafe { bind_tree::<P>((*state.inner).ps.lefttree, &mut bind_context) };
-    // PG can eliminate the entire target scan (for example, WHERE FALSE).
-    // Every remaining target scan must bind, but an empty plan needs no scan
-    // context. ResultRelationState still rejects an unbound row-level mutation.
-    bind_context.result?;
+    // A WHERE FALSE target can disappear completely; only surviving scans bind.
+    unsafe {
+        ModifyScanBinder::<P>::bind(
+            state
+                .execution
+                .as_deref()
+                .expect("execution was just installed"),
+            plan,
+            state.inner,
+        )
+    }?;
 
     unsafe { replace_aux_entry(estate, state.inner, node) };
     Ok(())

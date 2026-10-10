@@ -16,7 +16,7 @@
 //!   planning.
 //! - **Row world:** [`RowBatchBuffer`] owns [`Row`] values that are safe across
 //!   callback boundaries — the buffering half of the row-mode / FDW write path,
-//!   paired with `lagodb-arrow`'s `ColumnRule::build(&[Row], ..)`. Not on the
+//!   paired with `lagodb-arrow`'s `CellRule::build(&[Row], ..)`. Not on the
 //!   columnar hot path (see [`RowBatchBuffer`] for why it is retained).
 //!
 //! Core does not provide a `Cell`-based columnar buffer: on a mutation hot path,
@@ -60,8 +60,11 @@ pub trait BatchBuffer {
         self.len() == 0
     }
 
-    /// Returns `true` when the buffer's estimated in-memory footprint has
-    /// reached `max_bytes` and the caller should flush.
+    /// Returns `true` when the caller should flush the buffered batch.
+    ///
+    /// The default checks whether the estimated footprint has reached
+    /// `max_bytes`. Implementations may also impose a row-count limit so
+    /// values with little or no estimated payload still trigger a flush.
     ///
     /// This is a **memory-pressure** signal, not a target file-size signal:
     /// `estimated_size` reflects the Rust representation of buffered rows
@@ -80,7 +83,7 @@ pub trait BatchBuffer {
 /// # Role: the buffering half of the row-world write path
 ///
 /// This is the **row-world** write buffer, the counterpart to the
-/// `Cell`-based conversion (`lagodb-arrow`'s `ColumnRule::build(&[Row], ..)`):
+/// `Cell`-based conversion (`lagodb-arrow`'s `CellRule::build(&[Row], ..)`):
 /// a row-mode access method or FDW accumulates owned `Row`s here (one slot at a
 /// time, since `ExecForeignInsert` hands over one slot per call) and, on flush,
 /// converts the buffered `&[Row]` to a columnar batch.
@@ -92,7 +95,7 @@ pub trait BatchBuffer {
 /// base does not drive `RowBatchBuffer` today — it is exercised by unit tests
 /// and retained as the row-world buffering primitive a future row-mode FDW
 /// will use. It is **not** dead/legacy code: removing it would leave the
-/// row-world write path (which keeps `ColumnRule::build`) without its buffering
+/// row-world write path (which keeps `CellRule::build`) without its buffering
 /// half. See the columnar-datapath-refactor design, goal #3 / §3.1.
 ///
 /// Use [`Self::push_row`] when ownership is already available. [`Self::copy_row`]

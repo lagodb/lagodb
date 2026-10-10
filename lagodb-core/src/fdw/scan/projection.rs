@@ -10,11 +10,10 @@ use pgrx::pg_sys;
 use super::super::row_identity::ForeignRowIdentityRequirement;
 use super::super::system_column::SystemColumnRequirement;
 use super::error::ForeignScanError;
-use super::pathkeys::ForeignPathKeys;
 
 mod dependencies;
 
-use dependencies::ProjectionAnalysis;
+pub(super) use dependencies::ProjectionAnalysis;
 
 /// Provider read-set contract, kept separate from the executor scan tuple.
 /// PostgreSQL system columns are intentionally absent: `tableoid` is
@@ -245,145 +244,125 @@ pub(crate) struct PlannedProjection {
     pub(crate) requirements: ColumnRequirements,
 }
 
-/// Build the relation's executor projection and the provider read set.
-///
-/// `targetlist` is PostgreSQL's physical execution carrier and is used only to
-/// prove whether `setrefs.c` can rewrite a narrowed scan tuple. Semantic output
-/// dependencies come from `path_target_exprs`, local residual quals, and the
-/// provider/recheck inputs. The returned `fdw_scan_tlist` is either NIL, a
-/// Var-only list, or a one-column synthetic NULL list allocated in the current
-/// planner context;
-/// `projection_policy` controls whether the provider permits narrowing it.
-///
-/// # Safety
-///
-/// Every non-NULL list argument must be a live PostgreSQL planner `T_List`
-/// owned by the current planner memory context.  Its cells must remain live
-/// for this call, and the nodes must be the pre-setrefs nodes supplied by the
-/// current `GetForeignPlan` callback.
-pub(crate) unsafe fn plan_projection(
-    relation_oid: pg_sys::Oid,
-    scan_relid: pg_sys::Index,
-    targetlist: *mut pg_sys::List,
-    path_target_exprs: *mut pg_sys::List,
-    pathkeys: &ForeignPathKeys,
-    residual_quals: *mut pg_sys::List,
-    fdw_exprs: *mut pg_sys::List,
-    recheck_quals: *mut pg_sys::List,
-    projection_policy: ScanProjectionPolicy,
-    row_identity_requirement: ForeignRowIdentityRequirement,
-    mut requirements: ColumnRequirements,
-) -> Result<PlannedProjection, ForeignScanError> {
-    let mut analysis = unsafe {
-        ProjectionAnalysis::analyze(
-            scan_relid,
-            targetlist,
-            path_target_exprs,
-            pathkeys,
-            residual_quals,
-            fdw_exprs,
-            recheck_quals,
-        )
-    };
-
-    for attno in analysis.vars_by_attno.attnos() {
-        requirements.require_column(attno)?;
-    }
-    if analysis.provider_requires_all_columns {
-        requirements.require_all_columns();
-    }
-    if analysis
-        .system_columns
-        .iter()
-        .copied()
-        .any(SystemColumnRequirement::is_unsupported)
-        || (analysis
+impl ProjectionAnalysis {
+    /// Consume the analyzed dependencies to build the executor projection and
+    /// provider read set. Tuple-shape policy does not change dependency analysis.
+    /// The returned scan targetlist is NIL, a Var-only list, or a one-column
+    /// synthetic NULL list allocated in the current planner context.
+    ///
+    /// # Safety
+    ///
+    /// `relation_oid` must identify the live base relation analyzed by `Self::analyze`.
+    /// Its pre-setrefs expression nodes must remain live in the current planner
+    /// memory context until this projection is built.
+    pub(super) unsafe fn into_projection(
+        mut self,
+        relation_oid: pg_sys::Oid,
+        projection_policy: ScanProjectionPolicy,
+        row_identity_requirement: ForeignRowIdentityRequirement,
+        mut requirements: ColumnRequirements,
+    ) -> Result<PlannedProjection, ForeignScanError> {
+        for attno in self.vars_by_attno.attnos() {
+            requirements.require_column(attno)?;
+        }
+        if self.provider_requires_all_columns {
+            requirements.require_all_columns();
+        }
+        if self
             .system_columns
             .iter()
             .copied()
-            .any(SystemColumnRequirement::requires_item_pointer)
-            && !row_identity_requirement.needs_item_pointer())
-    {
-        return Err(ForeignScanError::unsupported(
-            "FDW framework v1 does not support system-column expressions",
-        ));
-    }
-    let require_relation_shape = row_identity_requirement.needs_item_pointer()
-        || matches!(
-            projection_policy,
-            ScanProjectionPolicy::RequireRelationShape
-        );
-    // Tuple shape policy does not change the provider's physical read set.
-    // Full-column reads come only from explicit requirements or analyzed
-    // provider dependencies above.
-
-    unsafe {
-        add_required_columns(relation_oid, &requirements)?;
-    }
-
-    let relation_shape = require_relation_shape || !analysis.can_narrow;
-    let write_plan = if analysis.executor_requires_all_columns {
-        SlotWritePlan::complete()
-    } else {
-        SlotWritePlan::required_attributes(analysis.executor_vars_by_attno.attnos())
-    };
-
-    if relation_shape {
-        return Ok(PlannedProjection {
-            fdw_scan_tlist: ptr::null_mut(),
-            projection: ScanProjection::Relation,
-            write_plan,
-            requirements,
-        });
-    }
-
-    if analysis.executor_vars_by_attno.is_empty() {
-        let fdw_scan_tlist = unsafe { append_synthetic_null_tlist() }?;
-        return Ok(PlannedProjection {
-            fdw_scan_tlist,
-            projection: ScanProjection::synthetic_null(),
-            write_plan: SlotWritePlan::required_attributes(
-                Vec::<pg_sys::AttrNumber>::new(),
-            ),
-            requirements,
-        });
-    }
-
-    let mut tlist = ptr::null_mut();
-    let mut attnos = Vec::with_capacity(analysis.executor_vars_by_attno.len());
-
-    for direct in analysis.direct_outputs {
-        if analysis.executor_vars_by_attno.take(direct.attno).is_none() {
-            continue;
+            .any(SystemColumnRequirement::is_unsupported)
+            || (self
+                .system_columns
+                .iter()
+                .copied()
+                .any(SystemColumnRequirement::requires_item_pointer)
+                && !row_identity_requirement.needs_item_pointer())
+        {
+            return Err(ForeignScanError::unsupported(
+                "FDW framework v1 does not support system-column expressions",
+            ));
         }
-        attnos.push(direct.attno);
-        tlist = unsafe {
-            append_tlist_entry(tlist, direct.var, attnos.len(), direct.resjunk)?
+        let require_relation_shape = row_identity_requirement.needs_item_pointer()
+            || matches!(
+                projection_policy,
+                ScanProjectionPolicy::RequireRelationShape
+            );
+        // Tuple shape policy does not change the provider's physical read set.
+        // Full-column reads come only from explicit requirements or analyzed
+        // provider dependencies above.
+
+        unsafe {
+            add_required_columns(relation_oid, &requirements)?;
+        }
+
+        let relation_shape = require_relation_shape || !self.can_narrow;
+        let write_plan = if self.executor_requires_all_columns {
+            SlotWritePlan::complete()
+        } else {
+            SlotWritePlan::required_attributes(self.executor_vars_by_attno.attnos())
         };
-    }
 
-    for (attno, var) in analysis.executor_vars_by_attno.iter() {
-        attnos.push(attno);
-        tlist =
-            unsafe { append_tlist_entry(tlist, var.as_ptr(), attnos.len(), true)? };
-    }
+        if relation_shape {
+            return Ok(PlannedProjection {
+                fdw_scan_tlist: ptr::null_mut(),
+                projection: ScanProjection::Relation,
+                write_plan,
+                requirements,
+            });
+        }
 
-    if tlist.is_null() {
-        return Ok(PlannedProjection {
-            fdw_scan_tlist: ptr::null_mut(),
-            projection: ScanProjection::Relation,
-            write_plan,
+        if self.executor_vars_by_attno.is_empty() {
+            let fdw_scan_tlist = unsafe { append_synthetic_null_tlist() }?;
+            return Ok(PlannedProjection {
+                fdw_scan_tlist,
+                projection: ScanProjection::synthetic_null(),
+                write_plan: SlotWritePlan::required_attributes(Vec::<
+                    pg_sys::AttrNumber,
+                >::new(
+                )),
+                requirements,
+            });
+        }
+
+        let mut tlist = ptr::null_mut();
+        let mut attnos = Vec::with_capacity(self.executor_vars_by_attno.len());
+
+        for direct in self.direct_outputs {
+            if self.executor_vars_by_attno.take(direct.attno).is_none() {
+                continue;
+            }
+            attnos.push(direct.attno);
+            tlist = unsafe {
+                append_tlist_entry(tlist, direct.var, attnos.len(), direct.resjunk)?
+            };
+        }
+
+        for (attno, var) in self.executor_vars_by_attno.iter() {
+            attnos.push(attno);
+            tlist = unsafe {
+                append_tlist_entry(tlist, var.as_ptr(), attnos.len(), true)?
+            };
+        }
+
+        if tlist.is_null() {
+            return Ok(PlannedProjection {
+                fdw_scan_tlist: ptr::null_mut(),
+                projection: ScanProjection::Relation,
+                write_plan,
+                requirements,
+            });
+        }
+
+        requirements.user_attnos.extend(attnos.iter().copied());
+        Ok(PlannedProjection {
+            fdw_scan_tlist: tlist,
+            projection: ScanProjection::projected(attnos),
+            write_plan: SlotWritePlan::complete(),
             requirements,
-        });
+        })
     }
-
-    requirements.user_attnos.extend(attnos.iter().copied());
-    Ok(PlannedProjection {
-        fdw_scan_tlist: tlist,
-        projection: ScanProjection::projected(attnos),
-        write_plan: SlotWritePlan::complete(),
-        requirements,
-    })
 }
 
 /// # Safety

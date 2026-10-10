@@ -23,8 +23,9 @@ use super::explain::ForeignScanExplain;
 use super::filter::ForeignScanFilters;
 use super::path_builder::{build_path_variants, expr_list_from_ptrs};
 use super::pathkeys::ForeignPathKeys;
+use super::plan_filter::ForeignPlanFilters;
 use super::private::{DecodedPathPrivate, decode_path_private, encode_scan_private};
-use super::projection::{ScanProjectionPolicy, plan_projection};
+use super::projection::{ProjectionAnalysis, ScanProjectionPolicy};
 
 use super::parameterized::ParameterizedCandidates;
 
@@ -177,8 +178,6 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_paths<P: FdwScan>(
 
         emitted += unsafe {
             build_path_variants::<P>(
-                root,
-                baserel,
                 &relation,
                 &state.provider_state,
                 PathVariantKind::Plain,
@@ -213,8 +212,6 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_paths<P: FdwScan>(
             let filters = state.base_filters.merged(&ppi_filters);
             emitted += unsafe {
                 build_path_variants::<P>(
-                    root,
-                    baserel,
                     &relation,
                     &state.provider_state,
                     PathVariantKind::JoinParameterized,
@@ -407,17 +404,17 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
         } else {
             ForeignRowIdentityRequirement::None
         };
-        let plan_context = ForeignPlanContext::new(
+        let plan_context = ForeignPlanContext {
             relation,
-            &final_filters,
+            filters: ForeignPlanFilters::new(&final_filters),
             tlist,
             outer_plan,
-            path_private.kind,
+            kind: path_private.kind,
             required_outer,
-            &path_private.private_data,
-            &pathkeys,
+            path_private: &path_private.private_data,
+            pathkeys: &pathkeys,
             row_identity_requirement,
-        );
+        };
         let plan_spec = P::build_plan(&mut state.provider_state, &plan_context)?;
         unsafe {
             plan_spec
@@ -437,8 +434,7 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
         };
         let private_data = plan_spec.private_data;
         let planned_projection = unsafe {
-            plan_projection(
-                relation.relation_oid(),
+            ProjectionAnalysis::analyze(
                 relation.scan_relid(),
                 tlist,
                 path_target_exprs,
@@ -446,6 +442,9 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
                 residual_quals,
                 fdw_exprs,
                 recheck_quals,
+            )
+            .into_projection(
+                relation.relation_oid(),
                 projection_policy,
                 row_identity_requirement,
                 required_columns,
@@ -455,17 +454,12 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
         let encoded_explain =
             unsafe { ForeignScanExplain::build::<P>(&final_filters) }?.encode()?;
         let private_data = encode_scan_private::<P>(
-            P::NAME,
             relation.relation_oid(),
             &private_data,
-            &planned_projection.projection,
-            &planned_projection.write_plan,
+            &planned_projection,
             row_identity_requirement,
-            &planned_projection.requirements,
-            final_filters.planned.len(),
-            final_filters.bindings.len(),
-            encoded_filters.planned,
-            encoded_filters.bindings,
+            &final_filters,
+            &encoded_filters,
             encoded_explain,
         )?;
         let scan = unsafe {

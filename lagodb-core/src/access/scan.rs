@@ -3,16 +3,18 @@
 //! This module provides wrapper functions that bridge PostgreSQL's sequential
 //! scan callbacks with the AM-level scan facet and scan session implementation.
 
-use super::common::FfiContainer;
-use crate::api::{AmScanSession, ScanFlags, TableAccessMethod};
+mod descriptor;
+
+use crate::api::{AmResult, AmScanSession, ScanFlags, TableAccessMethod};
 use crate::batch::ScanBatchDriver;
-use crate::diag::{PgReportError, ReportableError};
+use crate::diag::ReportableError;
 use crate::handles::{
     AnalyzeReadStreamHandle, ItemPointer, OwnedScanKeys, ParallelTableScanDescHandle,
     RelationHandle, SampleScanStateHandle, ScanDirection, SnapshotHandle,
     TBMIterateResultHandle,
 };
-use crate::tuple::{Row, RowDatumCodec, SlotColumns};
+use crate::tuple::SlotColumns;
+pub(crate) use descriptor::TableAmScanDesc;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::prelude::*;
 use std::sync::OnceLock;
@@ -58,65 +60,6 @@ unsafe extern "C-unwind" fn copy_virtual_heap_tuple_with_tid(
     }
 }
 
-struct TableScanState<T> {
-    am_instance: T,
-    scan_keys: OwnedScanKeys,
-    row: Row,
-    tmp_ctx: pg_sys::MemoryContext,
-    /// Bound only if this scan uses one of the Row-returning callbacks. The
-    /// normal `scan_getnextslot` path may be slot-first and provider-physical.
-    row_codec: Option<RowDatumCodec>,
-}
-
-type TableAmScanDesc<T> = FfiContainer<pg_sys::TableScanDescData, TableScanState<T>>;
-
-impl<T> TableScanState<T> {
-    fn new(
-        am_instance: T,
-        scan_keys: OwnedScanKeys,
-        tmp_ctx: pg_sys::MemoryContext,
-    ) -> Self {
-        Self {
-            am_instance,
-            scan_keys,
-            row: Row::new(),
-            tmp_ctx,
-            row_codec: None,
-        }
-    }
-
-    unsafe fn reset_tmp_context(&mut self) {
-        unsafe { pg_sys::MemoryContextReset(self.tmp_ctx) };
-    }
-
-    unsafe fn write_row_to_slot(
-        &mut self,
-        slot: *mut pg_sys::TupleTableSlot,
-    ) -> Result<(), PgReportError> {
-        // Do not bind this at scan_begin: the ordinary scan_getnextslot path
-        // can fill the slot through a provider physical codec without ever
-        // materializing a semantic Row.
-        if self.row_codec.is_none() {
-            self.row_codec = Some(
-                // SAFETY: the executor passes an initialized slot whose tuple
-                // descriptor remains valid for this fetch callback.
-                unsafe { RowDatumCodec::from_slot(slot) }
-                    .map_err(PgReportError::from_domain_error)
-                    .report_unwrap(),
-            );
-        }
-        let mut columns = unsafe { SlotColumns::new(slot, self.tmp_ctx) };
-        unsafe {
-            columns.fill_from_row(
-                &mut self.row,
-                self.row_codec
-                    .as_ref()
-                    .expect("row codec initialized before row write"),
-            )
-        }
-    }
-}
-
 #[pg_guard]
 pub extern "C-unwind" fn slot_callbacks<A>(
     _rel: pg_sys::Relation,
@@ -139,79 +82,45 @@ pub extern "C-unwind" fn scan_begin<A>(
 where
     A: TableAccessMethod,
 {
-    unsafe {
-        // PostgreSQL may skip scan_end after ERROR, so the Rust session state
-        // is owned by this context's reset/delete callback.  The descriptor is
-        // allocated in the same context so the C wrapper and Rust state share
-        // one lifetime boundary.
-        const LIFECYCLE_CTX_NAME: &core::ffi::CStr = c"lagodb TableScan lifecycle";
-        let scan_desc = TableAmScanDesc::<A::ScanSession>::alloc(
-            pg_sys::CurrentMemoryContext,
-            LIFECYCLE_CTX_NAME,
-        );
-        // Copy the borrowed scan keys into a dispatcher-owned buffer once.
-        // From here on the AM only sees the owned set; this matches the
-        // PostgreSQL heap AM, which copies into rs_key in `initscan` and
-        // never re-reads the caller's borrowed pointer.
-        let scan_keys = OwnedScanKeys::copy_from_raw(key, nkeys);
+    // This is the sole PostgreSQL reporting boundary for scan initialization.
+    unsafe { begin_scan::<A>(rel, snapshot, nkeys, key, pscan, flags) }
+        .report_unwrap()
+}
 
-        // Convert raw C pointers to safe Handle types
-        let rel_handle = RelationHandle::from_raw(rel);
-        // PostgreSQL's table_beginscan_analyze() deliberately passes a null
-        // snapshot; all other scan entry points pass a live Snapshot.
+unsafe fn begin_scan<A: TableAccessMethod>(
+    rel: pg_sys::Relation,
+    snapshot: pg_sys::Snapshot,
+    nkeys: i32,
+    key: *mut pg_sys::ScanKeyData,
+    pscan: pg_sys::ParallelTableScanDesc,
+    flags: u32,
+) -> AmResult<pg_sys::TableScanDesc> {
+    // SAFETY: PG supplies live callback arguments. ANALYZE passes no snapshot;
+    // the parallel descriptor is absent for serial scans.
+    unsafe {
+        let keys = OwnedScanKeys::copy_from_raw(key, nkeys);
+        let relation = RelationHandle::from_raw(rel);
         let snapshot_handle =
             (!snapshot.is_null()).then(|| SnapshotHandle::from_raw(snapshot));
-        let pscan_handle = if pscan.is_null() {
-            None
-        } else {
-            Some(ParallelTableScanDescHandle::from_raw(pscan))
-        };
-
-        let instance = <A::ScanSession as AmScanSession>::new(
-            &rel_handle,
+        let parallel =
+            (!pscan.is_null()).then(|| ParallelTableScanDescHandle::from_raw(pscan));
+        let instance = A::ScanSession::new(
+            &relation,
             snapshot_handle.as_ref(),
-            pscan_handle.as_ref(),
+            parallel.as_ref(),
             ScanFlags::from_bits(flags),
-        )
-        .report_unwrap();
-
-        const TMP_CTX_NAME: &core::ffi::CStr = c"lagodb TableScan tmp";
-        let tmp_ctx = (*scan_desc).create_child_context(TMP_CTX_NAME);
-        // Move ownership of the keys into the FFI session container so that
-        // the AM's scan_begin sees the same buffer that scan_rescan will
-        // later mutate in place.
-        (*scan_desc).init_session(TableScanState::new(instance, scan_keys, tmp_ctx));
-
-        // Wire the PostgreSQL TableScanDescData up to point at the AM-owned
-        // key buffer (mirroring heap AM, where rs_key is allocated by the
-        // AM in `heap_beginscan`). Doing this *after* init_session means
-        // the descriptor's rs_key never transiently aliases the caller's
-        // borrowed pointer. The pointer remains valid for the lifetime of
-        // the FFI session, which is the lifecycle context that owns the
-        // descriptor itself. `rs_key_ptr` returns `NULL` when the buffer
-        // is empty, matching PG heap AM convention.
-        let session = (*scan_desc).session_mut();
-        let owned_keys = &mut session.scan_keys;
-        let nkeys = owned_keys.len() as core::ffi::c_int;
-        let rs_key = owned_keys.rs_key_ptr();
-        let base = (*scan_desc).base_mut();
-        base.rs_rd = rel;
-        base.rs_snapshot = snapshot;
-        base.rs_nkeys = nkeys;
-        base.rs_key = rs_key;
-        base.rs_flags = flags;
-        base.rs_parallel = pscan;
-
-        // Now drive the AM's scan_begin, with the schema-aware AM able to
-        // see the initial effective keys. Disjoint borrowing lets us hand
-        // out `&scan_keys` while `&mut am_instance` is in flight.
-        let session = (*scan_desc).session_mut();
-        session
-            .am_instance
-            .scan_begin(&session.scan_keys)
-            .report_unwrap();
-
-        scan_desc as pg_sys::TableScanDesc
+        )?;
+        let desc = TableAmScanDesc::<A::ScanSession>::create(
+            pg_sys::CurrentMemoryContext,
+            rel,
+            snapshot,
+            pscan,
+            flags,
+            keys,
+            instance,
+        );
+        (*desc).begin()?;
+        Ok(desc.cast())
     }
 }
 

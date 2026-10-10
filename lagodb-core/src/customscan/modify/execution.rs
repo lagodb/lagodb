@@ -200,6 +200,7 @@ impl<P: LagodbCustomModifyProvider> ResultRelationState<P> {
     // phase read for every INSERT callback.
     fn modify_state(
         &mut self,
+        command_id: pg_sys::CommandId,
     ) -> AmResult<&mut <P::AccessMethod as TableAccessMethod>::ModifyState> {
         if self.modify_state.is_none() {
             let context = match &self.access {
@@ -213,6 +214,7 @@ impl<P: LagodbCustomModifyProvider> ResultRelationState<P> {
                         self.query_state.clone(),
                         self.command,
                         self.actions,
+                        command_id,
                         context.clone(),
                     )
                 }
@@ -224,6 +226,7 @@ impl<P: LagodbCustomModifyProvider> ResultRelationState<P> {
                         self.command
                     },
                     ModifyActions::INSERT,
+                    command_id,
                 ),
             };
             self.create_modify_state(context)?;
@@ -268,7 +271,7 @@ impl<P: LagodbCustomModifyProvider> ResultRelationState<P> {
         self.ensure_ready()?;
         self.prepare_insert();
         let new = unsafe { TupleSlotRow::from_raw(new_slot) };
-        self.modify_state()?.insert_slot(new, context)
+        self.modify_state(context.cid)?.insert_slot(new, context)
     }
 
     pub(super) unsafe fn update(
@@ -281,7 +284,8 @@ impl<P: LagodbCustomModifyProvider> ResultRelationState<P> {
         let old = unsafe { TupleSlotRow::from_raw(old_slot) };
         let new = unsafe { TupleSlotRow::from_raw(new_slot) };
         self.ensure_ready()?;
-        self.modify_state()?.update_slot(row_id, old, new, context)
+        self.modify_state(context.cid)?
+            .update_slot(row_id, old, new, context)
     }
 
     pub(super) fn delete(
@@ -290,7 +294,7 @@ impl<P: LagodbCustomModifyProvider> ResultRelationState<P> {
         context: MutationDeleteContext<'_>,
     ) -> AmResult<MutationOutcome> {
         self.ensure_ready()?;
-        self.modify_state()?.delete_slot(row_id, context)
+        self.modify_state(context.cid)?.delete_slot(row_id, context)
     }
 
     pub(super) unsafe fn preserve_trigger_row(
@@ -517,6 +521,15 @@ impl<P: LagodbCustomModifyProvider> ModifyNodeState<P> {
             relation.abort();
         }
         self.phase = RelationPhase::Aborted;
+    }
+
+    /// Exceptional teardown, distinct from a normal ExecEnd of this node.
+    pub(super) fn cleanup_after_error(&mut self) {
+        // AFTER triggers can fail after finish() published the writes. The
+        // shared query's rows must be detached regardless of the node phase,
+        // and before provider abort, which can itself fail during cleanup.
+        self.query_state.abandon_trigger_rows();
+        self.abort();
     }
 
     pub(super) fn is_finished(&self) -> bool {

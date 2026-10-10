@@ -6,7 +6,7 @@ use core::ptr;
 
 use pgrx::pg_sys;
 
-use crate::expr::pushdown::{FilterPlanSummary, NegotiatedFilterSet, PathFilterSet};
+use crate::expr::pushdown::{FilterPlanSummary, PathFilterSet};
 use crate::expr::relation::PlanRelationResolver;
 
 use super::super::row_identity::ForeignRowIdentityRequirement;
@@ -380,6 +380,10 @@ impl<'a> ForeignPathContext<'a> {
         }
     }
 
+    pub(super) fn path_filters(&self) -> &PathFilterSet {
+        self.pushdown
+    }
+
     #[inline]
     pub fn relation(&self) -> &ForeignRelContext<'a> {
         &self.relation
@@ -535,42 +539,18 @@ impl<D> ForeignPathSpec<D> {
 
 /// Final plan callback context.
 pub struct ForeignPlanContext<'a, P: super::contract::FdwScan> {
-    relation: ForeignRelContext<'a>,
-    filters: ForeignPlanFilters<'a, P>,
-    tlist: *mut pg_sys::List,
-    outer_plan: *mut pg_sys::Plan,
-    kind: PathVariantKind,
-    required_outer: Relids,
-    path_private: &'a P::PrivateData,
-    pathkeys: &'a ForeignPathKeys,
-    row_identity_requirement: ForeignRowIdentityRequirement,
+    pub(super) relation: ForeignRelContext<'a>,
+    pub(super) filters: ForeignPlanFilters<'a, P>,
+    pub(super) tlist: *mut pg_sys::List,
+    pub(super) outer_plan: *mut pg_sys::Plan,
+    pub(super) kind: PathVariantKind,
+    pub(super) required_outer: Relids,
+    pub(super) path_private: &'a P::PrivateData,
+    pub(super) pathkeys: &'a ForeignPathKeys,
+    pub(super) row_identity_requirement: ForeignRowIdentityRequirement,
 }
 
 impl<'a, P: super::contract::FdwScan> ForeignPlanContext<'a, P> {
-    pub(crate) fn new(
-        relation: ForeignRelContext<'a>,
-        filters: &'a NegotiatedFilterSet<P::PlannedPredicate>,
-        tlist: *mut pg_sys::List,
-        outer_plan: *mut pg_sys::Plan,
-        kind: PathVariantKind,
-        required_outer: Relids,
-        path_private: &'a P::PrivateData,
-        pathkeys: &'a ForeignPathKeys,
-        row_identity_requirement: ForeignRowIdentityRequirement,
-    ) -> Self {
-        Self {
-            relation,
-            filters: ForeignPlanFilters::new(filters),
-            tlist,
-            outer_plan,
-            kind,
-            required_outer,
-            path_private,
-            pathkeys,
-            row_identity_requirement,
-        }
-    }
-
     #[inline]
     pub fn relation(&self) -> &ForeignRelContext<'a> {
         &self.relation

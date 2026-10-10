@@ -15,6 +15,7 @@ use super::error::ForeignScanError;
 /// `root` and `baserel` must be live planner-owned nodes from the current
 /// `GetForeignPaths` callback.  `pathkeys`, `required_outer`, and
 /// `fdw_private` must use PostgreSQL's planner-context ownership rules.
+#[allow(clippy::too_many_arguments)] // Thin adapter for PG create_foreignscan_path.
 pub(crate) unsafe fn create_foreign_path(
     root: *mut pg_sys::PlannerInfo,
     baserel: *mut pg_sys::RelOptInfo,
