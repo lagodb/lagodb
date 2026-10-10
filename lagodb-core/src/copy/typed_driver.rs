@@ -5,6 +5,7 @@ use std::panic::AssertUnwindSafe;
 
 use pgrx::{PgTryBuilder, pg_sys};
 
+use super::from_execution::CopyFromExecution;
 use crate::diag::PgError;
 
 use super::context::{
@@ -45,19 +46,14 @@ impl<'statement, 'parse> TypedCopyFromSpec<'statement, 'parse> {
 }
 
 pub struct TypedCopyFromDriver<'statement, 'parse> {
-    state: pg_sys::CopyFromState,
+    execution: CopyFromExecution,
     target_route: CopyTargetRoute,
-    state_ended: bool,
     _preparation: CopyFromPreparation<'statement, 'parse>,
     _statement: PhantomData<&'statement pg_sys::CopyStmt>,
     _parse: PhantomData<&'parse CopyParseState>,
 }
 
 impl<'statement, 'parse> TypedCopyFromDriver<'statement, 'parse> {
-    fn end_state(state: pg_sys::CopyFromState) {
-        unsafe { pg::CopyBridge::end_routed_from(state) }
-    }
-
     /// Validates options and prepares the target before provider input is opened.
     pub fn begin(
         spec: TypedCopyFromSpec<'statement, 'parse>,
@@ -82,9 +78,8 @@ impl<'statement, 'parse> TypedCopyFromDriver<'statement, 'parse> {
             .execute()
         }?;
         Ok(Self {
-            state,
+            execution: CopyFromExecution::new(state),
             target_route,
-            state_ended: false,
             _preparation: spec.preparation,
             _statement: PhantomData,
             _parse: PhantomData,
@@ -99,7 +94,8 @@ impl<'statement, 'parse> TypedCopyFromDriver<'statement, 'parse> {
             &CopyColumnLayout,
         ) -> Result<Box<dyn CopyDatumSource>, CopyError>,
     ) -> Result<u64, CopyError> {
-        let state = self.state;
+        let state = self.execution.state;
+        let bridge = self.execution.bridge();
         // SAFETY: begin prepared a live COPY state; its descriptor and attnums
         // remain valid until this driver ends the state.
         let layout = unsafe {
@@ -120,32 +116,14 @@ impl<'statement, 'parse> TypedCopyFromDriver<'statement, 'parse> {
                     source_callback(),
                     source_context,
                     provider_owned_partitioned_table,
+                    &bridge,
                 ))
             }))
             .catch_others(|error| Err(PgError::from_caught(error)))
             .execute()
         };
 
-        self.state_ended = true;
-        match result {
-            Ok(processed) => {
-                Self::end_state(state);
-                source_guard.finish()?;
-                Ok(processed)
-            }
-            Err(error) => {
-                Self::end_state(state);
-                Err(error.into())
-            }
-        }
-    }
-}
-
-impl Drop for TypedCopyFromDriver<'_, '_> {
-    fn drop(&mut self) {
-        if !self.state_ended {
-            Self::end_state(self.state);
-        }
+        self.execution.finish(result, || source_guard.finish())
     }
 }
 

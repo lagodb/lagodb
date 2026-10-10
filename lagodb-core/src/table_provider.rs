@@ -17,7 +17,7 @@ use crate::hooks::{HookRegistrationError, freeze_hooks_with_provider};
 use crate::runtime_api::{
     CallbackErrorReport, MaintenanceReport, MaintenanceRequest, MaintenanceStats,
     ProviderIdentity, RuntimeApiError, RuntimeClient, RuntimeRegistrationError,
-    TableProvider,
+    TableCopyCallbacks, TableProvider,
 };
 use crate::table_maintenance::{
     TableMaintenanceCommandTime, TableMaintenanceError, TableMaintenanceReport,
@@ -44,6 +44,11 @@ pub trait LagodbTableProvider: 'static {
     const OWNS_PARTITIONED_TABLE: bool = false;
 
     fn access_method_oid() -> Option<pg_sys::Oid>;
+
+    /// Explicit COPY sessions; None retains native TableAM insertion.
+    fn copy_callbacks() -> Option<&'static TableCopyCallbacks> {
+        None
+    }
 
     /// Execute TRUNCATE for a provider-owned partitioned table.
     ///
@@ -203,6 +208,7 @@ where
         access_method_name: P::ACCESS_METHOD_NAME.as_ptr(),
         owns_partitioned_table: P::OWNS_PARTITIONED_TABLE,
         supports_analyze: P::SUPPORTS_ANALYZE,
+        copy: P::copy_callbacks().map_or(std::ptr::null(), |callbacks| callbacks),
         access_method_oid: provider_access_method_oid::<P>,
         truncate_partitioned_table: provider_truncate_partitioned_table::<P>,
         execute_maintenance: provider_execute_maintenance::<P>,

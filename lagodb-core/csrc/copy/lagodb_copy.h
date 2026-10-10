@@ -5,6 +5,7 @@
 
 #include "commands/copy.h"
 #include "lagodb_relation.h"
+#include "lagodb_copy_write.h"
 
 /* Exact-build counterpart of Rust's CopyEndpoint. */
 typedef enum LagodbCopyEndpoint
@@ -107,7 +108,8 @@ uint64		lagodb_execute_routed_copy_from(
 											CopyFromState state,
 											lagodb_typed_copy_source_cb typed_source,
 											void *typed_source_context,
-											bool provider_owned_partitioned_table);
+											bool provider_owned_partitioned_table,
+                                            const LagodbCopyWriteBridge *write_bridge);
 void		lagodb_end_routed_copy_from(CopyFromState state);
 TupleDesc	lagodb_routed_copy_from_tuple_desc(CopyFromState state);
 List	   *lagodb_routed_copy_from_attnums(CopyFromState state);

@@ -11,6 +11,7 @@ use std::ptr::NonNull;
 use pgrx::pg_sys::{self, ffi::pg_guard_ffi_boundary};
 
 use super::CopyEndpoint;
+use super::write_bridge::CopyWriteBridge;
 
 pub(crate) type TypedCopySourceCallback =
     unsafe extern "C-unwind" fn(
@@ -98,6 +99,7 @@ unsafe extern "C-unwind" {
         typed_source: Option<TypedCopySourceCallback>,
         typed_source_context: *mut c_void,
         provider_owned_partitioned_table: bool,
+        write_bridge: *const CopyWriteBridge,
     ) -> u64;
     fn lagodb_end_routed_copy_from(state: pg_sys::CopyFromState);
     fn lagodb_routed_copy_from_tuple_desc(
@@ -244,6 +246,8 @@ impl CopyBridge {
         unsafe { pg_guard_ffi_boundary(|| lagodb_end_copy_datum_coercion(state)) }
     }
 
+    // Keep the argument mapping to lagodb_begin_routed_copy_from explicit.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn begin_routed_from(
         pstate: *mut pg_sys::ParseState,
         relation: pg_sys::Relation,
@@ -275,6 +279,7 @@ impl CopyBridge {
     pub(crate) unsafe fn execute_routed_from_bytes(
         state: pg_sys::CopyFromState,
         provider_owned_partitioned_table: bool,
+        write_bridge: &CopyWriteBridge,
     ) -> u64 {
         unsafe {
             pg_guard_ffi_boundary(|| {
@@ -283,6 +288,7 @@ impl CopyBridge {
                     None,
                     std::ptr::null_mut(),
                     provider_owned_partitioned_table,
+                    write_bridge,
                 )
             })
         }
@@ -293,6 +299,7 @@ impl CopyBridge {
         typed_source: TypedCopySourceCallback,
         typed_source_context: NonNull<c_void>,
         provider_owned_partitioned_table: bool,
+        write_bridge: &CopyWriteBridge,
     ) -> u64 {
         unsafe {
             pg_guard_ffi_boundary(|| {
@@ -301,6 +308,7 @@ impl CopyBridge {
                     Some(typed_source),
                     typed_source_context.as_ptr(),
                     provider_owned_partitioned_table,
+                    write_bridge,
                 )
             })
         }
@@ -322,6 +330,8 @@ impl CopyBridge {
         unsafe { pg_guard_ffi_boundary(|| lagodb_routed_copy_from_attnums(state)) }
     }
 
+    // Keep the argument mapping to lagodb_begin_routed_copy_to explicit.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn begin_routed_to(
         pstate: *mut pg_sys::ParseState,
         relation: pg_sys::Relation,
@@ -477,6 +487,8 @@ impl CopyBridge {
         }
     }
 
+    // Thin adapter for lagodb_begin_copy_from, matching PG BeginCopyFrom.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn begin_from(
         pstate: *mut pg_sys::ParseState,
         relation: pg_sys::Relation,

@@ -109,6 +109,7 @@ impl UtilityConsumerCallbacks {
 }
 
 #[pgrx::pg_guard]
+#[allow(clippy::too_many_arguments)] // RoutedUtilityPredicate: context + PG ProcessUtility inputs.
 unsafe extern "C-unwind" fn copy_consumer_matches(
     context: *mut c_void,
     pstmt: *mut pg_sys::PlannedStmt,
@@ -156,6 +157,7 @@ unsafe extern "C-unwind" fn copy_consumer_matches(
 }
 
 #[pgrx::pg_guard]
+#[allow(clippy::too_many_arguments)] // RoutedUtilityConsumer: context + PG ProcessUtility inputs.
 unsafe extern "C-unwind" fn invoke_copy_consumer(
     context: *mut c_void,
     pstmt: *mut pg_sys::PlannedStmt,

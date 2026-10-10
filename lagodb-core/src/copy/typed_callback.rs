@@ -179,6 +179,7 @@ pub(super) const fn destination_callback() -> super::pg::TypedCopyDestinationCal
 }
 
 #[pg_guard]
+#[allow(clippy::too_many_arguments)] // lagodb_typed_copy_source_cb in lagodb_copy.h.
 unsafe extern "C-unwind" fn typed_source_callback(
     context: *mut c_void,
     values: *mut pg_sys::Datum,

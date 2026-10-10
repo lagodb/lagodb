@@ -1,6 +1,6 @@
 //! PostgreSQL hooks framework
 //!
-//! This module provides safe wrappers around various PostgreSQL hooks:
+//! This module provides safe Rust interfaces to various PostgreSQL hooks:
 //! - `utility_hook`: ProcessUtility hook for DDL statements
 //! - `object_access_hook`: Object access hook for permission and access control
 
@@ -36,9 +36,9 @@ pub use object_access_hook::{
 };
 pub use utility_consumer::{CopyConsumer, CopyRoute, register_copy_consumer};
 pub use utility_hook::{
-    AlterDatabaseStmtNode, AlterTableMoveAllStmtNode, AlterTableSpaceOptionsStmtNode,
-    AlterTableStmtNode, AlterUserMappingStmtNode, CopyStmtNode,
-    CreateForeignTableStmtNode, CreateStmtNode, CreateTableAsStmtNode,
+    AlterDatabaseStmtNode, AlterEnumStmtNode, AlterTableMoveAllStmtNode,
+    AlterTableSpaceOptionsStmtNode, AlterTableStmtNode, AlterUserMappingStmtNode,
+    CopyStmtNode, CreateForeignTableStmtNode, CreateStmtNode, CreateTableAsStmtNode,
     CreateTableSpaceStmtNode, CreateUserMappingStmtNode, CreatedbStmtNode,
     PostUtilityContext, PreUtilityContext, RenameStmtNode, UtilityHook, UtilityNode,
     UtilityStmtNode, VacuumStmtNode, register_utility_hook,

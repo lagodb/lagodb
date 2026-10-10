@@ -69,8 +69,8 @@ impl TableProviderRegistry {
                 unsafe { provider_access_method_name(existing_descriptor) }
                     .expect("validated access-method name");
             if existing_name == name {
-                let same_descriptor = existing_access_method_name
-                    == access_method_name
+                let same_descriptor = existing_descriptor.copy == descriptor.copy
+                    && existing_access_method_name == access_method_name
                     && existing_descriptor.owns_partitioned_table
                         == descriptor.owns_partitioned_table
                     && existing_descriptor.supports_analyze

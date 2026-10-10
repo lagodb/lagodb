@@ -96,6 +96,9 @@ typedef struct CopyMultiInsertBuffer
 {
 	TupleTableSlot *slots[MAX_BUFFERED_TUPLES]; /* Array to store tuples */
 	ResultRelInfo *resultRelInfo;	/* ResultRelInfo for 'relid' */
+	/* LAGODB BEGIN: borrowed binding survives buffer eviction. */
+	void       *write_binding;
+	/* LAGODB END */
 	BulkInsertState bistate;	/* BulkInsertState for this rel if plain
 								 * table; NULL if foreign table */
 	int			nused;			/* number of 'slots' containing tuples */
@@ -126,6 +129,7 @@ typedef struct CopyMultiInsertInfo
 	 * relcache object.
 	 */
 	const TableAmRoutine *partitioned_table_tableam;
+	const LagodbCopyWriteBridge *write_bridge;
 	/* LAGODB END */
 } CopyMultiInsertInfo;
 
@@ -136,11 +140,14 @@ static void ClosePipeFromProgram(CopyFromState cstate);
 /* LAGODB BEGIN: partitioned table table-AM dispatch. */
 static inline void
 LagodbTableTupleInsert(const TableAmRoutine *partitioned_table_tableam,
+                           const LagodbCopyWriteBridge *write_bridge, void *write_binding,
 					   Relation relation, TupleTableSlot *slot,
 					   CommandId cid, int options,
 					   BulkInsertState bistate)
 {
-	if (partitioned_table_tableam != NULL)
+	if (write_binding != NULL)
+		write_bridge->insert(write_binding, slot, options);
+	else if (partitioned_table_tableam != NULL)
 		partitioned_table_tableam->tuple_insert(relation, slot, cid, options,
 												bistate);
 	else
@@ -149,11 +156,14 @@ LagodbTableTupleInsert(const TableAmRoutine *partitioned_table_tableam,
 
 static inline void
 LagodbTableMultiInsert(const TableAmRoutine *partitioned_table_tableam,
+                           const LagodbCopyWriteBridge *write_bridge, void *write_binding,
 					   Relation relation, TupleTableSlot **slots,
 					   int nslots, CommandId cid, int options,
 					   BulkInsertState bistate)
 {
-	if (partitioned_table_tableam != NULL)
+	if (write_binding != NULL)
+		write_bridge->insert_batch(write_binding, slots, nslots, options);
+	else if (partitioned_table_tableam != NULL)
 		partitioned_table_tableam->multi_insert(relation, slots, nslots, cid,
 												options, bistate);
 	else
@@ -162,9 +172,12 @@ LagodbTableMultiInsert(const TableAmRoutine *partitioned_table_tableam,
 
 static inline void
 LagodbTableFinishBulkInsert(const TableAmRoutine *partitioned_table_tableam,
+                           const LagodbCopyWriteBridge *write_bridge, void *write_binding,
 							Relation relation, int options)
 {
-	if (partitioned_table_tableam != NULL)
+	if (write_binding != NULL)
+		write_bridge->finish_bulk(write_binding, options);
+	else if (partitioned_table_tableam != NULL)
 	{
 		if (partitioned_table_tableam->finish_bulk_insert != NULL)
 			partitioned_table_tableam->finish_bulk_insert(relation, options);
@@ -336,6 +349,12 @@ CopyMultiInsertInfoSetupBuffer(CopyMultiInsertInfo *miinfo,
 	CopyMultiInsertBuffer *buffer;
 
 	buffer = CopyMultiInsertBufferInit(rri);
+	/* LAGODB BEGIN: resolve once when a buffer is bound to its relation. */
+	buffer->write_binding = rri->ri_FdwRoutine == NULL
+		? miinfo->write_bridge->bind(miinfo->write_bridge->context,
+									   rri->ri_RelationDesc, miinfo->mycid)
+		: NULL;
+	/* LAGODB END */
 
 	/* Setup back-link so we can easily find this buffer again */
 	rri->ri_CopyMultiInsertBuffer = buffer;
@@ -353,7 +372,8 @@ static void
 CopyMultiInsertInfoInit(CopyMultiInsertInfo *miinfo, ResultRelInfo *rri,
 						CopyFromState cstate, EState *estate, CommandId mycid,
 						int ti_options,
-						const TableAmRoutine *partitioned_table_tableam)
+						const TableAmRoutine *partitioned_table_tableam,
+                        const LagodbCopyWriteBridge *write_bridge)
 {
 	miinfo->multiInsertBuffers = NIL;
 	miinfo->bufferedTuples = 0;
@@ -363,6 +383,7 @@ CopyMultiInsertInfoInit(CopyMultiInsertInfo *miinfo, ResultRelInfo *rri,
 	miinfo->mycid = mycid;
 	miinfo->ti_options = ti_options;
 	miinfo->partitioned_table_tableam = partitioned_table_tableam;
+	miinfo->write_bridge = write_bridge;
 
 	/*
 	 * Only setup the buffer when not dealing with a partitioned table.
@@ -508,6 +529,7 @@ CopyMultiInsertBufferFlush(CopyMultiInsertInfo *miinfo,
 		 */
 		oldcontext = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
 		LagodbTableMultiInsert(miinfo->partitioned_table_tableam,
+                               miinfo->write_bridge, buffer->write_binding,
 							   resultRelInfo->ri_RelationDesc,
 							   slots,
 							   nused,
@@ -600,6 +622,7 @@ CopyMultiInsertBufferCleanup(CopyMultiInsertInfo *miinfo,
 
 	if (resultRelInfo->ri_FdwRoutine == NULL)
 		LagodbTableFinishBulkInsert(miinfo->partitioned_table_tableam,
+                                     miinfo->write_bridge, buffer->write_binding,
 									resultRelInfo->ri_RelationDesc,
 									miinfo->ti_options);
 
@@ -730,11 +753,13 @@ static uint64
 LagodbCopyFromExecutor(CopyFromState cstate,
 					   lagodb_typed_copy_source_cb typed_source,
 					   void *typed_source_context,
-					   bool provider_owned_partitioned_table)
+					   bool provider_owned_partitioned_table,
+                       const LagodbCopyWriteBridge *write_bridge)
 {
 	ResultRelInfo *resultRelInfo;
 	ResultRelInfo *target_resultRelInfo;
 	ResultRelInfo *prevResultRelInfo = NULL;
+	void       *write_binding = NULL;
 	EState	   *estate = CreateExecutorState(); /* for ExecConstraints() */
 	ModifyTableState *mtstate;
 	ExprContext *econtext;
@@ -1033,8 +1058,15 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 
 		CopyMultiInsertInfoInit(&multiInsertInfo, resultRelInfo, cstate,
 								estate, mycid, ti_options,
-								partitioned_table_tableam);
+								partitioned_table_tableam, write_bridge);
 	}
+
+	/* LAGODB BEGIN: bind once for the non-partitioned single-row path. */
+	if (insertMethod == CIM_SINGLE && proute == NULL &&
+		resultRelInfo->ri_FdwRoutine == NULL)
+		write_binding = write_bridge->bind(write_bridge->context,
+										   resultRelInfo->ri_RelationDesc, mycid);
+	/* LAGODB END */
 
 	/*
 	 * If not using batch mode (which allocates slots as needed) set up a
@@ -1310,6 +1342,14 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 											 &processed);
 				}
 
+				/* LAGODB BEGIN: batch buffers retain their own binding. */
+				if (!leafpart_use_multi_insert)
+					write_binding = resultRelInfo->ri_FdwRoutine == NULL
+						? write_bridge->bind(write_bridge->context,
+											 resultRelInfo->ri_RelationDesc, mycid)
+						: NULL;
+				/* LAGODB END */
+
 				if (bistate != NULL)
 					ReleaseBulkInsertStatePin(bistate);
 				prevResultRelInfo = resultRelInfo;
@@ -1481,6 +1521,7 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 					{
 						/* OK, store the tuple and create index entries for it */
 						LagodbTableTupleInsert(partitioned_table_tableam,
+                                               write_bridge, write_binding,
 											   resultRelInfo->ri_RelationDesc,
 											   myslot, mycid, ti_options, bistate);
 
@@ -1536,6 +1577,10 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 		FreeBulkInsertState(bistate);
 
 	MemoryContextSwitchTo(oldcontext);
+
+	/* LAGODB BEGIN: publish all AM writes; retain rows through input shutdown. */
+	write_bridge->publish(write_bridge->context);
+	/* LAGODB END */
 
 	/* Execute AFTER STATEMENT insertion triggers */
 	ExecASInsertTriggers(estate, target_resultRelInfo, cstate->transition_capture);
@@ -2049,7 +2094,8 @@ uint64
 lagodb_execute_routed_copy_from(CopyFromState state,
 								lagodb_typed_copy_source_cb typed_source,
 								void *typed_source_context,
-								bool provider_owned_partitioned_table)
+								bool provider_owned_partitioned_table,
+                       const LagodbCopyWriteBridge *write_bridge)
 {
 	/*
 	 * Provider byte input is now open and its callback is active. Preserve PG's
@@ -2065,7 +2111,7 @@ lagodb_execute_routed_copy_from(CopyFromState state,
 	}
 
 	return LagodbCopyFromExecutor(state, typed_source, typed_source_context,
-								  provider_owned_partitioned_table);
+								  provider_owned_partitioned_table, write_bridge);
 }
 
 void

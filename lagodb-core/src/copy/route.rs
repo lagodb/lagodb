@@ -29,6 +29,18 @@ impl<'statement> CopyTargetProbe<'statement> {
         }
     }
 
+    /// Standard FROM fallback for explicit AM writes. Partitioned targets
+    /// qualify only when their provider owns the root as a logical table.
+    pub fn requires_write_bridge(&self) -> Result<bool, CopyError> {
+        let Some(target) = self.find() else {
+            return Ok(false);
+        };
+        CopyTargetRoute::requires_write_bridge(
+            target.relkind() as u8,
+            target.access_method_oid(),
+        )
+    }
+
     /// Find current catalog identity without opening the target relation.
     ///
     /// Catalog failures and namespace-hook errors propagate to the utility
@@ -66,20 +78,6 @@ impl<'statement> CopyTargetProbe<'statement> {
     }
 }
 
-/// COPY FROM preparation bound to the claiming AM's partitioned table.
-///
-/// Constructed only by [`CopyFromPreparation::into_partitioned_table`], after
-/// PostgreSQL has acquired the execution lock and validated the command.
-pub struct PartitionedTableCopyFromPreparation<'statement, 'parse> {
-    inner: CopyFromPreparation<'statement, 'parse>,
-}
-
-impl<'statement, 'parse> PartitionedTableCopyFromPreparation<'statement, 'parse> {
-    pub(super) fn into_preparation(self) -> CopyFromPreparation<'statement, 'parse> {
-        self.inner
-    }
-}
-
 /// COPY TO preparation bound to the claiming AM's partitioned table.
 ///
 /// RLS query-mode exports retain the same target binding and execution lock.
@@ -93,22 +91,23 @@ impl<'statement, 'parse> PartitionedTableCopyToPreparation<'statement, 'parse> {
     }
 }
 
-impl<'statement, 'parse> CopyFromPreparation<'statement, 'parse> {
-    /// Bind the actual locked target to the AM that claimed COPY admission.
-    ///
-    /// A mismatching target is rejected before driver/source I/O. The probe's
-    /// OID is intentionally not used: PG preparation resolves the name again.
-    /// `None` rejects the target when the claiming AM no longer exists.
-    pub fn into_partitioned_table(
-        self,
-        access_method: Option<pg_sys::Oid>,
-    ) -> Result<PartitionedTableCopyFromPreparation<'statement, 'parse>, CopyError>
-    {
-        // SAFETY: preparation retains this execution-locked relation.
+impl CopyFromPreparation<'_, '_> {
+    /// Recheck the shared FROM claim against PostgreSQL's execution-locked target.
+    /// A positive probe is not authority to execute an unrelated replacement.
+    pub fn require_write_bridge(&self) -> Result<(), CopyError> {
         let relation = unsafe { RelationHandle::from_raw(self.relation()) };
-        self.target_route()
-            .require_partitioned_table(relation.access_method_oid(), access_method)?;
-        Ok(PartitionedTableCopyFromPreparation { inner: self })
+        if CopyTargetRoute::requires_write_bridge(
+            relation.relkind() as u8,
+            relation.access_method_oid(),
+        )? {
+            Ok(())
+        } else {
+            Err(PgReportError::from_message(
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "COPY target no longer matches the claimed table route",
+            )
+            .into())
+        }
     }
 }
 
@@ -143,6 +142,26 @@ pub(crate) enum CopyTargetRoute {
 }
 
 impl CopyTargetRoute {
+    fn requires_write_bridge(
+        relkind: u8,
+        access_method: pg_sys::Oid,
+    ) -> Result<bool, CopyError> {
+        if relkind != pg_sys::RELKIND_RELATION
+            && relkind != pg_sys::RELKIND_PARTITIONED_TABLE
+        {
+            return Ok(false);
+        }
+        Ok(
+            TableProviderRouter::provider_for_am(access_method)?.is_some_and(
+                |provider| {
+                    !provider.copy.is_null()
+                        && (relkind == pg_sys::RELKIND_RELATION
+                            || provider.owns_partitioned_table)
+                },
+            ),
+        )
+    }
+
     /// Resolve target ownership once before entering the executor loop.
     ///
     /// # Safety

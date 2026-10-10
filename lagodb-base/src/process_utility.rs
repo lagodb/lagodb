@@ -16,6 +16,7 @@ use crate::descriptor_registry::{
     DescriptorNode, DescriptorRegistry, DescriptorSnapshot,
 };
 use lagodb_core::diag::{PgReportError, ReportableError};
+use lagodb_core::hooks::{HookError, UtilityHookPhase};
 use lagodb_core::runtime_api::UtilityHookDescriptor;
 use lagodb_core::table_maintenance::TableMaintenanceRouter;
 use pgrx::{pg_guard, pg_sys};
@@ -485,6 +486,20 @@ unsafe extern "C-unwind" fn process_utility_router(
             // and the callback arguments remain live for this invocation.
             consumer.consume(consumer_args).report_unwrap();
         }
+        let copy_consumed =
+            if final_tag == pg_sys::NodeTag::T_CopyStmt && !consumer_consumed {
+                copy_route::try_from(args)
+                    .map_err(|error| {
+                        HookError::from_copy_error(error).with_utility_context(
+                            "CopyFromRouter",
+                            UtilityHookPhase::Consume,
+                            pg_sys::NodeTag::T_CopyStmt,
+                        )
+                    })
+                    .report_unwrap()
+            } else {
+                false
+            };
         let is_maintenance = final_tag == pg_sys::NodeTag::T_VacuumStmt;
         let maintenance_consumed = if is_maintenance {
             MaintenanceCommandScope::execute(args)
@@ -497,7 +512,18 @@ unsafe extern "C-unwind" fn process_utility_router(
         } else {
             false
         };
-        let consumed = consumer_consumed || maintenance_consumed || truncate_consumed;
+        let consumed = consumer_consumed
+            || copy_consumed
+            || maintenance_consumed
+            || truncate_consumed;
+        // Intentionally do not delegate consumed COPY commands to the captured
+        // parent ProcessUtility hook: the format consumer or shared AM fallback
+        // has already executed them, and delegation would execute them again.
+        // Downstream hooks therefore do not observe these commands; outer hooks
+        // that called this router can still observe them. This is an accepted
+        // extension-composition boundary, including ordinary Iceberg COPY FROM.
+        // Unclaimed native COPY retains parent delegation, and LagoDB's own
+        // post-hooks still run below for successfully consumed commands.
         // Maintenance's C scope already performed parent fallback while its
         // recursion state was active. Other utility routes still delegate here.
         if !consumed && !is_maintenance {
@@ -516,12 +542,6 @@ unsafe extern "C-unwind" fn process_utility_router(
                     original_node,
                 );
             });
-        }
-        if let Some(policy) = tablespace_policy.as_mut() {
-            policy
-                .complete()
-                .map_err(PgReportError::from_domain_error)
-                .report_unwrap();
         }
     }
 }

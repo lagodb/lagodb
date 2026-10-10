@@ -1,8 +1,8 @@
-//! PostgreSQL-format COPY routing for Iceberg partitioned tables.
+//! PostgreSQL-format COPY TO routing for Iceberg partitioned tables.
 
 use lagodb_core::copy::{
     CopyCompletion, CopyContext, CopyEndpoint, CopyError, CopyTargetProbe,
-    RoutedCopyFromDriver, RoutedCopyToDriver,
+    RoutedCopyToDriver,
 };
 use lagodb_core::hooks::{CopyConsumer, CopyRoute, register_copy_consumer};
 use pgrx::pg_sys;
@@ -27,10 +27,13 @@ impl CopyConsumer for PartitionedTableCopyConsumer {
     }
 
     fn route(&self, context: &CopyContext<'_>) -> Result<CopyRoute, CopyError> {
-        // This consumer supplies PostgreSQL-format I/O for managed tables.
+        // FROM belongs to the shared runtime fallback. This consumer supplies
+        // PostgreSQL-format exports for provider-owned partitioned tables.
         // URI I/O requires a format consumer; local file format claims are
         // resolved by the runtime before this table fallback.
-        if context.statement().endpoint() == CopyEndpoint::ExternalUri {
+        if context.statement().is_from()
+            || context.statement().endpoint() == CopyEndpoint::ExternalUri
+        {
             return Ok(CopyRoute::PassThrough);
         }
         Ok(if Self::owns_target(context) {
@@ -45,31 +48,13 @@ impl CopyConsumer for PartitionedTableCopyConsumer {
         context: &mut CopyContext<'_>,
     ) -> Result<CopyCompletion, CopyError> {
         let parse_state = context.parse_state();
-        let processed = if context.statement().is_from() {
-            let preparation = context.prepare_from(&parse_state)?;
-            let preparation =
-                preparation.into_partitioned_table(IcebergAccessMethod::oid())?;
-            unsafe {
-                RoutedCopyFromDriver::begin(
-                    context.statement(),
-                    &parse_state,
-                    preparation,
-                )?
-            }
-            .execute()?
-        } else {
-            let preparation = context.prepare_to(&parse_state)?;
-            let preparation =
-                preparation.into_partitioned_table(IcebergAccessMethod::oid())?;
-            unsafe {
-                RoutedCopyToDriver::begin(
-                    context.statement(),
-                    &parse_state,
-                    preparation,
-                )?
-            }
-            .execute()?
-        };
+        let preparation = context.prepare_to(&parse_state)?;
+        let preparation =
+            preparation.into_partitioned_table(IcebergAccessMethod::oid())?;
+        let processed = unsafe {
+            RoutedCopyToDriver::begin(context.statement(), &parse_state, preparation)?
+        }
+        .execute()?;
         parse_state.dispose()?;
         Ok(CopyCompletion::new(processed))
     }

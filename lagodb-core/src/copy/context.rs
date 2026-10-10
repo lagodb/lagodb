@@ -304,7 +304,9 @@ impl<'a> CopyContext<'a> {
     ///
     /// `pstmt` and every callback argument must be the live values PostgreSQL
     /// supplied to `ProcessUtility`. The utility node must be `T_CopyStmt`.
-    pub(crate) unsafe fn from_raw(
+    // Centralize the unsafe conversion of PG ProcessUtility inputs to COPY context.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn from_raw(
         pstmt: *mut pg_sys::PlannedStmt,
         query_string: *const c_char,
         read_only_tree: bool,
@@ -338,7 +340,8 @@ impl<'a> CopyContext<'a> {
         self.process
     }
 
-    pub(crate) fn complete(&mut self, completion: CopyCompletion) {
+    /// Publish the COPY command tag after the consumer or runtime driver succeeds.
+    pub fn complete(&mut self, completion: CopyCompletion) {
         self.process.set_completion(completion.processed());
     }
 

@@ -36,6 +36,11 @@ macro_rules! impl_utility_stmt_node {
 
 impl_utility_stmt_node!(CopyStmtNode, pg_sys::CopyStmt, pg_sys::NodeTag::T_CopyStmt);
 impl_utility_stmt_node!(
+    AlterEnumStmtNode,
+    pg_sys::AlterEnumStmt,
+    pg_sys::NodeTag::T_AlterEnumStmt
+);
+impl_utility_stmt_node!(
     VacuumStmtNode,
     pg_sys::VacuumStmt,
     pg_sys::NodeTag::T_VacuumStmt

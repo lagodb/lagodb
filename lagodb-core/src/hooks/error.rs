@@ -160,7 +160,8 @@ impl HookError {
         }))
     }
 
-    pub(crate) fn from_copy_error(error: CopyError) -> Self {
+    /// Preserve structured PostgreSQL diagnostics at a COPY utility boundary.
+    pub fn from_copy_error(error: CopyError) -> Self {
         match error {
             CopyError::Postgres(error) => error.into(),
             error => Self::with_source(error.sql_error_code(), error),

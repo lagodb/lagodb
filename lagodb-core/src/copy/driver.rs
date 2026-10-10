@@ -3,6 +3,7 @@ use std::panic::AssertUnwindSafe;
 
 use pgrx::{PgTryBuilder, pg_sys};
 
+use super::from_execution::CopyFromExecution;
 use crate::diag::PgError;
 
 use super::context::{
@@ -50,19 +51,14 @@ impl<'statement, 'parse> CopyFromSpec<'statement, 'parse> {
 
 /// RAII wrapper around PostgreSQL's `CopyFromState`.
 pub struct CopyFromDriver<'statement, 'parse> {
-    state: pg_sys::CopyFromState,
+    execution: CopyFromExecution,
     target_route: CopyTargetRoute,
-    finished: bool,
     _preparation: CopyFromPreparation<'statement, 'parse>,
     _statement_lifetime: PhantomData<&'statement pg_sys::CopyStmt>,
     _parse_lifetime: PhantomData<&'parse CopyParseState>,
 }
 
 impl<'statement, 'parse> CopyFromDriver<'statement, 'parse> {
-    fn end_state(state: pg_sys::CopyFromState) {
-        unsafe { pg::CopyBridge::end_routed_from(state) }
-    }
-
     /// Validates options and prepares PostgreSQL's COPY FROM state without
     /// opening the provider's input. Execution constructs the source before
     /// reading any bytes or starting the executor.
@@ -109,9 +105,8 @@ impl<'statement, 'parse> CopyFromDriver<'statement, 'parse> {
         }?;
 
         Ok(Self {
-            state,
+            execution: CopyFromExecution::new(state),
             target_route,
-            finished: false,
             _preparation: preparation,
             _statement_lifetime: PhantomData,
             _parse_lifetime: PhantomData,
@@ -126,7 +121,8 @@ impl<'statement, 'parse> CopyFromDriver<'statement, 'parse> {
     ) -> Result<u64, CopyError> {
         let mut source = open_source()?;
         let mut source_guard = SourceGuard::new(source.as_mut());
-        let state = self.state;
+        let state = self.execution.state;
+        let bridge = self.execution.bridge();
         let provider_owned_partitioned_table =
             self.target_route.provider_owned_partitioned_table();
         let result = source_guard.with_active(|| unsafe {
@@ -134,36 +130,13 @@ impl<'statement, 'parse> CopyFromDriver<'statement, 'parse> {
                 Ok(pg::CopyBridge::execute_routed_from_bytes(
                     state,
                     provider_owned_partitioned_table,
+                    &bridge,
                 ))
             }))
             .catch_others(|error| Err(PgError::from_caught(error)))
             .execute()
         });
-        match result {
-            Ok(processed) => {
-                self.finished = true;
-                Self::end_state(state);
-                Ok(processed)
-            }
-            Err(error) => {
-                // The error has been caught by PgTryBuilder, so PostgreSQL's
-                // normal longjmp cleanup will not release this opaque state.
-                // EndCopyFrom is required here to release its COPY context;
-                self.finished = true;
-                Self::end_state(state);
-                Err(error.into())
-            }
-        }
-    }
-}
-
-impl Drop for CopyFromDriver<'_, '_> {
-    fn drop(&mut self) {
-        if !self.finished {
-            // Normal callers use execute(); Drop covers Rust-side early
-            // returns before execution begins.
-            Self::end_state(self.state);
-        }
+        self.execution.finish(result, || Ok(()))
     }
 }
 

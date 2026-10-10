@@ -14,6 +14,8 @@ mod datum;
 mod driver;
 mod endpoint;
 mod error;
+mod execution;
+mod from_execution;
 mod io;
 mod layout;
 mod pg;
@@ -26,6 +28,7 @@ mod standard_driver;
 mod typed_callback;
 mod typed_driver;
 mod typed_io;
+mod write_bridge;
 
 pub use context::{
     CopyCompletion, CopyContext, CopyFromPreparation, CopyOption, CopyOptionIter,
@@ -42,10 +45,7 @@ pub use progress::CopyOutputProgress;
 pub use raw_fields::{
     CopyRawFieldReader, CopyRawFields, CopyRawRecord, CopyTextInputValidator,
 };
-pub use route::{
-    CopyTargetProbe, PartitionedTableCopyFromPreparation,
-    PartitionedTableCopyToPreparation,
-};
+pub use route::{CopyTargetProbe, PartitionedTableCopyToPreparation};
 pub use row::CopyRowEncoder;
 pub use scan::{CopyDocumentSource, CopyFromScan};
 pub use standard_driver::{RoutedCopyFromDriver, RoutedCopyToDriver};

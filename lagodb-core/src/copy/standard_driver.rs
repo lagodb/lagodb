@@ -1,42 +1,28 @@
-//! PG-encoded COPY execution for provider-owned partitioned tables.
-//!
-//! This driver is selected only after a provider claims the partitioned table.
-//! It keeps PostgreSQL's file/program/frontend byte path while using the derived
-//! executor to suppress leaf routing.
+//! PostgreSQL-encoded COPY using the derived executors.
+//! FROM supports the shared table fallback; TO retains provider-owned partition
+//! binding. File, PROGRAM and frontend I/O remain PostgreSQL's responsibility.
 
 use std::panic::AssertUnwindSafe;
 
 use pgrx::{PgTryBuilder, pg_sys};
 
+use super::from_execution::CopyFromExecution;
 use crate::diag::PgError;
 
 use super::context::{
     CopyFromPreparation, CopyParseState, CopyStatement, CopyToPreparation,
 };
 use super::pg::CopyToShutdown;
-use super::route::{
-    PartitionedTableCopyFromPreparation, PartitionedTableCopyToPreparation,
-};
+use super::route::{CopyTargetRoute, PartitionedTableCopyToPreparation};
 use super::{CopyError, pg};
 
 pub struct RoutedCopyFromDriver<'statement, 'parse> {
-    state: pg_sys::CopyFromState,
-    state_ended: bool,
+    execution: CopyFromExecution,
+    target_route: CopyTargetRoute,
     _preparation: CopyFromPreparation<'statement, 'parse>,
 }
 
 impl<'statement, 'parse> RoutedCopyFromDriver<'statement, 'parse> {
-    fn end_state(state: pg_sys::CopyFromState) -> Result<(), PgError> {
-        unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                pg::CopyBridge::end_routed_from(state);
-                Ok(())
-            }))
-            .catch_others(|error| Err(PgError::from_caught(error)))
-            .execute()
-        }
-    }
-
     /// # Safety
     ///
     /// `preparation` must belong to this statement and parse state. Its table
@@ -44,9 +30,9 @@ impl<'statement, 'parse> RoutedCopyFromDriver<'statement, 'parse> {
     pub unsafe fn begin(
         statement: &'statement CopyStatement<'statement>,
         parse_state: &'parse CopyParseState,
-        preparation: PartitionedTableCopyFromPreparation<'statement, 'parse>,
+        preparation: CopyFromPreparation<'statement, 'parse>,
     ) -> Result<Self, CopyError> {
-        let preparation = preparation.into_preparation();
+        let target_route = preparation.target_route();
         let relation = preparation.relation();
         let filename = statement
             .filename()
@@ -69,40 +55,27 @@ impl<'statement, 'parse> RoutedCopyFromDriver<'statement, 'parse> {
             .execute()
         }?;
         Ok(Self {
-            state,
-            state_ended: false,
+            execution: CopyFromExecution::new(state),
+            target_route,
             _preparation: preparation,
         })
     }
 
     pub fn execute(mut self) -> Result<u64, CopyError> {
-        let state = self.state;
+        let state = self.execution.state;
+        let bridge = self.execution.bridge();
         let result = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(|| {
-                Ok(pg::CopyBridge::execute_routed_from_bytes(state, true))
+                Ok(pg::CopyBridge::execute_routed_from_bytes(
+                    state,
+                    self.target_route.provider_owned_partitioned_table(),
+                    &bridge,
+                ))
             }))
             .catch_others(|error| Err(PgError::from_caught(error)))
             .execute()
         };
-        self.state_ended = true;
-        match result {
-            Ok(processed) => {
-                Self::end_state(state)?;
-                Ok(processed)
-            }
-            Err(error) => {
-                let _ = Self::end_state(state);
-                Err(error.into())
-            }
-        }
-    }
-}
-
-impl Drop for RoutedCopyFromDriver<'_, '_> {
-    fn drop(&mut self) {
-        if !self.state_ended {
-            let _ = Self::end_state(self.state);
-        }
+        self.execution.finish(result, || Ok(()))
     }
 }
 
