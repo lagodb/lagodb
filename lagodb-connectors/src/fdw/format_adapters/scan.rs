@@ -1,4 +1,4 @@
-//! Reader-owned scan, filter, and pathkey contracts.
+//! Format-specific FDW scan, filter, and pathkey contracts.
 
 use lagodb_core::expr::pushdown::FilterPlanningContext;
 use lagodb_core::fdw::{
@@ -10,13 +10,13 @@ use lagodb_core::fdw::{
 use lagodb_core::plan_data::PlanDataReader;
 
 use crate::error::ConnectorError;
-use crate::storage::ObjectFiles;
+use crate::fdw::LagodbConnectors;
+use crate::format::{FormatKind, FormatObject};
+use crate::storage::InputFiles;
 
 use super::filter::{
     FormatFilterPlanner, FormatPlannedFilter, NoPushdownFilterPlanner,
 };
-use super::{FormatKind, FormatObject};
-use crate::fdw::LagodbConnectors;
 
 /// Format selection persisted in the core FDW plan envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,12 +36,13 @@ impl FormatScanPrivate {
     }
 }
 
-/// Reader capability of one concrete format.
+/// FDW reading capabilities of one concrete format: scan planning and
+/// execution, filter pushdown, pathkeys, and optional ANALYZE support.
 ///
 /// Filter pushdown and pathkey handling are deliberately reached through
 /// this reader capability. A format that supports either capability replaces
 /// the corresponding default method on its own reader implementation.
-pub(crate) trait FormatReader: FormatObject {
+pub(crate) trait FormatFdwReader: FormatObject {
     /// Create relation-scoped scan planning state.
     fn planner(self: Box<Self>) -> Box<dyn FormatScanPlanner>;
 
@@ -72,7 +73,7 @@ pub(crate) trait FormatReader: FormatObject {
     fn begin(
         self: Box<Self>,
         context: StartForeignScanContext<'_, LagodbConnectors>,
-        files: ObjectFiles,
+        files: InputFiles,
     ) -> Result<Box<dyn FormatScanState>, ConnectorError>;
 
     /// Select the explicit ANALYZE capability before resolving storage.
@@ -92,7 +93,7 @@ pub(crate) trait FormatAnalyzer: 'static {
     fn acquire_sample_rows(
         self: Box<Self>,
         context: &mut ForeignSampleContext<'_>,
-        files: ObjectFiles,
+        files: InputFiles,
     ) -> Result<ForeignSampleStatistics, ForeignTableMaintenanceError>;
 }
 

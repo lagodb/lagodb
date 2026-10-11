@@ -131,14 +131,6 @@ impl<'a> RawTableOptions<'a> {
             .or_else(|| FormatKind::infer_from_key(object.key()))
             .ok_or_else(ConnectorError::format_required)?;
         let suffix_compression = StreamCompression::from_suffix(object.key());
-        if suffix_compression.is_some()
-            && matches!(kind, FormatKind::Parquet | FormatKind::Avro)
-        {
-            return Err(ConnectorError::invalid_option(
-                "compression",
-                "compression suffixes are supported only for text, csv, and json",
-            ));
-        }
         Ok(ResolvedTableOptions {
             object,
             format: ResolvedForeignFormat::resolve(

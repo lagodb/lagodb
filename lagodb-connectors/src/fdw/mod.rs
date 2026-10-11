@@ -2,6 +2,7 @@
 
 mod ddl;
 mod filter;
+mod format_adapters;
 mod format_selection;
 mod maintenance;
 mod modify;

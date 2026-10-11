@@ -1,4 +1,4 @@
-//! Object allocation and key generation for one write statement.
+//! Local-file and object-store output allocation for one write statement.
 
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
@@ -28,14 +28,14 @@ impl ObjectFileSuffix {
     }
 }
 
-/// Output keys follow the object-store immutability contract.
+/// Output destination and allocation policy for local files or object storage.
 ///
 /// Prefix output always allocates operation-unique keys. Exact output is for
 /// publishing to a previously unused key; overwriting an existing key is not
 /// a supported publication protocol and requires explicit cache coordination
 /// outside this writer. Local exact COPY output uses PostgreSQL's overwrite
 /// semantics; local directory output retains the unique-file contract.
-pub(crate) enum ObjectOutput {
+pub(crate) enum StorageOutput {
     LocalExact {
         path: Option<PathBuf>,
     },
@@ -65,7 +65,7 @@ pub(crate) enum AllocatedObject {
     },
 }
 
-impl ObjectOutput {
+impl StorageOutput {
     pub(crate) fn resolve(
         location: &ResolvedStorageLocation,
         kind: ObjectLocationKind,

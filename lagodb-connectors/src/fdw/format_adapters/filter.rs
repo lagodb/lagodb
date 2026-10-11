@@ -1,4 +1,4 @@
-//! Reader-owned filter pushdown contracts.
+//! Format-specific FDW filter pushdown contracts.
 
 use lagodb_core::expr::RuntimeValueBindings;
 use lagodb_core::expr::pushdown::{FilterBindResult, FilterPlan, PredicateFragment};
@@ -6,9 +6,8 @@ use lagodb_core::fdw::ForeignFilterExplainValues;
 use lagodb_core::plan_data::PlanDataWriter;
 
 use crate::error::ConnectorError;
-
-use super::FormatKind;
-use super::parquet::ParquetBoundPredicate;
+use crate::format::FormatKind;
+use crate::format::parquet::ParquetBoundPredicate;
 
 /// A format predicate accepted during scan planning.
 ///

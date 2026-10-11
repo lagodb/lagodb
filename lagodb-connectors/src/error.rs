@@ -190,6 +190,9 @@ impl ConnectorError {
                 ArrowConversionError::DatumConversion(error) => {
                     Self::is_datum_row_data_error(error)
                 }
+                ArrowConversionError::JsonValue(error) => {
+                    Self::is_data_exception(error.sql_error_code())
+                }
                 ArrowConversionError::InvalidInput(_)
                 | ArrowConversionError::ValueOutOfRange(_)
                 | ArrowConversionError::DatetimeConversionError(_)
@@ -212,9 +215,7 @@ impl ConnectorError {
             | Self::Json { .. }
             | Self::JsonRecordTooLarge { .. }
             | Self::JsonValue { .. } => true,
-            Self::JsonDatum(error) => {
-                matches!(error, JsonValueError::Nul(_) | JsonValueError::Utf8(_))
-            }
+            Self::JsonDatum(error) => Self::is_data_exception(error.sql_error_code()),
             Self::Postgres(error) => Self::is_data_exception(error.sql_error_code()),
             _ => false,
         }
@@ -230,13 +231,18 @@ impl ConnectorError {
     }
 
     fn is_datum_row_data_error(error: &DatumConversionError) -> bool {
-        matches!(
-            error,
+        match error {
             DatumConversionError::IncompatibleType { .. }
-                | DatumConversionError::OutOfRange { .. }
-                | DatumConversionError::InvalidInput { .. }
-                | DatumConversionError::InvalidUtf8 { .. }
-        )
+            | DatumConversionError::OutOfRange { .. }
+            | DatumConversionError::InvalidInput { .. }
+            | DatumConversionError::InvalidUtf8 { .. } => true,
+            // PG type input reports through the conversion error chain,
+            // rather than unwinding to COPY's outer row catch.
+            DatumConversionError::Postgres(error) => {
+                Self::is_data_exception(error.sql_error_code())
+            }
+            DatumConversionError::UnsupportedServerEncoding { .. } => false,
+        }
     }
 
     #[inline]

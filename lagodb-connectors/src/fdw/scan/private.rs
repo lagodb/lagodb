@@ -5,7 +5,8 @@ use lagodb_core::fdw::{
 };
 
 use crate::error::ConnectorError;
-use crate::format::{FormatKind, FormatScanPrivate};
+use crate::fdw::format_adapters::FormatScanPrivate;
+use crate::format::FormatKind;
 
 pub(crate) type ConnectorScanPrivate = FormatScanPrivate;
 

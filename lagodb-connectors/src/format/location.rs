@@ -4,7 +4,7 @@ use std::num::NonZeroU64;
 
 use crate::error::ConnectorError;
 use crate::storage::{
-    ObjectInput, ObjectLocationKind, ObjectOutput, ResolvedStorageLocation,
+    ObjectLocationKind, ResolvedStorageLocation, StorageInput, StorageOutput,
     StoragePath,
 };
 
@@ -42,8 +42,8 @@ impl FormatKind {
     pub(crate) fn input(
         self,
         location: &ResolvedStorageLocation,
-    ) -> Result<ObjectInput, ConnectorError> {
-        ObjectInput::resolve(location, self.location_kind(location.path())?, |key| {
+    ) -> Result<StorageInput, ConnectorError> {
+        StorageInput::resolve(location, self.location_kind(location.path())?, |key| {
             self.matches_object_key(key)
         })
     }
@@ -52,8 +52,8 @@ impl FormatKind {
         self,
         location: &ResolvedStorageLocation,
         prefix_target_file_bytes: impl FnOnce() -> NonZeroU64,
-    ) -> Result<ObjectOutput, ConnectorError> {
-        ObjectOutput::resolve(
+    ) -> Result<StorageOutput, ConnectorError> {
+        StorageOutput::resolve(
             location,
             self.location_kind(location.path())?,
             prefix_target_file_bytes,

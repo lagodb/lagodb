@@ -1,4 +1,4 @@
-//! Relation-bound encoding shared by connector INSERT entry points.
+//! Format-specific FDW INSERT capabilities and write state.
 
 use core::ffi::c_int;
 
@@ -6,20 +6,19 @@ use lagodb_core::handles::RelationHandle;
 use lagodb_core::tuple::TupleSlotRow;
 
 use crate::error::ConnectorError;
-use crate::storage::ObjectOutput;
-
-use super::FormatObject;
+use crate::format::FormatObject;
+use crate::storage::StorageOutput;
 
 /// Bind format options and column encoders once for a live relation.
 pub(crate) trait FormatWriter: FormatObject {
     fn begin(
         self: Box<Self>,
         relation: &RelationHandle<'_>,
-        output: ObjectOutput,
+        output: StorageOutput,
     ) -> Result<Box<dyn FormatWriteState>, ConnectorError>;
 }
 
-/// The format owns encoding and buffering; the FDW adapter owns SQL operations.
+/// Per-statement FDW state delegates encoding and buffering to format codecs.
 pub(crate) trait FormatWriteState: 'static {
     fn batch_size(&self) -> c_int {
         1

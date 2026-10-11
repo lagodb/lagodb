@@ -1,4 +1,4 @@
-//! Object collection resolution for COPY FROM and foreign scans.
+//! Local-file and object-store input resolution for COPY FROM and foreign scans.
 
 use lagodb_core::storage::foreign::{
     ObjectAccess, ObjectPrefixAccess, StorageManager,
@@ -12,7 +12,8 @@ use super::{InputFile, ObjectLocationKind, ResolvedStorageLocation};
 
 const LIST_PAGE_SIZE: u32 = 1_024;
 
-pub(crate) enum ObjectInput {
+/// Resolved input selection, including stable membership for prefix rescans.
+pub(crate) enum StorageInput {
     Local(LocalInput),
     Exact {
         access: ObjectAccess,
@@ -26,7 +27,7 @@ pub(crate) enum ObjectInput {
     },
 }
 
-impl ObjectInput {
+impl StorageInput {
     /// Resolve the declared location once and retain stable prefix membership
     /// for rescans.
     pub(crate) fn resolve(
@@ -93,15 +94,15 @@ impl ObjectInput {
         }
     }
 
-    pub(crate) fn open(self) -> ObjectFiles {
+    pub(crate) fn open(self) -> InputFiles {
         match self {
-            Self::Local(input) => ObjectFiles::Local(input.open()),
-            Self::Exact { access, key, .. } => ObjectFiles::Exact {
+            Self::Local(input) => InputFiles::Local(input.open()),
+            Self::Exact { access, key, .. } => InputFiles::Exact {
                 access,
                 key,
                 emitted: false,
             },
-            Self::Prefix { access, keys, .. } => ObjectFiles::Prefix {
+            Self::Prefix { access, keys, .. } => InputFiles::Prefix {
                 access,
                 keys,
                 index: 0,
@@ -110,7 +111,8 @@ impl ObjectInput {
     }
 }
 
-pub(crate) enum ObjectFiles {
+/// Resettable iterator over the files selected by [`StorageInput`].
+pub(crate) enum InputFiles {
     Local(LocalFiles),
     Exact {
         access: ObjectAccess,
@@ -124,7 +126,7 @@ pub(crate) enum ObjectFiles {
     },
 }
 
-impl ObjectFiles {
+impl InputFiles {
     pub(crate) fn reset(&mut self) {
         match self {
             Self::Local(files) => files.reset(),
@@ -134,7 +136,7 @@ impl ObjectFiles {
     }
 }
 
-impl Iterator for ObjectFiles {
+impl Iterator for InputFiles {
     type Item = Result<InputFile, ConnectorError>;
 
     fn next(&mut self) -> Option<Self::Item> {

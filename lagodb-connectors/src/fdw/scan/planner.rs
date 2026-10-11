@@ -8,7 +8,7 @@ use lagodb_core::fdw::{
     StartForeignScanContext,
 };
 
-use crate::format::FormatScanPlanner;
+use crate::fdw::format_adapters::FormatScanPlanner;
 
 use super::super::{LagodbConnectors, ResolvedForeignRelation};
 use super::private::ConnectorScanPrivate;
@@ -31,7 +31,7 @@ impl FdwScan for LagodbConnectors {
     ) -> Result<Self::PlannerState, ForeignScanError> {
         let relation = ResolvedForeignRelation::resolve(context.relation_oid())?;
         Ok(ConnectorScanPlanner {
-            scan: relation.into_reader().planner(),
+            scan: relation.into_fdw_reader().planner(),
         })
     }
 

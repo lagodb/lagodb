@@ -7,12 +7,13 @@ use lagodb_core::expr::pushdown::{
 };
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 
-use crate::format::{
-    FormatBoundFilter, FormatFilterPlanner, FormatKind, FormatPlannedFilter,
-};
-
-use super::{LagodbConnectors, ResolvedForeignRelation};
 use crate::error::ConnectorError;
+use crate::format::FormatKind;
+
+use super::format_adapters::{
+    FdwFormat, FormatBoundFilter, FormatFilterPlanner, FormatPlannedFilter,
+};
+use super::{LagodbConnectors, ResolvedForeignRelation};
 
 /// Planner state created once for one relation planning invocation.
 pub(crate) struct ConnectorFilterPlanner {
@@ -47,7 +48,7 @@ impl FilterPushdown for LagodbConnectors {
         context: &FilterPlanningContext,
     ) -> Result<Self::Planner, Self::Error> {
         let selected = ResolvedForeignRelation::resolve(context.relation_oid())?;
-        let reader = selected.into_reader();
+        let reader = selected.into_fdw_reader();
         Ok(ConnectorFilterPlanner {
             inner: reader.begin_filter_planning(context)?,
         })
@@ -68,7 +69,7 @@ impl FilterPushdown for LagodbConnectors {
         let wire = reader.read_i32()?;
         let kind = FormatKind::from_wire(wire)
             .ok_or_else(|| ConnectorError::invalid_plan_format(wire))?;
-        kind.decode_filter(reader, binding_count)
+        FdwFormat::decode_filter(kind, reader, binding_count)
     }
 
     fn bind_filter(

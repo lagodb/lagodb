@@ -8,6 +8,19 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::storage::InputFile;
 
+use super::FormatKind;
+
+impl FormatKind {
+    /// Whether compression may wrap the entire file. Container formats carry
+    /// compression internally and do not accept stream-compression suffixes.
+    pub(super) const fn supports_stream_compression(self) -> bool {
+        match self {
+            Self::Text | Self::Csv | Self::Json => true,
+            Self::Avro | Self::Parquet => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StreamCompression {
     None,

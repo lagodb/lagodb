@@ -2,7 +2,6 @@
 
 use crate::storage::InputFile;
 use lagodb_core::storage::foreign::ForeignOptionView;
-use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 
@@ -12,9 +11,8 @@ use super::json::JsonFormat;
 use super::parquet::ParquetFormat;
 use super::text::TextFormat;
 use super::{
-    AvroWriteCompression, FormatKind, FormatReader, FormatSchemaReader, FormatWriter,
-    InferredSchema, ParquetWriteCompression, StreamCompression,
-    StreamCompressionOptions,
+    AvroWriteCompression, FormatKind, FormatSchemaReader, InferredSchema,
+    ParquetWriteCompression, StreamCompression, StreamCompressionOptions,
 };
 
 /// One borrowed format-specific option after common foreign-table options have
@@ -62,6 +60,12 @@ impl ResolvedForeignFormat {
         suffix_compression: Option<StreamCompression>,
         options: &[FormatOption<'_>],
     ) -> Result<Self, ConnectorError> {
+        if suffix_compression.is_some() && !kind.supports_stream_compression() {
+            return Err(ConnectorError::invalid_option(
+                "compression",
+                "compression suffixes are supported only for text, csv, and json",
+            ));
+        }
         match kind {
             FormatKind::Text => Ok(Self::Text(TextFormat::resolve(
                 Self::parse_stream_compression(
@@ -153,51 +157,6 @@ impl ResolvedForeignFormat {
                 "foreign column option",
                 "force_null and force_not_null are only valid for csv",
             )),
-        }
-    }
-
-    pub(crate) fn validate_relation_columns(
-        &self,
-        relation_oid: pg_sys::Oid,
-        natts: usize,
-    ) -> Result<(), ConnectorError> {
-        for attno in 1..=natts {
-            // PostgreSQL bounds TupleDesc::natts by AttrNumber, so this
-            // relation-level cold-path conversion cannot truncate.
-            // SAFETY: the FDW callback supplies a live foreign relation and
-            // every attno is within its TupleDesc.
-            let options = unsafe {
-                pg_sys::GetForeignColumnOptions(
-                    relation_oid,
-                    attno as pg_sys::AttrNumber,
-                )
-            };
-            // SAFETY: PostgreSQL owns this option list for the duration of the
-            // catalog lookup and validation call.
-            self.validate_column_view(unsafe {
-                ForeignOptionView::from_raw(options)
-            })?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn into_reader(self) -> Box<dyn FormatReader> {
-        match self {
-            Self::Text(format) => Box::new(format),
-            Self::Csv(format) => Box::new(format),
-            Self::Json(format) => Box::new(format),
-            Self::Avro(format) => Box::new(format),
-            Self::Parquet(format) => Box::new(format),
-        }
-    }
-
-    pub(crate) fn into_writer(self) -> Box<dyn FormatWriter> {
-        match self {
-            Self::Text(format) => Box::new(format),
-            Self::Csv(format) => Box::new(format),
-            Self::Json(format) => Box::new(format),
-            Self::Avro(format) => Box::new(format),
-            Self::Parquet(format) => Box::new(format),
         }
     }
 

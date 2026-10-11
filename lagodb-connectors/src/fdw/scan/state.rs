@@ -1,17 +1,17 @@
 //! Executor-side scan state and format delegation.
 
-use super::super::ResolvedForeignRelation;
 use core::mem;
 
-use crate::format::{FormatReader, FormatScanState};
-use crate::storage::ObjectFiles;
 use lagodb_core::fdw::{
     BeginForeignScanContext, ForeignScanError, ReScanForeignScanContext,
     ScanSlotWriter, StartForeignScanContext,
 };
 
-use super::super::LagodbConnectors;
 use crate::error::ConnectorError;
+use crate::fdw::format_adapters::{FormatFdwReader, FormatScanState};
+use crate::storage::InputFiles;
+
+use super::super::{LagodbConnectors, ResolvedForeignRelation};
 
 /// Executor state owns the format object selected by the serialized plan.
 pub(crate) struct ConnectorScanState {
@@ -20,8 +20,8 @@ pub(crate) struct ConnectorScanState {
 
 enum ConnectorScanPhase {
     Prepared {
-        reader: Box<dyn FormatReader>,
-        files: ObjectFiles,
+        reader: Box<dyn FormatFdwReader>,
+        files: InputFiles,
     },
     Active(Box<dyn FormatScanState>),
     Transitioning,

@@ -8,7 +8,8 @@ use lagodb_core::fdw::{
 };
 
 use crate::error::ConnectorError;
-use crate::format::{FormatKind, FormatWriteState};
+use crate::fdw::format_adapters::FormatWriteState;
+use crate::format::FormatKind;
 
 pub(crate) struct ConnectorModifyState {
     format: FormatKind,

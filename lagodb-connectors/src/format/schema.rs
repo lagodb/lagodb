@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::ffi::CString;
 
 use crate::storage::InputFile;
-use arrow_schema::{DataType, Schema, TimeUnit};
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
@@ -38,25 +37,6 @@ impl InferredSchema {
         }
         Self::validate_column_names(&columns)?;
         Ok(Self { columns })
-    }
-
-    pub(crate) fn from_arrow(
-        format: FormatKind,
-        schema: &Schema,
-    ) -> Result<Self, ConnectorError> {
-        let columns = schema
-            .fields()
-            .iter()
-            .map(|field| {
-                let postgres_type = PostgresType::from_arrow(
-                    format,
-                    field.name(),
-                    field.data_type(),
-                )?;
-                Ok(InferredColumn::new(field.name(), postgres_type))
-            })
-            .collect::<Result<Vec<_>, ConnectorError>>()?;
-        Self::new(format, columns)
     }
 
     pub(crate) fn into_pg_list(self) -> Result<*mut pg_sys::List, ConnectorError> {
@@ -170,94 +150,10 @@ impl PostgresType {
         }
     }
 
-    pub(crate) fn array(self, field_name: &str) -> Result<Self, ConnectorError> {
-        let oid = unsafe { pg_sys::get_array_type(self.oid) };
-        if oid == pg_sys::InvalidOid {
-            return Err(ConnectorError::invalid_object_schema(
-                self.format,
-                format!(
-                    "column {field_name:?} has an element type without a PostgreSQL array type"
-                ),
-            ));
-        }
-        Ok(Self::new(self.format, oid))
-    }
-
     pub(crate) fn numeric(format: FormatKind, precision: i32, scale: i32) -> Self {
         let typmod = ((precision << 16) | (scale & 0x7ff))
             + i32::try_from(std::mem::size_of::<i32>())
                 .expect("i32 size fits in i32");
         Self::with_typmod(format, pg_sys::NUMERICOID, typmod)
-    }
-
-    fn from_arrow(
-        format: FormatKind,
-        field_name: &str,
-        data_type: &DataType,
-    ) -> Result<Self, ConnectorError> {
-        let plain = |oid| Ok(Self::new(format, oid));
-        match data_type {
-            DataType::Boolean => plain(pg_sys::BOOLOID),
-            DataType::Int32 => plain(pg_sys::INT4OID),
-            DataType::Int64 => plain(pg_sys::INT8OID),
-            DataType::Float32 => plain(pg_sys::FLOAT4OID),
-            DataType::Float64 => plain(pg_sys::FLOAT8OID),
-            DataType::Decimal128(precision, scale)
-                if (1..=38).contains(precision)
-                    && (0..=38).contains(scale)
-                    && *scale as u8 <= *precision =>
-            {
-                Ok(Self::numeric(
-                    format,
-                    i32::from(*precision),
-                    i32::from(*scale),
-                ))
-            }
-            DataType::Timestamp(
-                TimeUnit::Microsecond | TimeUnit::Nanosecond,
-                timezone,
-            ) => plain(if timezone.is_some() {
-                pg_sys::TIMESTAMPTZOID
-            } else {
-                pg_sys::TIMESTAMPOID
-            }),
-            DataType::Date32 => plain(pg_sys::DATEOID),
-            DataType::Time64(TimeUnit::Microsecond) => plain(pg_sys::TIMEOID),
-            DataType::Binary | DataType::LargeBinary => plain(pg_sys::BYTEAOID),
-            DataType::FixedSizeBinary(width) if *width > 0 => plain(pg_sys::BYTEAOID),
-            DataType::Utf8 | DataType::LargeUtf8 => plain(pg_sys::TEXTOID),
-            DataType::List(field) => match field.data_type() {
-                DataType::Boolean => {
-                    Self::new(format, pg_sys::BOOLOID).array(field_name)
-                }
-                DataType::Int32 => {
-                    Self::new(format, pg_sys::INT4OID).array(field_name)
-                }
-                DataType::Int64 => {
-                    Self::new(format, pg_sys::INT8OID).array(field_name)
-                }
-                DataType::Float32 => {
-                    Self::new(format, pg_sys::FLOAT4OID).array(field_name)
-                }
-                DataType::Float64 => {
-                    Self::new(format, pg_sys::FLOAT8OID).array(field_name)
-                }
-                DataType::Utf8 | DataType::LargeUtf8 => {
-                    Self::new(format, pg_sys::TEXTOID).array(field_name)
-                }
-                _ => Err(ConnectorError::invalid_object_schema(
-                    format,
-                    format!(
-                        "column {field_name:?} uses unsupported source type {data_type}"
-                    ),
-                )),
-            },
-            _ => Err(ConnectorError::invalid_object_schema(
-                format,
-                format!(
-                    "column {field_name:?} uses unsupported source type {data_type}"
-                ),
-            )),
-        }
     }
 }

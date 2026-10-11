@@ -3,7 +3,9 @@
 use lagodb_core::copy::CopyOutputProgress;
 
 use crate::error::ConnectorError;
-use crate::storage::{FilePublication, ObjectFileSuffix, ObjectOutput, OutputWriter};
+use crate::storage::{
+    FilePublication, ObjectFileSuffix, OutputWriter, StorageOutput,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FileWriteProgress {
@@ -76,7 +78,7 @@ pub(crate) struct ObjectSetWriter<F>
 where
     F: ObjectFileEncoderFactory,
 {
-    output: ObjectOutput,
+    output: StorageOutput,
     factory: F,
     current: Option<OpenObject<F::Encoder>>,
     completed_object: bool,
@@ -89,7 +91,7 @@ where
     F: ObjectFileEncoderFactory,
 {
     pub(crate) fn new(
-        output: ObjectOutput,
+        output: StorageOutput,
         factory: F,
     ) -> Result<Self, ConnectorError> {
         let mut writer = Self {

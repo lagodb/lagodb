@@ -1,7 +1,7 @@
 //! LagoDB connector extension entry point.
 //!
 //! [`copy`] and [`fdw`] adapt PostgreSQL execution, [`access`] resolves catalog
-//! bindings and privileges, [`format`] owns codecs and format-specific execution,
+//! bindings and privileges, [`format`] owns schemas and shared file codecs,
 //! and [`storage`] owns file discovery, I/O, and publication.
 
 mod access;

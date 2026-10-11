@@ -11,7 +11,7 @@ use crate::format::{
     EmptyOutputPolicy, ObjectSetWriter, StreamCompression, StreamDecoder,
     StreamEncoderFactory,
 };
-use crate::storage::{InputFile, ObjectOutput};
+use crate::storage::{InputFile, StorageOutput};
 
 use super::super::delimited::DelimitedFormat;
 use super::{FormatCopyDestination, FormatCopyOutput, ResolvedCopyFormat};
@@ -47,11 +47,11 @@ impl CopyDataSource for StreamCopySource {
 
 enum StreamDestinationState {
     Uninitialized {
-        output: ObjectOutput,
+        output: StorageOutput,
         factory: StreamEncoderFactory,
     },
     AwaitingHeader {
-        output: ObjectOutput,
+        output: StorageOutput,
         factory: StreamEncoderFactory,
         progress: CopyOutputProgress,
     },
@@ -66,7 +66,7 @@ pub(super) struct StreamCopyDestination {
 
 impl StreamCopyDestination {
     pub(super) fn new(
-        output: ObjectOutput,
+        output: StorageOutput,
         compression: StreamCompression,
         format: DelimitedFormat,
     ) -> Self {

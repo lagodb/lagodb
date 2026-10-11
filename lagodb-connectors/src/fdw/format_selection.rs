@@ -5,10 +5,12 @@ use pgrx::pg_sys;
 
 use crate::access::{ConnectorAccess, LocalFilePolicy};
 use crate::error::ConnectorError;
-use crate::format::{FormatAnalyzer, FormatKind, FormatReader, FormatWriter};
-use crate::storage::ObjectLocationKind;
-use crate::storage::ResolvedStorageLocation;
+use crate::format::FormatKind;
+use crate::storage::{ObjectLocationKind, ResolvedStorageLocation};
 
+use super::format_adapters::{
+    FdwFormat, FormatAnalyzer, FormatFdwReader, FormatWriter,
+};
 use super::{ResolvedTableOptions, resolve_table_options};
 
 type ResolvedFormatParts<T> = (T, ResolvedStorageLocation);
@@ -39,8 +41,8 @@ impl ResolvedForeignRelation {
         self.options.format.kind()
     }
 
-    pub(crate) fn into_reader(self) -> Box<dyn FormatReader> {
-        self.options.format.into_reader()
+    pub(crate) fn into_fdw_reader(self) -> Box<dyn FormatFdwReader> {
+        FdwFormat::reader(self.options.format)
     }
 
     pub(crate) fn output_kind(&self) -> Result<ObjectLocationKind, ConnectorError> {
@@ -52,21 +54,36 @@ impl ResolvedForeignRelation {
         relation_oid: pg_sys::Oid,
         natts: usize,
     ) -> Result<(), ConnectorError> {
-        self.options
-            .format
-            .validate_relation_columns(relation_oid, natts)
+        for attno in 1..=natts {
+            // PostgreSQL bounds TupleDesc::natts by AttrNumber, so this
+            // relation-level cold-path conversion cannot truncate.
+            // SAFETY: the FDW callback supplies a live foreign relation and
+            // every attno is within its TupleDesc.
+            let options = unsafe {
+                pg_sys::GetForeignColumnOptions(
+                    relation_oid,
+                    attno as pg_sys::AttrNumber,
+                )
+            };
+            // SAFETY: PostgreSQL owns this option list for the duration of the
+            // catalog lookup and validation call.
+            self.options.format.validate_column_view(unsafe {
+                ForeignOptionView::from_raw(options)
+            })?;
+        }
+        Ok(())
     }
 
     pub(crate) fn into_scan_parts(
         self,
         effective_user: pg_sys::Oid,
-    ) -> Result<ResolvedFormatParts<Box<dyn FormatReader>>, ConnectorError> {
+    ) -> Result<ResolvedFormatParts<Box<dyn FormatFdwReader>>, ConnectorError> {
         let location = ConnectorAccess::resolve_foreign_object(
             self.options.object,
             self.server_oid,
             effective_user,
         )?;
-        Ok((self.options.format.into_reader(), location))
+        Ok((FdwFormat::reader(self.options.format), location))
     }
 
     pub(crate) fn into_analyze_parts(
@@ -75,7 +92,7 @@ impl ResolvedForeignRelation {
     ) -> Result<Option<ResolvedFormatParts<Box<dyn FormatAnalyzer>>>, ConnectorError>
     {
         let ResolvedTableOptions { object, format } = self.options;
-        let Some(analyzer) = format.into_reader().analyzer() else {
+        let Some(analyzer) = FdwFormat::reader(format).analyzer() else {
             return Ok(None);
         };
         let location = ConnectorAccess::resolve_foreign_object(
@@ -98,6 +115,6 @@ impl ResolvedForeignRelation {
         if location.local_path().is_some() {
             LocalFilePolicy::require_write(effective_user)?;
         }
-        Ok((self.options.format.into_writer(), location))
+        Ok((FdwFormat::writer(self.options.format), location))
     }
 }

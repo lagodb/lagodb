@@ -51,6 +51,20 @@ impl ResolvedCopyFormat {
     ) -> Result<Self, ConnectorError> {
         Self::validate_options(options, kind)?;
         let suffix = StreamCompression::from_suffix(object.key());
+        if !kind.supports_stream_compression() {
+            if copy_from && (explicit_compression.is_some() || suffix.is_some()) {
+                return Err(ConnectorError::invalid_copy_option(
+                    "compression",
+                    "must be omitted when reading Parquet or Avro; the container records its codec",
+                ));
+            }
+            if suffix.is_some() {
+                return Err(ConnectorError::invalid_copy_option(
+                    "compression",
+                    "a stream-compression suffix is not valid for Parquet or Avro",
+                ));
+            }
+        }
         match kind {
             FormatKind::Text => {
                 let compression =
@@ -67,15 +81,8 @@ impl ResolvedCopyFormat {
                     Self::resolve_stream_compression(explicit_compression, suffix)?;
                 Ok(Self::Json(compression))
             }
-            FormatKind::Avro if copy_from => {
-                Self::reject_container_read_compression(
-                    explicit_compression,
-                    suffix,
-                )?;
-                Ok(Self::AvroRead)
-            }
+            FormatKind::Avro if copy_from => Ok(Self::AvroRead),
             FormatKind::Avro => {
-                Self::reject_container_suffix(suffix)?;
                 Ok(Self::AvroWrite(match explicit_compression {
                     Some(value) => AvroWriteCompression::parse(value).ok_or_else(|| {
                         ConnectorError::invalid_copy_option(
@@ -86,15 +93,8 @@ impl ResolvedCopyFormat {
                     None => AvroWriteCompression::default(),
                 }))
             }
-            FormatKind::Parquet if copy_from => {
-                Self::reject_container_read_compression(
-                    explicit_compression,
-                    suffix,
-                )?;
-                Ok(Self::ParquetRead)
-            }
+            FormatKind::Parquet if copy_from => Ok(Self::ParquetRead),
             FormatKind::Parquet => {
-                Self::reject_container_suffix(suffix)?;
                 Ok(Self::ParquetWrite(match explicit_compression {
                     Some(value) => ParquetWriteCompression::parse(value).ok_or_else(|| {
                         ConnectorError::invalid_copy_option(
@@ -106,19 +106,6 @@ impl ResolvedCopyFormat {
                 }))
             }
         }
-    }
-
-    fn reject_container_read_compression(
-        explicit: Option<&str>,
-        suffix: Option<StreamCompression>,
-    ) -> Result<(), ConnectorError> {
-        if explicit.is_some() || suffix.is_some() {
-            return Err(ConnectorError::invalid_copy_option(
-                "compression",
-                "must be omitted when reading Parquet or Avro; the container records its codec",
-            ));
-        }
-        Ok(())
     }
 
     fn resolve_stream_compression(
@@ -134,18 +121,6 @@ impl ResolvedCopyFormat {
             }),
             None => Ok(suffix.unwrap_or(StreamCompression::None)),
         }
-    }
-
-    fn reject_container_suffix(
-        suffix: Option<StreamCompression>,
-    ) -> Result<(), ConnectorError> {
-        if suffix.is_some() {
-            return Err(ConnectorError::invalid_copy_option(
-                "compression",
-                "a stream-compression suffix is not valid for Parquet or Avro",
-            ));
-        }
-        Ok(())
     }
 
     fn validate_options(

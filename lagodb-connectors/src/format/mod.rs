@@ -1,68 +1,48 @@
-//! Format identity, codec capabilities, and cold-path factories.
+//! Format configuration, schemas, and shared file codecs.
 //!
-//! Reader, writer, and predicate capabilities remain independent traits. FDW
-//! and COPY adapters may share concrete codecs without sharing execution state.
+//! FDW capabilities and execution state live in `fdw::format_adapters`.
+//! COPY adapters reuse the file readers, writers, and predicates exposed here.
 
-mod avro;
-mod codec;
+pub(crate) mod avro;
 mod compression;
+mod compression_options;
 mod copy;
 mod csv;
 mod delimited;
-mod delimited_scan;
 mod delimited_schema;
-mod delimited_write;
-mod filter;
-mod json;
+pub(crate) mod json;
 mod location;
 mod object_writer;
-mod parquet;
+pub(crate) mod parquet;
 mod resolved;
-mod scan;
 mod schema;
 mod stream_writer;
 mod text;
-mod write;
 
 use std::fmt::{self, Display, Formatter};
 
-use lagodb_core::plan_data::PlanDataReader;
-
-use crate::error::ConnectorError;
-
-pub(crate) use codec::{
+pub(crate) use avro::AvroFormat;
+pub(crate) use compression::{StreamDecoder, StreamEncoder};
+pub(crate) use compression_options::{
     AvroWriteCompression, ParquetWriteCompression, StreamCompression,
     StreamCompressionOptions,
 };
 pub(crate) use copy::{FormatCopyInput, FormatCopyOutput, ResolvedCopyFormat};
-pub(crate) use filter::{
-    FormatBoundFilter, FormatFilterPlan, FormatFilterPlanner, FormatPlannedFilter,
-};
+pub(crate) use csv::{CsvColumnOptions, CsvFormat, CsvOptions};
+pub(crate) use delimited::{DelimitedFormat, DelimitedOptions};
+pub(crate) use json::JsonFormat;
 pub(crate) use object_writer::{
     EmptyOutputPolicy, FileWriteProgress, ObjectFileEncoder,
     ObjectFileEncoderFactory, ObjectSetWriter,
 };
+pub(crate) use parquet::ParquetFormat;
 pub(crate) use resolved::{FormatOption, ResolvedForeignFormat};
-pub(crate) use scan::{
-    FormatAnalyzer, FormatReader, FormatScanPlanner, FormatScanPrivate,
-    FormatScanState,
-};
 pub(crate) use schema::{
     FormatSchemaReader, InferredColumn, InferredSchema, PostgresType,
     SCHEMA_SAMPLE_RECORDS,
 };
-pub(crate) use write::{FormatWriteState, FormatWriter};
-
-use avro::AvroFormat;
-pub(crate) use compression::{StreamDecoder, StreamEncoder};
-use csv::CsvFormat;
-use json::JsonFormat;
-use parquet::ParquetFormat;
-pub(crate) use parquet::{
-    ParquetObjectReader, ParquetObjectWriter, parquet_arrow_type,
-};
 pub(crate) use stream_writer::{StreamEncoderFactory, StreamFormat};
-use text::TextFormat;
+pub(crate) use text::TextFormat;
 
 /// A supported external object format.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -111,7 +91,7 @@ impl FormatKind {
     }
 
     /// Whether one concrete object key carries a suffix supported by this
-    /// format. Stream wrappers are part of text/CSV/JSON object syntax, while
+    /// format. Stream compression is part of text/CSV/JSON object syntax, while
     /// Parquet and Avro compression belongs inside the container.
     pub(crate) fn matches_object_key(self, key: &str) -> bool {
         match self {
@@ -142,22 +122,6 @@ impl FormatKind {
             Self::AVRO_WIRE => Some(Self::Avro),
             Self::PARQUET_WIRE => Some(Self::Parquet),
             _ => None,
-        }
-    }
-
-    pub(crate) fn decode_filter(
-        self,
-        reader: &mut PlanDataReader<'_>,
-        binding_count: usize,
-    ) -> Result<FormatPlannedFilter, ConnectorError> {
-        match self {
-            Self::Text => TextFormat::decode_filter(self, reader, binding_count),
-            Self::Csv => CsvFormat::decode_filter(self, reader, binding_count),
-            Self::Json => JsonFormat::decode_filter(self, reader, binding_count),
-            Self::Avro => AvroFormat::decode_filter(self, reader, binding_count),
-            Self::Parquet => {
-                ParquetFormat::decode_filter(self, reader, binding_count)
-            }
         }
     }
 
