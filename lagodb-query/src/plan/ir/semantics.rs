@@ -36,12 +36,25 @@ impl ScalarSemantics {
                         && Decimal128Semantics::for_type(value_type).is_some()
                 };
         }
-        if value_type.typmod != -1 {
+        if value_type.typmod != -1
+            && !matches!(
+                value_type.type_oid,
+                pg_sys::TIMESTAMPOID | pg_sys::TIMESTAMPTZOID
+            )
+        {
             return false;
         }
         match value_type.type_oid {
             pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID => {
                 value_type.collation.to_u32() == pg_sys::InvalidOid.to_u32()
+            }
+            pg_sys::BYTEAOID
+            | pg_sys::UUIDOID
+            | pg_sys::DATEOID
+            | pg_sys::TIMESTAMPOID
+            | pg_sys::TIMESTAMPTZOID => {
+                matches!(self, Self::Exact)
+                    && value_type.collation == pg_sys::InvalidOid
             }
             pg_sys::BOOLOID => {
                 !matches!(self, Self::Integer)

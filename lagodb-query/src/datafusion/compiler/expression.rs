@@ -1,31 +1,44 @@
 //! Exact query-expression lowering into DataFusion expressions.
 
 use std::ops::Not;
+use std::sync::Arc;
 
-use datafusion::common::{DataFusionError, ScalarValue};
+use arrow_schema::{DataType, Field};
+use datafusion::common::DataFusionError;
 use datafusion::functions::math::expr_fn::isnan;
-use datafusion::logical_expr::expr::{Case, InList};
+use datafusion::logical_expr::expr::{Case, InList, Placeholder};
 use datafusion::logical_expr::expr_fn::cast;
 use datafusion::logical_expr::{Expr, col};
-use lagodb_arrow::PgDatumArrayBuilder;
-use lagodb_core::expr::{ColumnRef, RuntimeValue, RuntimeValueSource};
+use lagodb_core::expr::{ColumnRef, RuntimeValue, RuntimeValueLayout};
 use lagodb_core::query_contract::OutputId;
-use pgrx::{AnyNumeric, FromDatum, pg_sys};
+use pgrx::pg_sys;
 
 use crate::plan::{
-    BooleanTestKind, ComparisonKind, Decimal128Semantics, ExecutionExpr,
-    ExecutionScalarRepr, ScalarFunctionKind,
+    BooleanTestKind, ComparisonKind, ExecutionExpr, ExecutionScalarRepr,
+    ScalarFunctionKind,
 };
 
 use super::DataFusionPlanError;
 use crate::datafusion::integer_abs::PgIntegerAbsUdf;
-use crate::datafusion::postgres_eval::{PgExprRuntime, PgExprUdf};
+use crate::datafusion::postgres_eval::{PgExprRuntime, PgExprSignature, PgExprUdf};
 use crate::datafusion::scan_binding::ScanBindings;
 
-pub(super) struct DataFusionExpressionCompiler<'a> {
+/// The expression tree is lowered identically for admission and execution.
+/// Planning binds leaves to their physical types without evaluating PG values
+/// or constructing PostgreSQL UDF runtime state.
+enum ExpressionBindings<'a> {
+    Execution {
+        values: &'a [RuntimeValue],
+        postgres: PgExprRuntime,
+    },
+    Planning {
+        values: &'a RuntimeValueLayout,
+    },
+}
+
+pub(in crate::datafusion) struct DataFusionExpressionCompiler<'a> {
     scans: &'a ScanBindings,
-    values: &'a [RuntimeValue],
-    postgres: PgExprRuntime,
+    bindings: ExpressionBindings<'a>,
 }
 
 impl<'a> DataFusionExpressionCompiler<'a> {
@@ -36,12 +49,21 @@ impl<'a> DataFusionExpressionCompiler<'a> {
     ) -> Self {
         Self {
             scans,
-            values,
-            postgres,
+            bindings: ExpressionBindings::Execution { values, postgres },
         }
     }
 
-    pub(super) fn compile(
+    pub(super) const fn for_planning(
+        scans: &'a ScanBindings,
+        values: &'a RuntimeValueLayout,
+    ) -> Self {
+        Self {
+            scans,
+            bindings: ExpressionBindings::Planning { values },
+        }
+    }
+
+    pub(in crate::datafusion) fn compile(
         &self,
         expression: &ExecutionExpr,
     ) -> Result<Expr, DataFusionPlanError> {
@@ -59,24 +81,44 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                 Ok(value.clone().gt(value))
             }
             ExecutionExpr::Column(column) => self.column(column),
-            ExecutionExpr::Value(value) => self
-                .values
-                .get(value.index())
-                .copied()
-                .ok_or(DataFusionPlanError::MissingRuntimeValue {
-                    index: value.index(),
-                })
-                .and_then(Self::runtime_value)
-                .map(|value| Expr::Literal(value, None)),
-            ExecutionExpr::DecimalValue { value, semantics } => self
-                .values
-                .get(value.index())
-                .copied()
-                .ok_or(DataFusionPlanError::MissingRuntimeValue {
-                    index: value.index(),
-                })
-                .and_then(|value| Self::decimal_runtime_value(value, *semantics))
-                .map(|value| Expr::Literal(value, None)),
+            ExecutionExpr::Value(value) => match &self.bindings {
+                ExpressionBindings::Execution { values, .. } => values
+                    .get(value.index())
+                    .copied()
+                    .ok_or(DataFusionPlanError::MissingRuntimeValue {
+                        index: value.index(),
+                    })
+                    .and_then(Self::runtime_value)
+                    .map(|value| Expr::Literal(value, None)),
+                ExpressionBindings::Planning { values, .. } => {
+                    let value_type = values.values()[value.index()].value_type;
+                    let representation = ExecutionScalarRepr::for_runtime_value(
+                        value_type,
+                    )
+                    .expect("validated runtime value has a physical representation");
+                    Ok(Self::typed_value(representation.data_type()))
+                }
+            },
+            ExecutionExpr::DecimalValue { value, semantics } => {
+                match &self.bindings {
+                    ExpressionBindings::Execution { values, .. } => values
+                        .get(value.index())
+                        .copied()
+                        .ok_or(DataFusionPlanError::MissingRuntimeValue {
+                            index: value.index(),
+                        })
+                        .and_then(|value| {
+                            Self::decimal_runtime_value(value, *semantics)
+                        })
+                        .map(|value| Expr::Literal(value, None)),
+                    ExpressionBindings::Planning { .. } => {
+                        Ok(Self::typed_value(DataType::Decimal128(
+                            semantics.precision(),
+                            semantics.scale(),
+                        )))
+                    }
+                }
+            }
             ExecutionExpr::Output(output) => Ok(col(Self::output_name(*output))),
             ExecutionExpr::Comparison {
                 operator,
@@ -196,9 +238,18 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                     .iter()
                     .map(|input| self.compile(input.expression()))
                     .collect::<Result<Vec<_>, _>>()?;
-                PgExprUdf::try_new(postgres.clone(), self.postgres)
-                    .ok_or(DataFusionPlanError::UnsupportedPostgresExpression)
-                    .map(|udf| udf.call(arguments))
+                match &self.bindings {
+                    ExpressionBindings::Execution {
+                        postgres: runtime, ..
+                    } => PgExprUdf::try_new(postgres.clone(), *runtime)
+                        .ok_or(DataFusionPlanError::UnsupportedPostgresExpression)
+                        .map(|udf| udf.call(arguments)),
+                    ExpressionBindings::Planning { .. } => {
+                        PgExprSignature::try_new(postgres)
+                            .ok_or(DataFusionPlanError::UnsupportedPostgresExpression)
+                            .map(|signature| signature.into_udf().call(arguments))
+                    }
+                }
             }
         }
     }
@@ -225,12 +276,7 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                 "native scalar function has an invalid argument layout".to_owned(),
             )
         };
-        // Compatibility boundary for native text constructors such as Repeat
-        // and Replace: DataFusion limits one Utf8 value by Arrow's i32 offset
-        // range, whereas PostgreSQL is bounded by MaxAllocSize and reports
-        // PostgreSQL-specific error codes. Parade-compatible native behavior
-        // is retained for now; exact allocation/error parity belongs in the
-        // later semantic-governance phase, not in the per-row adapter.
+
         Ok(match kind {
             ScalarFunctionKind::Ascii => ascii(arguments.next().ok_or_else(missing)?),
             ScalarFunctionKind::Repeat => repeat(
@@ -310,71 +356,10 @@ impl<'a> DataFusionExpressionCompiler<'a> {
         )
     }
 
-    fn runtime_value(
-        value: RuntimeValue,
-    ) -> Result<ScalarValue, DataFusionPlanError> {
-        let oid = value.metadata().value_type.type_oid;
-        let invalid = || DataFusionPlanError::InvalidRuntimeValue { oid };
-        let value_type = value.metadata().value_type;
-        let representation = ExecutionScalarRepr::for_runtime_value(value_type)
-            .ok_or(DataFusionPlanError::UnsupportedRuntimeType { oid })?;
-        if oid != pg_sys::NUMERICOID {
-            let data_type = representation.data_type();
-            let mut builder = PgDatumArrayBuilder::bind(&data_type, oid, 1)
-                .map_err(|_| invalid())?;
-            let datum = if value.is_null() {
-                None
-            } else {
-                Some(unsafe { value.datum() })
-            };
-            unsafe { builder.append(datum) }.map_err(|_| invalid())?;
-            let array = builder.finish().map_err(|_| invalid())?;
-            return ScalarValue::try_from_array(&array, 0).map_err(Into::into);
-        }
-        debug_assert_eq!(representation, ExecutionScalarRepr::Float64);
-        if value.is_null() {
-            return Ok(ScalarValue::Float64(None));
-        }
-        let datum = unsafe { value.datum() };
-        unsafe {
-            AnyNumeric::from_datum(datum, false)
-                .ok_or_else(invalid)
-                .and_then(|value| {
-                    f64::try_from(value)
-                        .map(|value| ScalarValue::Float64(Some(value)))
-                        .map_err(|_| invalid())
-                })
-        }
-    }
-
-    fn decimal_runtime_value(
-        value: RuntimeValue,
-        semantics: Decimal128Semantics,
-    ) -> Result<ScalarValue, DataFusionPlanError> {
-        let metadata = value.metadata();
-        let oid = metadata.value_type.type_oid;
-        let invalid = || DataFusionPlanError::InvalidRuntimeValue { oid };
-        if oid != pg_sys::NUMERICOID
-            || metadata.source_kind != RuntimeValueSource::Constant
-        {
-            return Err(invalid());
-        }
-        if value.is_null() {
-            return Ok(ScalarValue::Decimal128(
-                None,
-                semantics.precision(),
-                semantics.scale(),
-            ));
-        }
-        let codec = semantics.codec();
-        // SAFETY: RuntimeValueState evaluated this NUMERIC expression in the
-        // current executor context and retains the datum for plan compilation.
-        let coefficient = unsafe { codec.encode_bound_datum(value.datum()) }
-            .map_err(|_| invalid())?;
-        Ok(ScalarValue::Decimal128(
-            Some(coefficient),
-            semantics.precision(),
-            semantics.scale(),
+    fn typed_value(data_type: DataType) -> Expr {
+        Expr::Placeholder(Placeholder::new_with_field(
+            "$type".to_owned(),
+            Some(Arc::new(Field::new("", data_type, true))),
         ))
     }
 

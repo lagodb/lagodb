@@ -1,11 +1,15 @@
 //! Compilation of validated query semantics into DataFusion plans.
 
+mod aggregate;
 mod expression;
+mod logical;
 mod plan;
+mod runtime_value;
 
 use datafusion::common::DataFusionError;
 use pgrx::pg_sys;
 
+pub(super) use logical::DataFusionLogicalPlanCompiler;
 pub(super) use plan::DataFusionPlanCompiler;
 
 #[derive(Debug, thiserror::Error)]

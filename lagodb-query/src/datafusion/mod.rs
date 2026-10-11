@@ -1,5 +1,6 @@
 //! DataFusion execution components owned by the central query engine.
 
+mod admission;
 mod compiler;
 mod error;
 mod execution;
@@ -10,12 +11,17 @@ mod numeric_aggregate;
 mod parallel;
 mod physical_plan;
 mod postgres_eval;
+mod real_sum;
 mod scan_binding;
 mod scan_callbacks;
 mod table_scan;
 
+pub use admission::{DataFusionAdmissionDecline, DataFusionPlanAdmission};
 pub use error::QueryExecutionError;
-pub use execution::{ExecutionMetricsMode, QueryExecution, QueryExecutionRequest};
+pub use execution::{
+    ExecutionMetricsMode, PendingQueryExecution, QueryExecution,
+    QueryExecutionRequest,
+};
 pub use memory::QueryExecutionLimits;
 pub use metrics::{
     ExecutionMetricsSnapshot, QueryExecutionMode, ScanExecutionMetricsSnapshot,

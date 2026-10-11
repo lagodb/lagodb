@@ -476,7 +476,11 @@ impl<'a> PlanExpressionValidator<'a> {
                 else_expr,
                 result_type,
             } => {
-                if when_then.is_empty() {
+                // JSONBOID does not establish one physical Arrow type for
+                // all branches: a struct and a map are both valid JSONB
+                // outputs. Materializing either is supported, but combining
+                // them inside DataFusion requires a separate semantic rule.
+                if when_then.is_empty() || result_type.type_oid == pg_sys::JSONBOID {
                     return Err(QueryPlanError::UnsupportedPredicate);
                 }
                 for branch in when_then {

@@ -28,6 +28,11 @@ impl StaticFilterSet {
         else {
             return Ok(TableProviderFilterPushDown::Unsupported);
         };
+        // TODO: Measure the cost of materializing a provider predicate here only
+        // to close it after reading support; plan() negotiates it again for use.
+        // If material, expose capability analysis backed by the same provider
+        // rules as predicate construction, preserving Exact/Inexact decisions
+        // and residual ownership without a separate support allowlist.
         let planned = bound
             .negotiate_predicate(plan.predicate())
             .map_err(|error| DataFusionError::External(Box::new(error)))?;

@@ -5,6 +5,7 @@
 //! static filter, whereas the current Iceberg reader performs one full-batch
 //! equality and OR per literal.
 
+mod boolean;
 mod logical;
 mod physical;
 
@@ -13,6 +14,7 @@ use std::borrow::Cow;
 use arrow_schema::DataType;
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::Operator;
+use lagodb_core::expr::BooleanTestKind;
 use lagodb_core::runtime_api::{
     RuntimeComparisonOperator, RuntimeIntegerWidening, RuntimePredicateValue,
 };
@@ -28,6 +30,12 @@ impl DataFusionPredicateScalar {
     // PostgreSQL's ordering rules.
     fn value(value: &ScalarValue) -> Option<RuntimePredicateValue<'_>> {
         match value {
+            ScalarValue::Binary(Some(value))
+            | ScalarValue::LargeBinary(Some(value))
+            | ScalarValue::BinaryView(Some(value))
+            | ScalarValue::FixedSizeBinary(_, Some(value)) => Some(
+                RuntimePredicateValue::Binary(Cow::Borrowed(value.as_slice())),
+            ),
             ScalarValue::Boolean(Some(value)) => {
                 Some(RuntimePredicateValue::Boolean(*value))
             }
@@ -94,6 +102,38 @@ impl DataFusionPredicateScalar {
             (DataType::Int16 | DataType::Int32, DataType::Int64) => {
                 Some(RuntimeIntegerWidening::ToInt64)
             }
+            _ => None,
+        }
+    }
+
+    /// These Arrow casts change storage layout without changing the bytes.
+    fn binary_representation_cast(source: &DataType, target: &DataType) -> bool {
+        matches!(
+            source,
+            DataType::Binary
+                | DataType::LargeBinary
+                | DataType::BinaryView
+                | DataType::FixedSizeBinary(_)
+        ) && matches!(
+            target,
+            DataType::Binary | DataType::LargeBinary | DataType::BinaryView
+        )
+    }
+
+    /// DataFusion lowers SQL BooleanTest to a null-safe boolean comparison.
+    fn boolean_test(
+        operator: Operator,
+        value: &ScalarValue,
+    ) -> Option<BooleanTestKind> {
+        let kind = match value {
+            ScalarValue::Boolean(Some(true)) => BooleanTestKind::IsTrue,
+            ScalarValue::Boolean(Some(false)) => BooleanTestKind::IsFalse,
+            ScalarValue::Boolean(None) => BooleanTestKind::IsUnknown,
+            _ => return None,
+        };
+        match operator {
+            Operator::IsNotDistinctFrom => Some(kind),
+            Operator::IsDistinctFrom => Some(kind.negated()),
             _ => None,
         }
     }

@@ -5,6 +5,7 @@ use datafusion::common::ScalarValue;
 use datafusion::functions::math::nans::IsNanFunc;
 use datafusion::functions::string::starts_with::StartsWithFunc;
 use datafusion::logical_expr::{Expr, Operator};
+use lagodb_core::expr::BooleanTestKind;
 use lagodb_core::runtime_api::{
     RuntimePredicateScalar, RuntimePredicateValue, RuntimePruningPredicate,
 };
@@ -20,7 +21,7 @@ pub(in crate::datafusion::table_scan) struct LogicalPredicatePlan<'expr> {
 }
 
 impl<'expr> LogicalPredicatePlan<'expr> {
-    fn complete(predicate: RuntimePruningPredicate<'expr>) -> Self {
+    pub(super) fn complete(predicate: RuntimePruningPredicate<'expr>) -> Self {
         Self {
             predicate,
             complete: true,
@@ -47,7 +48,7 @@ impl<'expr> LogicalPredicatePlan<'expr> {
 /// Resolve DataFusion columns to statement-bound source positions and lower
 /// representable expression shapes. Provider capability is not decided here.
 pub(in crate::datafusion::table_scan) struct LogicalPredicateAdapter<'a> {
-    source_schema: &'a Schema,
+    pub(super) source_schema: &'a Schema,
 }
 
 impl<'a> LogicalPredicateAdapter<'a> {
@@ -62,6 +63,25 @@ impl<'a> LogicalPredicateAdapter<'a> {
         expression: &'expr Expr,
     ) -> Option<LogicalPredicatePlan<'expr>> {
         match expression {
+            Expr::Column(_) => self
+                .boolean_column(expression, true)
+                .map(LogicalPredicatePlan::complete),
+            Expr::IsTrue(value) => self.boolean_test(value, BooleanTestKind::IsTrue),
+            Expr::IsNotTrue(value) => {
+                self.boolean_test(value, BooleanTestKind::IsNotTrue)
+            }
+            Expr::IsFalse(value) => {
+                self.boolean_test(value, BooleanTestKind::IsFalse)
+            }
+            Expr::IsNotFalse(value) => {
+                self.boolean_test(value, BooleanTestKind::IsNotFalse)
+            }
+            Expr::IsUnknown(value) => {
+                self.boolean_test(value, BooleanTestKind::IsUnknown)
+            }
+            Expr::IsNotUnknown(value) => {
+                self.boolean_test(value, BooleanTestKind::IsNotUnknown)
+            }
             Expr::BinaryExpr(binary) => match binary.op {
                 Operator::And => Self::combine_and(
                     self.lower(&binary.left),
@@ -127,6 +147,9 @@ impl<'a> LogicalPredicateAdapter<'a> {
         &self,
         expression: &'expr Expr,
     ) -> Option<RuntimePruningPredicate<'expr>> {
+        if let Some(predicate) = self.boolean_column(expression, false) {
+            return Some(predicate);
+        }
         let Expr::ScalarFunction(function) = expression else {
             return None;
         };
@@ -177,6 +200,22 @@ impl<'a> LogicalPredicateAdapter<'a> {
         operator: Operator,
         right: &'expr Expr,
     ) -> Option<RuntimePruningPredicate<'expr>> {
+        if matches!(
+            operator,
+            Operator::IsDistinctFrom | Operator::IsNotDistinctFrom
+        ) {
+            let (column, literal) = if let Expr::Literal(literal, _) = right {
+                (left, literal)
+            } else if let Expr::Literal(literal, _) = left {
+                (right, literal)
+            } else {
+                return None;
+            };
+            let kind = DataFusionPredicateScalar::boolean_test(operator, literal)?;
+            return self
+                .boolean_test(column, kind)
+                .map(LogicalPredicatePlan::into_predicate);
+        }
         if matches!(operator, Operator::Eq | Operator::Gt)
             && let (Some(left_column), Some(right_column)) =
                 (self.column(left), self.column(right))
@@ -230,7 +269,7 @@ impl<'a> LogicalPredicateAdapter<'a> {
         })
     }
 
-    fn column(&self, expression: &Expr) -> Option<usize> {
+    pub(super) fn column(&self, expression: &Expr) -> Option<usize> {
         let Expr::Column(column) = expression else {
             return None;
         };
@@ -250,6 +289,9 @@ impl<'a> LogicalPredicateAdapter<'a> {
         let column = self.column(&cast.expr)?;
         let source = self.source_schema.field(column).data_type();
         let target = cast.field.data_type();
+        if DataFusionPredicateScalar::binary_representation_cast(source, target) {
+            return Some(RuntimePredicateScalar::Column(column));
+        }
         let target = DataFusionPredicateScalar::integer_widening(source, target)?;
         Some(RuntimePredicateScalar::WidenedIntegerColumn { column, target })
     }

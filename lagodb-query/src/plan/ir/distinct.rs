@@ -43,6 +43,10 @@ impl DistinctExpr {
         // do not follow PostgreSQL equality. Text-family keys use Arrow byte
         // equality; nondeterministic collations are rejected below, but this
         // gate does not provide locale-aware equality normalization.
+        //
+        // Source precision is checked by DataFusion admission: timestamp OIDs
+        // cover both Arrow microseconds and nanoseconds, but only the former
+        // preserve PG equality for DISTINCT without normalization.
         match value_type.type_oid {
             pg_sys::BOOLOID
             | pg_sys::INT2OID

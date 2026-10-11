@@ -6,7 +6,8 @@
 //! and DISTINCT semantic allowlists remain responsible for their own operator
 //! semantics.
 
-use arrow_schema::DataType;
+use arrow_schema::{DataType, TimeUnit};
+use lagodb_arrow::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};
 use lagodb_core::expr::ExprType;
 use pgrx::pg_sys;
 
@@ -18,6 +19,11 @@ pub enum ExecutionScalarRepr {
     Float32,
     Float64,
     Utf8,
+    Binary,
+    Uuid,
+    Date,
+    Timestamp,
+    Timestamptz,
 }
 
 impl ExecutionScalarRepr {
@@ -25,6 +31,11 @@ impl ExecutionScalarRepr {
     /// DataFusion plan is built.
     pub const fn for_runtime_value(value_type: ExprType) -> Option<Self> {
         match value_type.type_oid {
+            pg_sys::BYTEAOID => Some(Self::Binary),
+            pg_sys::UUIDOID => Some(Self::Uuid),
+            pg_sys::DATEOID => Some(Self::Date),
+            pg_sys::TIMESTAMPOID => Some(Self::Timestamp),
+            pg_sys::TIMESTAMPTZOID => Some(Self::Timestamptz),
             pg_sys::BOOLOID => Some(Self::Boolean),
             pg_sys::INT2OID | pg_sys::INT4OID => Some(Self::Int32),
             pg_sys::INT8OID => Some(Self::Int64),
@@ -35,6 +46,18 @@ impl ExecutionScalarRepr {
             }
             _ => None,
         }
+    }
+
+    /// Whether a non-NULL PG-epoch date has a finite Arrow Date32 value.
+    pub fn supports_date_value(days: i32) -> bool {
+        !matches!(days, i32::MIN | i32::MAX)
+            && pg_epoch_days_to_unix_days(days).is_some()
+    }
+
+    /// Whether a non-NULL PG-epoch timestamp has a finite Arrow microsecond value.
+    pub fn supports_timestamp_value(micros: i64) -> bool {
+        !matches!(micros, i64::MIN | i64::MAX)
+            && pg_epoch_micros_to_unix_micros(micros).is_some()
     }
 
     /// Representation accepted at an ExecEvalExpr UDF input or result
@@ -62,6 +85,13 @@ impl ExecutionScalarRepr {
             Self::Float32 => DataType::Float32,
             Self::Float64 => DataType::Float64,
             Self::Utf8 => DataType::Utf8,
+            Self::Binary => DataType::Binary,
+            Self::Uuid => DataType::FixedSizeBinary(16),
+            Self::Date => DataType::Date32,
+            Self::Timestamp => DataType::Timestamp(TimeUnit::Microsecond, None),
+            Self::Timestamptz => {
+                DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into()))
+            }
         }
     }
 }

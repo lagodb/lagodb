@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use arrow_schema::Schema;
+use arrow_schema::{DataType, Schema};
 use datafusion::common::ScalarValue;
 use datafusion::functions::math::nans::IsNanFunc;
 use datafusion::functions::string::starts_with::StartsWithFunc;
@@ -13,7 +13,8 @@ use datafusion::physical_expr::expressions::{
 };
 use datafusion::physical_expr::{PhysicalExpr, conjunction_opt};
 use lagodb_core::runtime_api::{
-    RuntimePredicateScalar, RuntimePredicateValue, RuntimePruningPredicate,
+    RuntimeComparisonOperator, RuntimePredicateScalar, RuntimePredicateValue,
+    RuntimePruningPredicate,
 };
 
 use super::DataFusionPredicateScalar;
@@ -73,6 +74,9 @@ impl<'a> PhysicalPredicateAdapter<'a> {
         &self,
         expression: &'expr Arc<dyn PhysicalExpr>,
     ) -> Option<RuntimePruningPredicate<'expr>> {
+        if let Some(column) = self.boolean_column(expression, true) {
+            return Some(column);
+        }
         if let Some(literal) = expression.downcast_ref::<Literal>() {
             return match literal.value() {
                 ScalarValue::Boolean(Some(true)) => {
@@ -111,6 +115,25 @@ impl<'a> PhysicalPredicateAdapter<'a> {
             .and_then(|function| self.starts_with(function.args()))
     }
 
+    fn boolean_column(
+        &self,
+        expression: &Arc<dyn PhysicalExpr>,
+        expected: bool,
+    ) -> Option<RuntimePruningPredicate<'static>> {
+        let column = expression.downcast_ref::<Column>()?;
+        if self.output_schema.field(column.index()).data_type() != &DataType::Boolean
+        {
+            return None;
+        }
+        Some(RuntimePruningPredicate::Comparison {
+            operator: RuntimeComparisonOperator::Equal,
+            left: RuntimePredicateScalar::Column(self.column(expression)?),
+            right: RuntimePredicateScalar::Value(RuntimePredicateValue::Boolean(
+                expected,
+            )),
+        })
+    }
+
     fn nan_test<'expr>(
         &self,
         arguments: &'expr [Arc<dyn PhysicalExpr>],
@@ -131,6 +154,9 @@ impl<'a> PhysicalPredicateAdapter<'a> {
         &self,
         expression: &'expr Arc<dyn PhysicalExpr>,
     ) -> Option<RuntimePruningPredicate<'expr>> {
+        if let Some(column) = self.boolean_column(expression, false) {
+            return Some(column);
+        }
         let function = expression.downcast_ref::<ScalarFunctionExpr>()?;
         if function.fun().inner().is::<IsNanFunc>() {
             self.nan_test(function.args(), true)
@@ -208,6 +234,28 @@ impl<'a> PhysicalPredicateAdapter<'a> {
         operator: Operator,
         right: &'expr Arc<dyn PhysicalExpr>,
     ) -> Option<RuntimePruningPredicate<'expr>> {
+        if matches!(
+            operator,
+            Operator::IsDistinctFrom | Operator::IsNotDistinctFrom
+        ) {
+            let (column, literal) =
+                if let Some(literal) = right.downcast_ref::<Literal>() {
+                    (left, literal)
+                } else {
+                    (right, left.downcast_ref::<Literal>()?)
+                };
+            let output = column.downcast_ref::<Column>()?.index();
+            if self.output_schema.field(output).data_type() != &DataType::Boolean {
+                return None;
+            }
+            return Some(RuntimePruningPredicate::BooleanTest {
+                kind: DataFusionPredicateScalar::boolean_test(
+                    operator,
+                    literal.value(),
+                )?,
+                value: RuntimePredicateScalar::Column(self.column(column)?),
+            });
+        }
         if matches!(operator, Operator::Eq | Operator::Gt)
             && let (Some(left_column), Some(right_column)) =
                 (self.column(left), self.column(right))
@@ -280,6 +328,12 @@ impl<'a> PhysicalPredicateAdapter<'a> {
             .get(output_position)
             .copied()?;
         let source = self.output_schema.field(output_position).data_type();
+        if DataFusionPredicateScalar::binary_representation_cast(
+            source,
+            cast.cast_type(),
+        ) {
+            return Some(RuntimePredicateScalar::Column(column));
+        }
         let target =
             DataFusionPredicateScalar::integer_widening(source, cast.cast_type())?;
         Some(RuntimePredicateScalar::WidenedIntegerColumn { column, target })

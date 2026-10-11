@@ -11,6 +11,7 @@
 //! granularity changes require profile data showing that they reduce total
 //! boundary and conversion cost.
 
+mod signature;
 mod state;
 
 use std::hash::{Hash, Hasher};
@@ -22,22 +23,20 @@ use arrow_schema::DataType;
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
-    Volatility,
 };
 use lagodb_arrow::{PgDatumArrayBuilder, PgDatumArrayReader};
 use lagodb_core::diag::PgReportError;
 use pgrx::{PgTryBuilder, pg_sys};
 
-use crate::plan::{ExecutionScalarRepr, PostgresEvalExpr, PostgresExprVolatility};
+use crate::plan::PostgresEvalExpr;
 use state::PgExprState;
 
+pub(super) use signature::PgExprSignature;
 pub(super) use state::{PgExprRuntime, without_pg_cleanup};
 
 pub(super) struct PgExprUdf {
-    name: String,
+    contract: PgExprSignature,
     expression: PostgresEvalExpr,
-    signature: Signature,
-    return_type: DataType,
     state: OnceLock<Result<PgExprState, String>>,
     runtime: PgExprRuntime,
 }
@@ -46,7 +45,7 @@ impl std::fmt::Debug for PgExprUdf {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("PgExprUdf")
-            .field("name", &self.name)
+            .field("name", &self.contract.name())
             .field("result_type", &self.expression.result_type())
             .finish()
     }
@@ -88,40 +87,13 @@ impl PgExprUdf {
         expression: PostgresEvalExpr,
         runtime: PgExprRuntime,
     ) -> Option<ScalarUDF> {
-        let return_type =
-            ExecutionScalarRepr::for_postgres_eval(expression.result_type())?
-                .data_type();
-        let input_types = expression
-            .inputs()
-            .iter()
-            .map(|input| {
-                ExecutionScalarRepr::for_postgres_eval(input.value_type())
-                    .map(ExecutionScalarRepr::data_type)
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let volatility = match expression.volatility() {
-            PostgresExprVolatility::Immutable => Volatility::Immutable,
-            PostgresExprVolatility::Stable => Volatility::Stable,
-            PostgresExprVolatility::Volatile => Volatility::Volatile,
-        };
-        let name = Self::stable_name(expression.serialized().to_bytes());
+        let contract = PgExprSignature::try_new(&expression)?;
         Some(ScalarUDF::from(Self {
-            name,
+            contract,
             expression,
-            signature: Signature::exact(input_types, volatility),
-            return_type,
             state: OnceLock::new(),
             runtime,
         }))
-    }
-
-    fn stable_name(serialized: &[u8]) -> String {
-        let mut hash = 0xcbf29ce484222325_u64;
-        for byte in serialized {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        format!("lagodb_pg_expr_{hash:016x}")
     }
 
     fn execution_error(error: impl std::fmt::Display) -> DataFusionError {
@@ -155,7 +127,7 @@ impl PgExprUdf {
             })
             .collect::<DataFusionResult<Vec<_>>>()?;
         let mut output = PgDatumArrayBuilder::bind(
-            &self.return_type,
+            self.contract.result_type(),
             self.expression.result_type().type_oid,
             arguments.number_rows,
         )
@@ -205,18 +177,18 @@ impl PgExprUdf {
 
 impl ScalarUDFImpl for PgExprUdf {
     fn name(&self) -> &str {
-        &self.name
+        self.contract.name()
     }
 
     fn signature(&self) -> &Signature {
-        &self.signature
+        self.contract.signature()
     }
 
     fn return_type(
         &self,
         _argument_types: &[DataType],
     ) -> DataFusionResult<DataType> {
-        Ok(self.return_type.clone())
+        Ok(self.contract.result_type().clone())
     }
 
     fn invoke_with_args(

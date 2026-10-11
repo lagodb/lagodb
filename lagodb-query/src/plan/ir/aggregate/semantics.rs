@@ -367,6 +367,8 @@ impl AggCall {
     }
 
     fn supports_count_distinct(value_type: ExprType) -> bool {
+        // Physical source precision is checked with query DISTINCT during
+        // DataFusion admission. Keep valid microsecond timestamp support here.
         ScalarSemantics::Integer.supports_type(value_type)
             || Self::supports_float(value_type)
             || Self::supports_text_distinct(value_type)

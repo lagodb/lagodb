@@ -126,7 +126,11 @@ impl ScalarFunctionKind {
                     && scalar_result(result.type_oid)
             }
             Self::Coalesce => {
-                !arguments.is_empty()
+                // Equal PG JSONB OIDs do not imply equal Arrow container
+                // types. Keep branch combination in PG; direct nested column
+                // output and null bitmap predicates remain independent.
+                result.type_oid != pg_sys::JSONBOID
+                    && !arguments.is_empty()
                     && arguments.iter().all(|argument| *argument == result)
                     && input_collation == result.collation
             }
