@@ -71,12 +71,13 @@ impl TableScanCallbacks {
     /// # Safety
     ///
     /// `plan_data` must be a live, read-only provider plan frame in the active
-    /// executor memory context.
+    /// executor memory context. `estate` must be its initialized owning executor.
     pub(in crate::datafusion) unsafe fn bind(
         self,
         plan_data: *const pg_sys::List,
+        estate: *mut pg_sys::EState,
     ) -> Result<BoundTableScanHandle, PgReportError> {
-        let request = TableScanBindRequest::new(plan_data);
+        let request = TableScanBindRequest::new(plan_data, estate);
         let mut output = BoundTableScanResult::default();
         let mut error = CallbackErrorReport::default();
         // SAFETY: this method's contract supplies live plan data; registration

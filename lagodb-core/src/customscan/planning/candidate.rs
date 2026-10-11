@@ -12,6 +12,8 @@ use crate::expr::inspect::{RelationExprAnalyzer, RelationExprUsage, RelationScop
 pub enum CustomScanRejection {
     #[error("CustomScan requires a relation range-table entry")]
     NotARegularRelation,
+    #[error("PostgreSQL plans inheritance parents through their member relations")]
+    InheritanceParent,
     #[error("CustomScan does not support relation kind {relkind}")]
     UnsupportedRelKind { relkind: u8 },
     #[error("TABLESAMPLE is not supported by CustomScan")]
@@ -60,6 +62,16 @@ impl CustomScanCandidate {
         let rtekind = unsafe { (*self.rte).rtekind };
         if rtekind != pg_sys::RTEKind::RTE_RELATION {
             return Err(CustomScanRejection::NotARegularRelation);
+        }
+
+        // PG's set_rel_pathlist builds Append paths for inh RTEs. Preserve
+        // that composition; our scan contract covers one physical relation.
+        // expand_single_inheritance_child clears inh on physical members,
+        // including the parent's own scan. Provider-owned partitioned tables
+        // already have inh cleared by query preparation.
+        // SAFETY: `inspect` requires a live planner-owned RTE.
+        if unsafe { (*self.rte).inh } {
+            return Err(CustomScanRejection::InheritanceParent);
         }
 
         let relkind = unsafe { (*self.rte).relkind } as u8;

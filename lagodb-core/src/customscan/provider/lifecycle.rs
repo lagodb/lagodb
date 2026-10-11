@@ -39,43 +39,18 @@ pub struct BeginContext<'a, P: LagodbCustomScanProvider + ?Sized> {
     pub purpose: ScanPurpose,
     /// Statement-stable predicates; dynamic inputs are bound at Start.
     pub filters: BoundFilterSet<'a, P::BoundPredicate>,
-    scan_tuple_desc: pg_sys::TupleDesc,
-    tuple_layout: &'a ScanTupleLayout,
+    pub(in crate::customscan) scan_tuple_desc: pg_sys::TupleDesc,
+    pub(in crate::customscan) tuple_layout: &'a ScanTupleLayout,
     /// Scan relation handle.
     pub relation: RelationHandle<'a>,
     /// Executor snapshot handle.
     pub snapshot: SnapshotHandle<'a>,
     /// True only for the partial path executed under PostgreSQL Gather.
     pub parallel_aware: bool,
-    _marker: PhantomData<&'a ()>,
+    pub(in crate::customscan) _marker: PhantomData<&'a ()>,
 }
 
 impl<'a, P: LagodbCustomScanProvider> BeginContext<'a, P> {
-    pub(crate) fn new(
-        state: &'a mut P::State,
-        private_data: &'a P::PrivateData,
-        purpose: ScanPurpose,
-        filters: BoundFilterSet<'a, P::BoundPredicate>,
-        scan_tuple_desc: pg_sys::TupleDesc,
-        tuple_layout: &'a ScanTupleLayout,
-        relation: RelationHandle<'a>,
-        snapshot: SnapshotHandle<'a>,
-        parallel_aware: bool,
-    ) -> Self {
-        Self {
-            state,
-            private_data,
-            purpose,
-            filters,
-            scan_tuple_desc,
-            tuple_layout,
-            relation,
-            snapshot,
-            parallel_aware,
-            _marker: PhantomData,
-        }
-    }
-
     /// Actual executor descriptor for the provider-filled raw scan slot.
     #[inline]
     pub fn scan_tuple(&self) -> ScanTupleDescriptor<'_> {

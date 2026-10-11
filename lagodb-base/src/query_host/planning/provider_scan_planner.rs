@@ -2,7 +2,10 @@
 
 use std::ffi::CStr;
 use std::mem::size_of;
+use std::sync::Arc;
 
+use arrow_schema::ffi::FFI_ArrowSchema;
+use arrow_schema::{Schema, SchemaRef};
 use lagodb_core::diag::PgReportError;
 use lagodb_core::query_contract::{ScanCost, TableScanRoute};
 use lagodb_core::runtime_api::{
@@ -19,6 +22,7 @@ pub(super) struct PlannedScanRecord {
     pub(super) plan_data: *mut pg_sys::List,
     pub(super) pruning: Option<PlannedScanPruning>,
     pub(super) cost: ScanCost,
+    pub(super) schema: SchemaRef,
 }
 
 pub(super) struct PlannedScanPruning {
@@ -38,10 +42,33 @@ impl ProviderScanPlanner {
 
         let mut output = PlannedTableScanResult::default();
         let mut error = CallbackErrorReport::default();
-        match registered.plan(&request, &mut output, &mut error) {
+        // The empty C schema owns any provider export and releases it on all
+        // exits, including a declined candidate or a malformed result.
+        let mut schema = FFI_ArrowSchema::empty();
+        match registered.plan(&request, &mut output, &mut schema, &mut error) {
             TABLE_SCAN_UNSUPPORTED => Ok(None),
             TABLE_SCAN_PLANNED => {
-                Self::decode_planned(registered.route(), &request, output).map(Some)
+                let schema = Schema::try_from(&schema).map_err(|error| {
+                    PgReportError::from_message(
+                        PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                        format!(
+                            "table scan returned an invalid Arrow schema: {error}"
+                        ),
+                    )
+                })?;
+                if schema.fields().len() != request.projected_attno_count {
+                    return Err(PgReportError::from_message(
+                        PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                        "table scan schema does not match its requested projection",
+                    ));
+                }
+                Self::decode_planned(
+                    registered.route(),
+                    &request,
+                    output,
+                    Arc::new(schema),
+                )
+                .map(Some)
             }
             TABLE_SCAN_FAILED => {
                 // SAFETY: `FAILED` requires the provider callback to populate
@@ -92,6 +119,7 @@ impl ProviderScanPlanner {
         route: TableScanRoute<'static>,
         request: &TableScanPlanningRequest,
         output: PlannedTableScanResult,
+        schema: SchemaRef,
     ) -> Result<PlannedScanRecord, PgReportError> {
         let expected_size = u32::try_from(size_of::<PlannedTableScanResult>())
             .expect("planned table-scan result size exceeds u32");
@@ -128,6 +156,7 @@ impl ProviderScanPlanner {
             plan_data: output.plan_data,
             pruning,
             cost,
+            schema,
         })
     }
 }

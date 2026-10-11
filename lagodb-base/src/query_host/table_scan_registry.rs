@@ -3,7 +3,9 @@
 
 use std::ffi::{CStr, c_char, c_void};
 use std::mem::size_of;
+use std::ptr;
 
+use arrow_schema::ffi::FFI_ArrowSchema;
 use lagodb_core::diag::PgReportError;
 use lagodb_core::query_contract::{TableScanRoute, TableScanRouteKind};
 use lagodb_core::runtime_api::{
@@ -238,12 +240,19 @@ impl ResolvedTableScan {
         self,
         request: &TableScanPlanningRequest,
         output: &mut PlannedTableScanResult,
+        schema: &mut FFI_ArrowSchema,
         error: &mut CallbackErrorReport,
     ) -> u32 {
         // SAFETY: registration validated the callback table; all arguments
         // remain live for this synchronous FFI call.
         unsafe {
-            (self.callbacks.plan_scan)(self.callbacks.context, request, output, error)
+            (self.callbacks.plan_scan)(
+                self.callbacks.context,
+                request,
+                output,
+                ptr::from_mut(schema).cast(),
+                error,
+            )
         }
     }
 

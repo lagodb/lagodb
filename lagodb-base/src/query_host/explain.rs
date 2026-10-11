@@ -117,23 +117,16 @@ impl QueryOffloadExplain {
         let logical_plan =
             QueryExplainPlan::new(fragment, &plan.scans, options, metrics).build();
         let mode = if options.analyze {
-            let mode = metrics
+            metrics
                 .map(ExecutionMetricsSnapshot::execution_mode)
                 .filter(|mode| *mode != QueryExecutionMode::NotStarted)
                 .or(planned_mode)
-                .ok_or(QueryHostError::ExecutorContract(
-                    "EXPLAIN ANALYZE has no query execution mode",
-                ))?;
-            Some(match mode {
-                QueryExecutionMode::Serial => c"Serial",
-                QueryExecutionMode::Parallel => c"Parallel",
-                QueryExecutionMode::Mixed => c"Serial and Parallel",
-                QueryExecutionMode::NotStarted => {
-                    return Err(QueryHostError::ExecutorContract(
-                        "EXPLAIN ANALYZE did not start query execution",
-                    ));
-                }
-            })
+                .and_then(|mode| match mode {
+                    QueryExecutionMode::Serial => Some(c"Serial"),
+                    QueryExecutionMode::Parallel => Some(c"Parallel"),
+                    QueryExecutionMode::Mixed => Some(c"Serial and Parallel"),
+                    QueryExecutionMode::NotStarted => None,
+                })
         } else {
             None
         };

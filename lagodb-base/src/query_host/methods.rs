@@ -26,6 +26,7 @@ pub(super) fn tables() -> &'static CustomScanMethodTables {
                 explain: execution::explain,
             },
         )
+        .with_first_exec(execution::first_exec)
     })
 }
 

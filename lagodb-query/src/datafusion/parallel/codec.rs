@@ -21,7 +21,7 @@ use prost::Message;
 use super::catalog::WorkerSourceCatalog;
 use super::scan_exec::ParallelTableScanExec;
 use crate::datafusion::integer_abs::PgIntegerAbsUdf;
-use crate::datafusion::numeric_aggregate;
+use crate::datafusion::{numeric_aggregate, real_sum};
 use lagodb_core::query_contract::ScanId;
 
 const SOURCE_CODEC_VERSION: u32 = 1;
@@ -182,6 +182,9 @@ impl PhysicalExtensionCodec for LagoPhysicalCodec {
     }
 
     fn try_decode_udf(&self, name: &str, buf: &[u8]) -> Result<Arc<ScalarUDF>> {
+        if name == real_sum::NAME && buf.is_empty() {
+            return Ok(real_sum::result());
+        }
         if name != "abs" || buf.len() != 1 {
             return Err(DataFusionError::NotImplemented(format!(
                 "LagoDB UDF {name:?} has no physical codec",
@@ -195,6 +198,9 @@ impl PhysicalExtensionCodec for LagoPhysicalCodec {
     }
 
     fn try_encode_udf(&self, node: &ScalarUDF, buf: &mut Vec<u8>) -> Result<()> {
+        if node.name() == real_sum::NAME {
+            return Ok(());
+        }
         let Some(tag) = PgIntegerAbsUdf::codec_tag(node) else {
             return Err(DataFusionError::NotImplemented(format!(
                 "LagoDB UDF codec does not encode {}",
@@ -252,9 +258,11 @@ impl PhysicalExtensionCodec for DistributedCodecHostingLagoFunctions {
     }
 
     fn try_encode_udf(&self, node: &ScalarUDF, _buf: &mut Vec<u8>) -> Result<()> {
-        if PgIntegerAbsUdf::codec_tag(node).is_some() {
+        if PgIntegerAbsUdf::codec_tag(node).is_some() || node.name() == real_sum::NAME
+        {
             return Err(DataFusionError::NotImplemented(
-                "PostgreSQL ABS is encoded by the LagoDB codec".to_owned(),
+                "PostgreSQL scalar semantics are encoded by the LagoDB codec"
+                    .to_owned(),
             ));
         }
         Ok(())

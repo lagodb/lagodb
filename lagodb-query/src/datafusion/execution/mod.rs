@@ -3,8 +3,6 @@
 mod output;
 mod state;
 
-use std::marker::PhantomData;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use pgrx::pg_sys;
@@ -18,7 +16,7 @@ use super::metrics::{
 };
 use super::parallel::ParallelQueryOptions;
 use super::scan_callbacks::TableScanCallbacks;
-use output::QueryOutputDecoder;
+pub use state::PendingQueryExecution;
 use state::QueryExecutionState;
 
 /// Whether LagoDB records counters and retains physical-plan metrics for
@@ -39,12 +37,14 @@ pub enum ExecutionMetricsMode {
     Enabled,
 }
 
-/// Begin-owned query state with statement resources and at most one lazy run.
+/// Started query state with statement resources and at most one lazy run.
+///
+/// The PostgreSQL host owns cleanup: it must consume this value through `close`
+/// or `abort`, including from its ResourceOwner and unwind fallback paths.
+#[must_use]
 pub struct QueryExecution {
-    output: QueryOutputDecoder,
     metrics: Option<Arc<ExecutionMetrics>>,
-    state: Option<QueryExecutionState>,
-    backend_thread: PhantomData<Rc<()>>,
+    state: QueryExecutionState,
 }
 
 /// Begin-time inputs selected by the PG host for one complete query fragment.
@@ -60,21 +60,6 @@ pub struct QueryExecutionRequest<'a> {
 }
 
 impl QueryExecution {
-    pub fn try_new(
-        request: QueryExecutionRequest<'_>,
-    ) -> Result<Self, QueryExecutionError> {
-        let metrics = (request.metrics_mode == ExecutionMetricsMode::Enabled)
-            .then(|| Arc::new(ExecutionMetrics::new(request.scans.len())));
-        let (state, output) =
-            QueryExecutionState::prepare(request, metrics.as_ref())?;
-        Ok(Self {
-            output,
-            metrics,
-            state: Some(state),
-            backend_thread: PhantomData,
-        })
-    }
-
     /// Write the next query result through the pre-bound Arrow decoder.
     ///
     /// # Safety
@@ -86,13 +71,7 @@ impl QueryExecution {
         slot: *mut pg_sys::TupleTableSlot,
         datum_context: pg_sys::MemoryContext,
     ) -> Result<bool, QueryExecutionError> {
-        let state = self
-            .state
-            .as_mut()
-            .expect("query execution state is active");
-        let produced =
-            unsafe { state.next_into_slot(&self.output, slot, datum_context) }?;
-        Ok(produced)
+        unsafe { self.state.next_into_slot(slot, datum_context) }
     }
 
     /// # Safety
@@ -103,62 +82,36 @@ impl QueryExecution {
         &mut self,
         changed_parameters: *mut pg_sys::Bitmapset,
     ) -> Result<(), QueryExecutionError> {
-        unsafe {
-            self.state
-                .as_mut()
-                .expect("query execution state is active")
-                .rescan(changed_parameters)
-        }
+        unsafe { self.state.rescan(changed_parameters) }
     }
 
-    pub fn close(mut self) -> Result<(), QueryExecutionError> {
-        self.state
-            .take()
-            .expect("query execution state is active")
-            .close()
+    pub fn close(self) -> Result<(), QueryExecutionError> {
+        self.state.close()
     }
 
-    pub fn abort(mut self) {
-        if let Some(state) = self.state.take() {
-            state.abort();
-        }
+    pub fn abort(self) {
+        self.state.abort();
     }
 
     pub fn metrics(&self) -> Option<ExecutionMetricsSnapshot> {
-        self.metrics.as_ref().map(|metrics| {
-            metrics.snapshot(
-                self.state
-                    .as_ref()
-                    .expect("query execution state is active")
-                    .peak_reserved(),
-            )
-        })
+        self.metrics
+            .as_ref()
+            .map(|metrics| metrics.snapshot(self.state.peak_reserved()))
     }
 
     pub fn physical_plan_analyze(
         &self,
         include_timing: bool,
     ) -> Option<PlanExplainNode> {
-        self.state
-            .as_ref()
-            .expect("query execution state is active")
-            .physical_plan_analyze(include_timing)
+        self.state.physical_plan_analyze(include_timing)
     }
 
     pub fn physical_plan_explain(&self) -> PlanExplainNode {
-        self.state
-            .as_ref()
-            .expect("query execution state is active")
-            .physical_plan_explain()
+        self.state.physical_plan_explain()
     }
 
     pub fn planned_mode(&self) -> QueryExecutionMode {
-        if self
-            .state
-            .as_ref()
-            .expect("query execution state is active")
-            .planned_parallel()
-        {
+        if self.state.planned_parallel() {
             QueryExecutionMode::Parallel
         } else {
             QueryExecutionMode::Serial
@@ -166,17 +119,6 @@ impl QueryExecution {
     }
 
     pub fn fragment(&self) -> &QueryFragment {
-        self.state
-            .as_ref()
-            .expect("query execution state is active")
-            .fragment()
-    }
-}
-
-impl Drop for QueryExecution {
-    fn drop(&mut self) {
-        if let Some(state) = self.state.take() {
-            let _ = state.close();
-        }
+        self.state.fragment()
     }
 }

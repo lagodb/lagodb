@@ -3,13 +3,11 @@
 use arrow_array::RecordBatch;
 use arrow_schema::{DataType, SchemaRef};
 use lagodb_arrow::{
-    ArrowColumnDecoder, BoundBatch, ColumnRule, DatumCodec, DecodedColumn,
-    PgColumnType, resolve_column_rule,
+    ArrowColumnDecoder, BoundBatch, BoundDatumPlan, CellRule, DatumCodec,
+    DecodedColumn,
 };
-use lagodb_core::batch::BatchRowDecoder;
 use lagodb_core::diag::PgReportError;
-use lagodb_core::tuple::SlotColumns;
-use pgrx::prelude::PgSqlErrorCode;
+use lagodb_core::tuple::{PgType, SlotColumns};
 use pgrx::{PgMemoryContexts, pg_sys};
 
 use crate::plan::QueryTupleLayout;
@@ -40,44 +38,30 @@ impl QueryOutputDecoder {
         for (position, (field, slot)) in
             schema.fields().iter().zip(layout.slots()).enumerate()
         {
-            let pg_type =
-                PgColumnType::from_pg_type(slot.type_oid()).ok_or_else(|| {
-                    PgReportError::from_message(
-                        PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH,
-                        format!(
-                            "query output type {:?} has no Arrow conversion",
-                            slot.type_oid()
-                        ),
-                    )
-                })?;
-            let (rule, codec) = match (slot.type_oid(), field.data_type()) {
-                (pg_sys::FLOAT4OID, DataType::Float64) => {
-                    (ColumnRule::F64, DatumCodec::float4_from_float64())
-                }
+            let physical = match (slot.type_oid(), field.data_type()) {
                 (pg_sys::NUMERICOID, DataType::Binary) => {
                     // SAFETY: only LagoDB's numeric UDAF emits this complete
                     // detoasted PostgreSQL NUMERIC varlena.
-                    (ColumnRule::Binary, unsafe {
+                    Some((CellRule::Binary, unsafe {
                         DatumCodec::postgres_numeric_varlena()
-                    })
+                    }))
                 }
                 (pg_sys::NUMERICOID, DataType::Int64) => {
-                    (ColumnRule::I64, DatumCodec::numeric_from_int64())
+                    Some((CellRule::I64, DatumCodec::numeric_from_int64()))
                 }
                 (pg_sys::NUMERICOID, DataType::Float64) => {
-                    (ColumnRule::F64, DatumCodec::numeric_from_float64())
+                    Some((CellRule::F64, DatumCodec::numeric_from_float64()))
                 }
-                _ => (
-                    resolve_column_rule(field.data_type(), pg_type)
-                        .map_err(PgReportError::from_domain_error)?,
-                    DatumCodec::standard(slot.type_oid())
-                        .map_err(PgReportError::from_domain_error)?,
-                ),
+                _ => None,
             };
-            // SAFETY: the output layout is constructed from the CustomScan
-            // target list that PostgreSQL uses to create the destination slot.
-            // `position` is bounded by that validated layout for this decoder.
-            columns.push(
+            // SAFETY: the target list establishes the slot layout. Forwarded
+            // JSON text comes from the provider's validated JSON representation.
+            // TextIo outputs likewise forward the provider's NUL-free PG
+            // type-output text. Native string functions produce PG text, and
+            // ExecutionScalarRepr excludes TextIo types from runtime literals
+            // and PostgreSQL fallback evaluation; these cannot manufacture a
+            // new TextIo payload from an arbitrary Arrow string.
+            let column = if let Some((rule, codec)) = physical {
                 unsafe {
                     DecodedColumn::new(
                         rule,
@@ -87,17 +71,24 @@ impl QueryOutputDecoder {
                         codec,
                     )
                 }
-                .map_err(PgReportError::from_domain_error)?,
-            );
+            } else {
+                // SAFETY: json/jsonb text obeys the validated, NUL-free
+                // forwarding contract above, including array/composite leaves.
+                let plan = unsafe {
+                    BoundDatumPlan::bind_with_prevalidated_json_text(
+                        field,
+                        PgType::new(slot.type_oid(), slot.typmod()),
+                    )
+                }
+                .map_err(PgReportError::from_domain_error)?;
+                unsafe { DecodedColumn::bind(plan, position, position) }
+            }
+            .map_err(PgReportError::from_domain_error)?;
+            columns.push(column);
             nullable.push(slot.nullable());
         }
-        // Resolve this once with PostgreSQL's type metadata. By-value datums
-        // cannot retain allocations in the current memory context, so the row
-        // hot path only switches contexts when an output can be by-ref.
-        let requires_datum_context = layout
-            .slots()
-            .iter()
-            .any(|slot| unsafe { !pg_sys::get_typbyval(slot.type_oid()) });
+        let requires_datum_context =
+            columns.iter().any(DecodedColumn::requires_datum_context);
         Ok(Self {
             decoder: ArrowColumnDecoder::new(columns),
             nullable: nullable.into_boxed_slice(),
@@ -106,11 +97,15 @@ impl QueryOutputDecoder {
         })
     }
 
-    pub(super) fn bind(
+    /// # Safety
+    /// `batch` must come from the execution plan schema supplied to `try_new`.
+    pub(super) unsafe fn bind_batch_unchecked(
         &self,
         batch: RecordBatch,
     ) -> Result<BoundBatch, PgReportError> {
-        self.decoder.bind(batch)
+        // SAFETY: RecordBatchStream's fixed-schema contract is supplied by the
+        // caller; PG target nullability is checked separately by execution state.
+        unsafe { self.decoder.bind_batch_unchecked(batch) }
     }
 
     /// # Safety

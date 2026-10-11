@@ -3,8 +3,13 @@
 use std::ffi::CStr;
 use std::{mem, ptr};
 
-use lagodb_core::runtime_api::TableScanPlanningRequest;
+use lagodb_core::diag::log_debug1;
+use lagodb_core::runtime_api::{
+    TABLE_SCAN_PROJECTION_COLUMNS, TABLE_SCAN_PROJECTION_ROW_COUNT,
+    TableScanPlanningRequest,
+};
 use lagodb_query::ExecutionProfile;
+use lagodb_query::datafusion::DataFusionPlanAdmission;
 use lagodb_query::plan::{
     CostingContext, PlanCost, PlannedTableScan, QueryCostEstimator, ScanCostTable,
     SelectedQueryPlan, TableScanFilterExplain,
@@ -72,6 +77,17 @@ impl QueryPathInstallation {
             };
             scans.push(ProviderScanPlan { input, provider });
         }
+        if let Err(reason) = DataFusionPlanAdmission::new(
+            &self.planned.query,
+            scans.iter().map(|scan| &scan.provider.schema),
+        )
+        .check()
+        {
+            log_debug1(format_args!(
+                "query offload physical admission declined: {reason}"
+            ));
+            return Ok(());
+        }
         let execution = query_execution_profile();
         let cost = self.cost(&scans, execution)?;
         self.encode_and_install(scans, execution, cost, parallel_safe)
@@ -94,27 +110,27 @@ impl QueryPathInstallation {
             .as_ref()
             .map_or(ptr::null_mut(), |filter| filter.source_expression());
         let check_as_user_id = unsafe { (*input.input_rel).userid };
-        if input.projected_columns.is_empty() {
-            TableScanPlanningRequest::row_count(
-                input.scan.index(),
-                predicate_expression,
-                check_as_user_id,
-                input.root,
-                input.input_rel,
-                input.range_table_index,
-                input.range_table_entry,
-            )
-        } else {
-            TableScanPlanningRequest::columns(
-                input.scan.index(),
-                &input.projected_columns,
-                predicate_expression,
-                check_as_user_id,
-                input.root,
-                input.input_rel,
-                input.range_table_index,
-                input.range_table_entry,
-            )
+        let (projection_kind, projected_attnos) =
+            if input.projected_columns.is_empty() {
+                (TABLE_SCAN_PROJECTION_ROW_COUNT, ptr::null())
+            } else {
+                (
+                    TABLE_SCAN_PROJECTION_COLUMNS,
+                    input.projected_columns.as_ptr(),
+                )
+            };
+        TableScanPlanningRequest {
+            struct_size: TableScanPlanningRequest::STRUCT_SIZE,
+            projection_kind,
+            projected_attnos,
+            projected_attno_count: input.projected_columns.len(),
+            predicate_expression,
+            check_as_user_id,
+            scan_index: input.scan.index(),
+            root: input.root,
+            relation: input.input_rel,
+            range_table_index: input.range_table_index,
+            range_table_entry: input.range_table_entry,
         }
     }
 

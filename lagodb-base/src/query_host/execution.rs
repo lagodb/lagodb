@@ -1,6 +1,7 @@
 //! Executor lifecycle for the base-owned query-offload scan.
 
-use std::cell::UnsafeCell;
+mod owner;
+
 use std::ffi::c_int;
 use std::rc::Rc;
 use std::{mem, ptr};
@@ -9,7 +10,8 @@ use lagodb_core::resource::{ResourceHandle, forget_resource, remember_resource};
 use lagodb_query::ExecutionProfile;
 use lagodb_query::datafusion::{
     ExecutionMetricsMode, ParallelExecutionHost, ParallelQueryOptions,
-    QueryExecution, QueryExecutionError, QueryExecutionLimits, QueryExecutionRequest,
+    PendingQueryExecution, QueryExecution, QueryExecutionError, QueryExecutionLimits,
+    QueryExecutionRequest,
 };
 use lagodb_query::plan::SelectedQueryPlan;
 use pgrx::{PgMemoryContexts, pg_guard, pg_sys};
@@ -19,81 +21,24 @@ use super::explain::{ExplainOptions, QueryOffloadExplain};
 use super::methods;
 use super::parallel::PgParallelHost;
 use super::table_scan_registry::TableScanRegistry;
+use owner::QueryExecutionCell;
 
 enum QueryPhase {
     Created,
     ExplainOnly,
-    Running(Rc<QueryExecutionCell>),
+    Active(Rc<QueryExecutionCell>),
     Closed,
-}
-
-/// Single-threaded owner shared by the CustomScan state and PostgreSQL's
-/// ResourceOwner cleanup callback.
-///
-/// pgrx converts a PostgreSQL ERROR raised by a protected outbound FFI call
-/// into a Rust unwind before reporting it again at the inbound callback
-/// boundary. After control returns to PostgreSQL, cleanup of a failed portal
-/// may omit `EndCustomScan`, and its ResourceOwner may be released independently
-/// of the executor MemoryContext. Both cleanup paths therefore share this cell:
-/// whichever runs first takes the execution, while the other observes an empty
-/// cell. Normal `EndCustomScan` closes the same value and unregisters the
-/// callback. Executor and cleanup callbacks are serialized on one backend
-/// thread, so accesses cannot overlap.
-struct QueryExecutionCell {
-    execution: UnsafeCell<Option<QueryExecution>>,
-}
-
-impl QueryExecutionCell {
-    fn new(execution: QueryExecution) -> Self {
-        Self {
-            execution: UnsafeCell::new(Some(execution)),
-        }
-    }
-
-    /// # Safety
-    ///
-    /// The caller must be the active PostgreSQL backend callback for this
-    /// CustomScan; no ResourceOwner cleanup callback may run concurrently.
-    unsafe fn with_mut<R>(
-        &self,
-        operation: impl FnOnce(&mut QueryExecution) -> R,
-    ) -> Option<R> {
-        unsafe { (&mut *self.execution.get()).as_mut().map(operation) }
-    }
-
-    /// # Safety
-    ///
-    /// The caller must uphold the same serialized callback contract as
-    /// [`Self::with_mut`].
-    unsafe fn with_ref<R>(
-        &self,
-        operation: impl FnOnce(&QueryExecution) -> R,
-    ) -> Option<R> {
-        unsafe { (&*self.execution.get()).as_ref().map(operation) }
-    }
-
-    fn close(&self) -> Result<(), QueryExecutionError> {
-        // SAFETY: normal executor close and ResourceOwner cleanup are
-        // serialized on the PostgreSQL backend thread.
-        unsafe { (&mut *self.execution.get()).take() }
-            .map_or(Ok(()), QueryExecution::close)
-    }
-
-    fn abort(&self) {
-        // PG evaluator objects must not invoke commit-style executor cleanup
-        // after an ERROR unwind. The execution owner still releases Rust and
-        // provider resources; the outer executor's statement context reclaims
-        // its evaluator state.
-        if let Some(execution) = unsafe { (&mut *self.execution.get()).take() } {
-            execution.abort();
-        }
-    }
 }
 
 #[repr(C)]
 struct QueryOffloadScanState {
     base: pg_sys::CustomScanState,
     phase: QueryPhase,
+    // Borrowed from the Active owner's stable Rc allocation at first execution.
+    // Only the regular row method table accesses this pointer. End/abort revoke
+    // access; ResourceOwner cleanup ends the portal's execution even when it
+    // leaves this wrapper allocated until its MemoryContext is deleted.
+    row_execution: *mut QueryExecution,
     resource: Option<ResourceHandle>,
     explain: QueryOffloadExplain,
 }
@@ -111,8 +56,9 @@ impl QueryOffloadScanState {
     }
 
     fn close(&mut self) -> Result<(), QueryExecutionError> {
+        self.row_execution = ptr::null_mut();
         let result = match mem::replace(&mut self.phase, QueryPhase::Closed) {
-            QueryPhase::Running(execution) => execution.close(),
+            QueryPhase::Active(execution) => execution.close(),
             QueryPhase::Created | QueryPhase::ExplainOnly | QueryPhase::Closed => {
                 Ok(())
             }
@@ -124,8 +70,9 @@ impl QueryOffloadScanState {
     }
 
     fn abort(&mut self) {
+        self.row_execution = ptr::null_mut();
         match mem::replace(&mut self.phase, QueryPhase::Closed) {
-            QueryPhase::Running(execution) => execution.abort(),
+            QueryPhase::Active(execution) => execution.abort(),
             QueryPhase::Created | QueryPhase::ExplainOnly | QueryPhase::Closed => {}
         }
         if let Some(resource) = self.resource.take() {
@@ -182,10 +129,11 @@ pub(super) unsafe extern "C-unwind" fn create_state(
                 },
                 ..Default::default()
             },
-            methods: methods::tables().exec(),
+            methods: methods::tables().initial_exec(),
             ..Default::default()
         },
         phase: QueryPhase::Created,
+        row_execution: ptr::null_mut(),
         resource: None,
         explain: QueryOffloadExplain::new(),
     };
@@ -265,7 +213,7 @@ unsafe fn begin_scan(
     } else {
         None
     };
-    let execution = Rc::new(QueryExecutionCell::new(QueryExecution::try_new(
+    let execution = Rc::new(QueryExecutionCell::new(PendingQueryExecution::try_new(
         QueryExecutionRequest {
             query,
             scans: &scans,
@@ -279,8 +227,34 @@ unsafe fn begin_scan(
     )?));
     let cleanup = Rc::clone(&execution);
     state.resource = Some(remember_resource(move || cleanup.abort()));
-    state.phase = QueryPhase::Running(execution);
+    state.phase = QueryPhase::Active(execution);
     Ok(())
+}
+
+#[pg_guard]
+pub(super) unsafe extern "C-unwind" fn first_exec(
+    node: *mut pg_sys::CustomScanState,
+) -> *mut pg_sys::TupleTableSlot {
+    // Keep provider/error allocations in the owning executor context, as the
+    // core CustomScan Start boundary does. The regular row path has no start check.
+    let estate = unsafe { (*node).ss.ps.state };
+    let previous = unsafe { pg_sys::MemoryContextSwitchTo((*estate).es_query_cxt) };
+    let result = (|| {
+        let state = unsafe { QueryOffloadScanState::from_node(&mut *node) };
+        let QueryPhase::Active(execution) = &state.phase else {
+            return Err(QueryHostError::ExecutorContract(
+                "query startup has no binding",
+            ));
+        };
+        state.row_execution = unsafe { execution.start() }?;
+        Ok(())
+    })();
+    unsafe { pg_sys::MemoryContextSwitchTo(previous) };
+    if let Err(error) = result {
+        error.into_report().report();
+    }
+    unsafe { (*node).methods = methods::tables().exec() };
+    unsafe { exec(node) }
 }
 
 #[pg_guard]
@@ -314,21 +288,12 @@ unsafe fn scan_next(
             &mut *scan_state.cast::<pg_sys::CustomScanState>(),
         )
     };
-    let QueryPhase::Running(execution) = &state.phase else {
-        return Err(QueryHostError::ExecutorContract(
-            "ExecCustomScan was invoked while query offload was not running",
-        ));
-    };
-    let produced = unsafe {
-        execution
-            .with_mut(|execution| execution.next_into_slot(slot, per_tuple_context))
-    }
-    .ok_or(QueryHostError::ExecutorContract(
-        "query-offload execution was already released",
-    ))??;
-    if !produced {
-        return Ok(slot);
-    }
+    // SAFETY: first_exec publishes the owner's stable execution address before
+    // installing this method table. Rescans retain that object; PG never resumes
+    // this node after End or portal failure. Callback borrows do not overlap,
+    // including owner-side rescan/EXPLAIN access and final resource cleanup.
+    let execution = unsafe { &mut *state.row_execution };
+    unsafe { execution.next_into_slot(slot, per_tuple_context) }?;
     Ok(slot)
 }
 
@@ -343,16 +308,10 @@ unsafe extern "C-unwind" fn recheck(
 #[pg_guard]
 pub(super) unsafe extern "C-unwind" fn rescan(node: *mut pg_sys::CustomScanState) {
     let state = unsafe { QueryOffloadScanState::from_node(&mut *node) };
-    let result = (|| match &mut state.phase {
-        QueryPhase::Running(execution) => {
+    let result = match &mut state.phase {
+        QueryPhase::Active(execution) => {
             let changed_parameters = unsafe { (*node).ss.ps.chgParam };
-            unsafe {
-                execution.with_mut(|execution| execution.rescan(changed_parameters))
-            }
-            .ok_or(QueryHostError::ExecutorContract(
-                "query-offload execution was already released",
-            ))?
-            .map_err(QueryHostError::from)
+            unsafe { execution.rescan(changed_parameters) }
         }
         QueryPhase::ExplainOnly => Ok(()),
         QueryPhase::Created | QueryPhase::Closed => {
@@ -360,7 +319,7 @@ pub(super) unsafe extern "C-unwind" fn rescan(node: *mut pg_sys::CustomScanState
                 "ReScanCustomScan was invoked outside an active phase",
             ))
         }
-    })();
+    };
     if let Err(error) = result {
         error.into_report().report();
     }
@@ -390,7 +349,7 @@ pub(super) unsafe extern "C-unwind" fn explain(
         // deliberately does no EXPLAIN work. If it later elects to log this
         // statement, its callback still owns the live CustomScan plan and can
         // capture the presentation metadata on demand.
-        if matches!(&state.phase, QueryPhase::Running(_)) && !state.explain.has_plan()
+        if matches!(&state.phase, QueryPhase::Active(_)) && !state.explain.has_plan()
         {
             let selected = unsafe {
                 SelectedQueryPlan::decode_execution(&*(*scan).custom_private)
@@ -400,24 +359,36 @@ pub(super) unsafe extern "C-unwind" fn explain(
         }
 
         match &state.phase {
-            QueryPhase::Running(execution) => unsafe {
-                execution.with_ref(|execution| {
-                    let metrics = execution.metrics();
-                    let planned_mode = execution.planned_mode();
-                    let physical_plan = options.engine_diagnostics().then(|| {
-                        execution
-                            .physical_plan_analyze(options.timing)
-                            .unwrap_or_else(|| execution.physical_plan_explain())
-                    });
-                    state.explain.emit(
-                        Some(execution.fragment()),
-                        metrics.as_ref(),
-                        Some(planned_mode),
-                        physical_plan.as_ref(),
-                        options,
-                        explain,
-                    )
-                })
+            QueryPhase::Active(execution) => unsafe {
+                execution.with_ref(
+                    |pending| {
+                        state.explain.emit(
+                            Some(pending.fragment()),
+                            None,
+                            None,
+                            None,
+                            options,
+                            explain,
+                        )
+                    },
+                    |execution| {
+                        let metrics = execution.metrics();
+                        let planned_mode = execution.planned_mode();
+                        let physical_plan = options.engine_diagnostics().then(|| {
+                            execution
+                                .physical_plan_analyze(options.timing)
+                                .unwrap_or_else(|| execution.physical_plan_explain())
+                        });
+                        state.explain.emit(
+                            Some(execution.fragment()),
+                            metrics.as_ref(),
+                            Some(planned_mode),
+                            physical_plan.as_ref(),
+                            options,
+                            explain,
+                        )
+                    },
+                )
             }
             .unwrap_or_else(|| unsafe {
                 state.explain.emit(None, None, None, None, options, explain)

@@ -28,7 +28,7 @@ pub(super) use worker::{
 ///
 /// This wrapper can cross the `lagodb-base`/`lagodb-query` crate boundary, but
 /// cannot cross a thread boundary. It exposes no opaque handle or stream;
-/// [`QueryExecution`](super::QueryExecution) consumes it while
+/// [`PendingQueryExecution`](super::PendingQueryExecution) consumes it while
 /// constructing the sole PostgreSQL-owned execution lifecycle.
 #[derive(Clone, Copy)]
 pub struct TableScanCallbacks {

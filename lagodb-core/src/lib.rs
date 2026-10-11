@@ -1,5 +1,3 @@
-#![allow(clippy::too_many_arguments)]
-
 //! lagodb-core: Rust framework for PostgreSQL table access methods and FDWs
 //!
 //! This library provides safe lifecycle adapters for implementing custom table

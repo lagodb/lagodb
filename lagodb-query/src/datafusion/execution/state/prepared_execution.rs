@@ -57,7 +57,7 @@ impl PreparedQueryExecution {
     pub(super) fn prepare(
         preparation: QueryPreparation<'_>,
         bound_scans: BoundTableScans,
-        runtime_values: RuntimeValueState,
+        mut runtime_values: RuntimeValueState,
         postgres: PgExprRuntime,
         metrics: Option<&Arc<ExecutionMetrics>>,
         parent: *mut pg_sys::PlanState,
@@ -76,6 +76,15 @@ impl PreparedQueryExecution {
                 .map_err(QueryExecutionError::Runtime)?;
             let runtime_resources = limits.planning_runtime_env()?;
             let environment = runtime_resources.environment;
+            // Preparation runs at first execution, after PG has supplied outer
+            // parameters. Replace Begin's placeholders before compiling, so the
+            // first run can use this plan without an immediate rebuild. Refresh
+            // the complete layout: a pre-start rescan can reset the expression
+            // context that held statement-stable by-reference values as well.
+            if runtime_values.has_dynamic_values() {
+                let econtext = unsafe { (*parent).ps_ExprContext };
+                unsafe { runtime_values.rebind_complete(econtext) };
+            }
             let prepared_plan =
                 PreparedPhysicalPlan::prepare(PhysicalPlanPreparation {
                     runtime: &runtime,
@@ -106,7 +115,7 @@ impl PreparedQueryExecution {
                     runtime,
                     environment,
                     bound_scans,
-                    dynamic_rebind_required: runtime_values.has_dynamic_values(),
+                    dynamic_rebind_required: false,
                     physical_plan_rebuild_required: false,
                     completed_peak_memory_bytes: 0,
                     runtime_values,

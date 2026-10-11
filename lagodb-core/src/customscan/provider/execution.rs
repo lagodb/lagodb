@@ -4,7 +4,7 @@ use core::marker::PhantomData;
 
 use pgrx::pg_sys;
 
-use crate::batch::ScanBatchDriver;
+use crate::api::AmResult;
 use crate::customscan::error::CustomScanError;
 use crate::handles::{RelationHandle, ScanDirection};
 use crate::tuple::{Row, RowDatumCodec, SlotColumns, TupleSlotWriter};
@@ -42,7 +42,7 @@ pub struct NextSlotEmitter<'a> {
     _marker: PhantomData<&'a ()>,
 }
 
-/// Result of attempting to advance one slot-first driver.
+/// Result of attempting to advance one slot-first row source.
 ///
 /// The exhausted case returns the still-uncommitted emitter so a parallel
 /// provider can attach another task and retry. The produced case does not,
@@ -65,19 +65,24 @@ impl<'a> NextSlotEmitter<'a> {
         self.scan_direction
     }
 
-    /// Attempt to emit one row from a slot-first driver.
+    /// Attempt to emit one row from a forward-only slot-first source.
     ///
-    /// [`NextSlotAttempt::Exhausted`] means that this driver is exhausted. A
+    /// Framework paths do not advertise backward scanning, so PostgreSQL owns
+    /// any materialization needed for scrollable cursors. `advance` only moves
+    /// the source forward; it does not receive a Table AM direction request.
+    ///
+    /// [`NextSlotAttempt::Exhausted`] means that this source is exhausted. A
     /// parallel provider may attach another task cursor and retry with the
     /// returned emitter.
     #[inline]
-    pub fn try_emit_columns<D: ScanBatchDriver>(
+    pub fn try_emit_columns<F>(
         mut self,
-        driver: &mut D,
-    ) -> Result<NextSlotAttempt<'a>, CustomScanError> {
-        let direction = self.scan_direction;
-        let produced =
-            self.emit_with(|columns| driver.next_into_slot(direction, columns))?;
+        advance: F,
+    ) -> Result<NextSlotAttempt<'a>, CustomScanError>
+    where
+        F: FnOnce(&mut SlotColumns<'_>) -> AmResult<bool>,
+    {
+        let produced = self.emit_with(advance)?;
         Ok(if produced {
             NextSlotAttempt::Produced(NextSlotResult {
                 produced: true,
@@ -88,18 +93,21 @@ impl<'a> NextSlotEmitter<'a> {
         })
     }
 
-    /// Emit one row, or finish the callback when the driver is exhausted.
+    /// Emit one row, or finish the callback when the source is exhausted.
     ///
-    /// Drivers that do not need to replace their underlying task source use
+    /// Sources that do not need to replace their underlying task source use
     /// this terminal operation. Native-parallel adapters use
     /// [`Self::try_emit_columns`] so they can retain the uncommitted emitter
     /// while advancing to another task group.
     #[inline]
-    pub fn emit_columns<D: ScanBatchDriver>(
+    pub fn emit_columns<F>(
         self,
-        driver: &mut D,
-    ) -> Result<NextSlotResult<'a>, CustomScanError> {
-        Ok(match self.try_emit_columns(driver)? {
+        advance: F,
+    ) -> Result<NextSlotResult<'a>, CustomScanError>
+    where
+        F: FnOnce(&mut SlotColumns<'_>) -> AmResult<bool>,
+    {
+        Ok(match self.try_emit_columns(advance)? {
             NextSlotAttempt::Produced(produced) => produced,
             NextSlotAttempt::Exhausted(emitter) => emitter.finish_eof(),
         })
@@ -116,7 +124,7 @@ impl<'a> NextSlotEmitter<'a> {
 
     fn emit_with<F>(&mut self, advance: F) -> Result<bool, CustomScanError>
     where
-        F: FnOnce(&mut SlotColumns<'_>) -> crate::api::AmResult<bool>,
+        F: FnOnce(&mut SlotColumns<'_>) -> AmResult<bool>,
     {
         let slot = self.slot;
         let datum_context = self.per_tuple_memory_context;
@@ -205,12 +213,15 @@ impl<'a, P: LagodbCustomScanProvider> NextSlotContext<'a, P> {
         })
     }
 
-    /// Drive a slot-first scan driver into the scan slot.
-    pub fn emit_columns<D: ScanBatchDriver>(
+    /// Advance a forward-only row source into the scan slot.
+    pub fn emit_columns<F>(
         self,
-        driver: &mut D,
-    ) -> Result<NextSlotResult<'a>, CustomScanError> {
-        self.emitter.emit_columns(driver)
+        advance: F,
+    ) -> Result<NextSlotResult<'a>, CustomScanError>
+    where
+        F: FnOnce(&mut SlotColumns<'_>) -> AmResult<bool>,
+    {
+        self.emitter.emit_columns(advance)
     }
 
     /// Finish the callback without producing a row.
@@ -226,7 +237,7 @@ pub(crate) fn emit_into_slot<A, S>(
     store: S,
 ) -> Result<bool, CustomScanError>
 where
-    A: FnOnce() -> crate::api::AmResult<bool>,
+    A: FnOnce() -> AmResult<bool>,
     S: FnOnce(),
 {
     let found = advance().map_err(CustomScanError::from)?;

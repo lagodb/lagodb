@@ -49,6 +49,7 @@ impl BoundTableScans {
     pub(super) fn bind(
         scans: &[PlannedTableScan<'_>],
         callbacks: &[TableScanCallbacks],
+        estate: *mut pg_sys::EState,
     ) -> Result<Self, QueryExecutionError> {
         if scans.len() != callbacks.len() {
             return Err(QueryExecutionError::ScanCallbackCount {
@@ -65,22 +66,23 @@ impl BoundTableScans {
             // SAFETY: the selected plan ties every provider payload to the
             // live plan-data input, and registry resolution supplied these
             // callbacks.
-            let handle = match unsafe { callbacks.bind(planned_scan.provider_plan()) }
-            {
-                Ok(handle) => handle,
-                Err(error) => {
-                    let cleanup = Self {
-                        entries: entries.into_boxed_slice(),
+            let handle =
+                match unsafe { callbacks.bind(planned_scan.provider_plan(), estate) }
+                {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        let cleanup = Self {
+                            entries: entries.into_boxed_slice(),
+                        }
+                        .close()
+                        .err()
+                        .map(Box::new);
+                        return Err(QueryExecutionError::Initialization {
+                            primary: Box::new(QueryExecutionError::ScanBind(error)),
+                            cleanup,
+                        });
                     }
-                    .close()
-                    .err()
-                    .map(Box::new);
-                    return Err(QueryExecutionError::Initialization {
-                        primary: Box::new(QueryExecutionError::ScanBind(error)),
-                        cleanup,
-                    });
-                }
-            };
+                };
             entries.push(BoundScan {
                 scan,
                 cost: planned_scan.cost(),

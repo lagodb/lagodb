@@ -31,6 +31,7 @@ mod error;
 mod planning;
 mod registration;
 mod storage_volume;
+mod table_copy;
 mod table_scan;
 mod table_scan_predicate;
 mod table_scan_worker;
@@ -38,11 +39,8 @@ mod table_scan_worker;
 pub use error::*;
 pub use planning::*;
 pub use registration::*;
-pub use storage_volume::{
-    ResolveStorageVolumeRouteCallback, StorageVolumeRouteLookupError,
-    StorageVolumeRouteOutput, VOLUME_ROUTE_ERROR, VOLUME_ROUTE_INVALID_REQUEST,
-    VOLUME_ROUTE_NOT_FOUND, VOLUME_ROUTE_OK,
-};
+pub use storage_volume::*;
+pub use table_copy::TableCopyCallbacks;
 pub use table_scan::*;
 pub use table_scan_predicate::*;
 pub use table_scan_worker::*;
@@ -373,6 +371,8 @@ pub struct TableProvider {
     pub owns_partitioned_table: bool,
     /// Whether the table-AM callbacks provide a valid PostgreSQL ANALYZE sample.
     pub supports_analyze: bool,
+    /// Null for AMs that use their native TableAM insertion callbacks.
+    pub copy: *const TableCopyCallbacks,
     pub access_method_oid: AccessMethodOidCallback,
     pub truncate_partitioned_table: TruncatePartitionedTableCallback,
     pub execute_maintenance: ExecuteMaintenanceCallback,
@@ -397,7 +397,7 @@ pub struct RuntimeApi {
     pub maintenance_config:
         unsafe extern "C-unwind" fn(*mut RuntimeMaintenanceConfig),
     pub stage_worker_wakeup: StageWorkerWakeupCallback,
-    pub resolve_storage_volume_route: ResolveStorageVolumeRouteCallback,
+    pub load_tablespace_bindings: LoadTablespaceBindingsCallback,
 }
 
 unsafe extern "C" {

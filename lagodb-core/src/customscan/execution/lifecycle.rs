@@ -1,6 +1,7 @@
 //! Begin, ReScan, and End CustomScan lifecycle callbacks.
 
 use core::ffi::c_int;
+use core::marker::PhantomData;
 use core::ptr;
 
 use crate::customscan::ScanPurpose;
@@ -165,17 +166,18 @@ unsafe fn begin_custom_scan<P: LagodbCustomScanProvider>(
         .expect("BeginCustomScan: filters must be initialized above")
         .bound();
 
-    let begin_ctx = BeginContext::<P>::new(
-        provider_state_ref,
-        decoded_private_ref,
-        envelope.purpose,
+    let begin_ctx = BeginContext::<P> {
+        state: provider_state_ref,
+        private_data: decoded_private_ref,
+        purpose: envelope.purpose,
         filters,
         scan_tuple_desc,
-        &envelope.tuple_layout,
-        unsafe { RelationHandle::from_raw(scan_rel) },
-        unsafe { SnapshotHandle::from_raw(snapshot) },
-        unsafe { (*cscan).scan.plan.parallel_aware },
-    );
+        tuple_layout: &envelope.tuple_layout,
+        relation: unsafe { RelationHandle::from_raw(scan_rel) },
+        snapshot: unsafe { SnapshotHandle::from_raw(snapshot) },
+        parallel_aware: unsafe { (*cscan).scan.plan.parallel_aware },
+        _marker: PhantomData,
+    };
     P::begin(begin_ctx)?;
     wrapper.provider_began = true;
     Ok(())

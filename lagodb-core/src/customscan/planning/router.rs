@@ -134,29 +134,38 @@ unsafe fn plan_relation_paths(
             return Ok(());
         }
 
-        // SAFETY: the candidate owns the live `RelOptInfo` passed to this
-        // planning callback.
-        let original_paths = unsafe { (*candidate.rel()).pathlist };
-        // SAFETY: same live `RelOptInfo` as `original_paths`.
-        let original_partial = unsafe { (*candidate.rel()).partial_pathlist };
-        // SAFETY: PostgreSQL permits a set-rel hook to replace these path lists
-        // while the relation is being planned.
-        unsafe {
-            (*candidate.rel()).pathlist = ptr::null_mut();
-            (*candidate.rel()).partial_pathlist = ptr::null_mut();
+        // Constraint exclusion can replace a target with an empty Result.
+        if unsafe { pg_sys::is_dummy_rel(rel) } {
+            return Ok(());
         }
-        // SAFETY: the validated candidate and registered provider remain live
-        // for the synchronous planner operation.
-        let mut planner = unsafe { CustomScanPathPlanner::new(candidate, provider) }?;
-        // SAFETY: the planner was constructed for the current live relation.
-        let emitted = unsafe { planner.emit() }?;
-        if emitted == 0 {
-            // SAFETY: the relation is still live and no replacement path was
-            // emitted, so restore the exact lists saved above.
-            unsafe {
-                (*candidate.rel()).pathlist = original_paths;
-                (*candidate.rel()).partial_pathlist = original_partial;
+        let require_custom = owns_partitioned_table || gucs::force_mode();
+        let original_paths = unsafe { (*rel).pathlist };
+        let mut native_paths = ptr::null_mut();
+        if !require_custom {
+            for index in 0..unsafe { pg_sys::list_length(original_paths) } {
+                let path = unsafe {
+                    pg_sys::list_nth(original_paths, index).cast::<pg_sys::Path>()
+                };
+                // Only SeqScan has an explicit mutation-session binding. Do not
+                // expose unrelated native scan methods by restoring all paths.
+                if unsafe { (*path).pathtype } == pg_sys::NodeTag::T_SeqScan {
+                    native_paths =
+                        unsafe { pg_sys::lappend(native_paths, path.cast()) };
+                }
             }
+        }
+        // Modification scans are serial. Provider-owned partition roots retain
+        // their mandatory CustomScan, including when ordinary optimization is off.
+        unsafe {
+            (*rel).pathlist = native_paths;
+            (*rel).partial_pathlist = ptr::null_mut();
+        }
+        if require_custom || gucs::enabled() {
+            let mut planner =
+                unsafe { CustomScanPathPlanner::new(candidate, provider) }?;
+            unsafe { planner.emit() }?;
+        }
+        if unsafe { (*rel).pathlist.is_null() } {
             return Err(CustomScanError::required_modify_path(provider.name()));
         }
         return Ok(());

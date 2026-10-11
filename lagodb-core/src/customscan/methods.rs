@@ -174,7 +174,7 @@ impl CustomScanMethodTables {
     }
 
     /// Install a one-time execution entry point without a per-row start check.
-    pub(crate) fn with_first_exec(mut self, execute: ExecCustomScan) -> Self {
+    pub fn with_first_exec(mut self, execute: ExecCustomScan) -> Self {
         self.first_exec = Some(pg_sys::CustomExecMethods {
             ExecCustomScan: Some(execute),
             ..self.exec
@@ -182,7 +182,7 @@ impl CustomScanMethodTables {
         self
     }
 
-    pub(crate) fn initial_exec(&'static self) -> &'static pg_sys::CustomExecMethods {
+    pub fn initial_exec(&'static self) -> &'static pg_sys::CustomExecMethods {
         self.first_exec.as_ref().unwrap_or(&self.exec)
     }
 

@@ -1,26 +1,22 @@
 //! Statement-owned query preparation and one-run-at-a-time execution state.
 
+mod pending;
+pub use pending::PendingQueryExecution;
+
 mod prepared_execution;
 mod prepared_plan;
 mod table_scans;
 
 use std::mem;
-use std::sync::Arc;
 
 use datafusion::execution::SendableRecordBatchStream;
 use lagodb_arrow::BoundBatch;
-use lagodb_core::customscan::custom_exprs::PgExpressionSections;
-use lagodb_core::expr::RuntimeValueState;
 use pgrx::pg_sys;
 
-use super::QueryExecutionRequest;
 use super::output::QueryOutputDecoder;
 use crate::datafusion::error::QueryExecutionError;
-use crate::datafusion::metrics::ExecutionMetrics;
-use crate::datafusion::postgres_eval::PgExprRuntime;
 use crate::plan::{PlanExplainNode, QueryFragment};
-use prepared_execution::{PreparedQueryExecution, QueryPreparation};
-use table_scans::BoundTableScans;
+use prepared_execution::PreparedQueryExecution;
 
 enum RunState {
     Ready,
@@ -61,63 +57,10 @@ pub(super) struct QueryExecutionState {
     // before the physical plan/session/runtime and bound provider handles.
     run_state: RunState,
     prepared: PreparedQueryExecution,
+    output: QueryOutputDecoder,
 }
 
 impl QueryExecutionState {
-    pub(super) fn prepare(
-        request: QueryExecutionRequest<'_>,
-        metrics: Option<&Arc<ExecutionMetrics>>,
-    ) -> Result<(Self, QueryOutputDecoder), QueryExecutionError> {
-        let QueryExecutionRequest {
-            query,
-            scans,
-            callbacks,
-            parallel,
-            limits,
-            runtime_exprs,
-            parent,
-            metrics_mode: _,
-        } = request;
-        let (fragment, layout, runtime_layout) = query.into_parts();
-        let postgres = unsafe { PgExprRuntime::from_plan_state(parent) };
-        let expression_sections = unsafe {
-            PgExpressionSections::from_custom_exprs(
-                runtime_exprs,
-                runtime_layout.len(),
-                0,
-            )
-        }
-        .map_err(QueryExecutionError::ExpressionSections)?;
-        let runtime_exprs = unsafe { expression_sections.runtime_binding_list() };
-        let mut runtime_values = unsafe {
-            RuntimeValueState::initialize(runtime_layout, runtime_exprs, parent)
-        }
-        .map_err(QueryExecutionError::RuntimeValues)?;
-        let econtext = unsafe { (*parent).ps_ExprContext };
-        unsafe { runtime_values.bind_initial_template(econtext) };
-        let bound_scans = BoundTableScans::bind(scans, callbacks)?;
-        let (prepared, output) = PreparedQueryExecution::prepare(
-            QueryPreparation {
-                fragment: &fragment,
-                layout: &layout,
-                limits,
-                parallel,
-            },
-            bound_scans,
-            runtime_values,
-            postgres,
-            metrics,
-            parent,
-        )?;
-        Ok((
-            Self {
-                run_state: RunState::Ready,
-                prepared,
-            },
-            output,
-        ))
-    }
-
     fn start_run_if_ready(&mut self) -> Result<(), QueryExecutionError> {
         if matches!(&self.run_state, RunState::Ready) {
             let run = self.prepared.start_run()?;
@@ -135,7 +78,6 @@ impl QueryExecutionState {
     /// `datum_context` must be its live datum context.
     pub(super) unsafe fn next_into_slot(
         &mut self,
-        output_decoder: &QueryOutputDecoder,
         slot: *mut pg_sys::TupleTableSlot,
         datum_context: pg_sys::MemoryContext,
     ) -> Result<bool, QueryExecutionError> {
@@ -143,6 +85,7 @@ impl QueryExecutionState {
             return Ok(false);
         }
         self.start_run_if_ready()?;
+        let output_decoder = &self.output;
 
         let RunState::Running(run) = &mut self.run_state else {
             unreachable!("ready query execution was started immediately above")
@@ -179,8 +122,10 @@ impl QueryExecutionState {
                     if rows == 0 {
                         continue;
                     }
-                    let batch = output_decoder
-                        .bind(batch)
+                    // SAFETY: prepared execution builds output_decoder from the
+                    // same plan that produces this RecordBatchStream. The stream
+                    // guarantees that every batch has that plan's output schema.
+                    let batch = unsafe { output_decoder.bind_batch_unchecked(batch) }
                         .map_err(QueryExecutionError::OutputConversion)?;
                     run.install_batch(batch, rows);
                 }
@@ -222,6 +167,7 @@ impl QueryExecutionState {
         let Self {
             run_state,
             prepared,
+            output: _,
         } = self;
         drop(run_state);
         prepared.close()
@@ -233,6 +179,7 @@ impl QueryExecutionState {
         let Self {
             run_state,
             prepared,
+            output: _,
         } = self;
         drop(run_state);
         prepared.abort();
