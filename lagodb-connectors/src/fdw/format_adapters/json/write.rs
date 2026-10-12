@@ -1,17 +1,16 @@
 //! Native NDJSON Foreign Table INSERT writer.
 
 use lagodb_core::handles::RelationHandle;
-use lagodb_core::tuple::TupleSlotRow;
-use lagodb_core::tuple::{BoundJsonObjectEncoder, SlotDatumIndex};
+use lagodb_core::tuple::{BoundJsonObjectEncoder, SlotDatumIndex, TupleSlotRow};
 
 use crate::error::ConnectorError;
-use crate::storage::ObjectOutput;
-
-use super::record::JsonColumnPlan;
+use crate::fdw::format_adapters::FormatWriteState;
+use crate::format::json::JsonColumnPlan;
 use crate::format::{
-    EmptyOutputPolicy, FormatKind, FormatWriteState, ObjectSetWriter,
-    StreamCompression, StreamEncoderFactory, StreamFormat,
+    EmptyOutputPolicy, FormatKind, ObjectSetWriter, StreamCompression,
+    StreamEncoderFactory, StreamFormat,
 };
+use crate::storage::StorageOutput;
 
 pub(super) struct JsonWriteState {
     sources: Box<[SlotDatumIndex]>,
@@ -22,7 +21,7 @@ pub(super) struct JsonWriteState {
 impl JsonWriteState {
     pub(super) fn begin(
         relation: &RelationHandle<'_>,
-        output: ObjectOutput,
+        output: StorageOutput,
         compression: StreamCompression,
     ) -> Result<Self, ConnectorError> {
         let columns = relation.live_columns();

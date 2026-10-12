@@ -6,7 +6,7 @@ use std::num::NonZeroUsize;
 use crate::storage::InputFile;
 
 use crate::error::ConnectorError;
-use crate::storage::{ObjectFiles, ProgressReader, ReadProgress};
+use crate::storage::{InputFiles, ProgressReader, ReadProgress};
 
 use super::super::{StreamCompressionOptions, StreamDecoder};
 
@@ -100,8 +100,8 @@ where
 type ObjectDecoder =
     JsonLineReader<BufReader<StreamDecoder<ProgressReader<InputFile>>>>;
 
-pub(in crate::format) struct JsonRecordStream {
-    files: ObjectFiles,
+pub(crate) struct JsonRecordStream {
+    files: InputFiles,
     compression: StreamCompressionOptions,
     max_record_bytes: NonZeroUsize,
     reader: Option<ObjectDecoder>,
@@ -111,8 +111,8 @@ pub(in crate::format) struct JsonRecordStream {
 }
 
 impl JsonRecordStream {
-    pub(in crate::format) fn new(
-        files: ObjectFiles,
+    pub(crate) fn new(
+        files: InputFiles,
         compression: StreamCompressionOptions,
         max_record_bytes: NonZeroUsize,
     ) -> Self {
@@ -128,7 +128,7 @@ impl JsonRecordStream {
     }
 
     pub(in crate::format) fn with_progress(
-        files: ObjectFiles,
+        files: InputFiles,
         compression: StreamCompressionOptions,
         max_record_bytes: NonZeroUsize,
     ) -> Self {
@@ -143,7 +143,7 @@ impl JsonRecordStream {
         }
     }
 
-    pub(in crate::format) fn next_record(
+    pub(crate) fn next_record(
         &mut self,
     ) -> Result<Option<(u64, &[u8])>, ConnectorError> {
         loop {
@@ -167,14 +167,14 @@ impl JsonRecordStream {
         }
     }
 
-    pub(in crate::format) fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.reader = None;
         self.completed_bytes = 0;
         self.current_progress = None;
         self.files.reset();
     }
 
-    pub(in crate::format) fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         self.reader = None;
         self.current_progress = None;
     }

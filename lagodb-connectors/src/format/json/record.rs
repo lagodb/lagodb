@@ -64,7 +64,7 @@ impl PgInputPlan {
     }
 }
 
-pub(in crate::format) struct JsonColumn {
+pub(crate) struct JsonColumn {
     name: Box<str>,
     input_kind: JsonInputKind,
     input: PgInputPlan,
@@ -73,19 +73,16 @@ pub(in crate::format) struct JsonColumn {
 
 impl JsonColumn {
     #[inline]
-    pub(in crate::format) fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
     #[inline]
-    pub(in crate::format) const fn output_encoder(&self) -> JsonDatumEncoder {
+    pub(crate) const fn output_encoder(&self) -> JsonDatumEncoder {
         self.output
     }
 
-    pub(in crate::format) unsafe fn input_datum(
-        &self,
-        value: &CStr,
-    ) -> pg_sys::Datum {
+    pub(crate) unsafe fn input_datum(&self, value: &CStr) -> pg_sys::Datum {
         unsafe { self.input.datum(value) }
     }
 
@@ -109,13 +106,13 @@ impl JsonColumn {
     }
 }
 
-pub(in crate::format) struct JsonColumnPlan {
+pub(crate) struct JsonColumnPlan {
     columns: Box<[JsonColumn]>,
     indexes: HashMap<Box<str>, usize>,
 }
 
 impl JsonColumnPlan {
-    pub(in crate::format) fn bind<'a>(
+    pub(crate) fn bind<'a>(
         fields: impl IntoIterator<Item = (&'a str, pg_sys::Oid, i32)>,
     ) -> Result<Self, ConnectorError> {
         ColumnDatumTarget::validate_utf8_server_encoding()
@@ -169,12 +166,12 @@ impl JsonColumnPlan {
     }
 
     #[inline]
-    pub(in crate::format) fn columns(&self) -> &[JsonColumn] {
+    pub(crate) fn columns(&self) -> &[JsonColumn] {
         &self.columns
     }
 
     #[inline]
-    pub(in crate::format) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.columns.len()
     }
 
@@ -195,26 +192,26 @@ impl JsonColumnPlan {
 #[derive(Clone)]
 struct JsonValueRange(Range<usize>);
 
-pub(in crate::format) enum JsonInputValue<'a> {
+pub(crate) enum JsonInputValue<'a> {
     Null,
     Bytes(&'a [u8]),
     CStr(&'a CStr),
 }
 
-pub(in crate::format) struct JsonRecordDecoder {
+pub(crate) struct JsonRecordDecoder {
     values: Vec<Option<JsonValueRange>>,
     scalar: JsonScalarDecoder,
 }
 
 impl JsonRecordDecoder {
-    pub(in crate::format) fn new(column_count: usize) -> Self {
+    pub(crate) fn new(column_count: usize) -> Self {
         Self {
             values: vec![None; column_count],
             scalar: JsonScalarDecoder::new(),
         }
     }
 
-    pub(in crate::format) fn decode(
+    pub(crate) fn decode(
         &mut self,
         plan: &JsonColumnPlan,
         record: &[u8],
@@ -235,7 +232,7 @@ impl JsonRecordDecoder {
         })
     }
 
-    pub(in crate::format) fn value<'a>(
+    pub(crate) fn value<'a>(
         &'a mut self,
         record: &'a [u8],
         column: &JsonColumn,

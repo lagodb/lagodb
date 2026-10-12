@@ -2,8 +2,6 @@
 
 use std::ffi::{CStr, CString, c_void};
 
-use lagodb_core::fdw::ColumnRequirements;
-use lagodb_core::handles::RelationHandle;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
@@ -35,7 +33,7 @@ impl DelimitedFormat {
 }
 
 #[derive(Debug)]
-pub(super) struct DelimitedOptions {
+pub(crate) struct DelimitedOptions {
     pub(super) delimiter: u8,
     pub(super) null_marker: Box<str>,
     pub(super) encoding: Option<Box<str>>,
@@ -151,33 +149,6 @@ impl DelimitedOptions {
         self.append_base_options(options, format)
     }
 
-    pub(super) fn append_postgres_options(
-        &self,
-        options: *mut pg_sys::List,
-        format: super::FormatKind,
-        relation: &RelationHandle<'_>,
-        requirements: &ColumnRequirements,
-    ) -> Result<*mut pg_sys::List, ConnectorError> {
-        let mut options = self.append_base_options(options, format)?;
-        if !requirements.needs_all_columns() {
-            let columns = relation.live_columns();
-            let mut columns_by_attno = vec![None; relation.natts()];
-            for column in columns.iter() {
-                columns_by_attno[(column.attno() - 1) as usize] = Some(column);
-            }
-            let selected = requirements
-                .user_columns()
-                .filter_map(|attno| columns_by_attno[(attno - 1) as usize])
-                .map(|column| column.name());
-            options = Self::append_identifier_list_option(
-                options,
-                "convert_selectively",
-                selected,
-            )?;
-        }
-        Ok(options)
-    }
-
     fn append_base_options(
         &self,
         mut options: *mut pg_sys::List,
@@ -224,7 +195,7 @@ impl DelimitedOptions {
         Ok(unsafe { pg_sys::lappend(options, option.cast::<c_void>()) })
     }
 
-    pub(super) fn append_identifier_list_option<'a>(
+    pub(crate) fn append_identifier_list_option<'a>(
         options: *mut pg_sys::List,
         name: &str,
         values: impl IntoIterator<Item = &'a CStr>,

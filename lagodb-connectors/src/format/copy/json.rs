@@ -19,7 +19,7 @@ use crate::format::{
     StreamCompressionOptions, StreamEncoderFactory, StreamFormat,
 };
 use crate::gucs::ReadConfig;
-use crate::storage::{ObjectFiles, ObjectOutput};
+use crate::storage::{InputFiles, StorageOutput};
 
 use super::{FormatCopyDestination, FormatCopyOutput};
 
@@ -32,7 +32,7 @@ pub(super) struct JsonCopySource {
 
 impl JsonCopySource {
     pub(super) fn new(
-        files: ObjectFiles,
+        files: InputFiles,
         layout: &CopyColumnLayout,
         compression: StreamCompression,
     ) -> Result<Self, CopyError> {
@@ -143,14 +143,14 @@ struct ReadyJsonCopyDestination {
 
 /// Tuple-slot-to-NDJSON destination for PostgreSQL COPY TO.
 pub(super) struct JsonCopyDestination {
-    output: Option<ObjectOutput>,
+    output: Option<StorageOutput>,
     compression: StreamCompression,
     ready: Option<ReadyJsonCopyDestination>,
     bytes_produced: u64,
 }
 
 impl JsonCopyDestination {
-    pub(super) fn new(output: ObjectOutput, compression: StreamCompression) -> Self {
+    pub(super) fn new(output: StorageOutput, compression: StreamCompression) -> Self {
         Self {
             output: Some(output),
             compression,

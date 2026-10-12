@@ -6,13 +6,13 @@ use lagodb_core::tuple::TupleSlotRow;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
-use crate::storage::ObjectOutput;
-
-use super::delimited::DelimitedFormat;
-use super::{
-    EmptyOutputPolicy, FormatWriteState, ObjectSetWriter, StreamCompression,
+use crate::format::{
+    DelimitedFormat, EmptyOutputPolicy, ObjectSetWriter, StreamCompression,
     StreamEncoderFactory,
 };
+use crate::storage::StorageOutput;
+
+use super::FormatWriteState;
 
 /// Prefix-object writer for one Text or CSV foreign-table INSERT statement.
 pub(super) struct DelimitedWriteState {
@@ -23,7 +23,7 @@ pub(super) struct DelimitedWriteState {
 impl DelimitedWriteState {
     pub(super) fn begin(
         relation: &RelationHandle<'_>,
-        output: ObjectOutput,
+        output: StorageOutput,
         format: DelimitedFormat,
         compression: StreamCompression,
         postgres_options: *mut pg_sys::List,

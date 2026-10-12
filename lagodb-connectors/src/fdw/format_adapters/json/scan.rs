@@ -14,15 +14,15 @@ use pgrx::{PgTryBuilder, pg_sys};
 
 use crate::error::ConnectorError;
 use crate::fdw::LagodbConnectors;
-use crate::gucs::ReadConfig;
-use crate::storage::ObjectFiles;
-
-use super::record::{JsonColumnPlan, JsonInputValue, JsonRecordDecoder};
-use super::stream::JsonRecordStream;
-use crate::format::{
-    FormatKind, FormatScanPlanner, FormatScanPrivate, FormatScanState,
-    StreamCompressionOptions,
+use crate::fdw::format_adapters::{
+    FormatScanPlanner, FormatScanPrivate, FormatScanState,
 };
+use crate::format::json::{
+    JsonColumnPlan, JsonInputValue, JsonRecordDecoder, JsonRecordStream,
+};
+use crate::format::{FormatKind, StreamCompressionOptions};
+use crate::gucs::ReadConfig;
+use crate::storage::InputFiles;
 
 const DEFAULT_ESTIMATED_ROWS: f64 = 1_000.0;
 const DEFAULT_ESTIMATED_WIDTH: i32 = 32;
@@ -83,7 +83,7 @@ pub(super) struct JsonScanState {
 impl JsonScanState {
     pub(super) fn begin(
         context: StartForeignScanContext<'_, LagodbConnectors>,
-        files: ObjectFiles,
+        files: InputFiles,
         compression: StreamCompressionOptions,
     ) -> Result<Self, ConnectorError> {
         let live = context.relation.live_columns();

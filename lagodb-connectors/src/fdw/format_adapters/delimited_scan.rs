@@ -2,7 +2,6 @@
 
 use std::io;
 
-use crate::storage::InputFile;
 use lagodb_core::copy::{
     CopyDataSource, CopyDocumentSource, CopyError, CopyFromScan,
 };
@@ -16,10 +15,10 @@ use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 use crate::fdw::LagodbConnectors;
+use crate::format::{FormatKind, StreamCompressionOptions, StreamDecoder};
+use crate::storage::{InputFile, InputFiles};
 
-use super::scan::{FormatScanPlanner, FormatScanPrivate, FormatScanState};
-use super::{FormatKind, StreamCompressionOptions, StreamDecoder};
-use crate::storage::ObjectFiles;
+use super::{FormatScanPlanner, FormatScanPrivate, FormatScanState};
 
 const DEFAULT_ESTIMATED_ROWS: f64 = 1_000.0;
 const DEFAULT_ESTIMATED_WIDTH: i32 = 32;
@@ -84,7 +83,7 @@ pub(super) struct DelimitedScanState {
 impl DelimitedScanState {
     pub(super) fn begin(
         context: StartForeignScanContext<'_, LagodbConnectors>,
-        files: ObjectFiles,
+        files: InputFiles,
         compression: StreamCompressionOptions,
         postgres_options: *mut pg_sys::List,
     ) -> Result<Self, ConnectorError> {
@@ -126,13 +125,13 @@ impl FormatScanState for DelimitedScanState {
 }
 
 struct DelimitedObjectSource {
-    files: ObjectFiles,
+    files: InputFiles,
     compression: StreamCompressionOptions,
     decoder: Option<StreamDecoder<InputFile>>,
 }
 
 impl DelimitedObjectSource {
-    fn new(files: ObjectFiles, compression: StreamCompressionOptions) -> Self {
+    fn new(files: InputFiles, compression: StreamCompressionOptions) -> Self {
         Self {
             files,
             compression,

@@ -2,37 +2,33 @@
 
 mod record;
 mod scalar;
-mod scan;
 mod schema;
 mod stream;
-mod write;
 
 use std::io::BufReader;
 
-use crate::storage::InputFile;
-use lagodb_core::fdw::StartForeignScanContext;
-use lagodb_core::handles::RelationHandle;
-
 use crate::error::ConnectorError;
-use crate::fdw::LagodbConnectors;
 use crate::gucs::ReadConfig;
-use crate::storage::{ObjectFiles, ObjectOutput};
+use crate::storage::InputFile;
 
 use super::{
-    FormatKind, FormatObject, FormatOption, FormatReader, FormatScanPlanner,
-    FormatScanState, FormatSchemaReader, FormatWriteState, FormatWriter,
-    InferredSchema, StreamCompressionOptions, StreamDecoder,
+    FormatKind, FormatObject, FormatOption, FormatSchemaReader, InferredSchema,
+    StreamCompressionOptions, StreamDecoder,
 };
 
-pub(super) use record::{JsonColumnPlan, JsonInputValue, JsonRecordDecoder};
-pub(super) use stream::JsonRecordStream;
+pub(crate) use record::{JsonColumnPlan, JsonInputValue, JsonRecordDecoder};
+pub(crate) use stream::JsonRecordStream;
 
 /// JSON-format processor. Every non-empty line is one JSON object.
 pub(crate) struct JsonFormat {
-    pub(super) compression: StreamCompressionOptions,
+    compression: StreamCompressionOptions,
 }
 
 impl JsonFormat {
+    pub(crate) const fn compression(&self) -> StreamCompressionOptions {
+        self.compression
+    }
+
     pub(crate) fn resolve(
         compression: StreamCompressionOptions,
         options: &[FormatOption<'_>],
@@ -50,38 +46,6 @@ impl JsonFormat {
 impl FormatObject for JsonFormat {
     fn kind(&self) -> FormatKind {
         FormatKind::Json
-    }
-}
-
-impl FormatReader for JsonFormat {
-    fn planner(self: Box<Self>) -> Box<dyn FormatScanPlanner> {
-        Box::new(scan::JsonScanPlanner)
-    }
-
-    fn begin(
-        self: Box<Self>,
-        context: StartForeignScanContext<'_, LagodbConnectors>,
-        files: ObjectFiles,
-    ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
-        Ok(Box::new(scan::JsonScanState::begin(
-            context,
-            files,
-            self.compression,
-        )?))
-    }
-}
-
-impl FormatWriter for JsonFormat {
-    fn begin(
-        self: Box<Self>,
-        relation: &RelationHandle<'_>,
-        output: ObjectOutput,
-    ) -> Result<Box<dyn FormatWriteState>, ConnectorError> {
-        Ok(Box::new(write::JsonWriteState::begin(
-            relation,
-            output,
-            self.compression.for_output(),
-        )?))
     }
 }
 

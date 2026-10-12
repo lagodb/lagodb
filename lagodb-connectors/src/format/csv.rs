@@ -1,24 +1,17 @@
 //! PostgreSQL COPY CSV-format object and its validated options.
 
-use crate::storage::InputFile;
-use lagodb_core::fdw::{ColumnRequirements, StartForeignScanContext};
-use lagodb_core::handles::RelationHandle;
 use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
+use crate::storage::InputFile;
 
-use super::delimited::{DelimitedFormat, DelimitedOptions, DelimitedOptionsBuilder};
-use super::delimited_scan::{DelimitedScanPlanner, DelimitedScanState};
+use super::delimited::{DelimitedOptions, DelimitedOptionsBuilder};
 use super::delimited_schema::DelimitedSchemaReader;
-use super::delimited_write::DelimitedWriteState;
 use super::{
-    FormatKind, FormatObject, FormatOption, FormatReader, FormatScanPlanner,
-    FormatScanState, FormatSchemaReader, FormatWriteState, FormatWriter,
-    InferredSchema, StreamCompressionOptions,
+    FormatKind, FormatObject, FormatOption, FormatSchemaReader, InferredSchema,
+    StreamCompressionOptions,
 };
-use crate::fdw::LagodbConnectors;
-use crate::storage::{ObjectFiles, ObjectOutput};
 
 /// CSV-format processor.
 pub(crate) struct CsvFormat {
@@ -27,7 +20,7 @@ pub(crate) struct CsvFormat {
 }
 
 #[derive(Debug)]
-pub(super) struct CsvOptions {
+pub(crate) struct CsvOptions {
     pub(super) delimited: DelimitedOptions,
     pub(super) quote: u8,
     pub(super) escape: u8,
@@ -35,67 +28,30 @@ pub(super) struct CsvOptions {
 }
 
 impl CsvOptions {
-    pub(super) fn postgres_options(
+    pub(crate) fn postgres_base_options(
         &self,
-        relation: &RelationHandle<'_>,
-        requirements: &ColumnRequirements,
     ) -> Result<*mut pg_sys::List, ConnectorError> {
-        let mut options = self.delimited.append_postgres_options(
-            std::ptr::null_mut(),
-            FormatKind::Csv,
-            relation,
-            requirements,
-        )?;
-        options = self.append_postgres_quote_options(options)?;
+        self.delimited
+            .append_postgres_output_options(std::ptr::null_mut(), FormatKind::Csv)
+    }
+
+    pub(crate) fn append_postgres_input_options(
+        &self,
+        options: *mut pg_sys::List,
+    ) -> Result<*mut pg_sys::List, ConnectorError> {
+        let options = self.append_postgres_quote_options(options)?;
         let header = match self.header {
             CsvHeader::False => "false",
             CsvHeader::True => "true",
             CsvHeader::Match => "match",
         };
-        options = DelimitedOptions::append_string_option(options, "header", header)?;
-
-        let mut force_null = Vec::new();
-        let mut force_not_null = Vec::new();
-        let columns = relation.live_columns();
-        for column in columns.iter() {
-            // SAFETY: PostgreSQL owns this foreign-column option list for the
-            // live relation and attribute during this begin callback.
-            let raw = unsafe {
-                pg_sys::GetForeignColumnOptions(relation.oid(), column.attno())
-            };
-            let column_options = unsafe { ForeignOptionView::from_raw(raw) };
-            let (is_force_null, is_force_not_null) =
-                ColumnOptions::parse_view(column_options)?.flags();
-            if is_force_null {
-                force_null.push(column.name());
-            }
-            if is_force_not_null {
-                force_not_null.push(column.name());
-            }
-        }
-        if !force_null.is_empty() {
-            options = DelimitedOptions::append_identifier_list_option(
-                options,
-                "force_null",
-                force_null,
-            )?;
-        }
-        if !force_not_null.is_empty() {
-            options = DelimitedOptions::append_identifier_list_option(
-                options,
-                "force_not_null",
-                force_not_null,
-            )?;
-        }
-        Ok(options)
+        DelimitedOptions::append_string_option(options, "header", header)
     }
 
-    pub(super) fn postgres_output_options(
+    pub(crate) fn postgres_output_options(
         &self,
     ) -> Result<*mut pg_sys::List, ConnectorError> {
-        let options = self
-            .delimited
-            .append_postgres_output_options(std::ptr::null_mut(), FormatKind::Csv)?;
+        let options = self.postgres_base_options()?;
         self.append_postgres_quote_options(options)
     }
 
@@ -106,7 +62,7 @@ impl CsvOptions {
         DelimitedOptions::append_string_option(options, "header", "false")
     }
 
-    pub(super) const fn header_enabled(&self) -> bool {
+    pub(crate) const fn header_enabled(&self) -> bool {
         matches!(self.header, CsvHeader::True | CsvHeader::Match)
     }
 
@@ -160,6 +116,10 @@ impl CsvHeader {
 }
 
 impl CsvFormat {
+    pub(crate) fn into_parts(self) -> (CsvOptions, StreamCompressionOptions) {
+        (self.options, self.compression)
+    }
+
     pub(crate) fn resolve(
         compression: StreamCompressionOptions,
         options: &[FormatOption<'_>],
@@ -244,13 +204,13 @@ impl CsvFormat {
     pub(crate) fn validate_column_options(
         options: &[Option<String>],
     ) -> Result<(), ConnectorError> {
-        ColumnOptions::parse(options)?.validate()
+        CsvColumnOptions::parse(options)?.validate()
     }
 
     pub(crate) fn validate_column_view(
         options: ForeignOptionView<'_>,
     ) -> Result<(), ConnectorError> {
-        ColumnOptions::parse_view(options)?.validate()
+        CsvColumnOptions::parse_view(options)?.validate()
     }
 }
 
@@ -279,62 +239,14 @@ impl FormatSchemaReader for CsvFormat {
     }
 }
 
-impl FormatReader for CsvFormat {
-    fn planner(self: Box<Self>) -> Box<dyn FormatScanPlanner> {
-        Box::new(DelimitedScanPlanner::new(FormatKind::Csv))
-    }
-
-    fn begin(
-        self: Box<Self>,
-        context: StartForeignScanContext<'_, LagodbConnectors>,
-        files: ObjectFiles,
-    ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
-        let Self {
-            options,
-            compression,
-        } = *self;
-        let postgres_options =
-            options.postgres_options(&context.relation, context.required_columns)?;
-        Ok(Box::new(DelimitedScanState::begin(
-            context,
-            files,
-            compression,
-            postgres_options,
-        )?))
-    }
-}
-
-impl FormatWriter for CsvFormat {
-    fn begin(
-        self: Box<Self>,
-        relation: &RelationHandle<'_>,
-        output: ObjectOutput,
-    ) -> Result<Box<dyn FormatWriteState>, ConnectorError> {
-        let Self {
-            options,
-            compression,
-        } = *self;
-        let postgres_options = options.postgres_output_options()?;
-        let write_header = options.header_enabled();
-        Ok(Box::new(DelimitedWriteState::begin(
-            relation,
-            output,
-            DelimitedFormat::Csv,
-            compression.for_output(),
-            postgres_options,
-            write_header,
-        )?))
-    }
-}
-
-struct ColumnOptions {
+pub(crate) struct CsvColumnOptions {
     force_null: bool,
     force_not_null: bool,
     seen_force_null: bool,
     seen_force_not_null: bool,
 }
 
-impl ColumnOptions {
+impl CsvColumnOptions {
     fn empty() -> Self {
         Self {
             force_null: false,
@@ -358,7 +270,9 @@ impl ColumnOptions {
         Ok(parsed)
     }
 
-    fn parse_view(options: ForeignOptionView<'_>) -> Result<Self, ConnectorError> {
+    pub(crate) fn parse_view(
+        options: ForeignOptionView<'_>,
+    ) -> Result<Self, ConnectorError> {
         let mut parsed = Self::empty();
         for option in options.iter() {
             let name = option.name().to_str().map_err(|_| {
@@ -409,7 +323,7 @@ impl ColumnOptions {
         Ok(())
     }
 
-    fn flags(&self) -> (bool, bool) {
+    pub(crate) fn flags(&self) -> (bool, bool) {
         (self.force_null, self.force_not_null)
     }
 
