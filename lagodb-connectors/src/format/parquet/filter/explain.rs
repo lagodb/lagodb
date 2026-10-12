@@ -1,8 +1,8 @@
-//! Planning-time Parquet predicate descriptions for FDW EXPLAIN.
+//! Planning-time Parquet predicate descriptions.
 
 use std::ffi::{CStr, CString};
 
-use lagodb_core::fdw::ForeignFilterExplainValues;
+use lagodb_core::expr::RuntimeValueId;
 use pgrx::pg_sys;
 
 use super::{PlannedColumn, PlannedNode};
@@ -22,10 +22,10 @@ impl PlannedColumn {
 }
 
 impl PlannedNode {
-    pub(super) fn write_explain(
+    pub(super) fn write_explain<'a>(
         &self,
         output: &mut String,
-        values: ForeignFilterExplainValues<'_>,
+        values: &impl Fn(RuntimeValueId) -> &'a str,
     ) {
         output.push('(');
         match self {
@@ -39,7 +39,7 @@ impl PlannedNode {
                 output.push(' ');
                 output.push_str(operator.sql());
                 output.push(' ');
-                output.push_str(values.value(*value));
+                output.push_str(values(*value));
             }
             Self::IsNull(column) => {
                 column.write_explain(output);
@@ -63,9 +63,9 @@ impl PlannedNode {
         output.push(')');
     }
 
-    fn write_explain_children(
+    fn write_explain_children<'a>(
         output: &mut String,
-        values: ForeignFilterExplainValues<'_>,
+        values: &impl Fn(RuntimeValueId) -> &'a str,
         children: &[Self],
         separator: &str,
     ) {

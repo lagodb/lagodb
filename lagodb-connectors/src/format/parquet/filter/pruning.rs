@@ -291,6 +291,17 @@ impl BoundValue {
                     .then(|| typed.max_opt().map(|max| max.cmp(value)))
                     .flatten(),
             },
+            // Parquet's logical signed 16-bit integer uses INT32 statistics.
+            (Self::I16(value), Statistics::Int32(typed)) => RangeOrdering {
+                min: typed
+                    .min_is_exact()
+                    .then(|| typed.min_opt().map(|min| min.cmp(&i32::from(*value))))
+                    .flatten(),
+                max: typed
+                    .max_is_exact()
+                    .then(|| typed.max_opt().map(|max| max.cmp(&i32::from(*value))))
+                    .flatten(),
+            },
             (Self::I32(value), Statistics::Int32(typed)) => RangeOrdering {
                 min: typed
                     .min_is_exact()

@@ -7,22 +7,16 @@ mod value;
 
 use lagodb_core::diag::PgReportError;
 use lagodb_core::expr::pushdown::{
-    FilterBindResult, FilterPlan, FilterPlanningContext, PredicateExpr,
-    PredicateFragment, ScalarExpr,
+    FilterPlanningContext, PredicateExpr, PredicateFragment, ScalarExpr,
 };
-use lagodb_core::expr::{ColumnRef, RuntimeValueId};
-use lagodb_core::expr::{PushdownCosting, RuntimeValueBindings};
-use lagodb_core::fdw::ForeignFilterExplainValues;
+use lagodb_core::expr::{ColumnRef, RuntimeValueBindings, RuntimeValueId};
 use lagodb_core::handles::RelationGuard;
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 use lagodb_core::tuple::Utf8ServerEncoding;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
-use crate::format::{
-    FormatBoundFilter, FormatFilterPlan, FormatFilterPlanner, FormatKind,
-    FormatPlannedFilter,
-};
+use crate::format::FormatKind;
 
 use self::runtime::BoundNode;
 use self::value::{ComparisonOperator, DecodedValue, ValueType};
@@ -37,13 +31,13 @@ const NODE_AND: i32 = 3;
 const NODE_OR: i32 = 4;
 const NODE_NOT: i32 = 5;
 
-pub(super) struct ParquetFilterPlanner {
+pub(crate) struct ParquetFilterPlanner {
     columns: Box<[Option<PlannedColumn>]>,
     utf8: Option<Utf8ServerEncoding>,
 }
 
 impl ParquetFilterPlanner {
-    pub(super) fn begin(
+    pub(crate) fn begin(
         context: &FilterPlanningContext,
     ) -> Result<Self, ConnectorError> {
         let relation = RelationGuard::open_table(
@@ -73,6 +67,14 @@ impl ParquetFilterPlanner {
         })
     }
 
+    pub(crate) fn plan_filter(
+        &self,
+        fragment: &PredicateFragment,
+    ) -> Option<ParquetPlannedPredicate> {
+        let root = self.plan_node(fragment, fragment.root())?;
+        Some(ParquetPlannedPredicate { root })
+    }
+
     fn plan_node(
         &self,
         fragment: &PredicateFragment,
@@ -86,6 +88,9 @@ impl ParquetFilterPlanner {
             | PredicateExpr::IsNan(_)
             | PredicateExpr::IsNotNan(_)
             | PredicateExpr::StartsWith { .. } => None,
+            // Boolean tests are null-safe, unlike the strict comparisons
+            // implemented here. Keep them as PostgreSQL residual quals.
+            PredicateExpr::BooleanTest { .. } => None,
             PredicateExpr::Comparison {
                 operator,
                 left,
@@ -155,27 +160,12 @@ impl ParquetFilterPlanner {
     }
 }
 
-impl FormatFilterPlanner for ParquetFilterPlanner {
-    fn try_plan_filter(
-        &mut self,
-        fragment: &PredicateFragment,
-    ) -> Result<FilterPlan<FormatPlannedFilter>, ConnectorError> {
-        let Some(root) = self.plan_node(fragment, fragment.root()) else {
-            return Ok(FilterPlan::Unsupported);
-        };
-        Ok(FilterPlan::exact(
-            Box::new(ParquetPlannedPredicate { root }),
-            PushdownCosting::CostedPruning,
-        ))
-    }
-}
-
-pub(super) struct ParquetPlannedPredicate {
+pub(crate) struct ParquetPlannedPredicate {
     root: PlannedNode,
 }
 
 impl ParquetPlannedPredicate {
-    pub(super) fn decode(
+    pub(crate) fn decode(
         kind: FormatKind,
         reader: &mut PlanDataReader<'_>,
         binding_count: usize,
@@ -187,32 +177,26 @@ impl ParquetPlannedPredicate {
             .read_nested(|nested| PlannedNode::decode(nested, binding_count))?;
         Ok(Self { root })
     }
-}
 
-impl FormatFilterPlan for ParquetPlannedPredicate {
-    fn kind(&self) -> FormatKind {
-        FormatKind::Parquet
-    }
-
-    fn encode(&self, writer: &mut PlanDataWriter) -> Result<(), ConnectorError> {
+    pub(crate) fn encode(&self, writer: &mut PlanDataWriter) {
         writer.append_nested(|nested| self.root.encode(nested));
-        Ok(())
     }
 
-    fn explain(&self, values: ForeignFilterExplainValues<'_>) -> String {
+    pub(crate) fn explain<'a>(
+        &self,
+        value: impl Fn(RuntimeValueId) -> &'a str,
+    ) -> String {
         let mut output = String::new();
-        self.root.write_explain(&mut output, values);
+        self.root.write_explain(&mut output, &value);
         output
     }
 
-    fn bind(
+    pub(crate) fn bind(
         &self,
         values: RuntimeValueBindings<'_>,
-    ) -> Result<FilterBindResult<FormatBoundFilter>, ConnectorError> {
+    ) -> Result<ParquetBoundPredicate, ConnectorError> {
         let root = self.root.bind(values)?;
-        Ok(FilterBindResult::Bound(FormatBoundFilter::Parquet(
-            ParquetBoundPredicate::new(root),
-        )))
+        Ok(ParquetBoundPredicate::new(root))
     }
 }
 

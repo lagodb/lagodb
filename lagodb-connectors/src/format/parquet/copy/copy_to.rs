@@ -3,30 +3,28 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use arrow_schema::{Field, Schema};
-use lagodb_arrow::{
-    BoundDatumBuffer, BoundDatumColumnPlan, PgColumnType, resolve_column_rule,
-};
+use lagodb_arrow::BoundDatumBuffer;
 use lagodb_core::batch::BatchBuffer;
 use lagodb_core::copy::{
     CopyColumnLayout, CopyError, CopyOutputRow, CopyTupleDestination,
 };
 use lagodb_core::diag::PgReportError;
+use lagodb_core::tuple::PgType;
 use pgrx::PgTryBuilder;
 
 use crate::error::ConnectorError;
-use crate::format::{
-    FormatKind, ParquetObjectWriter, ParquetWriteCompression, parquet_arrow_type,
-};
-use crate::storage::ObjectOutput;
+use crate::format::{FormatKind, ParquetWriteCompression};
+use crate::storage::StorageOutput;
 
 use super::super::super::copy::{FormatCopyDestination, FormatCopyOutput};
+use super::super::output_writer::ParquetOutputWriter;
+use super::super::write_plan::ParquetWritePlan;
 
 const COPY_TO_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 struct ReadyParquetCopyDestination {
     buffer: BoundDatumBuffer,
-    writer: ParquetObjectWriter,
+    writer: ParquetOutputWriter,
 }
 
 impl ReadyParquetCopyDestination {
@@ -63,14 +61,14 @@ impl ReadyParquetCopyDestination {
 
 /// COPY TO destination initialized from PostgreSQL's actual output TupleDesc.
 pub(in crate::format) struct ParquetCopyDestination {
-    output: Option<ObjectOutput>,
+    output: Option<StorageOutput>,
     compression: ParquetWriteCompression,
     ready: Option<ReadyParquetCopyDestination>,
 }
 
 impl ParquetCopyDestination {
     pub(in crate::format) fn new(
-        output: ObjectOutput,
+        output: StorageOutput,
         compression: ParquetWriteCompression,
     ) -> Self {
         Self {
@@ -90,62 +88,30 @@ impl CopyTupleDestination for ParquetCopyDestination {
             )
             .into());
         }
-        let mut fields = Vec::with_capacity(layout.len());
-        let mut datum_plans = Vec::with_capacity(layout.len());
-        let result = PgTryBuilder::new(AssertUnwindSafe(|| {
-            for column in layout.columns() {
-                let name = column.name().to_str().map_err(|_| {
-                    ConnectorError::invalid_object_schema(
-                        FormatKind::Parquet,
-                        "COPY column names must be valid UTF-8 for Parquet",
+        let plan = PgTryBuilder::new(AssertUnwindSafe(|| {
+            ParquetWritePlan::bind(layout.columns().iter().enumerate().map(
+                |(index, column)| {
+                    (
+                        column.name(),
+                        PgType::new(column.type_oid(), column.type_mod()),
+                        index,
                     )
-                })?;
-                if fields.iter().any(|field: &Field| field.name() == name) {
-                    return Err(ConnectorError::invalid_object_schema(
-                        FormatKind::Parquet,
-                        "Parquet COPY TO output column names must be unique",
-                    ));
-                }
-                let data_type =
-                    parquet_arrow_type(column.type_oid(), column.type_mod())?;
-                let pg = PgColumnType::from_pg_type(column.type_oid()).ok_or_else(
-                    || {
-                        ConnectorError::invalid_object_schema(
-                            FormatKind::Parquet,
-                            format!(
-                                "PostgreSQL type OID {} has no Arrow conversion",
-                                column.type_oid()
-                            ),
-                        )
-                    },
-                )?;
-                let rule = resolve_column_rule(&data_type, pg)?;
-                datum_plans
-                    .push(BoundDatumColumnPlan::bind(rule, column.type_oid())?);
-
-                fields.push(Field::new(name, data_type, true));
-            }
-            Ok::<(), ConnectorError>(())
+                },
+            ))
         }))
         .catch_others(|error| {
             Err(ConnectorError::Postgres(PgReportError::from_caught(error)))
         })
-        .execute();
-        result.map_err(CopyError::from)?;
-
-        let schema = Arc::new(Schema::new(fields));
-        let buffer = BoundDatumBuffer::new(
-            Arc::clone(&schema),
-            datum_plans.into_boxed_slice(),
-        )
-        .map_err(ConnectorError::from)?;
+        .execute()?;
+        let schema = Arc::clone(plan.schema());
+        let buffer = plan.into_datum_buffer()?;
         let output = self
             .output
             .take()
             .expect("COPY TO initializes its destination exactly once");
         self.ready = Some(ReadyParquetCopyDestination {
             buffer,
-            writer: ParquetObjectWriter::new(output, schema, self.compression)?,
+            writer: ParquetOutputWriter::new(output, schema, self.compression)?,
         });
         Ok(())
     }

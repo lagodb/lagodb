@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Decimal128Array, Int32Array, Int64Array,
-    LargeStringArray, Scalar, StringArray,
+    Array, ArrayRef, BooleanArray, Decimal128Array, Int16Array, Int32Array,
+    Int64Array, LargeStringArray, Scalar, StringArray,
 };
 use arrow_ord::cmp;
 use arrow_schema::{ArrowError, DataType};
@@ -40,6 +40,7 @@ const VALUE_I32: i32 = 1;
 const VALUE_I64: i32 = 2;
 const VALUE_STRING: i32 = 3;
 const VALUE_DECIMAL128: i32 = 4;
+const VALUE_I16: i32 = 5;
 
 #[derive(Clone, Copy)]
 pub(super) enum ComparisonOperator {
@@ -161,6 +162,7 @@ impl ComparisonOperator {
 #[derive(Clone, Copy)]
 pub(super) enum ValueType {
     Bool,
+    I16,
     I32,
     I64,
     String,
@@ -201,8 +203,8 @@ impl ValueType {
                 PgOid::BuiltIn(PgBuiltInOids::INT2OID),
                 PgOid::BuiltIn(PgBuiltInOids::INT2OID),
                 PgOid::BuiltIn(PgBuiltInOids::INT2OID),
-            )
-            | (
+            ) => Self::I16,
+            (
                 PgOid::BuiltIn(PgBuiltInOids::INT4OID),
                 PgOid::BuiltIn(PgBuiltInOids::INT4OID),
                 PgOid::BuiltIn(PgBuiltInOids::INT4OID),
@@ -230,7 +232,7 @@ impl ValueType {
         };
 
         let value_type = match value_type {
-            Self::Bool | Self::I32 | Self::I64 | Self::Decimal128(_)
+            Self::Bool | Self::I16 | Self::I32 | Self::I64 | Self::Decimal128(_)
                 if opcollid == pg_sys::Oid::INVALID
                     && inputcollid == pg_sys::Oid::INVALID =>
             {
@@ -259,6 +261,7 @@ impl ValueType {
     pub(super) fn encode(self, writer: &mut PlanDataWriter) {
         match self {
             Self::Bool => writer.append_i32(VALUE_BOOL),
+            Self::I16 => writer.append_i32(VALUE_I16),
             Self::I32 => writer.append_i32(VALUE_I32),
             Self::I64 => writer.append_i32(VALUE_I64),
             Self::String => writer.append_i32(VALUE_STRING),
@@ -274,6 +277,7 @@ impl ValueType {
     ) -> Result<Self, ConnectorError> {
         match reader.read_i32()? {
             VALUE_BOOL => Ok(Self::Bool),
+            VALUE_I16 => Ok(Self::I16),
             VALUE_I32 => Ok(Self::I32),
             VALUE_I64 => Ok(Self::I64),
             VALUE_STRING => Ok(Self::String),
@@ -311,10 +315,9 @@ impl ValueType {
                 unsafe { bool::from_datum(datum, false) }
                     .ok_or_else(|| ConnectorError::invalid_filter_datum(type_oid))?,
             )),
-            (Self::I32, pg_sys::INT2OID) => DecodedValue::Scalar(BoundValue::I32(
+            (Self::I16, pg_sys::INT2OID) => DecodedValue::Scalar(BoundValue::I16(
                 unsafe { i16::from_datum(datum, false) }
-                    .ok_or_else(|| ConnectorError::invalid_filter_datum(type_oid))?
-                    as i32,
+                    .ok_or_else(|| ConnectorError::invalid_filter_datum(type_oid))?,
             )),
             (Self::I32, pg_sys::INT4OID) => DecodedValue::Scalar(BoundValue::I32(
                 unsafe { i32::from_datum(datum, false) }
@@ -366,6 +369,7 @@ impl ValueType {
 #[derive(Clone)]
 pub(super) enum BoundValue {
     Bool(bool),
+    I16(i16),
     I32(i32),
     I64(i64),
     String(Box<str>),
@@ -388,6 +392,9 @@ impl BoundValue {
         let array: ArrayRef = match (self, data_type) {
             (Self::Bool(value), DataType::Boolean) => {
                 Arc::new(BooleanArray::from(vec![*value]))
+            }
+            (Self::I16(value), DataType::Int16) => {
+                Arc::new(Int16Array::from(vec![*value]))
             }
             (Self::I32(value), DataType::Int32) => {
                 Arc::new(Int32Array::from(vec![*value]))

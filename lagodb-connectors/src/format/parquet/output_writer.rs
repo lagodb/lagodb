@@ -1,4 +1,4 @@
-//! Format-domain Parquet object writer shared by FDW and COPY adapters.
+//! Parquet file encoding and output shared by FDW and COPY adapters.
 //!
 //! Finalized prefix objects are uploaded immediately and registered for
 //! best-effort transaction-abort deletion. This is raw external-file behavior,
@@ -18,7 +18,7 @@ use crate::format::{
     EmptyOutputPolicy, FileWriteProgress, ObjectFileEncoder,
     ObjectFileEncoderFactory, ObjectSetWriter, ParquetWriteCompression,
 };
-use crate::storage::{ObjectFileSuffix, ObjectOutput, OutputWriter};
+use crate::storage::{ObjectFileSuffix, OutputWriter, StorageOutput};
 
 struct ParquetEncoderFactory {
     schema: Arc<Schema>,
@@ -99,15 +99,16 @@ impl ObjectFileEncoder for ParquetFileEncoder {
     }
 }
 
-/// Incremental Parquet output for one exact object or rolling prefix.
-pub(crate) struct ParquetObjectWriter {
+/// Incremental Parquet output for one exact file or rolling prefix, on local
+/// filesystems or object stores.
+pub(crate) struct ParquetOutputWriter {
     writer: Option<ObjectSetWriter<ParquetEncoderFactory>>,
     completed_bytes: u64,
 }
 
-impl ParquetObjectWriter {
+impl ParquetOutputWriter {
     pub(crate) fn new(
-        output: ObjectOutput,
+        output: StorageOutput,
         schema: Arc<Schema>,
         compression: ParquetWriteCompression,
     ) -> Result<Self, ConnectorError> {
