@@ -36,7 +36,7 @@ impl AvroValueKind {
     ) -> Result<Self, ConnectorError> {
         match oid {
             pg_sys::BOOLOID => Ok(Self::Boolean),
-            pg_sys::INT2OID | pg_sys::INT4OID => Ok(Self::Int),
+            pg_sys::INT4OID => Ok(Self::Int),
             pg_sys::INT8OID => Ok(Self::Long),
             pg_sys::FLOAT4OID => Ok(Self::Float),
             pg_sys::FLOAT8OID => Ok(Self::Double),
@@ -170,11 +170,8 @@ impl AvroValueKind {
     pub(in crate::format::avro) fn supports_target(self, oid: pg_sys::Oid) -> bool {
         match self {
             Self::Boolean => oid == pg_sys::BOOLOID,
-            Self::Int | Self::Long => {
-                oid == pg_sys::INT2OID
-                    || oid == pg_sys::INT4OID
-                    || oid == pg_sys::INT8OID
-            }
+            Self::Int => oid == pg_sys::INT4OID,
+            Self::Long => oid == pg_sys::INT8OID,
             Self::Float => oid == pg_sys::FLOAT4OID,
             Self::Double => oid == pg_sys::FLOAT8OID,
             Self::Bytes => oid == pg_sys::BYTEAOID,
@@ -230,13 +227,13 @@ impl AvroValueKind {
     }
 }
 
-pub(in crate::format::avro) struct AvroWritePlan {
+pub(crate) struct AvroWritePlan {
     schema: Schema,
     fields: Box<[AvroValueKind]>,
 }
 
 impl AvroWritePlan {
-    pub(super) fn from_relation_columns(
+    pub(crate) fn from_relation_columns(
         columns: &[RelationColumn],
     ) -> Result<Self, ConnectorError> {
         let mut fields = Vec::with_capacity(columns.len());

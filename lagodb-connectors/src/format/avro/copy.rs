@@ -16,7 +16,7 @@ use crate::error::ConnectorError;
 use crate::format::copy::{FormatCopyDestination, FormatCopyOutput};
 use crate::format::{AvroWriteCompression, FormatKind};
 use crate::storage::{
-    InputFile, ObjectFiles, ObjectOutput, ProgressReader, ReadProgress,
+    InputFile, InputFiles, ProgressReader, ReadProgress, StorageOutput,
 };
 
 use super::read::AvroReadColumn;
@@ -37,7 +37,7 @@ pub(in crate::format) struct AvroCopySource {
 
 impl AvroCopySource {
     pub(in crate::format) fn new(
-        mut files: ObjectFiles,
+        mut files: InputFiles,
         layout: &CopyColumnLayout,
     ) -> Result<Self, CopyError> {
         let first = files.next().expect(
@@ -165,14 +165,14 @@ struct ReadyAvroCopyDestination {
 
 /// Tuple-slot-to-Avro destination for PostgreSQL COPY TO.
 pub(in crate::format) struct AvroCopyDestination {
-    output: Option<ObjectOutput>,
+    output: Option<StorageOutput>,
     compression: AvroWriteCompression,
     ready: Option<ReadyAvroCopyDestination>,
 }
 
 impl AvroCopyDestination {
     pub(in crate::format) fn new(
-        output: ObjectOutput,
+        output: StorageOutput,
         compression: AvroWriteCompression,
     ) -> Self {
         Self {

@@ -6,25 +6,21 @@ mod write;
 
 use std::io::BufReader;
 
-use crate::storage::InputFile;
 use apache_avro::{Reader, Schema};
-use lagodb_core::fdw::StartForeignScanContext;
-use lagodb_core::handles::RelationHandle;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
-use crate::fdw::LagodbConnectors;
-use crate::storage::{ObjectFiles, ObjectOutput};
+use crate::storage::InputFile;
 
 use super::{
-    AvroWriteCompression, FormatKind, FormatObject, FormatOption, FormatReader,
-    FormatScanPlanner, FormatScanState, FormatSchemaReader, FormatWriteState,
-    FormatWriter, InferredColumn, InferredSchema, PostgresType,
+    AvroWriteCompression, FormatKind, FormatObject, FormatOption, FormatSchemaReader,
+    InferredColumn, InferredSchema, PostgresType,
 };
 
 pub(super) use copy::{AvroCopyDestination, AvroCopySource};
-use read::AvroScanState;
-use write::{AvroValueKind, AvroWriteState};
+pub(crate) use read::AvroReadColumn;
+use write::AvroValueKind;
+pub(crate) use write::{AvroDatumRow, AvroObjectWriter, AvroWritePlan};
 
 /// Avro-format processor.
 pub(crate) struct AvroFormat {
@@ -32,6 +28,10 @@ pub(crate) struct AvroFormat {
 }
 
 impl AvroFormat {
+    pub(crate) const fn write_compression(&self) -> AvroWriteCompression {
+        self.write_compression
+    }
+
     pub(crate) fn resolve(
         write_compression: AvroWriteCompression,
         options: &[FormatOption<'_>],
@@ -49,34 +49,6 @@ impl AvroFormat {
 impl FormatObject for AvroFormat {
     fn kind(&self) -> FormatKind {
         FormatKind::Avro
-    }
-}
-
-impl FormatReader for AvroFormat {
-    fn planner(self: Box<Self>) -> Box<dyn FormatScanPlanner> {
-        Box::new(read::AvroScanPlanner::new())
-    }
-
-    fn begin(
-        self: Box<Self>,
-        context: StartForeignScanContext<'_, LagodbConnectors>,
-        files: ObjectFiles,
-    ) -> Result<Box<dyn FormatScanState>, ConnectorError> {
-        Ok(Box::new(AvroScanState::begin(context, files)?))
-    }
-}
-
-impl FormatWriter for AvroFormat {
-    fn begin(
-        self: Box<Self>,
-        relation: &RelationHandle<'_>,
-        output: ObjectOutput,
-    ) -> Result<Box<dyn FormatWriteState>, ConnectorError> {
-        Ok(Box::new(AvroWriteState::begin(
-            relation,
-            output,
-            self.write_compression,
-        )?))
     }
 }
 
