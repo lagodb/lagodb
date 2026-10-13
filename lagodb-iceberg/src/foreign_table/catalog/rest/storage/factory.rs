@@ -5,21 +5,20 @@ use std::sync::Arc;
 
 use iceberg_lite::Result;
 use iceberg_lite::io::{Storage, StorageConfig, StorageFactory};
-use lagodb_core::storage::foreign::StorageManager;
-use lagodb_core::storage::profile::{StorageProfileError, StorageProfiles};
+use lagodb_core::storage::profile::StorageProfiles;
 use lagodb_core::storage::service::StorageEndpoint;
 use lagodb_storage::StagingPathResolver;
 use pgrx::pg_sys;
 
-use super::cache::CatalogStorageIdentity;
 use super::routes::CatalogStorage;
+use crate::foreign_table::options::ServerBindingKey;
 
 /// Builds table-bound storage from REST response properties and credentials.
 #[derive(Clone)]
 pub(crate) struct PgStorageFactory {
     endpoint: StorageEndpoint,
     staging_resolver: StagingPathResolver,
-    catalog_identity: CatalogStorageIdentity,
+    catalog_identity: ServerBindingKey,
     profiles: StorageProfiles,
     backend_thread: PhantomData<Rc<()>>,
 }
@@ -35,30 +34,23 @@ unsafe impl Sync for PgStorageFactory {}
 impl PgStorageFactory {
     pub(crate) fn new(
         endpoint: StorageEndpoint,
-        catalog_name: Arc<str>,
         catalog_server_oid: pg_sys::Oid,
         owner_fdw_oid: pg_sys::Oid,
         effective_user: pg_sys::Oid,
-    ) -> std::result::Result<Self, StorageProfileError> {
+    ) -> Self {
         let staging_resolver = StagingPathResolver::new(endpoint.cache_dir());
-        let manager = StorageManager::from_endpoint(&endpoint);
-        let profiles = StorageProfiles::load(
-            &manager,
-            owner_fdw_oid,
-            c"storage",
-            effective_user,
-        )?;
-        Ok(Self {
+        let profiles =
+            StorageProfiles::new(owner_fdw_oid, c"storage", effective_user);
+        Self {
             endpoint,
             staging_resolver,
-            catalog_identity: CatalogStorageIdentity::new(
-                catalog_server_oid,
+            catalog_identity: ServerBindingKey {
+                server_oid: catalog_server_oid,
                 effective_user,
-                catalog_name,
-            ),
+            },
             profiles,
             backend_thread: PhantomData,
-        })
+        }
     }
 }
 

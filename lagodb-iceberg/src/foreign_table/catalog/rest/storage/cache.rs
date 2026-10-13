@@ -5,8 +5,8 @@
 //! the entry; in-flight routes retain the prior service until their ordinary
 //! lifetime ends. Idle entries expire and least-recently-used entries are
 //! evicted at the capacity boundary, so a long-lived PostgreSQL backend cannot
-//! retain an unbounded set of REST credentials. PostgreSQL storage profiles use
-//! the separate foreign cache and never enter this cache.
+//! retain an unbounded set of REST credentials. Local profiles are merged with response properties before entering this
+//! cache; only the effective configuration acquires a service.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -19,6 +19,7 @@ use lagodb_storage::{StorageError, StorageResult, StoreConfig};
 use pgrx::pg_sys;
 
 use super::routes::ObjectProvider;
+use crate::foreign_table::options::ServerBindingKey;
 
 thread_local! {
     static CONFIGURED_STORAGE_CACHE: RefCell<ConfiguredStorageCache> =
@@ -28,28 +29,6 @@ thread_local! {
 const MAX_CONFIGURED_STORAGE_ENTRIES: usize = 64;
 const CONFIGURED_STORAGE_MAX_IDLE: Duration = Duration::from_secs(15 * 60);
 
-/// Non-secret REST catalog binding that isolates backend-local route entries.
-#[derive(Clone, Eq, Hash, PartialEq)]
-pub(super) struct CatalogStorageIdentity {
-    catalog_server_oid: u32,
-    effective_user: u32,
-    catalog_name: Arc<str>,
-}
-
-impl CatalogStorageIdentity {
-    pub(super) fn new(
-        catalog_server_oid: pg_sys::Oid,
-        effective_user: pg_sys::Oid,
-        catalog_name: Arc<str>,
-    ) -> Self {
-        Self {
-            catalog_server_oid: u32::from(catalog_server_oid),
-            effective_user: u32::from(effective_user),
-            catalog_name,
-        }
-    }
-}
-
 /// Non-secret identity of one catalog-provided object-storage route.
 ///
 /// Credentials and other mutable client behavior deliberately remain outside
@@ -57,7 +36,8 @@ impl CatalogStorageIdentity {
 /// replaces the service stored under this stable route identity.
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub(super) struct ConfiguredStorageRouteId {
-    catalog: CatalogStorageIdentity,
+    catalog: ServerBindingKey,
+    profile_server_oid: Option<pg_sys::Oid>,
     socket_path: PathBuf,
     provider: ObjectProvider,
     object_endpoint: Option<String>,
@@ -68,7 +48,7 @@ pub(super) struct ConfiguredStorageRouteId {
 
 impl ConfiguredStorageRouteId {
     pub(super) fn new(
-        catalog: &CatalogStorageIdentity,
+        catalog: &ServerBindingKey,
         endpoint: &StorageEndpoint,
         provider: ObjectProvider,
         bucket: &str,
@@ -84,6 +64,7 @@ impl ConfiguredStorageRouteId {
         };
         Self {
             catalog: catalog.clone(),
+            profile_server_oid: None,
             socket_path: endpoint.socket_path().to_path_buf(),
             provider,
             object_endpoint: object_endpoint.map(str::to_owned),
@@ -91,6 +72,14 @@ impl ConfiguredStorageRouteId {
             account: account.map(str::to_owned),
             prefix: prefix.map(str::to_owned),
         }
+    }
+
+    pub(super) fn with_profile_server(
+        mut self,
+        server_oid: Option<pg_sys::Oid>,
+    ) -> Self {
+        self.profile_server_oid = server_oid;
+        self
     }
 }
 

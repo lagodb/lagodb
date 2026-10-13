@@ -41,30 +41,19 @@ impl PgRestCatalogBuilder {
         effective_user: pg_sys::Oid,
     ) -> Result<RestCatalog> {
         let name = name.into();
-        let catalog_name: Arc<str> = Arc::from(name.as_str());
-        let endpoint = StorageEndpoint::from_pg_gucs()
-            .and_then(StorageEndpoint::require_enabled)
-            .map_err(|error| {
-                Error::new(
-                    ErrorKind::IoError,
-                    "REST catalog storage service is unavailable",
-                )
-                .with_source(error)
-            })?;
-        let storage_factory = PgStorageFactory::new(
-            endpoint,
-            catalog_name,
-            catalog_server_oid,
-            owner_fdw_oid,
-            effective_user,
-        )
-        .map_err(|error| {
+        let endpoint = StorageEndpoint::from_pg_gucs().map_err(|error| {
             Error::new(
-                ErrorKind::DataInvalid,
-                "failed to load PostgreSQL storage profiles",
+                ErrorKind::IoError,
+                "REST catalog storage service is unavailable",
             )
             .with_source(error)
         })?;
+        let storage_factory = PgStorageFactory::new(
+            endpoint,
+            catalog_server_oid,
+            owner_fdw_oid,
+            effective_user,
+        );
         let mut builder = RestCatalogBuilder::default()
             .with_http_transport(Arc::new(PgRestHttpTransport::new()?))
             .with_storage_factory(Arc::new(storage_factory));

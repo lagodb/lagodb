@@ -1,7 +1,9 @@
 use std::any::Any;
 use std::borrow::Cow;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fmt;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use iceberg_lite::io::{
@@ -9,15 +11,15 @@ use iceberg_lite::io::{
 };
 use iceberg_lite::{Error, ErrorKind, Result};
 use lagodb_core::storage::profile::{
-    ObjectScheme, ObjectUri, ObjectUriPrefix, ScopedStorageProfile, StorageProfiles,
+    ObjectScheme, ObjectUri, ObjectUriPrefix, StorageProfiles,
 };
 use lagodb_core::storage::service::{BackendStorageService, StorageEndpoint};
 use lagodb_storage::{StagingPathResolver, StorageErrorKind, StoreConfig};
+use pgrx::pg_sys;
 
-use super::cache::{
-    CatalogStorageIdentity, ConfiguredStorageCache, ConfiguredStorageRouteId,
-};
-use super::config::ProviderConfig;
+use super::binding::{RouteBinding, RouteContext};
+use super::cache::{ConfiguredStorageCache, ConfiguredStorageRouteId};
+use crate::foreign_table::options::ServerBindingKey;
 use crate::storage::transaction_resources::{
     ensure_object_file_staged, mark_object_file_uploaded, register_object_file_staged,
 };
@@ -42,99 +44,54 @@ impl From<ObjectScheme> for ObjectProvider {
     }
 }
 
-struct CatalogRoute {
-    prefix: Option<ObjectUriPrefix>,
-    provider: ObjectProvider,
+pub(super) struct CatalogRoute {
     bucket: Arc<str>,
-    azure_account: Option<Arc<str>>,
     service: BackendStorageService,
     staging_resolver: StagingPathResolver,
 }
 
 impl CatalogRoute {
-    fn new(
-        prefix: Option<String>,
-        location: &str,
-        config: ProviderConfig<'_>,
-        profile: Option<&ScopedStorageProfile>,
-        catalog_identity: &CatalogStorageIdentity,
+    pub(super) fn new(
+        prefix: Option<&ObjectUriPrefix>,
+        profile_server_oid: Option<pg_sys::Oid>,
+        object: &ObjectUri,
+        store_config: StoreConfig,
+        catalog_identity: &ServerBindingKey,
         endpoint: &StorageEndpoint,
         staging_resolver: &StagingPathResolver,
     ) -> Result<Self> {
-        let location = ObjectUriPrefix::parse(location).map_err(object_uri_err)?;
-        let prefix = prefix
-            .map(|prefix| ObjectUriPrefix::parse(&prefix))
-            .transpose()
-            .map_err(object_uri_err)?;
-        let provider = ObjectProvider::from(location.scheme());
-        let store_config = config.resolve(provider, location.account())?;
-        let azure_account = match store_config.as_ref() {
-            StoreConfig::Azure(config) => config.account.as_deref().map(Arc::from),
+        let provider = ObjectProvider::from(object.scheme());
+        let azure_account = match &store_config {
+            StoreConfig::Azure(config) => config.account.as_deref(),
             _ => None,
         };
         if provider == ObjectProvider::Azure
-            && let Some(uri_account) = location.account()
-            && azure_account.as_deref() != Some(uri_account)
+            && let Some(uri_account) = object.account()
+            && azure_account != Some(uri_account)
         {
             return Err(Error::new(
                 ErrorKind::DataInvalid,
                 "Azure account in object URI conflicts with storage configuration",
             ));
         }
-        let service = match store_config {
-            Cow::Borrowed(_) => profile
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::Unexpected,
-                        "borrowed storage configuration has no PostgreSQL profile",
-                    )
-                })?
-                .service(),
-            Cow::Owned(store_config) => {
-                let route_id = ConfiguredStorageRouteId::new(
-                    catalog_identity,
-                    endpoint,
-                    provider,
-                    location.bucket(),
-                    azure_account.as_deref(),
-                    prefix.as_ref().and_then(ObjectUriPrefix::key_prefix),
-                    &store_config,
-                );
-                ConfiguredStorageCache::acquire(route_id, endpoint, store_config)
-                    .map_err(storage_err)?
-            }
-        };
-        Ok(Self {
-            prefix,
+        let route_id = ConfiguredStorageRouteId::new(
+            catalog_identity,
+            endpoint,
             provider,
-            bucket: Arc::from(location.bucket()),
+            object.bucket(),
             azure_account,
+            prefix.and_then(ObjectUriPrefix::key_prefix),
+            &store_config,
+        )
+        .with_profile_server(profile_server_oid);
+        let service =
+            ConfiguredStorageCache::acquire(route_id, endpoint, store_config)
+                .map_err(storage_err)?;
+        Ok(Self {
+            bucket: Arc::from(object.bucket()),
             service,
             staging_resolver: staging_resolver.clone(),
         })
-    }
-
-    fn matches(&self, uri: &ObjectUri) -> bool {
-        self.prefix
-            .as_ref()
-            .is_some_and(|prefix| prefix.contains(uri))
-    }
-
-    fn key_for_object<'a>(&self, object: &'a ObjectUri) -> Result<&'a str> {
-        let account_matches = self.provider != ObjectProvider::Azure
-            || object
-                .account()
-                .is_none_or(|account| self.azure_account.as_deref() == Some(account));
-        if ObjectProvider::from(object.scheme()) != self.provider
-            || object.bucket() != self.bucket.as_ref()
-            || !account_matches
-        {
-            return Err(Error::new(
-                ErrorKind::DataInvalid,
-                "object URI does not belong to the selected credential route",
-            ));
-        }
-        Ok(object.key())
     }
 
     fn delete(&self, key: &str) -> Result<()> {
@@ -210,12 +167,13 @@ impl CatalogRoute {
     }
 }
 
-/// Storage router that binds stable PostgreSQL profiles or one response's
-/// configured credential contexts before object operations begin.
+/// Storage router that binds only selected REST/local configurations and
+/// retains each service for subsequent file operations.
 pub(super) struct CatalogStorage {
     scheme: String,
-    default_route: CatalogRoute,
-    credential_routes: Vec<CatalogRoute>,
+    default_location: ObjectUriPrefix,
+    default_binding: RouteBinding,
+    credential_routes: Vec<RouteBinding>,
 }
 
 // SAFETY: `CatalogStorage` is the private REST-catalog adapter for
@@ -232,7 +190,7 @@ impl CatalogStorage {
         location: String,
         properties: HashMap<String, String>,
         credentials: Vec<StorageCredential>,
-        catalog_identity: &CatalogStorageIdentity,
+        catalog_identity: &ServerBindingKey,
         profiles: &StorageProfiles,
         endpoint: &StorageEndpoint,
         staging_resolver: &StagingPathResolver,
@@ -243,75 +201,43 @@ impl CatalogStorage {
             .ok_or_else(|| {
                 Error::new(ErrorKind::DataInvalid, "invalid object storage URI")
             })?;
+        let context = Rc::new(RouteContext {
+            catalog_identity: catalog_identity.clone(),
+            profiles: profiles.clone(),
+            endpoint: endpoint.clone(),
+            staging_resolver: staging_resolver.clone(),
+            properties,
+        });
         let mut credential_routes = Vec::with_capacity(credentials.len());
         for credential in credentials {
-            let (prefix, credential_properties) = credential.into_parts();
-            let profile = Self::profile_for(profiles, &prefix)?;
-            credential_routes.push(CatalogRoute::new(
-                Some(prefix.clone()),
-                &prefix,
-                ProviderConfig::with_profile_overrides(
-                    &properties,
-                    profile.map(ScopedStorageProfile::config),
-                    &credential_properties,
-                ),
-                profile,
-                catalog_identity,
-                endpoint,
-                staging_resolver,
-            )?);
+            let (prefix, overrides) = credential.into_parts();
+            let prefix = ObjectUriPrefix::parse(&prefix).map_err(object_uri_err)?;
+            credential_routes.push(RouteBinding::scoped(
+                prefix,
+                overrides,
+                Rc::clone(&context),
+            ));
         }
-        credential_routes.sort_by(|left, right| {
-            right
-                .prefix
-                .as_ref()
-                .map_or(0, ObjectUriPrefix::specificity)
-                .cmp(&left.prefix.as_ref().map_or(0, ObjectUriPrefix::specificity))
-        });
-        let profile = Self::profile_for(profiles, &location)?;
-        let default_route = CatalogRoute::new(
-            None,
-            &location,
-            ProviderConfig::with_profile(
-                &properties,
-                profile.map(ScopedStorageProfile::config),
-            ),
-            profile,
-            catalog_identity,
-            endpoint,
-            staging_resolver,
-        )?;
+        credential_routes.sort_by_key(|route| Reverse(route.specificity()));
+        let default_location =
+            ObjectUriPrefix::parse(&location).map_err(object_uri_err)?;
+        let default_binding = RouteBinding::fallback(context);
         Ok(Self {
             scheme,
-            default_route,
+            default_location,
+            default_binding,
             credential_routes,
         })
     }
 
-    fn profile_for<'a>(
-        profiles: &'a StorageProfiles,
-        location: &str,
-    ) -> Result<Option<&'a ScopedStorageProfile>> {
-        profiles.resolve_optional(location).map_err(|error| {
-            Error::new(
-                ErrorKind::DataInvalid,
-                "failed to resolve PostgreSQL storage profile",
-            )
-            .with_source(error)
-        })
-    }
-
-    fn route(&self, uri: &ObjectUri) -> &CatalogRoute {
+    fn select_binding(&self, object: &ObjectUri) -> &RouteBinding {
         self.credential_routes
             .iter()
-            .find(|route| route.matches(uri))
-            .unwrap_or(&self.default_route)
+            .find(|binding| binding.matches(object))
+            .unwrap_or(&self.default_binding)
     }
 
-    fn resolve<'a>(
-        &'a self,
-        path: &'a str,
-    ) -> Result<(&'a CatalogRoute, Cow<'a, str>)> {
+    fn resolve<'a>(&self, path: &'a str) -> Result<(Rc<CatalogRoute>, Cow<'a, str>)> {
         if !path.contains("://") {
             let key = path.trim_start_matches('/');
             if key.is_empty() {
@@ -320,11 +246,12 @@ impl CatalogStorage {
                     "object key is empty",
                 ));
             }
-            return Ok((&self.default_route, Cow::Borrowed(key)));
+            let object = self.default_location.object(key);
+            return Ok((self.default_binding.route(&object)?, Cow::Borrowed(key)));
         }
         let object = ObjectUri::parse(path).map_err(object_uri_err)?;
-        let route = self.route(&object);
-        let key = route.key_for_object(&object)?.to_owned();
+        let route = self.select_binding(&object).route(&object)?;
+        let key = object.key().to_owned();
         Ok((route, Cow::Owned(key)))
     }
 }
@@ -345,8 +272,12 @@ impl fmt::Debug for CatalogStorage {
 }
 
 impl Storage for CatalogStorage {
-    fn resolve_uri(&self, uri: &str) -> Result<usize> {
-        self.resolve(uri)?;
+    fn resolve_uri(&self, _uri: &str) -> Result<usize> {
+        // Preserve the full URI for per-object REST credential routing. Every
+        // file operation calls resolve() to parse, validate and route the path
+        // before accessing object data. InputFile/OutputFile construction only
+        // retains the path; errors are reported when it is used, avoiding
+        // duplicate parsing and binding selection before the actual operation.
         Ok(0)
     }
 

@@ -1,5 +1,6 @@
 //! Object storage created from Iceberg REST table configuration.
 
+mod binding;
 mod cache;
 mod config;
 mod factory;
