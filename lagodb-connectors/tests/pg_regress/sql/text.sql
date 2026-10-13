@@ -6,23 +6,14 @@ SELECT bucket AS lagodb_regress_bucket
 FROM lagodb_regress.object_storage_fixture
 \gset
 
-SELECT format('s3://%s/lagodb-connectors/text/exact.txt',
-              :'lagodb_regress_bucket') AS exact_path,
-       format('s3://%s/lagodb-connectors/text/prefix/',
-              :'lagodb_regress_bucket') AS prefix_path,
-       format('s3://%s/lagodb-connectors/text/prefix/part-a.txt',
-              :'lagodb_regress_bucket') AS part_a_path,
-       format('s3://%s/lagodb-connectors/text/prefix/part-b.txt',
-              :'lagodb_regress_bucket') AS part_b_path,
-       format('s3://%s/lagodb-connectors/text/extra.txt',
-              :'lagodb_regress_bucket') AS extra_path,
-       format('s3://%s/lagodb-connectors/text/alias.text',
-              :'lagodb_regress_bucket') AS alias_path,
-       format('s3://%s/lagodb-connectors/text/empty.txt',
-              :'lagodb_regress_bucket') AS empty_path,
-       format('s3://%s/lagodb-connectors/text/write/',
-              :'lagodb_regress_bucket') AS write_path
-\gset text_
+\set text_exact_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/exact.txt'
+\set text_prefix_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/prefix/'
+\set text_part_a_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/prefix/part-a.txt'
+\set text_part_b_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/prefix/part-b.txt'
+\set text_extra_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/extra.txt'
+\set text_alias_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/alias.text'
+\set text_empty_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/empty.txt'
+\set text_write_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/write/'
 
 -- Scalar values, NULLs, escaping, and exact/prefix objects.
 COPY lagodb_connectors_regress.common_source

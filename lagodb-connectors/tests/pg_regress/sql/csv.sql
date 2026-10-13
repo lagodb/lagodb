@@ -12,32 +12,19 @@ FROM lagodb_regress.object_storage_fixture
 \setenv OBJECT_STORAGE_ACCESS_KEY_ID :storage_access_key_id
 \setenv OBJECT_STORAGE_SECRET_ACCESS_KEY :storage_secret_access_key
 
-SELECT format('s3://%s/lagodb-connectors/csv/exact.csv',
-              :'storage_bucket') AS exact_path,
-       format('s3://%s/lagodb-connectors/csv/prefix/',
-              :'storage_bucket') AS prefix_path,
-       format('s3://%s/lagodb-connectors/csv/prefix/part-a.csv',
-              :'storage_bucket') AS part_a_path,
-       format('s3://%s/lagodb-connectors/csv/prefix/part-b.csv',
-              :'storage_bucket') AS part_b_path,
-       format('s3://%s/lagodb-connectors/csv/header.csv',
-              :'storage_bucket') AS header_path,
-       format('s3://%s/lagodb-connectors/csv/custom.csv',
-              :'storage_bucket') AS custom_path,
-       format('s3://%s/lagodb-connectors/csv/compressed.csv.gz',
-              :'storage_bucket') AS compressed_path,
-       format('s3://%s/lagodb-connectors/csv/options.csv',
-              :'storage_bucket') AS options_path,
-       format('s3://%s/lagodb-connectors/csv/extra.csv',
-              :'storage_bucket') AS extra_path,
-       format('s3://%s/lagodb-connectors/csv/empty.csv',
-              :'storage_bucket') AS empty_path,
-       format('s3://%s/lagodb-connectors/csv/write/',
-              :'storage_bucket') AS write_path,
-       format('s3://%s/lagodb-connectors/csv/malformed-width.csv',
-              :'storage_bucket') AS malformed_path,
-       'lagodb-connectors/csv/malformed-width.csv' AS malformed_key
-\gset csv_
+\set csv_exact_path 's3://' :storage_bucket '/lagodb-connectors/csv/exact.csv'
+\set csv_prefix_path 's3://' :storage_bucket '/lagodb-connectors/csv/prefix/'
+\set csv_part_a_path 's3://' :storage_bucket '/lagodb-connectors/csv/prefix/part-a.csv'
+\set csv_part_b_path 's3://' :storage_bucket '/lagodb-connectors/csv/prefix/part-b.csv'
+\set csv_header_path 's3://' :storage_bucket '/lagodb-connectors/csv/header.csv'
+\set csv_custom_path 's3://' :storage_bucket '/lagodb-connectors/csv/custom.csv'
+\set csv_compressed_path 's3://' :storage_bucket '/lagodb-connectors/csv/compressed.csv.gz'
+\set csv_options_path 's3://' :storage_bucket '/lagodb-connectors/csv/options.csv'
+\set csv_extra_path 's3://' :storage_bucket '/lagodb-connectors/csv/extra.csv'
+\set csv_empty_path 's3://' :storage_bucket '/lagodb-connectors/csv/empty.csv'
+\set csv_write_path 's3://' :storage_bucket '/lagodb-connectors/csv/write/'
+\set csv_malformed_path 's3://' :storage_bucket '/lagodb-connectors/csv/malformed-width.csv'
+\set csv_malformed_key 'lagodb-connectors/csv/malformed-width.csv'
 
 -- Exact/prefix I/O, headers, and PostgreSQL CSV options.
 COPY lagodb_connectors_regress.common_source

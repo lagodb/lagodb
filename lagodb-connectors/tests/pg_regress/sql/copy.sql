@@ -6,17 +6,11 @@ SELECT bucket AS lagodb_regress_bucket
 FROM lagodb_regress.object_storage_fixture
 \gset
 
-SELECT format('s3://%s/lagodb-connectors/copy/bridge/sentinels.json',
-              :'lagodb_regress_bucket') AS bridge_json,
-       format('s3://%s/lagodb-connectors/copy/bridge/sentinels.avro',
-              :'lagodb_regress_bucket') AS bridge_avro,
-       format('s3://%s/lagodb-connectors/copy/bridge/sentinels.parquet',
-              :'lagodb_regress_bucket') AS bridge_parquet,
-       format('s3://%s/lagodb-connectors/copy/empty-prefix/',
-              :'lagodb_regress_bucket') AS empty_prefix,
-       format('s3://%s/lagodb-connectors/copy/missing.txt',
-              :'lagodb_regress_bucket') AS missing_exact
-\gset copy_
+\set copy_bridge_json 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/bridge/sentinels.json'
+\set copy_bridge_avro 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/bridge/sentinels.avro'
+\set copy_bridge_parquet 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/bridge/sentinels.parquet'
+\set copy_empty_prefix 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/empty-prefix/'
+\set copy_missing_exact 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/missing.txt'
 
 -- Native COPY preserves NULLs, protocol-like text, quoting, and row-buffer reuse.
 CREATE TABLE lagodb_connectors_regress.copy_bridge_source (
@@ -107,13 +101,9 @@ WITH (server 'lagodb_connectors_regress_s3', format 'text', unknown_option true)
 -- Display payloads as JSON to distinguish NULL, empty strings, and escapes.
 CREATE TABLE lagodb_connectors_regress.copy_native_sink (payload text, id integer);
 
-SELECT format('s3://%s/lagodb-connectors/copy/query.json',
-              :'lagodb_regress_bucket') AS json,
-       format('s3://%s/lagodb-connectors/copy/query.avro',
-              :'lagodb_regress_bucket') AS avro,
-       format('s3://%s/lagodb-connectors/copy/query.parquet',
-              :'lagodb_regress_bucket') AS parquet
-\gset copy_
+\set copy_json 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/query.json'
+\set copy_avro 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/query.avro'
+\set copy_parquet 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/query.parquet'
 
 -- Query slots: reordered columns, an expression, and NULL.
 COPY (
@@ -185,13 +175,9 @@ WITH (server 'lagodb_connectors_regress_s3', format 'parquet') WHERE id >= 15;
 SELECT id, to_json(payload) AS payload, marker, total
 FROM lagodb_connectors_regress.copy_assignment_sink ORDER BY id;
 
-SELECT format('s3://%s/lagodb-connectors/copy/foreign.json',
-              :'lagodb_regress_bucket') AS json,
-       format('s3://%s/lagodb-connectors/copy/foreign.avro',
-              :'lagodb_regress_bucket') AS avro,
-       format('s3://%s/lagodb-connectors/copy/foreign.parquet',
-              :'lagodb_regress_bucket') AS parquet
-\gset copy_
+\set copy_json 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/foreign.json'
+\set copy_avro 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/foreign.avro'
+\set copy_parquet 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/foreign.parquet'
 
 -- Relation-form COPY of a foreign table is prepared as a PG query.
 CREATE FOREIGN TABLE lagodb_connectors_regress.copy_native_foreign (:id_payload_columns)
@@ -231,13 +217,9 @@ FROM lagodb_connectors_regress.copy_native_sink ORDER BY id;
 TRUNCATE lagodb_connectors_regress.copy_native_sink;
 DROP FOREIGN TABLE lagodb_connectors_regress.copy_native_foreign;
 
-SELECT format('s3://%s/lagodb-connectors/copy/typmods.json',
-              :'lagodb_regress_bucket') AS json,
-       format('s3://%s/lagodb-connectors/copy/typmods.avro',
-              :'lagodb_regress_bucket') AS avro,
-       format('s3://%s/lagodb-connectors/copy/typmods.parquet',
-              :'lagodb_regress_bucket') AS parquet
-\gset copy_
+\set copy_json 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/typmods.json'
+\set copy_avro 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/typmods.avro'
+\set copy_parquet 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/typmods.parquet'
 
 -- Native datums must honor target typmods: varchar trimming, char padding,
 -- and numeric/time/timestamp rounding.
@@ -266,36 +248,36 @@ COPY lagodb_connectors_regress.copy_typmod_sink FROM :'copy_json'
 WITH (server 'lagodb_connectors_regress_s3', format 'json');
 \set VERBOSITY default
 SELECT count(*) AS rows_after_error FROM lagodb_connectors_regress.copy_typmod_sink;
-SET client_min_messages = warning;
+SET client_min_messages = notice;
 COPY lagodb_connectors_regress.copy_typmod_sink FROM :'copy_json'
 WITH (server 'lagodb_connectors_regress_s3', format 'json', on_error ignore);
+RESET client_min_messages;
 SELECT id, payload, octet_length(padded) AS padded_bytes, amount,
        clock = time '12:34:56.124' AS time_rounded,
        happened = timestamp '2000-01-01' AS timestamp_rounded
 FROM lagodb_connectors_regress.copy_typmod_sink ORDER BY id;
 TRUNCATE lagodb_connectors_regress.copy_typmod_sink;
+SET client_min_messages = notice;
 COPY lagodb_connectors_regress.copy_typmod_sink FROM :'copy_avro'
 WITH (server 'lagodb_connectors_regress_s3', format 'avro', on_error ignore);
+RESET client_min_messages;
 SELECT id, payload, octet_length(padded) AS padded_bytes, amount,
        clock = time '12:34:56.124' AS time_rounded,
        happened = timestamp '2000-01-01' AS timestamp_rounded
 FROM lagodb_connectors_regress.copy_typmod_sink ORDER BY id;
 TRUNCATE lagodb_connectors_regress.copy_typmod_sink;
+SET client_min_messages = notice;
 COPY lagodb_connectors_regress.copy_typmod_sink FROM :'copy_parquet'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet', on_error ignore);
+RESET client_min_messages;
 SELECT id, payload, octet_length(padded) AS padded_bytes, amount,
        clock = time '12:34:56.124' AS time_rounded,
        happened = timestamp '2000-01-01' AS timestamp_rounded
 FROM lagodb_connectors_regress.copy_typmod_sink ORDER BY id;
-RESET client_min_messages;
 
-SELECT format('s3://%s/lagodb-connectors/copy/rls.json',
-              :'lagodb_regress_bucket') AS json,
-       format('s3://%s/lagodb-connectors/copy/rls.avro',
-              :'lagodb_regress_bucket') AS avro,
-       format('s3://%s/lagodb-connectors/copy/rls.parquet',
-              :'lagodb_regress_bucket') AS parquet
-\gset copy_
+\set copy_json 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/rls.json'
+\set copy_avro 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/rls.avro'
+\set copy_parquet 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/rls.parquet'
 
 -- Relation-form COPY must export only rows visible to the current role.
 CREATE ROLE lagodb_copy_reader;
@@ -336,7 +318,7 @@ DROP OWNED BY lagodb_copy_reader;
 DROP ROLE lagodb_copy_reader;
 
 -- Local COPY: inferred/explicit formats, relative input, and empty files.
-BEGIN;
+-- Only directory publication needs rollback cleanup; option errors run directly.
 SELECT current_setting('data_directory') || '/lagodb-copy-' || pg_backend_pid()
        AS local_copy_root
 \gset
@@ -350,12 +332,9 @@ CREATE TABLE lagodb_connectors_regress.local_copy_sink
 
 -- Native input must not stat/open a missing file before PG rejects its options.
 \set local_copy_missing :local_copy_root '-missing'
-SAVEPOINT local_input_options;
 \set VERBOSITY sqlstate
 COPY lagodb_connectors_regress.local_copy_sink FROM :'local_copy_missing'
 WITH (format avro, unknown_option true);
-ROLLBACK TO SAVEPOINT local_input_options;
-RELEASE SAVEPOINT local_input_options;
 \set VERBOSITY default
 
 -- json: native file output and input selected from the suffix.
@@ -373,31 +352,23 @@ UNION ALL
 -- Opening a local exact output must precede volatile query evaluation.
 -- Reuse the JSON file above as an invalid parent directory for all formats.
 CREATE SEQUENCE lagodb_connectors_regress.copy_open_sequence;
-SAVEPOINT local_output_open;
 \set VERBOSITY sqlstate
 \set local_copy_invalid :local_copy_file '/out.json'
 COPY (SELECT nextval('lagodb_connectors_regress.copy_open_sequence') AS id)
 TO :'local_copy_invalid';
-ROLLBACK TO SAVEPOINT local_output_open;
 \set local_copy_invalid :local_copy_file '/out.avro'
 COPY (SELECT nextval('lagodb_connectors_regress.copy_open_sequence') AS id)
 TO :'local_copy_invalid';
-ROLLBACK TO SAVEPOINT local_output_open;
 \set local_copy_invalid :local_copy_file '/out.parquet'
 COPY (SELECT nextval('lagodb_connectors_regress.copy_open_sequence') AS id)
 TO :'local_copy_invalid';
-ROLLBACK TO SAVEPOINT local_output_open;
-RELEASE SAVEPOINT local_output_open;
 SELECT is_called FROM lagodb_connectors_regress.copy_open_sequence;
 
 -- A first-row executor error still leaves the old JSON file truncated.
-SAVEPOINT local_output_truncate;
 COPY (
     SELECT 1 / (id - id)
     FROM lagodb_connectors_regress.local_copy_source LIMIT 1
 ) TO :'local_copy_file';
-ROLLBACK TO SAVEPOINT local_output_truncate;
-RELEASE SAVEPOINT local_output_truncate;
 \set VERBOSITY default
 SELECT (pg_stat_file(:'local_copy_file')).size = 0 AS truncated;
 
@@ -504,6 +475,7 @@ FROM lagodb_connectors_regress.local_copy_sink;
 
 -- Parquet COPY FROM supports a directory produced by COPY TO.
 \set local_copy_directory :local_copy_root '-parquet/'
+BEGIN;
 COPY lagodb_connectors_regress.local_copy_source TO :'local_copy_directory'
 WITH (format parquet);
 TRUNCATE lagodb_connectors_regress.local_copy_sink;
@@ -515,6 +487,8 @@ WITH (format parquet);
 UNION ALL
 (TABLE lagodb_connectors_regress.local_copy_source
  EXCEPT ALL TABLE lagodb_connectors_regress.local_copy_sink);
+
+ROLLBACK;
 
 -- An explicit core format overrides a native suffix in both COPY routers.
 \set local_copy_file :local_copy_root '.json'
@@ -531,17 +505,13 @@ UNION ALL
  EXCEPT ALL TABLE lagodb_connectors_regress.local_copy_sink);
 
 -- Reject a relative output path and an object-storage server on local COPY.
-SAVEPOINT local_output_path;
 \set VERBOSITY sqlstate
 COPY lagodb_connectors_regress.local_copy_source TO 'relative.parquet';
-ROLLBACK TO SAVEPOINT local_output_path;
-RELEASE SAVEPOINT local_output_path;
 
-SAVEPOINT local_server_option;
 COPY lagodb_connectors_regress.local_copy_source TO :'local_copy_file'
 WITH (format 'json', server 'lagodb_connectors_regress_s3');
-ROLLBACK TO SAVEPOINT local_server_option;
-RELEASE SAVEPOINT local_server_option;
 
 \set VERBOSITY default
-ROLLBACK;
+DROP SEQUENCE lagodb_connectors_regress.copy_open_sequence;
+DROP TABLE lagodb_connectors_regress.local_copy_sink,
+    lagodb_connectors_regress.local_copy_source;

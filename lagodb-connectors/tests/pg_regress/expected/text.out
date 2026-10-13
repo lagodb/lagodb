@@ -1,31 +1,23 @@
 \i include/column_definitions.sql
 -- Foreign tables do not support LIKE; share column lists through psql variables.
 \set common_columns 'id integer, bool_col boolean, smallint_col smallint, integer_col integer, bigint_col bigint, real_col real, double_col double precision, numeric_col numeric(12, 3), text_col text, varchar_col varchar(20), char_col character(5), name_col name, bytea_col bytea, uuid_col uuid, date_col date, time_col time without time zone, timestamp_col timestamp without time zone, timestamptz_col timestamp with time zone'
+\set avro_columns 'id integer, bool_col boolean, smallint_col integer, integer_col integer, bigint_col bigint, real_col real, double_col double precision, numeric_col numeric(12, 3), text_col text, varchar_col varchar(20), char_col character(5), name_col name, bytea_col bytea, uuid_col uuid, date_col date, time_col time without time zone, timestamp_col timestamp without time zone, timestamptz_col timestamp with time zone'
 \set json_columns :common_columns ', json_col json, jsonb_col jsonb'
-\set parquet_columns :common_columns ', json_col json, bool_array boolean[], smallint_array smallint[], integer_array integer[], bigint_array bigint[], real_array real[], double_array double precision[], text_array text[], varchar_array varchar(20)[], bpchar_array character(5)[], name_array name[], json_array json[]'
+\set parquet_columns :common_columns ', json_col json, bool_array boolean[], smallint_array smallint[], integer_array integer[], bigint_array bigint[], real_array real[], double_array double precision[], text_array text[], varchar_array varchar(20)[], bpchar_array character(5)[], name_array name[], json_array json[], bytea_array bytea[], uuid_array uuid[], numeric_array numeric(12, 3)[], date_array date[], time_array time[], timestamp_array timestamp[], timestamptz_array timestamptz[]'
 \set stream_extra_columns 'id integer, json_col json, jsonb_col jsonb, bool_array boolean[], int_array integer[], text_array text[]'
 \set id_payload_columns 'id integer, payload text'
 -- Text format COPY, foreign-table, inference, and scan-state coverage.
 SELECT bucket AS lagodb_regress_bucket
 FROM lagodb_regress.object_storage_fixture
 \gset
-SELECT format('s3://%s/lagodb-connectors/text/exact.txt',
-              :'lagodb_regress_bucket') AS exact_path,
-       format('s3://%s/lagodb-connectors/text/prefix/',
-              :'lagodb_regress_bucket') AS prefix_path,
-       format('s3://%s/lagodb-connectors/text/prefix/part-a.txt',
-              :'lagodb_regress_bucket') AS part_a_path,
-       format('s3://%s/lagodb-connectors/text/prefix/part-b.txt',
-              :'lagodb_regress_bucket') AS part_b_path,
-       format('s3://%s/lagodb-connectors/text/extra.txt',
-              :'lagodb_regress_bucket') AS extra_path,
-       format('s3://%s/lagodb-connectors/text/alias.text',
-              :'lagodb_regress_bucket') AS alias_path,
-       format('s3://%s/lagodb-connectors/text/empty.txt',
-              :'lagodb_regress_bucket') AS empty_path,
-       format('s3://%s/lagodb-connectors/text/write/',
-              :'lagodb_regress_bucket') AS write_path
-\gset text_
+\set text_exact_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/exact.txt'
+\set text_prefix_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/prefix/'
+\set text_part_a_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/prefix/part-a.txt'
+\set text_part_b_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/prefix/part-b.txt'
+\set text_extra_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/extra.txt'
+\set text_alias_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/alias.text'
+\set text_empty_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/empty.txt'
+\set text_write_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/text/write/'
 -- Scalar values, NULLs, escaping, and exact/prefix objects.
 COPY lagodb_connectors_regress.common_source
 TO :'text_exact_path'

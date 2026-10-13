@@ -3,7 +3,6 @@
 SET client_min_messages = warning;
 DROP SCHEMA IF EXISTS lagodb_connectors_regress CASCADE;
 DROP SERVER IF EXISTS lagodb_connectors_regress_scope CASCADE;
-DROP SERVER IF EXISTS lagodb_connectors_regress_missing_mapping CASCADE;
 DROP SERVER IF EXISTS lagodb_connectors_regress_s3 CASCADE;
 DROP EXTENSION IF EXISTS lagodb_connectors CASCADE;
 DROP EXTENSION IF EXISTS lagodb_base CASCADE;

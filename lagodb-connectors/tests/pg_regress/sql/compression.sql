@@ -16,30 +16,20 @@ FROM lagodb_regress.object_storage_fixture
 \setenv OBJECT_STORAGE_ACCESS_KEY_ID :storage_access_key_id
 \setenv OBJECT_STORAGE_SECRET_ACCESS_KEY :storage_secret_access_key
 
-SELECT format('s3://%s/lagodb-connectors/codecs/plain-suffix.txt.gz',
-              :'storage_bucket') AS plain_gz_path,
-       format('s3://%s/lagodb-connectors/codecs/plain-suffix.txt.zst',
-              :'storage_bucket') AS plain_zst_path,
-       format('s3://%s/lagodb-connectors/codecs/alias.txt.gzip',
-              :'storage_bucket') AS gzip_alias_path,
-       format('s3://%s/lagodb-connectors/codecs/alias.txt.zstd',
-              :'storage_bucket') AS zstd_alias_path,
-       format('s3://%s/lagodb-connectors/codecs/member-1.txt.gz',
-              :'storage_bucket') AS gzip_member_1_path,
-       format('s3://%s/lagodb-connectors/codecs/member-2.txt.gz',
-              :'storage_bucket') AS gzip_member_2_path,
-       format('s3://%s/lagodb-connectors/codecs/concatenated.txt.gz',
-              :'storage_bucket') AS gzip_concatenated_path,
-       format('s3://%s/lagodb-connectors/codecs/truncated.txt.zst',
-              :'storage_bucket') AS truncated_zstd_path,
-       format('s3://%s/lagodb-connectors/codecs/corrupt.txt.gz',
-              :'storage_bucket') AS corrupt_gzip_path,
-       'lagodb-connectors/codecs/member-1.txt.gz' AS gzip_member_1_key,
-       'lagodb-connectors/codecs/member-2.txt.gz' AS gzip_member_2_key,
-       'lagodb-connectors/codecs/concatenated.txt.gz' AS gzip_concatenated_key,
-       'lagodb-connectors/codecs/truncated.txt.zst' AS truncated_zstd_key,
-       'lagodb-connectors/codecs/corrupt.txt.gz' AS corrupt_gzip_key
-\gset codec_
+\set codec_plain_gz_path 's3://' :storage_bucket '/lagodb-connectors/codecs/plain-suffix.txt.gz'
+\set codec_plain_zst_path 's3://' :storage_bucket '/lagodb-connectors/codecs/plain-suffix.txt.zst'
+\set codec_gzip_alias_path 's3://' :storage_bucket '/lagodb-connectors/codecs/alias.txt.gzip'
+\set codec_zstd_alias_path 's3://' :storage_bucket '/lagodb-connectors/codecs/alias.txt.zstd'
+\set codec_gzip_member_1_path 's3://' :storage_bucket '/lagodb-connectors/codecs/member-1.txt.gz'
+\set codec_gzip_member_2_path 's3://' :storage_bucket '/lagodb-connectors/codecs/member-2.txt.gz'
+\set codec_gzip_concatenated_path 's3://' :storage_bucket '/lagodb-connectors/codecs/concatenated.txt.gz'
+\set codec_truncated_zstd_path 's3://' :storage_bucket '/lagodb-connectors/codecs/truncated.txt.zst'
+\set codec_corrupt_gzip_path 's3://' :storage_bucket '/lagodb-connectors/codecs/corrupt.txt.gz'
+\set codec_gzip_member_1_key 'lagodb-connectors/codecs/member-1.txt.gz'
+\set codec_gzip_member_2_key 'lagodb-connectors/codecs/member-2.txt.gz'
+\set codec_gzip_concatenated_key 'lagodb-connectors/codecs/concatenated.txt.gz'
+\set codec_truncated_zstd_key 'lagodb-connectors/codecs/truncated.txt.zst'
+\set codec_corrupt_gzip_key 'lagodb-connectors/codecs/corrupt.txt.gz'
 
 -- An explicit compression option takes precedence over a compression-looking
 -- suffix in both COPY and foreign-table option resolution.

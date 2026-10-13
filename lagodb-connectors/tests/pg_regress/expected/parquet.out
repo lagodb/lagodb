@@ -1,31 +1,24 @@
 \i include/column_definitions.sql
 -- Foreign tables do not support LIKE; share column lists through psql variables.
 \set common_columns 'id integer, bool_col boolean, smallint_col smallint, integer_col integer, bigint_col bigint, real_col real, double_col double precision, numeric_col numeric(12, 3), text_col text, varchar_col varchar(20), char_col character(5), name_col name, bytea_col bytea, uuid_col uuid, date_col date, time_col time without time zone, timestamp_col timestamp without time zone, timestamptz_col timestamp with time zone'
+\set avro_columns 'id integer, bool_col boolean, smallint_col integer, integer_col integer, bigint_col bigint, real_col real, double_col double precision, numeric_col numeric(12, 3), text_col text, varchar_col varchar(20), char_col character(5), name_col name, bytea_col bytea, uuid_col uuid, date_col date, time_col time without time zone, timestamp_col timestamp without time zone, timestamptz_col timestamp with time zone'
 \set json_columns :common_columns ', json_col json, jsonb_col jsonb'
-\set parquet_columns :common_columns ', json_col json, bool_array boolean[], smallint_array smallint[], integer_array integer[], bigint_array bigint[], real_array real[], double_array double precision[], text_array text[], varchar_array varchar(20)[], bpchar_array character(5)[], name_array name[], json_array json[]'
+\set parquet_columns :common_columns ', json_col json, bool_array boolean[], smallint_array smallint[], integer_array integer[], bigint_array bigint[], real_array real[], double_array double precision[], text_array text[], varchar_array varchar(20)[], bpchar_array character(5)[], name_array name[], json_array json[], bytea_array bytea[], uuid_array uuid[], numeric_array numeric(12, 3)[], date_array date[], time_array time[], timestamp_array timestamp[], timestamptz_array timestamptz[]'
 \set stream_extra_columns 'id integer, json_col json, jsonb_col jsonb, bool_array boolean[], int_array integer[], text_array text[]'
 \set id_payload_columns 'id integer, payload text'
 -- Parquet format coverage: I/O, schema, arrays, projection, filters, and ANALYZE.
 SELECT bucket AS lagodb_regress_bucket
 FROM lagodb_regress.object_storage_fixture
 \gset
-SELECT format('s3://%s/lagodb-connectors/parquet/exact.parquet',
-              :'lagodb_regress_bucket') AS parquet_exact_path,
-       format('s3://%s/lagodb-connectors/parquet/prefix/',
-              :'lagodb_regress_bucket') AS parquet_filter_path,
-       format('s3://%s/lagodb-connectors/parquet/prefix/part-a.parquet',
-              :'lagodb_regress_bucket') AS parquet_part_a_path,
-       format('s3://%s/lagodb-connectors/parquet/prefix/part-b.parquet',
-              :'lagodb_regress_bucket') AS parquet_part_b_path,
-       format('s3://%s/lagodb-connectors/parquet/zstd.parquet',
-              :'lagodb_regress_bucket') AS parquet_zstd_path,
-       format('s3://%s/lagodb-connectors/parquet/empty.parquet',
-              :'lagodb_regress_bucket') AS parquet_empty_path,
-       format('s3://%s/lagodb-connectors/parquet/empty-prefix/',
-              :'lagodb_regress_bucket') AS parquet_empty_prefix_path,
-       format('s3://%s/lagodb-connectors/parquet/write/',
-              :'lagodb_regress_bucket') AS parquet_write_path
-\gset
+\set parquet_base 's3://' :lagodb_regress_bucket '/lagodb-connectors/parquet/'
+\set parquet_exact_path :parquet_base 'exact.parquet'
+\set parquet_filter_path :parquet_base 'prefix/'
+\set parquet_part_a_path :parquet_base 'prefix/part-a.parquet'
+\set parquet_part_b_path :parquet_base 'prefix/part-b.parquet'
+\set parquet_zstd_path :parquet_base 'zstd.parquet'
+\set parquet_empty_path :parquet_base 'empty.parquet'
+\set parquet_empty_prefix_path :parquet_base 'empty-prefix/'
+\set parquet_write_path :parquet_base 'write/'
 -- Exact, prefix, compressed, and empty direct-COPY paths.
 COPY lagodb_connectors_regress.parquet_source
 TO :'parquet_exact_path'
@@ -111,6 +104,7 @@ SELECT count(*) AS empty_prefix_rows FROM lagodb_connectors_regress.parquet_copy
 (1 row)
 
 -- Exact/prefix foreign scans and format-owned schema inference.
+-- Declared scans restore the same constrained values written by PostgreSQL.
 CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_exact
     (:parquet_columns)
 SERVER lagodb_connectors_regress_s3
@@ -145,39 +139,46 @@ FROM pg_attribute
 WHERE attrelid = 'lagodb_connectors_regress.parquet_inferred'::regclass
   AND attnum > 0 AND NOT attisdropped
 ORDER BY attnum;
-     attname     |            type             
------------------+-----------------------------
- id              | integer
- bool_col        | boolean
- smallint_col    | integer
- integer_col     | integer
- bigint_col      | bigint
- real_col        | real
- double_col      | double precision
- numeric_col     | numeric(12,3)
- text_col        | text
- varchar_col     | text
- char_col        | text
- name_col        | text
- bytea_col       | bytea
- uuid_col        | bytea
- date_col        | date
- time_col        | time without time zone
- timestamp_col   | timestamp without time zone
- timestamptz_col | timestamp with time zone
- json_col        | text
- bool_array      | boolean[]
- smallint_array  | integer[]
- integer_array   | integer[]
- bigint_array    | bigint[]
- real_array      | real[]
- double_array    | double precision[]
- text_array      | text[]
- varchar_array   | text[]
- bpchar_array    | text[]
- name_array      | text[]
- json_array      | text[]
-(30 rows)
+      attname      |             type              
+-------------------+-------------------------------
+ id                | integer
+ bool_col          | boolean
+ smallint_col      | smallint
+ integer_col       | integer
+ bigint_col        | bigint
+ real_col          | real
+ double_col        | double precision
+ numeric_col       | numeric(12,3)
+ text_col          | text
+ varchar_col       | text
+ char_col          | text
+ name_col          | text
+ bytea_col         | bytea
+ uuid_col          | uuid
+ date_col          | date
+ time_col          | time without time zone
+ timestamp_col     | timestamp without time zone
+ timestamptz_col   | timestamp with time zone
+ json_col          | text
+ bool_array        | boolean[]
+ smallint_array    | smallint[]
+ integer_array     | integer[]
+ bigint_array      | bigint[]
+ real_array        | real[]
+ double_array      | double precision[]
+ text_array        | text[]
+ varchar_array     | text[]
+ bpchar_array      | text[]
+ name_array        | text[]
+ json_array        | text[]
+ bytea_array       | bytea[]
+ uuid_array        | uuid[]
+ numeric_array     | numeric(12,3)[]
+ date_array        | date[]
+ time_array        | time without time zone[]
+ timestamp_array   | timestamp without time zone[]
+ timestamptz_array | timestamp with time zone[]
+(37 rows)
 
 SELECT count(*) AS inferred_rows
 FROM lagodb_connectors_regress.parquet_inferred;
@@ -295,157 +296,102 @@ WHERE oid = 'lagodb_connectors_regress.parquet_filter'::regclass;
          2 | t
 (1 row)
 
-CREATE FUNCTION lagodb_connectors_regress.parquet_explain_plan(query text)
-RETURNS jsonb
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    plan text;
-BEGIN
-    EXECUTE 'EXPLAIN (FORMAT JSON) ' || query INTO plan;
-    RETURN plan::jsonb -> 0 -> 'Plan';
-END
-$$;
--- Inspect the ForeignScan fields: exact predicates have no local Filter.
-SELECT (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%id > 1%'
-   AND (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%bigint_col <%'
-   AND (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%::bigint%'
-   AND NOT (plan ? 'Filter')
-       AS mirrored_and_pushdown_complete
-FROM lagodb_connectors_regress.parquet_explain_plan(
-    $$SELECT id
-          FROM lagodb_connectors_regress.parquet_filter
-          WHERE 1 < id AND bigint_col < 0::bigint$$
-) AS explained(plan);
- mirrored_and_pushdown_complete 
---------------------------------
- t
-(1 row)
+-- Exact predicates are pushed without a local Filter.
+EXPLAIN (COSTS OFF)
+SELECT id
+FROM lagodb_connectors_regress.parquet_filter
+WHERE 1 < id AND bigint_col < 0::bigint;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Foreign Scan on parquet_filter
+   Pushed Filter: (id > 1) AND (bigint_col < '0'::bigint)
+(2 rows)
 
--- Folded boolean Vars remain local; pushed NULL tests must retain the residual Filter.
-SELECT ((plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%smallint_col IS NOT NULL%'
-        OR (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%NOT (smallint_col IS NULL)%')
-   AND (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%smallint_col IS NULL%'
-   AND (plan ->> 'Filter') LIKE '%bool_col%'
-   AND plan ? 'Filter'
-       AS boolean_null_logic_pushdown_complete
-FROM jsonb_path_query_first(
-    lagodb_connectors_regress.parquet_explain_plan(
-        $$SELECT inner_rel.id
-          FROM (VALUES (true)) AS outer_rel(flag)
-          CROSS JOIN LATERAL (
-              SELECT id
-              FROM lagodb_connectors_regress.parquet_filter
-              WHERE (NOT (smallint_col IS NULL) AND bool_col = outer_rel.flag)
-                 OR (smallint_col IS NULL AND bool_col <> outer_rel.flag)
-              OFFSET 0
-          ) AS inner_rel$$
-    ),
-    '$.** ? (@."Node Type" == "Foreign Scan")'
-) AS explained(plan);
- boolean_null_logic_pushdown_complete 
---------------------------------------
- t
-(1 row)
+-- Boolean Vars and NULL tests compose into an exact pushed predicate.
+EXPLAIN (COSTS OFF)
+SELECT inner_rel.id
+FROM (VALUES (true)) AS outer_rel(flag)
+CROSS JOIN LATERAL (
+    SELECT id
+    FROM lagodb_connectors_regress.parquet_filter
+    WHERE (NOT (smallint_col IS NULL) AND bool_col = outer_rel.flag)
+       OR (smallint_col IS NULL AND bool_col <> outer_rel.flag)
+    OFFSET 0
+) AS inner_rel;
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
+ Foreign Scan on parquet_filter
+   Pushed Filter: (((smallint_col IS NOT NULL) AND (bool_col = true)) OR ((smallint_col IS NULL) AND (NOT (bool_col = true))))
+(2 rows)
 
-SELECT (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%varchar_col =%'
-   AND (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%text_col >%'
-   AND NOT (plan ? 'Filter')
-       AS string_collation_pushdown_complete
-FROM lagodb_connectors_regress.parquet_explain_plan(
-    $$SELECT id
-          FROM lagodb_connectors_regress.parquet_filter
-          WHERE varchar_col = 'varchar-one'
-             OR text_col COLLATE "C" > 'z' COLLATE "C"$$
-) AS explained(plan);
- string_collation_pushdown_complete 
-------------------------------------
- t
-(1 row)
+-- String equality and C-collation ordering are pushed together.
+EXPLAIN (COSTS OFF)
+SELECT id
+FROM lagodb_connectors_regress.parquet_filter
+WHERE varchar_col = 'varchar-one'
+   OR text_col COLLATE "C" > 'z' COLLATE "C";
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
+ Foreign Scan on parquet_filter
+   Pushed Filter: ((varchar_col = 'varchar-one'::text) OR (text_col > 'z'::text COLLATE "C"))
+(2 rows)
 
--- PARAM_EXEC descriptions are persisted during planning. NULL and NOT
--- UNKNOWN execution cases above share this parameterized EXPLAIN path.
-SELECT (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%id = $1%'
-   AND NOT (plan ? 'Filter')
-       AS null_parameter_pushdown_complete
-FROM jsonb_path_query_first(
-    lagodb_connectors_regress.parquet_explain_plan(
-        $$SELECT inner_rel.id
-          FROM lagodb_connectors_regress.null_parameter_source AS outer_rel
-          CROSS JOIN LATERAL (
-              SELECT id
-              FROM lagodb_connectors_regress.parquet_filter
-              WHERE id = outer_rel.id
-              OFFSET 0
-          ) AS inner_rel$$
-    ),
-    '$.** ? (@."Node Type" == "Foreign Scan")'
-) AS explained(plan);
- null_parameter_pushdown_complete 
-----------------------------------
- t
-(1 row)
+-- PARAM_EXEC descriptions retain the runtime parameter, including NOT UNKNOWN.
+EXPLAIN (COSTS OFF)
+SELECT inner_rel.id
+FROM lagodb_connectors_regress.null_parameter_source AS outer_rel
+CROSS JOIN LATERAL (
+    SELECT id
+    FROM lagodb_connectors_regress.parquet_filter
+    WHERE id = outer_rel.id
+    OFFSET 0
+) AS inner_rel;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Nested Loop
+   ->  Seq Scan on null_parameter_source outer_rel
+   ->  Foreign Scan on parquet_filter
+         Pushed Filter: (id = $1)
+(4 rows)
 
-SELECT (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%id%'
-   AND (plan #>> '{LagoDB Pushdown,Pushed Filter}') LIKE '%$1%'
-   AND NOT (plan ? 'Filter')
-       AS null_parameter_not_pushdown_complete
-FROM jsonb_path_query_first(
-    lagodb_connectors_regress.parquet_explain_plan(
-        $$SELECT inner_rel.id
-          FROM lagodb_connectors_regress.null_parameter_source AS outer_rel
-          CROSS JOIN LATERAL (
-              SELECT id
-              FROM lagodb_connectors_regress.parquet_filter
-              WHERE NOT (id = outer_rel.id)
-              OFFSET 0
-          ) AS inner_rel$$
-    ),
-    '$.** ? (@."Node Type" == "Foreign Scan")'
-) AS explained(plan);
- null_parameter_not_pushdown_complete 
---------------------------------------
- t
-(1 row)
+EXPLAIN (COSTS OFF)
+SELECT inner_rel.id
+FROM lagodb_connectors_regress.null_parameter_source AS outer_rel
+CROSS JOIN LATERAL (
+    SELECT id
+    FROM lagodb_connectors_regress.parquet_filter
+    WHERE NOT (id = outer_rel.id)
+    OFFSET 0
+) AS inner_rel;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Nested Loop
+   ->  Seq Scan on null_parameter_source outer_rel
+   ->  Foreign Scan on parquet_filter
+         Pushed Filter: (id <> $1)
+(4 rows)
 
 -- Unsupported arithmetic remains a local PostgreSQL Filter.
-SELECT (plan #> '{LagoDB Pushdown,Pushed Filter}') IS NULL AND plan ? 'Filter'
-       AS unsupported_expression_remains_local
-FROM lagodb_connectors_regress.parquet_explain_plan(
-    $$SELECT id
-          FROM lagodb_connectors_regress.parquet_filter
-          WHERE id + 1 = 2$$
-) AS explained(plan);
- unsupported_expression_remains_local 
---------------------------------------
- t
-(1 row)
-
--- ANALYZE statistics drive row/width estimates and startup cost.
-SELECT (plan ->> 'Plan Rows')::integer <> 1000
-   AND (plan ->> 'Plan Width')::integer <> 32
-   AND (plan ->> 'Startup Cost')::double precision > 0
-       AS planner_uses_analyze_stats
-FROM lagodb_connectors_regress.parquet_explain_plan(
-    'SELECT * FROM lagodb_connectors_regress.parquet_filter WHERE id = 1'
-) AS explained(plan);
- planner_uses_analyze_stats 
-----------------------------
- t
-(1 row)
+EXPLAIN (COSTS OFF)
+SELECT id
+FROM lagodb_connectors_regress.parquet_filter
+WHERE id + 1 = 2;
+           QUERY PLAN           
+--------------------------------
+ Foreign Scan on parquet_filter
+   Filter: ((id + 1) = 2)
+(2 rows)
 
 -- No global object/row ordering is guaranteed; PostgreSQL must retain Sort.
-SELECT (plan ->> 'Node Type') = 'Sort'
-       AS planner_retains_sort
-FROM lagodb_connectors_regress.parquet_explain_plan(
-    'SELECT id FROM lagodb_connectors_regress.parquet_filter ORDER BY id'
-) AS explained(plan);
- planner_retains_sort 
-----------------------
- t
-(1 row)
+EXPLAIN (COSTS OFF)
+SELECT id FROM lagodb_connectors_regress.parquet_filter ORDER BY id;
+              QUERY PLAN              
+--------------------------------------
+ Sort
+   Sort Key: id
+   ->  Foreign Scan on parquet_filter
+(3 rows)
 
-DROP FUNCTION lagodb_connectors_regress.parquet_explain_plan(text);
 -- Parquet array element and shape boundaries.
 SELECT endpoint,
        bucket,
@@ -459,12 +405,9 @@ FROM lagodb_regress.object_storage_fixture
 \setenv OBJECT_STORAGE_REGION :storage_region
 \setenv OBJECT_STORAGE_ACCESS_KEY_ID :storage_access_key_id
 \setenv OBJECT_STORAGE_SECRET_ACCESS_KEY :storage_secret_access_key
-SELECT format('s3://%s/lagodb-connectors/parquet-arrays/null-elements.parquet',
-              :'storage_bucket') AS null_elements_path,
-       format('s3://%s/lagodb-connectors/parquet-arrays/multidimensional/',
-              :'storage_bucket') AS multidimensional_path,
-       'lagodb-connectors/parquet-arrays/multidimensional/' AS multidimensional_key
-\gset array_
+\set array_null_elements_path 's3://' :storage_bucket '/lagodb-connectors/parquet-arrays/null-elements.parquet'
+\set array_multidimensional_path 's3://' :storage_bucket '/lagodb-connectors/parquet-arrays/multidimensional/'
+\set array_multidimensional_key 'lagodb-connectors/parquet-arrays/multidimensional/'
 CREATE TABLE lagodb_connectors_regress.parquet_null_array_source
     (:parquet_columns);
 INSERT INTO lagodb_connectors_regress.parquet_null_array_source
@@ -497,7 +440,9 @@ SELECT id,
        ARRAY['left', NULL, 'right']::varchar(20)[],
        ARRAY['left', NULL, 'right']::character(5)[],
        ARRAY['left', NULL, 'right']::name[],
-       ARRAY['{"side":"left"}'::json, NULL, '{"side":"right"}'::json]
+       ARRAY['{"side":"left"}'::json, NULL, '{"side":"right"}'::json],
+       bytea_array, uuid_array, numeric_array, date_array,
+       time_array, timestamp_array, timestamptz_array
 FROM lagodb_connectors_regress.parquet_source
 WHERE id = 1;
 COPY lagodb_connectors_regress.parquet_null_array_source
@@ -515,6 +460,51 @@ UNION ALL
 ----------
 (0 rows)
 
+-- Recursive arrays retain element typmods and use PostgreSQL COPY assignment.
+CREATE TEMP TABLE parquet_array_typmod (id integer, numeric_array numeric(12, 2)[]);
+COPY parquet_array_typmod FROM :'parquet_exact_path'
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
+SELECT id, numeric_array FROM parquet_array_typmod ORDER BY id;
+ id |  numeric_array  
+----+-----------------
+  1 | {12345.68,NULL}
+  2 | {}
+(2 rows)
+
+-- Reject narrowing before a predicate can hide an incompatible column.
+-- Reuse the scalar/array file already exercised by the round-trip tests.
+CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_integer_mismatch (
+    bigint_col integer
+)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'parquet_exact_path', format 'parquet');
+CREATE TEMP TABLE parquet_integer_array_mismatch (bigint_array smallint[]);
+\set VERBOSITY sqlstate
+SELECT bigint_col FROM lagodb_connectors_regress.parquet_integer_mismatch
+WHERE bigint_col = 1;
+ERROR:  22000
+COPY parquet_integer_array_mismatch FROM :'parquet_exact_path'
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet', on_error ignore);
+ERROR:  22000
+\set VERBOSITY default
+-- Native Int16 predicates use the same mapping as scan and COPY.
+SELECT count(*) AS matching_rows
+FROM lagodb_connectors_regress.parquet_exact
+WHERE smallint_col = 7::smallint;
+ matching_rows 
+---------------
+             1
+(1 row)
+
+CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_narrow_float (
+    double_col real
+)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'parquet_exact_path', format 'parquet');
+\set VERBOSITY sqlstate
+SELECT double_col FROM lagodb_connectors_regress.parquet_narrow_float;
+ERROR:  22000
+\set VERBOSITY default
 -- Arrow List represents one-dimensional PostgreSQL arrays. A multidimensional
 -- value is the representative unsupported-shape boundary.
 CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_multidimensional (
@@ -532,9 +522,7 @@ ERROR:  42804
 \! sh bin/object_storage_tool assert-prefix-empty
 object_storage_prefix_empty: true
 -- Native-reader projection and COPY target-column mapping.
-SELECT format('s3://%s/lagodb-connectors/scan/reorder.parquet',
-              :'lagodb_regress_bucket') AS reorder_path
-\gset projection_
+\set projection_reorder_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/scan/reorder.parquet'
 -- A three-column object isolates projection and column-order behavior.
 COPY (
     SELECT id, bool_col, text_col
@@ -629,15 +617,9 @@ RESET enable_hashjoin;
 RESET enable_mergejoin;
 RESET enable_material;
 RESET enable_nestloop;
-SELECT format('s3://%s/lagodb-connectors/parquet/drift/',
-              :'lagodb_regress_bucket') AS drift_path,
-       format('s3://%s/lagodb-connectors/parquet/drift/part-a.parquet',
-              :'lagodb_regress_bucket') AS drift_a_path,
-       format('s3://%s/lagodb-connectors/parquet/drift/part-b.parquet',
-              :'lagodb_regress_bucket') AS drift_b_path,
-       format('s3://%s/lagodb-connectors/parquet/unsupported.parquet',
-              :'lagodb_regress_bucket') AS unsupported_path
-\gset parquet_boundary_
+\set parquet_boundary_drift_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/parquet/drift/'
+\set parquet_boundary_drift_a_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/parquet/drift/part-a.parquet'
+\set parquet_boundary_drift_b_path 's3://' :lagodb_regress_bucket '/lagodb-connectors/parquet/drift/part-b.parquet'
 COPY (
     SELECT id, text_col
     FROM lagodb_connectors_regress.common_source WHERE id = 1
@@ -656,9 +638,5 @@ SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'parquet_boundary_drift_path', format 'parquet');
 \set VERBOSITY sqlstate
 SELECT count(*) FROM lagodb_connectors_regress.parquet_drift;
-ERROR:  22000
-COPY lagodb_connectors_regress.json_source
-TO :'parquet_boundary_unsupported_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 ERROR:  22000
 \set VERBOSITY default

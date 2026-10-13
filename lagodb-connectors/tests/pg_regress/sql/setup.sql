@@ -44,26 +44,7 @@ CREATE USER MAPPING FOR PUBLIC
         secret_access_key :'lagodb_regress_secret_access_key'
     );
 
-CREATE TABLE lagodb_connectors_regress.common_source (
-    id integer,
-    bool_col boolean,
-    smallint_col smallint,
-    integer_col integer,
-    bigint_col bigint,
-    real_col real,
-    double_col double precision,
-    numeric_col numeric(12, 3),
-    text_col text,
-    varchar_col varchar(20),
-    char_col character(5),
-    name_col name,
-    bytea_col bytea,
-    uuid_col uuid,
-    date_col date,
-    time_col time without time zone,
-    timestamp_col timestamp without time zone,
-    timestamptz_col timestamp with time zone
-);
+CREATE TABLE lagodb_connectors_regress.common_source (:common_columns);
 
 INSERT INTO lagodb_connectors_regress.common_source
 VALUES
@@ -136,11 +117,12 @@ VALUES
         ARRAY['']
     );
 
-CREATE TABLE lagodb_connectors_regress.json_source
-    (:common_columns);
-ALTER TABLE lagodb_connectors_regress.json_source
-    ADD COLUMN json_col json,
-    ADD COLUMN jsonb_col jsonb;
+-- Avro has no int16 representation; its fixture uses only admitted PG types.
+CREATE TABLE lagodb_connectors_regress.avro_source (:avro_columns);
+INSERT INTO lagodb_connectors_regress.avro_source
+SELECT * FROM lagodb_connectors_regress.common_source;
+
+CREATE TABLE lagodb_connectors_regress.json_source (:json_columns);
 
 INSERT INTO lagodb_connectors_regress.json_source
 SELECT source.*,
@@ -155,21 +137,7 @@ SELECT source.*,
 FROM lagodb_connectors_regress.common_source AS source
 ORDER BY source.id;
 
-CREATE TABLE lagodb_connectors_regress.parquet_source
-    (:common_columns);
-ALTER TABLE lagodb_connectors_regress.parquet_source
-    ADD COLUMN json_col json,
-    ADD COLUMN bool_array boolean[],
-    ADD COLUMN smallint_array smallint[],
-    ADD COLUMN integer_array integer[],
-    ADD COLUMN bigint_array bigint[],
-    ADD COLUMN real_array real[],
-    ADD COLUMN double_array double precision[],
-    ADD COLUMN text_array text[],
-    ADD COLUMN varchar_array varchar(20)[],
-    ADD COLUMN bpchar_array character(5)[],
-    ADD COLUMN name_array name[],
-    ADD COLUMN json_array json[];
+CREATE TABLE lagodb_connectors_regress.parquet_source (:parquet_columns);
 
 INSERT INTO lagodb_connectors_regress.parquet_source
 SELECT source.*,
@@ -220,6 +188,20 @@ SELECT source.*,
        CASE WHEN source.id = 1
             THEN ARRAY['{"a":1}'::json, '{"b":2}'::json]
             ELSE ARRAY[]::json[]
-       END
+       END,
+       CASE WHEN source.id = 1 THEN ARRAY[source.bytea_col, NULL]
+            ELSE ARRAY[]::bytea[] END,
+       CASE WHEN source.id = 1 THEN ARRAY[source.uuid_col, NULL]
+            ELSE NULL END,
+       CASE WHEN source.id = 1 THEN ARRAY[source.numeric_col, NULL]
+            ELSE ARRAY[]::numeric[] END,
+       CASE WHEN source.id = 1 THEN ARRAY[source.date_col, NULL]
+            ELSE NULL END,
+       CASE WHEN source.id = 1 THEN ARRAY[source.time_col, NULL]
+            ELSE ARRAY[]::time[] END,
+       CASE WHEN source.id = 1 THEN ARRAY[source.timestamp_col, NULL]
+            ELSE NULL END,
+       CASE WHEN source.id = 1 THEN ARRAY[source.timestamptz_col, NULL]
+            ELSE ARRAY[]::timestamptz[] END
 FROM lagodb_connectors_regress.common_source AS source
 ORDER BY source.id;

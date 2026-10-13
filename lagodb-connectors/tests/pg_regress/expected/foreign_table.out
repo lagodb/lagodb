@@ -1,29 +1,22 @@
 \i include/column_definitions.sql
 -- Foreign tables do not support LIKE; share column lists through psql variables.
 \set common_columns 'id integer, bool_col boolean, smallint_col smallint, integer_col integer, bigint_col bigint, real_col real, double_col double precision, numeric_col numeric(12, 3), text_col text, varchar_col varchar(20), char_col character(5), name_col name, bytea_col bytea, uuid_col uuid, date_col date, time_col time without time zone, timestamp_col timestamp without time zone, timestamptz_col timestamp with time zone'
+\set avro_columns 'id integer, bool_col boolean, smallint_col integer, integer_col integer, bigint_col bigint, real_col real, double_col double precision, numeric_col numeric(12, 3), text_col text, varchar_col varchar(20), char_col character(5), name_col name, bytea_col bytea, uuid_col uuid, date_col date, time_col time without time zone, timestamp_col timestamp without time zone, timestamptz_col timestamp with time zone'
 \set json_columns :common_columns ', json_col json, jsonb_col jsonb'
-\set parquet_columns :common_columns ', json_col json, bool_array boolean[], smallint_array smallint[], integer_array integer[], bigint_array bigint[], real_array real[], double_array double precision[], text_array text[], varchar_array varchar(20)[], bpchar_array character(5)[], name_array name[], json_array json[]'
+\set parquet_columns :common_columns ', json_col json, bool_array boolean[], smallint_array smallint[], integer_array integer[], bigint_array bigint[], real_array real[], double_array double precision[], text_array text[], varchar_array varchar(20)[], bpchar_array character(5)[], name_array name[], json_array json[], bytea_array bytea[], uuid_array uuid[], numeric_array numeric(12, 3)[], date_array date[], time_array time[], timestamp_array timestamp[], timestamptz_array timestamptz[]'
 \set stream_extra_columns 'id integer, json_col json, jsonb_col jsonb, bool_array boolean[], int_array integer[], text_array text[]'
 \set id_payload_columns 'id integer, payload text'
 -- Common foreign-table capability and storage-boundary coverage.
 SELECT endpoint, bucket, region, access_key_id, secret_access_key
 FROM lagodb_regress.object_storage_fixture
 \gset storage_
-SELECT format('s3://%s/lagodb-connectors/foreign/common.txt',
-              :'storage_bucket') AS exact_path,
-       format('s3://%s/lagodb-connectors/foreign/inference/',
-              :'storage_bucket') AS inference_prefix,
-       format('s3://%s/lagodb-connectors/foreign/inference/part-a.txt',
-              :'storage_bucket') AS inference_part_a,
-       format('s3://%s/lagodb-connectors/foreign/inference/part-b.txt',
-              :'storage_bucket') AS inference_part_b,
-       format('s3://%s/lagodb-connectors/foreign/empty-prefix/',
-              :'storage_bucket') AS empty_prefix,
-       format('s3://%s/lagodb-connectors/foreign/dml/',
-              :'storage_bucket') AS dml_prefix,
-       format('s3://%s/lagodb-connectors/foreign/allowed/',
-              :'storage_bucket') AS denied_scope
-\gset foreign_
+\set foreign_exact_path 's3://' :storage_bucket '/lagodb-connectors/foreign/common.txt'
+\set foreign_inference_prefix 's3://' :storage_bucket '/lagodb-connectors/foreign/inference/'
+\set foreign_inference_part_a 's3://' :storage_bucket '/lagodb-connectors/foreign/inference/part-a.txt'
+\set foreign_inference_part_b 's3://' :storage_bucket '/lagodb-connectors/foreign/inference/part-b.txt'
+\set foreign_empty_prefix 's3://' :storage_bucket '/lagodb-connectors/foreign/empty-prefix/'
+\set foreign_dml_prefix 's3://' :storage_bucket '/lagodb-connectors/foreign/dml/'
+\set foreign_denied_scope 's3://' :storage_bucket '/lagodb-connectors/foreign/allowed/'
 COPY lagodb_connectors_regress.common_source
 TO :'foreign_exact_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'text');
@@ -99,12 +92,10 @@ FROM lagodb_connectors_regress.foreign_dml_boundary;
                        0
 (1 row)
 
--- Missing credentials and a path outside the configured scope are the two
--- representative catalog/storage configuration errors.
+-- Explicit server scope restrictions still apply.
 CREATE SERVER lagodb_connectors_regress_scope
     FOREIGN DATA WRAPPER lagodb_connectors
     OPTIONS (
-        provider 's3_compatible',
         endpoint :'storage_endpoint',
         region :'storage_region',
         scope :'foreign_denied_scope',
@@ -117,15 +108,6 @@ CREATE USER MAPPING FOR PUBLIC
         access_key_id :'storage_access_key_id',
         secret_access_key :'storage_secret_access_key'
     );
-CREATE SERVER lagodb_connectors_regress_missing_mapping
-    FOREIGN DATA WRAPPER lagodb_connectors
-    OPTIONS (
-        provider 's3_compatible',
-        endpoint :'storage_endpoint',
-        region :'storage_region',
-        allow_http 'true',
-        virtual_hosted_style_request 'false'
-    );
 \set VERBOSITY sqlstate
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_scope_denied (
     id integer
@@ -133,15 +115,35 @@ CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_scope_denied (
 SERVER lagodb_connectors_regress_scope
 OPTIONS (path :'foreign_exact_path', format 'text');
 ERROR:  42501
-CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_missing_mapping (
-    id integer
-)
-SERVER lagodb_connectors_regress_missing_mapping
-OPTIONS (path :'foreign_exact_path', format 'text');
-ERROR:  42704
 \set VERBOSITY default
+-- Configuration-only coverage: no process credentials or AWS profile are needed.
+CREATE SERVER credential_storage
+FOREIGN DATA WRAPPER lagodb_connectors
+OPTIONS (
+    provider 's3_compatible', endpoint :'storage_endpoint',
+    region :'storage_region', allow_http 'true',
+    virtual_hosted_style_request 'false'
+);
+-- Explicit columns allow declaration without resolving default-chain credentials.
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_default_chain (id integer)
+SERVER credential_storage OPTIONS (path :'foreign_exact_path', format 'text');
+CREATE USER MAPPING FOR CURRENT_USER SERVER credential_storage
+OPTIONS (aws_profile 'configuration-only-profile');
+-- Explicit identities must be complete and must not be combined with a profile.
+\set VERBOSITY terse
+ALTER USER MAPPING FOR CURRENT_USER SERVER credential_storage
+OPTIONS (ADD access_key_id 'incomplete');
+ERROR:  FDW validator provider error: configuration error: S3 credentials require access_key_id and secret_access_key together; token requires both
+ALTER USER MAPPING FOR CURRENT_USER SERVER credential_storage
+OPTIONS (ADD access_key_id 'explicit', ADD secret_access_key 'explicit-secret');
+ERROR:  FDW validator provider error: configuration error: AWS profile and explicit S3 credentials are mutually exclusive
+\set VERBOSITY default
+DROP FOREIGN TABLE lagodb_connectors_regress.foreign_default_chain;
+DROP USER MAPPING FOR CURRENT_USER SERVER credential_storage;
+DROP SERVER credential_storage;
 -- Local foreign tables require no storage profile or user mapping.
-BEGIN;
+-- Keep fixtures outside write transactions so permission errors run directly.
+-- Directory writes still roll back their published objects after each case.
 CREATE SERVER lagodb_connectors_regress_local FOREIGN DATA WRAPPER lagodb_connectors;
 SELECT current_setting('data_directory') || '/lagodb-foreign-' || pg_backend_pid()
        AS local_foreign_root
@@ -168,6 +170,7 @@ UNION ALL
 CREATE FOREIGN TABLE lagodb_connectors_regress.local_json_directory (id integer, payload text)
 SERVER lagodb_connectors_regress_local
 OPTIONS (path :'local_foreign_directory', format 'json');
+BEGIN;
 INSERT INTO lagodb_connectors_regress.local_json_directory
 SELECT * FROM lagodb_connectors_regress.local_foreign_source;
 (TABLE lagodb_connectors_regress.local_json_directory
@@ -200,6 +203,7 @@ UNION ALL
 ----+---------
 (0 rows)
 
+ROLLBACK;
 -- avro: infer the schema from a native local file and compare its values.
 \set local_foreign_file :local_foreign_root '.avro'
 COPY lagodb_connectors_regress.local_foreign_source TO :'local_foreign_file';
@@ -219,6 +223,7 @@ UNION ALL
 CREATE FOREIGN TABLE lagodb_connectors_regress.local_avro_directory (id integer, payload text)
 SERVER lagodb_connectors_regress_local
 OPTIONS (path :'local_foreign_directory', format 'avro');
+BEGIN;
 INSERT INTO lagodb_connectors_regress.local_avro_directory
 SELECT * FROM lagodb_connectors_regress.local_foreign_source;
 (TABLE lagodb_connectors_regress.local_avro_directory
@@ -251,6 +256,7 @@ UNION ALL
 ----+---------
 (0 rows)
 
+ROLLBACK;
 -- parquet: infer the schema from a native local file and compare its values.
 \set local_foreign_file :local_foreign_root '.parquet'
 COPY lagodb_connectors_regress.local_foreign_source TO :'local_foreign_file';
@@ -270,6 +276,7 @@ UNION ALL
 CREATE FOREIGN TABLE lagodb_connectors_regress.local_parquet_directory (id integer, payload text)
 SERVER lagodb_connectors_regress_local
 OPTIONS (path :'local_foreign_directory', format 'parquet');
+BEGIN;
 INSERT INTO lagodb_connectors_regress.local_parquet_directory
 SELECT * FROM lagodb_connectors_regress.local_foreign_source;
 (TABLE lagodb_connectors_regress.local_parquet_directory
@@ -302,8 +309,10 @@ UNION ALL
 ----+---------
 (0 rows)
 
+ROLLBACK;
 -- COPY directory publication is also readable through a foreign table.
 \set local_foreign_directory :local_foreign_root '-copy-json/'
+BEGIN;
 COPY lagodb_connectors_regress.local_foreign_source TO :'local_foreign_directory'
 WITH (format 'json');
 CREATE FOREIGN TABLE lagodb_connectors_regress.local_copy_directory (id integer, payload text)
@@ -318,13 +327,11 @@ UNION ALL
 ----+---------
 (0 rows)
 
+ROLLBACK;
 -- Exact local files share the FDW read-only contract across formats.
-SAVEPOINT exact_write;
 \set VERBOSITY sqlstate
 INSERT INTO lagodb_connectors_regress.local_parquet_exact VALUES (5, 'read-only');
 ERROR:  0A000
-ROLLBACK TO SAVEPOINT exact_write;
-RELEASE SAVEPOINT exact_write;
 \set VERBOSITY default
 CREATE ROLE lagodb_connectors_regress_local_reader;
 GRANT USAGE, CREATE ON SCHEMA lagodb_connectors_regress TO lagodb_connectors_regress_local_reader;
@@ -336,7 +343,7 @@ GRANT SELECT, INSERT ON lagodb_connectors_regress.local_parquet_directory
 CREATE TABLE lagodb_connectors_regress.local_privilege_sink (id integer, payload text);
 GRANT INSERT ON lagodb_connectors_regress.local_privilege_sink TO lagodb_connectors_regress_local_reader;
 \set local_foreign_file :local_foreign_root '.parquet'
-SET LOCAL ROLE lagodb_connectors_regress_local_reader;
+SET ROLE lagodb_connectors_regress_local_reader;
 SELECT count(*) AS table_granted_rows FROM lagodb_connectors_regress.local_json_exact;
  table_granted_rows 
 --------------------
@@ -344,30 +351,21 @@ SELECT count(*) AS table_granted_rows FROM lagodb_connectors_regress.local_json_
 (1 row)
 
 \set VERBOSITY sqlstate
-SAVEPOINT copy_read;
 COPY lagodb_connectors_regress.local_privilege_sink FROM :'local_foreign_file';
 ERROR:  42501
-ROLLBACK TO SAVEPOINT copy_read;
-RELEASE SAVEPOINT copy_read;
-SAVEPOINT copy_write;
 COPY lagodb_connectors_regress.local_foreign_source TO :'local_foreign_file';
 ERROR:  42501
-ROLLBACK TO SAVEPOINT copy_write;
-RELEASE SAVEPOINT copy_write;
-SAVEPOINT path_ddl;
 CREATE FOREIGN TABLE lagodb_connectors_regress.local_denied ()
 SERVER lagodb_connectors_regress_local OPTIONS (path :'local_foreign_file');
 ERROR:  42501
-ROLLBACK TO SAVEPOINT path_ddl;
-RELEASE SAVEPOINT path_ddl;
-SAVEPOINT foreign_write;
 INSERT INTO lagodb_connectors_regress.local_parquet_directory VALUES (5, 'denied');
 ERROR:  42501
-ROLLBACK TO SAVEPOINT foreign_write;
-RELEASE SAVEPOINT foreign_write;
 \set VERBOSITY default
 RESET ROLE;
 GRANT pg_write_server_files TO lagodb_connectors_regress_local_reader;
+BEGIN;
+INSERT INTO lagodb_connectors_regress.local_parquet_directory
+SELECT * FROM lagodb_connectors_regress.local_foreign_source;
 SET LOCAL ROLE lagodb_connectors_regress_local_reader;
 INSERT INTO lagodb_connectors_regress.local_parquet_directory VALUES (5, 'authorized');
 SELECT count(*) AS authorized_rows FROM lagodb_connectors_regress.local_parquet_directory;
@@ -378,3 +376,14 @@ SELECT count(*) AS authorized_rows FROM lagodb_connectors_regress.local_parquet_
 
 RESET ROLE;
 ROLLBACK;
+DROP OWNED BY lagodb_connectors_regress_local_reader;
+DROP ROLE lagodb_connectors_regress_local_reader;
+DROP FOREIGN TABLE lagodb_connectors_regress.local_json_exact,
+    lagodb_connectors_regress.local_json_directory,
+    lagodb_connectors_regress.local_avro_exact,
+    lagodb_connectors_regress.local_avro_directory,
+    lagodb_connectors_regress.local_parquet_exact,
+    lagodb_connectors_regress.local_parquet_directory;
+DROP TABLE lagodb_connectors_regress.local_privilege_sink,
+    lagodb_connectors_regress.local_foreign_source;
+DROP SERVER lagodb_connectors_regress_local;

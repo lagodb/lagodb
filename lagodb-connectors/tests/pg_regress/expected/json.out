@@ -1,8 +1,9 @@
 \i include/column_definitions.sql
 -- Foreign tables do not support LIKE; share column lists through psql variables.
 \set common_columns 'id integer, bool_col boolean, smallint_col smallint, integer_col integer, bigint_col bigint, real_col real, double_col double precision, numeric_col numeric(12, 3), text_col text, varchar_col varchar(20), char_col character(5), name_col name, bytea_col bytea, uuid_col uuid, date_col date, time_col time without time zone, timestamp_col timestamp without time zone, timestamptz_col timestamp with time zone'
+\set avro_columns 'id integer, bool_col boolean, smallint_col integer, integer_col integer, bigint_col bigint, real_col real, double_col double precision, numeric_col numeric(12, 3), text_col text, varchar_col varchar(20), char_col character(5), name_col name, bytea_col bytea, uuid_col uuid, date_col date, time_col time without time zone, timestamp_col timestamp without time zone, timestamptz_col timestamp with time zone'
 \set json_columns :common_columns ', json_col json, jsonb_col jsonb'
-\set parquet_columns :common_columns ', json_col json, bool_array boolean[], smallint_array smallint[], integer_array integer[], bigint_array bigint[], real_array real[], double_array double precision[], text_array text[], varchar_array varchar(20)[], bpchar_array character(5)[], name_array name[], json_array json[]'
+\set parquet_columns :common_columns ', json_col json, bool_array boolean[], smallint_array smallint[], integer_array integer[], bigint_array bigint[], real_array real[], double_array double precision[], text_array text[], varchar_array varchar(20)[], bpchar_array character(5)[], name_array name[], json_array json[], bytea_array bytea[], uuid_array uuid[], numeric_array numeric(12, 3)[], date_array date[], time_array time[], timestamp_array timestamp[], timestamptz_array timestamptz[]'
 \set stream_extra_columns 'id integer, json_col json, jsonb_col jsonb, bool_array boolean[], int_array integer[], text_array text[]'
 \set id_payload_columns 'id integer, payload text'
 -- JSON format COPY, foreign-table, inference, and scan-state coverage.
@@ -14,26 +15,16 @@ FROM lagodb_regress.object_storage_fixture
 \setenv OBJECT_STORAGE_REGION :storage_region
 \setenv OBJECT_STORAGE_ACCESS_KEY_ID :storage_access_key_id
 \setenv OBJECT_STORAGE_SECRET_ACCESS_KEY :storage_secret_access_key
-SELECT format('s3://%s/lagodb-connectors/json/exact.json',
-              :'storage_bucket') AS exact_path,
-       format('s3://%s/lagodb-connectors/json/prefix/',
-              :'storage_bucket') AS prefix_path,
-       format('s3://%s/lagodb-connectors/json/prefix/part-a.json',
-              :'storage_bucket') AS part_a_path,
-       format('s3://%s/lagodb-connectors/json/prefix/part-b.json',
-              :'storage_bucket') AS part_b_path,
-       format('s3://%s/lagodb-connectors/json/compressed.json.gz',
-              :'storage_bucket') AS compressed_path,
-       format('s3://%s/lagodb-connectors/json/alias.ndjson',
-              :'storage_bucket') AS alias_path,
-       format('s3://%s/lagodb-connectors/json/empty.json',
-              :'storage_bucket') AS empty_path,
-       format('s3://%s/lagodb-connectors/json/write/',
-              :'storage_bucket') AS write_path,
-       format('s3://%s/lagodb-connectors/json/corrupt.json',
-              :'storage_bucket') AS corrupt_path,
-       'lagodb-connectors/json/corrupt.json' AS corrupt_key
-\gset json_
+\set json_exact_path 's3://' :storage_bucket '/lagodb-connectors/json/exact.json'
+\set json_prefix_path 's3://' :storage_bucket '/lagodb-connectors/json/prefix/'
+\set json_part_a_path 's3://' :storage_bucket '/lagodb-connectors/json/prefix/part-a.json'
+\set json_part_b_path 's3://' :storage_bucket '/lagodb-connectors/json/prefix/part-b.json'
+\set json_compressed_path 's3://' :storage_bucket '/lagodb-connectors/json/compressed.json.gz'
+\set json_alias_path 's3://' :storage_bucket '/lagodb-connectors/json/alias.ndjson'
+\set json_empty_path 's3://' :storage_bucket '/lagodb-connectors/json/empty.json'
+\set json_write_path 's3://' :storage_bucket '/lagodb-connectors/json/write/'
+\set json_corrupt_path 's3://' :storage_bucket '/lagodb-connectors/json/corrupt.json'
+\set json_corrupt_key 'lagodb-connectors/json/corrupt.json'
 -- JSON and JSONB values round-trip through exact and compressed COPY paths.
 COPY lagodb_connectors_regress.json_source
 TO :'json_exact_path'

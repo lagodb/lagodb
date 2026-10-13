@@ -12,26 +12,16 @@ FROM lagodb_regress.object_storage_fixture
 \setenv OBJECT_STORAGE_ACCESS_KEY_ID :storage_access_key_id
 \setenv OBJECT_STORAGE_SECRET_ACCESS_KEY :storage_secret_access_key
 
-SELECT format('s3://%s/lagodb-connectors/json/exact.json',
-              :'storage_bucket') AS exact_path,
-       format('s3://%s/lagodb-connectors/json/prefix/',
-              :'storage_bucket') AS prefix_path,
-       format('s3://%s/lagodb-connectors/json/prefix/part-a.json',
-              :'storage_bucket') AS part_a_path,
-       format('s3://%s/lagodb-connectors/json/prefix/part-b.json',
-              :'storage_bucket') AS part_b_path,
-       format('s3://%s/lagodb-connectors/json/compressed.json.gz',
-              :'storage_bucket') AS compressed_path,
-       format('s3://%s/lagodb-connectors/json/alias.ndjson',
-              :'storage_bucket') AS alias_path,
-       format('s3://%s/lagodb-connectors/json/empty.json',
-              :'storage_bucket') AS empty_path,
-       format('s3://%s/lagodb-connectors/json/write/',
-              :'storage_bucket') AS write_path,
-       format('s3://%s/lagodb-connectors/json/corrupt.json',
-              :'storage_bucket') AS corrupt_path,
-       'lagodb-connectors/json/corrupt.json' AS corrupt_key
-\gset json_
+\set json_exact_path 's3://' :storage_bucket '/lagodb-connectors/json/exact.json'
+\set json_prefix_path 's3://' :storage_bucket '/lagodb-connectors/json/prefix/'
+\set json_part_a_path 's3://' :storage_bucket '/lagodb-connectors/json/prefix/part-a.json'
+\set json_part_b_path 's3://' :storage_bucket '/lagodb-connectors/json/prefix/part-b.json'
+\set json_compressed_path 's3://' :storage_bucket '/lagodb-connectors/json/compressed.json.gz'
+\set json_alias_path 's3://' :storage_bucket '/lagodb-connectors/json/alias.ndjson'
+\set json_empty_path 's3://' :storage_bucket '/lagodb-connectors/json/empty.json'
+\set json_write_path 's3://' :storage_bucket '/lagodb-connectors/json/write/'
+\set json_corrupt_path 's3://' :storage_bucket '/lagodb-connectors/json/corrupt.json'
+\set json_corrupt_key 'lagodb-connectors/json/corrupt.json'
 
 -- JSON and JSONB values round-trip through exact and compressed COPY paths.
 COPY lagodb_connectors_regress.json_source
