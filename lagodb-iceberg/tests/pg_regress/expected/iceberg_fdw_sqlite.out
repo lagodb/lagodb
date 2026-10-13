@@ -1,0 +1,87 @@
+-- Local SQLite catalog: SQL import, publication and transaction lifecycle.
+\setenv PGDATABASE :DBNAME
+\set iceberg_fixture sqlite
+\i include/iceberg_fixture.sql
+-- Caller supplies a consumer selection; failure must stop this SQL testcase.
+\setenv LAGODB_ICEBERG_FIXTURE :iceberg_fixture
+\! python3 ../../../scripts/pg_regress/regress_fixture.py provision "$LAGODB_ICEBERG_FIXTURE"
+iceberg_fixture_provisioned: sqlite
+\i ../../../scripts/pg_regress/fixture_command_result.sql
+-- psql's \! records an ordinary nonzero exit in SHELL_ERROR and keeps running.
+-- Include with \i from the suite root: pg_regress feeds top-level SQL via stdin.
+-- Only failed infrastructure commands enable ON_ERROR_STOP; expected SQL errors
+-- in the actual regression cases retain their normal pg_regress behavior.
+\if :SHELL_ERROR
+\set ON_ERROR_STOP on
+DO $$ BEGIN RAISE EXCEPTION 'Regression fixture command failed'; END $$;
+\endif
+SELECT '/tmp/lagodb_object_regress_' || current_setting('port') || '/sqlite' AS sqlite_root
+\gset
+\set sqlite_uri 'sqlite:' :sqlite_root '/catalog.db'
+\set sqlite_warehouse 'file://' :sqlite_root
+SET client_min_messages = warning;
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+RESET client_min_messages;
+CREATE EXTENSION lagodb_iceberg;
+CREATE SCHEMA iceberg_fdw_sqlite;
+-- Configuring a local-file catalog requires both server-file privileges.
+CREATE ROLE regress_sqlite_unprivileged;
+GRANT USAGE ON FOREIGN DATA WRAPPER lagodb_iceberg TO regress_sqlite_unprivileged;
+SET ROLE regress_sqlite_unprivileged;
+CREATE SERVER iceberg_sqlite_denied TYPE 'sqlite'
+FOREIGN DATA WRAPPER lagodb_iceberg
+OPTIONS (uri :'sqlite_uri', warehouse :'sqlite_warehouse', catalog_name 'regress');
+ERROR:  FDW validator provider error: configuring a SQLite catalog requires pg_read_server_files and pg_write_server_files privileges
+RESET ROLE;
+REVOKE USAGE ON FOREIGN DATA WRAPPER lagodb_iceberg FROM regress_sqlite_unprivileged;
+DROP ROLE regress_sqlite_unprivileged;
+CREATE SERVER iceberg_sqlite TYPE 'sqlite'
+FOREIGN DATA WRAPPER lagodb_iceberg
+OPTIONS (uri :'sqlite_uri', warehouse :'sqlite_warehouse', catalog_name 'regress');
+IMPORT FOREIGN SCHEMA fdw_sqlite
+FROM SERVER iceberg_sqlite INTO iceberg_fdw_sqlite;
+SELECT count(*) = 0 AS initially_empty FROM iceberg_fdw_sqlite.items;
+ initially_empty 
+-----------------
+ t
+(1 row)
+
+-- The same SQLite catalog publishes both tables at commit.
+BEGIN;
+INSERT INTO iceberg_fdw_sqlite.items VALUES (1, 'one'), (2, 'two');
+INSERT INTO iceberg_fdw_sqlite.other_items VALUES (10, 'ten');
+SELECT array_agg(id ORDER BY id) AS staged_ids FROM iceberg_fdw_sqlite.items;
+ staged_ids 
+------------
+ {1,2}
+(1 row)
+
+COMMIT;
+-- A new backend must reopen the catalog and read the published local files.
+\connect :DBNAME
+SELECT (SELECT array_agg(id ORDER BY id) FROM iceberg_fdw_sqlite.items) AS items,
+       (SELECT array_agg(id ORDER BY id) FROM iceberg_fdw_sqlite.other_items) AS other_items;
+ items | other_items 
+-------+-------------
+ {1,2} | {10}
+(1 row)
+
+UPDATE iceberg_fdw_sqlite.items SET payload = 'changed' WHERE id = 1;
+DELETE FROM iceberg_fdw_sqlite.items WHERE id = 2;
+-- Rollback leaves both published pointers unchanged.
+BEGIN;
+INSERT INTO iceberg_fdw_sqlite.items VALUES (3, 'discard');
+INSERT INTO iceberg_fdw_sqlite.other_items VALUES (11, 'discard');
+ROLLBACK;
+SELECT (SELECT array_agg(id::text || ':' || payload ORDER BY id)
+        FROM iceberg_fdw_sqlite.items) AS items,
+       (SELECT array_agg(id::text || ':' || payload ORDER BY id)
+        FROM iceberg_fdw_sqlite.other_items) AS other_items;
+    items    | other_items 
+-------------+-------------
+ {1:changed} | {10:ten}
+(1 row)
+
+DROP FOREIGN TABLE iceberg_fdw_sqlite.items, iceberg_fdw_sqlite.other_items;
+DROP SERVER iceberg_sqlite;
+DROP SCHEMA iceberg_fdw_sqlite;

@@ -1,19 +1,17 @@
 use std::collections::HashMap;
 
 use http::header::{HeaderName, HeaderValue};
+use iceberg_lite::catalog::sqlite::SqliteCatalogBuilder;
 use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 use url::Url;
 
 use super::super::error::IcebergFdwError;
+use super::catalog_type::{CatalogType, ENABLE_VENDED_CREDENTIALS};
+use super::table::ForeignTableIdentity;
 
-pub(super) const CATALOG_NAME: &str = "catalog_name";
-pub(super) const CATALOG_NAMESPACE: &str = "catalog_namespace";
-pub(super) const CATALOG_TABLE_NAME: &str = "catalog_table_name";
-pub(super) const MODE: &str = "mode";
-pub(super) const READ_ONLY: &str = "read_only";
-pub(super) const READ_WRITE: &str = "read_write";
-pub(super) const ENABLE_VENDED_CREDENTIALS: &str = "enable_vended_credentials";
+pub(super) const TABLE: &str = "table";
+pub(super) const SCHEMA_ID: &str = "schema_id";
 
 #[derive(Clone, Copy)]
 pub(super) enum OptionLayer {
@@ -21,6 +19,7 @@ pub(super) enum OptionLayer {
     Server,
     Mapping,
     Table,
+    Column,
     Import,
 }
 
@@ -31,25 +30,20 @@ impl OptionLayer {
             Some(oid) if oid == pg_sys::ForeignServerRelationId => Self::Server,
             Some(oid) if oid == pg_sys::UserMappingRelationId => Self::Mapping,
             Some(oid) if oid == pg_sys::ForeignTableRelationId => Self::Table,
-            _ => Self::Import,
+            Some(oid) if oid == pg_sys::AttributeRelationId => Self::Column,
+            None => Self::Import,
+            Some(_) => Self::Wrapper,
         }
     }
 
     pub(super) fn accepts(self, name: &str) -> bool {
         match self {
-            Self::Wrapper | Self::Import => false,
-            Self::Server => matches!(
-                name,
-                "uri"
-                    | "warehouse"
-                    | "prefix"
-                    | "rest.auth.type"
-                    | "oauth2-server-uri"
-                    | "scope"
-                    | "audience"
-                    | "resource"
-                    | ENABLE_VENDED_CREDENTIALS
-            ),
+            Self::Wrapper | Self::Column => false,
+            Self::Import => name == "strict",
+            Self::Server => {
+                CatalogType::Rest.accepts_server_option(name)
+                    || CatalogType::Sqlite.accepts_server_option(name)
+            }
             Self::Mapping => {
                 matches!(
                     name,
@@ -61,10 +55,7 @@ impl OptionLayer {
                         | "resource"
                 ) || name.starts_with("header.")
             }
-            Self::Table => matches!(
-                name,
-                "catalog_name" | "catalog_namespace" | "catalog_table_name" | "mode"
-            ),
+            Self::Table => matches!(name, "table" | "schema_id"),
         }
     }
 
@@ -72,17 +63,11 @@ impl OptionLayer {
         self,
         options: &[Option<String>],
     ) -> Result<(), IcebergFdwError> {
-        let mut parsed = ParsedOptions::default();
-        for option in options.iter().flatten() {
-            let (name, value) = option.split_once('=').ok_or_else(|| {
-                IcebergFdwError::invalid_option(
-                    "foreign option",
-                    "expected name=value",
-                )
-            })?;
-            parsed.set(self, name, value)?;
+        let parsed = ParsedOptions::from_array(self, options)?;
+        if matches!(self, Self::Table) {
+            ForeignTableIdentity::from_options(parsed)?;
         }
-        parsed.validate_required(self)
+        Ok(())
     }
 }
 
@@ -92,8 +77,30 @@ pub(super) struct ParsedOptions {
 }
 
 impl ParsedOptions {
+    /// Parse the complete options array supplied by the PostgreSQL validator.
+    pub(super) fn from_array(
+        layer: OptionLayer,
+        options: &[Option<String>],
+    ) -> Result<Self, IcebergFdwError> {
+        let mut parsed = Self::default();
+        for option in options.iter().flatten() {
+            let (name, value) = option.split_once('=').ok_or_else(|| {
+                IcebergFdwError::invalid_option(
+                    "foreign option",
+                    "expected name=value",
+                )
+            })?;
+            parsed.set(layer, name, value)?;
+        }
+        parsed.validate_required(layer)?;
+        Ok(parsed)
+    }
+
     fn validate_value(name: &str, value: &str) -> Result<(), IcebergFdwError> {
         match name {
+            "uri" if value.starts_with("sqlite:") => {
+                SqliteCatalogBuilder::database_path(value)?;
+            }
             "uri" | "oauth2-server-uri" => {
                 let url = Url::parse(value).map_err(|_| {
                     IcebergFdwError::invalid_option(name, "must be an absolute URL")
@@ -120,7 +127,7 @@ impl ParsedOptions {
                     "must be none or oauth2",
                 ));
             }
-            ENABLE_VENDED_CREDENTIALS
+            ENABLE_VENDED_CREDENTIALS | "strict"
                 if !value.eq_ignore_ascii_case("true")
                     && !value.eq_ignore_ascii_case("false") =>
             {
@@ -129,10 +136,10 @@ impl ParsedOptions {
                     "must be true or false",
                 ));
             }
-            MODE if !matches!(value, READ_ONLY | READ_WRITE) => {
+            SCHEMA_ID if !value.parse::<i32>().is_ok_and(|id| id >= 0) => {
                 return Err(IcebergFdwError::invalid_option(
                     name,
-                    "must be read_only or read_write",
+                    "must be a non-negative 32-bit integer",
                 ));
             }
             _ if name.starts_with("header.") => {
@@ -223,10 +230,11 @@ impl ParsedOptions {
     ) -> Result<(), IcebergFdwError> {
         let required: &[&str] = match layer {
             OptionLayer::Server => &["uri"],
-            OptionLayer::Table => {
-                &[CATALOG_NAME, CATALOG_NAMESPACE, CATALOG_TABLE_NAME, MODE]
-            }
-            OptionLayer::Wrapper | OptionLayer::Mapping | OptionLayer::Import => &[],
+            OptionLayer::Table => &[TABLE],
+            OptionLayer::Wrapper
+            | OptionLayer::Mapping
+            | OptionLayer::Column
+            | OptionLayer::Import => &[],
         };
         for &name in required {
             if !self.values.contains_key(name) {

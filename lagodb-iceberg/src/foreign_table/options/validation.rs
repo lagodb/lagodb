@@ -3,7 +3,8 @@ use lagodb_core::storage::profile::StorageProfileConfig;
 use pgrx::pg_sys;
 
 use super::super::error::IcebergFdwError;
-use super::schema::OptionLayer;
+use super::catalog_type::{CatalogServerOptions, CatalogType};
+use super::schema::{OptionLayer, ParsedOptions};
 
 pub(crate) struct IcebergFdwOptions;
 
@@ -18,6 +19,28 @@ impl IcebergFdwOptions {
                 StorageProfileConfig::validate_scoped_options(options, catalog)
                     .map_err(ForeignValidationError::provider)?;
             }
+            OptionLayer::Server => {
+                let options = CatalogServerOptions::from_options(
+                    ParsedOptions::from_array(layer, options)?,
+                )?;
+                if options.catalog_type() == CatalogType::Sqlite {
+                    // Match file_fdw/COPY's existing server-file privilege model.
+                    // SAFETY: the validator runs in the current PG backend.
+                    let allowed = unsafe {
+                        let user = pg_sys::GetUserId();
+                        pg_sys::has_privs_of_role(
+                            user,
+                            pg_sys::ROLE_PG_READ_SERVER_FILES.into(),
+                        ) && pg_sys::has_privs_of_role(
+                            user,
+                            pg_sys::ROLE_PG_WRITE_SERVER_FILES.into(),
+                        )
+                    };
+                    if !allowed {
+                        return Err(IcebergFdwError::LocalFileAccessDenied.into());
+                    }
+                }
+            }
             OptionLayer::Mapping => {
                 Self::validate_mapping(options, catalog)?;
             }
@@ -28,8 +51,8 @@ impl IcebergFdwOptions {
 
     fn is_storage_server(options: &[Option<String>]) -> bool {
         options.iter().flatten().any(|option| {
-            option.split_once('=').is_some_and(|(name, _)| {
-                StorageProfileConfig::is_server_discriminator(name)
+            option.split_once('=').is_some_and(|(name, value)| {
+                StorageProfileConfig::is_server_discriminator(name, value)
             })
         })
     }

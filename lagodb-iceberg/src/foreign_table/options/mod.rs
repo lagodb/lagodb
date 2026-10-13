@@ -1,14 +1,13 @@
-//! PostgreSQL foreign-catalog options for REST catalogs and scoped storage.
+//! PostgreSQL foreign-catalog options for Iceberg catalogs and scoped storage.
 
 mod catalog;
+mod catalog_type;
+mod identifier;
 mod schema;
 mod table;
 mod validation;
 
-pub(crate) use catalog::{
-    CatalogBindingKey, CatalogRuntimeConfig, RestCatalogConnection, ServerBindingKey,
-};
-pub(crate) use table::{
-    ForeignTableIdentity, ForeignTableMode, MaterializedForeignOptions,
-};
+pub(crate) use catalog::{CatalogConnection, CatalogRuntimeConfig, ServerBindingKey};
+pub(crate) use identifier::ForeignIdentifier;
+pub(crate) use table::{ForeignImportOptions, ForeignTableIdentity};
 pub(crate) use validation::IcebergFdwOptions;

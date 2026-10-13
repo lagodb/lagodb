@@ -4,7 +4,6 @@ CREATE TABLE iceberg.iceberg_metadata (
     relid regclass NOT NULL,
     metadata_location text,
     previous_metadata_location text,
-    default_spec_id integer,
     maintenance_due_at timestamptz,
     PRIMARY KEY (relid)
 ) WITH (user_catalog_table = true);

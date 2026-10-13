@@ -1,85 +1,54 @@
+use iceberg_lite::catalog::{NamespaceIdent, TableIdent};
+use iceberg_lite::spec::{SchemaRef, TableMetadata};
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 
 use super::super::error::IcebergFdwError;
-use super::schema::{
-    CATALOG_NAME, CATALOG_NAMESPACE, CATALOG_TABLE_NAME, MODE, OptionLayer,
-    ParsedOptions, READ_ONLY, READ_WRITE,
-};
-
-pub(crate) type MaterializedForeignOptions = Vec<(&'static str, String)>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ForeignTableMode {
-    ReadOnly,
-    ReadWrite,
-}
-
-impl ForeignTableMode {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::ReadOnly => READ_ONLY,
-            Self::ReadWrite => READ_WRITE,
-        }
-    }
-
-    pub(crate) const fn is_writable(self) -> bool {
-        matches!(self, Self::ReadWrite)
-    }
-
-    pub(crate) fn parse(value: &str) -> Result<Self, IcebergFdwError> {
-        match value {
-            READ_ONLY => Ok(Self::ReadOnly),
-            READ_WRITE => Ok(Self::ReadWrite),
-            _ => Err(IcebergFdwError::invalid_option(
-                MODE,
-                "must be read_only or read_write",
-            )),
-        }
-    }
-}
+use super::identifier::ForeignIdentifier;
+use super::schema::{OptionLayer, ParsedOptions, SCHEMA_ID, TABLE};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ForeignTableIdentity {
-    catalog_name: String,
-    namespace: String,
-    table_name: String,
-    mode: ForeignTableMode,
+    table: TableIdent,
+    schema_id: Option<i32>,
 }
 
 impl ForeignTableIdentity {
+    pub(crate) fn new(table: TableIdent, schema_id: Option<i32>) -> Self {
+        Self { table, schema_id }
+    }
+
     pub(crate) fn encode(&self, writer: &mut PlanDataWriter) {
+        let namespace = self.table.namespace().as_ref();
+        writer.append_count(namespace.len());
+        for component in namespace {
+            writer.append_str(component);
+        }
         writer
-            .append_str(self.catalog_name())
-            .append_str(self.namespace())
-            .append_str(self.table_name())
-            .append_str(self.mode().as_str());
+            .append_str(self.table.name())
+            .append_bool(self.schema_id.is_some());
+        if let Some(id) = self.schema_id {
+            writer.append_i32(id);
+        }
     }
 
     pub(crate) fn decode(
         reader: &mut PlanDataReader<'_>,
     ) -> Result<Self, IcebergFdwError> {
-        Ok(Self::with_mode(
-            reader.read_str()?,
-            reader.read_str()?,
-            reader.read_str()?,
-            ForeignTableMode::parse(&reader.read_str()?)?,
-        ))
-    }
-
-    pub(crate) fn with_mode(
-        catalog_name: String,
-        namespace: String,
-        table_name: String,
-        mode: ForeignTableMode,
-    ) -> Self {
-        Self {
-            catalog_name,
-            namespace,
-            table_name,
-            mode,
+        let count = reader.read_count()?;
+        let mut namespace = Vec::with_capacity(count);
+        for _ in 0..count {
+            namespace.push(reader.read_str()?);
         }
+        let table =
+            TableIdent::new(NamespaceIdent::from_vec(namespace)?, reader.read_str()?);
+        let schema_id = if reader.read_bool()? {
+            Some(reader.read_i32()?)
+        } else {
+            None
+        };
+        Ok(Self::new(table, schema_id))
     }
 
     pub(crate) fn resolve(
@@ -92,70 +61,72 @@ impl ForeignTableIdentity {
     pub(crate) fn from_foreign_table(
         table: &pg_sys::ForeignTable,
     ) -> Result<Self, IcebergFdwError> {
-        let options = unsafe { ForeignOptionView::from_raw(table.options) };
-        Self::from_view(options)
+        Self::from_view(unsafe { ForeignOptionView::from_raw(table.options) })
     }
 
     pub(crate) fn from_view(
         options: ForeignOptionView<'_>,
     ) -> Result<Self, IcebergFdwError> {
-        let mut parsed = ParsedOptions::from_view(OptionLayer::Table, options, true)?;
-        let mode = ForeignTableMode::parse(&parsed.take_required(MODE)?)?;
-        Ok(Self {
-            catalog_name: parsed.take_required(CATALOG_NAME)?,
-            namespace: parsed.take_required(CATALOG_NAMESPACE)?,
-            table_name: parsed.take_required(CATALOG_TABLE_NAME)?,
-            mode,
-        })
+        Self::from_options(ParsedOptions::from_view(
+            OptionLayer::Table,
+            options,
+            true,
+        )?)
     }
 
-    pub(crate) fn complete(
-        options: ForeignOptionView<'_>,
-        catalog_name: String,
-        namespace: String,
-        table_name: String,
-    ) -> Result<(Self, MaterializedForeignOptions), IcebergFdwError> {
-        let mut parsed =
-            ParsedOptions::from_view(OptionLayer::Table, options, false)?;
-        let defaults = [
-            (CATALOG_NAME, catalog_name),
-            (CATALOG_NAMESPACE, namespace),
-            (CATALOG_TABLE_NAME, table_name),
-            (MODE, READ_ONLY.to_owned()),
-        ];
-        let mut materialized = Vec::with_capacity(defaults.len());
-        for (name, value) in defaults {
-            if !parsed.values.contains_key(name) {
-                parsed.values.insert(name.to_owned(), value.clone());
-                materialized.push((name, value));
-            }
+    pub(super) fn from_options(
+        mut parsed: ParsedOptions,
+    ) -> Result<Self, IcebergFdwError> {
+        let table = ForeignIdentifier::table(&parsed.take_required(TABLE)?)?;
+        let schema_id = parsed
+            .values
+            .get(SCHEMA_ID)
+            .map(|value| {
+                value.parse::<i32>().map_err(|_| {
+                    IcebergFdwError::invalid_option(
+                        SCHEMA_ID,
+                        "must be a non-negative 32-bit integer",
+                    )
+                })
+            })
+            .transpose()?;
+        Ok(Self::new(table, schema_id))
+    }
+
+    pub(crate) fn table(&self) -> &TableIdent {
+        &self.table
+    }
+    pub(crate) const fn schema_id(&self) -> Option<i32> {
+        self.schema_id
+    }
+
+    /// Resolve the schema describing local columns, not the physical scan schema.
+    pub(crate) fn definition_schema<'a>(
+        &self,
+        metadata: &'a TableMetadata,
+    ) -> Result<&'a SchemaRef, IcebergFdwError> {
+        match self.schema_id {
+            None => Ok(metadata.current_schema()),
+            Some(id) => metadata
+                .schema_by_id(id)
+                .ok_or(IcebergFdwError::UnknownSchema { schema_id: id }),
         }
-        parsed.validate_required(OptionLayer::Table)?;
-        let mode = ForeignTableMode::parse(&parsed.take_required(MODE)?)?;
-        Ok((
-            Self {
-                catalog_name: parsed.take_required(CATALOG_NAME)?,
-                namespace: parsed.take_required(CATALOG_NAMESPACE)?,
-                table_name: parsed.take_required(CATALOG_TABLE_NAME)?,
-                mode,
-            },
-            materialized,
-        ))
     }
+}
 
-    pub(crate) fn catalog_name(&self) -> &str {
-        &self.catalog_name
-    }
+pub(crate) struct ForeignImportOptions {
+    pub(crate) strict: bool,
+}
 
-    pub(crate) fn namespace(&self) -> &str {
-        &self.namespace
-    }
-
-    pub(crate) fn table_name(&self) -> &str {
-        &self.table_name
-    }
-
-    pub(crate) const fn mode(&self) -> ForeignTableMode {
-        self.mode
+impl ForeignImportOptions {
+    pub(crate) fn from_view(
+        options: ForeignOptionView<'_>,
+    ) -> Result<Self, IcebergFdwError> {
+        let parsed = ParsedOptions::from_view(OptionLayer::Import, options, true)?;
+        let strict = parsed
+            .values
+            .get("strict")
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+        Ok(Self { strict })
     }
 }
