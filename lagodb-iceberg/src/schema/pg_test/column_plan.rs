@@ -85,7 +85,6 @@ mod tests {
         let plan =
             ReadColumnPlan::bind(&schema, &field_map, 4, &int_attribute_types(4))
                 .unwrap();
-        let field_index = field_map.into_index();
 
         assert_eq!(
             plan.columns
@@ -102,10 +101,7 @@ mod tests {
             vec![0, 1, 2]
         );
 
-        assert_eq!(field_index.binding_for_attno(1).unwrap().field_id, 1);
-        assert_eq!(field_index.binding_for_attno(2).unwrap().field_id, 2);
-        assert!(field_index.binding_for_attno(3).is_none());
-        assert_eq!(field_index.binding_for_attno(4).unwrap().field_id, 3);
+        assert_eq!(field_map.field_ids(), vec![1, 2, 3]);
     }
 
     #[pgrx::pg_test(schema = "tests")]
@@ -141,31 +137,25 @@ mod tests {
     #[pgrx::pg_test(schema = "tests")]
     fn projection_decouples_source_order_from_destination() {
         let schema = int_schema(&["a", "b", "c", "d", "e"]);
-        let full_map = RelationFieldMap::bind(
-            &schema,
-            &layout(&[(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e")], 5),
-        )
-        .unwrap();
+        let layout = layout(&[(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e")], 5);
         let projection = SlotProjection::from_outputs(vec![
             ProjectedAttribute::new(2, 1),
             ProjectedAttribute::new(5, 0),
         ]);
-        let field_map = full_map
-            .project(
-                projection
-                    .columns()
-                    .iter()
-                    .map(|field| (field.attno, field.destination)),
-            )
-            .unwrap();
+        let field_map = RelationFieldMap::bind_projection(
+            &schema,
+            &layout,
+            projection
+                .columns()
+                .iter()
+                .map(|field| (field.attno, field.destination)),
+        )
+        .unwrap();
         let plan =
             ReadColumnPlan::bind(&schema, &field_map, 2, &int_attribute_types(2))
                 .unwrap();
-        let field_index = field_map.into_index();
 
-        assert!(field_index.binding_for_attno(1).is_none());
-        assert_eq!(field_index.binding_for_attno(2).unwrap().field_id, 2);
-        assert_eq!(field_index.binding_for_attno(5).unwrap().field_id, 5);
+        assert_eq!(field_map.field_ids(), vec![2, 5]);
 
         assert_eq!(
             plan.columns
@@ -186,23 +176,20 @@ mod tests {
     #[pgrx::pg_test(schema = "tests")]
     fn projection_with_dropped_column_uses_attribute_position() {
         let schema = int_schema(&["a", "b", "e"]);
-        let full_map = RelationFieldMap::bind(
-            &schema,
-            &layout(&[(1, "a"), (2, "b"), (4, "e")], 4),
-        )
-        .unwrap();
+        let layout = layout(&[(1, "a"), (2, "b"), (4, "e")], 4);
         let projection = SlotProjection::from_outputs(vec![
             ProjectedAttribute::new(2, 0),
             ProjectedAttribute::new(4, 1),
         ]);
-        let field_map = full_map
-            .project(
-                projection
-                    .columns()
-                    .iter()
-                    .map(|field| (field.attno, field.destination)),
-            )
-            .unwrap();
+        let field_map = RelationFieldMap::bind_projection(
+            &schema,
+            &layout,
+            projection
+                .columns()
+                .iter()
+                .map(|field| (field.attno, field.destination)),
+        )
+        .unwrap();
         let plan =
             ReadColumnPlan::bind(&schema, &field_map, 2, &int_attribute_types(2))
                 .unwrap();
@@ -219,11 +206,12 @@ mod tests {
     #[pgrx::pg_test(schema = "tests")]
     fn projection_rejects_unmapped_attribute() {
         let schema = int_schema(&["a", "b"]);
-        let full_map =
-            RelationFieldMap::bind(&schema, &layout(&[(2, "b")], 2)).unwrap();
+        let layout = layout(&[(2, "b")], 2);
         let projection =
             SlotProjection::from_outputs(vec![ProjectedAttribute::new(1, 0)]);
-        let result = full_map.project(
+        let result = RelationFieldMap::bind_projection(
+            &schema,
+            &layout,
             projection
                 .columns()
                 .iter()
@@ -236,11 +224,12 @@ mod tests {
     #[pgrx::pg_test(schema = "tests")]
     fn projection_rejects_attribute_number_below_one() {
         let schema = int_schema(&["a", "b"]);
-        let full_map =
-            RelationFieldMap::bind(&schema, &layout(&[(1, "a")], 2)).unwrap();
+        let layout = layout(&[(1, "a")], 2);
         let projection =
             SlotProjection::from_outputs(vec![ProjectedAttribute::new(0, 0)]);
-        let result = full_map.project(
+        let result = RelationFieldMap::bind_projection(
+            &schema,
+            &layout,
             projection
                 .columns()
                 .iter()
@@ -253,20 +242,20 @@ mod tests {
     #[pgrx::pg_test(schema = "tests")]
     fn projection_rejects_destination_out_of_range() {
         let schema = int_schema(&["a", "b"]);
-        let full_map =
-            RelationFieldMap::bind(&schema, &layout(&[(2, "b")], 2)).unwrap();
+        let layout = layout(&[(2, "b")], 2);
         let projection =
             SlotProjection::from_outputs(vec![ProjectedAttribute::new(2, 5)]);
-        let result = full_map
-            .project(
-                projection
-                    .columns()
-                    .iter()
-                    .map(|field| (field.attno, field.destination)),
-            )
-            .and_then(|field_map| {
-                ReadColumnPlan::bind(&schema, &field_map, 2, &int_attribute_types(2))
-            });
+        let result = RelationFieldMap::bind_projection(
+            &schema,
+            &layout,
+            projection
+                .columns()
+                .iter()
+                .map(|field| (field.attno, field.destination)),
+        )
+        .and_then(|field_map| {
+            ReadColumnPlan::bind(&schema, &field_map, 2, &int_attribute_types(2))
+        });
 
         assert!(matches!(result, Err(IcebergError::InvariantViolated(_))));
     }

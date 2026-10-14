@@ -2,8 +2,8 @@
 //!
 //! PostgreSQL attribute names are resolved against an Iceberg schema once at
 //! the catalog boundary. Ordered consumers use the compact bindings directly;
-//! CustomScan additionally builds a direct `attno - 1` index for predicate
-//! translation and retains it for the scan lifetime.
+//! local attributes use a direct `attno - 1` index; remote fields are resolved
+//! only when a projection or predicate actually needs them.
 
 use iceberg_lite::spec::Schema as IcebergSchema;
 use lagodb_core::handles::RelationHandle;
@@ -40,6 +40,7 @@ impl LiveColumn {
 #[derive(Debug)]
 pub(crate) struct RelationLayout {
     live_columns: Vec<LiveColumn>,
+    by_attno: Box<[Option<usize>]>,
     slot_width: usize,
     attr_types: Vec<(pg_sys::Oid, i32)>,
 }
@@ -52,11 +53,7 @@ impl RelationLayout {
         slot_width: usize,
         attr_types: Vec<(pg_sys::Oid, i32)>,
     ) -> Self {
-        Self {
-            live_columns,
-            slot_width,
-            attr_types,
-        }
+        Self::new(live_columns, slot_width, attr_types)
     }
 
     pub(crate) fn from_relation(rel: &RelationHandle) -> IcebergResult<Self> {
@@ -78,11 +75,34 @@ impl RelationLayout {
             })
             .collect::<IcebergResult<Vec<_>>>()?;
 
-        Ok(Self {
+        Ok(Self::new(live_columns, rel.natts(), rel.attr_types()))
+    }
+
+    fn new(
+        live_columns: Vec<LiveColumn>,
+        slot_width: usize,
+        attr_types: Vec<(pg_sys::Oid, i32)>,
+    ) -> Self {
+        let mut by_attno = vec![None; slot_width];
+        for (index, column) in live_columns.iter().enumerate() {
+            by_attno[(column.attno - 1) as usize] = Some(index);
+        }
+        Self {
             live_columns,
-            slot_width: rel.natts(),
-            attr_types: rel.attr_types(),
-        })
+            by_attno: by_attno.into_boxed_slice(),
+            slot_width,
+            attr_types,
+        }
+    }
+
+    pub(crate) fn column(
+        &self,
+        attno: pg_sys::AttrNumber,
+    ) -> IcebergResult<&LiveColumn> {
+        let offset = RelationFieldMap::attribute_offset(attno, self.slot_width)?;
+        self.by_attno[offset]
+            .map(|index| &self.live_columns[index])
+            .ok_or_else(|| IcebergError::ColumnNotFound(format!("attno {attno}")))
     }
 
     pub(crate) fn live_columns(&self) -> &[LiveColumn] {
@@ -104,23 +124,14 @@ impl RelationLayout {
         schema: &IcebergSchema,
         projected: impl ExactSizeIterator<Item = pg_sys::AttrNumber>,
     ) -> IcebergResult<Box<[i32]>> {
-        let mut by_attno = vec![None; self.slot_width];
-        for column in &self.live_columns {
-            let field = schema
-                .field_by_name(&column.name)
-                .ok_or_else(|| IcebergError::ColumnNotFound(column.name.clone()))?;
-            let offset =
-                RelationFieldMap::attribute_offset(column.attno, self.slot_width)?;
-            by_attno[offset] = Some(field.id);
-        }
-
         let mut field_ids = Vec::with_capacity(projected.len());
         for attno in projected {
-            let offset = RelationFieldMap::attribute_offset(attno, self.slot_width)?;
-            let field_id = by_attno[offset].ok_or_else(|| {
-                IcebergError::ColumnNotFound(format!("attno {attno}"))
-            })?;
-            field_ids.push(field_id);
+            let column = self.column(attno)?;
+            let field = schema
+                .as_struct()
+                .field_by_name(&column.name)
+                .ok_or_else(|| IcebergError::ColumnNotFound(column.name.clone()))?;
+            field_ids.push(field.id);
         }
         Ok(field_ids.into_boxed_slice())
     }
@@ -137,23 +148,10 @@ pub(crate) struct RelationFieldBinding {
     pub(crate) debug_name: String,
 }
 
-impl RelationFieldBinding {
-    fn with_destination(&self, destination: usize) -> Self {
-        Self {
-            attno: self.attno,
-            destination,
-            field_id: self.field_id,
-            debug_name: self.debug_name.clone(),
-        }
-    }
-}
-
 /// Compact ordered field bindings shared by read and write planning.
 #[derive(Debug)]
 pub(crate) struct RelationFieldMap {
     fields: Vec<RelationFieldBinding>,
-    /// Width of the base relation's PostgreSQL attribute-number domain.
-    relation_width: usize,
 }
 
 impl RelationFieldMap {
@@ -165,6 +163,7 @@ impl RelationFieldMap {
         let mut fields = Vec::with_capacity(layout.live_columns().len());
         for col in layout.live_columns() {
             let field = schema
+                .as_struct()
                 .field_by_name(&col.name)
                 .ok_or_else(|| IcebergError::ColumnNotFound(col.name.clone()))?;
             fields.push(RelationFieldBinding {
@@ -174,40 +173,30 @@ impl RelationFieldMap {
                 debug_name: col.name.clone(),
             });
         }
-        Ok(Self {
-            fields,
-            relation_width: layout.slot_width(),
-        })
+        Ok(Self { fields })
     }
 
-    /// Retain projected bindings in projection order and remap their tuple
-    /// destinations. `projected` yields `(source attno, destination)` pairs.
-    pub(crate) fn project(
-        self,
+    /// Resolve only projected attributes, in storage order, to slot destinations.
+    pub(crate) fn bind_projection(
+        schema: &IcebergSchema,
+        layout: &RelationLayout,
         projected: impl ExactSizeIterator<Item = (pg_sys::AttrNumber, usize)>,
     ) -> IcebergResult<Self> {
-        let source_index = RelationFieldIndex::new(self);
         let mut fields = Vec::with_capacity(projected.len());
         for (attno, destination) in projected {
-            if attno <= 0 {
-                return Err(IcebergError::InvariantViolated(
-                    "RelationFieldMap: projected source attno must be >= 1",
-                ));
-            }
-            let binding = source_index.binding_for_attno(attno).ok_or_else(|| {
-                IcebergError::ColumnNotFound(format!("attno {attno}"))
-            })?;
-            fields.push(binding.with_destination(destination));
+            let column = layout.column(attno)?;
+            let remote = schema
+                .as_struct()
+                .field_by_name(&column.name)
+                .ok_or_else(|| IcebergError::ColumnNotFound(column.name.clone()))?;
+            fields.push(RelationFieldBinding {
+                attno,
+                destination,
+                field_id: remote.id,
+                debug_name: column.name.clone(),
+            });
         }
-        Ok(Self {
-            fields,
-            relation_width: source_index.relation_width(),
-        })
-    }
-
-    /// Add the direct user-attno lookup needed by CustomScan predicates.
-    pub(crate) fn into_index(self) -> RelationFieldIndex {
-        RelationFieldIndex::new(self)
+        Ok(Self { fields })
     }
 
     pub(crate) fn bindings(&self) -> &[RelationFieldBinding] {
@@ -246,48 +235,5 @@ impl RelationFieldMap {
             ));
         }
         Ok(offset)
-    }
-}
-
-/// Direct attribute lookup for projection binding and predicate planning.
-/// Predicate planners retain the index; projection binding consumes it locally.
-#[derive(Debug)]
-pub(crate) struct RelationFieldIndex {
-    field_map: RelationFieldMap,
-    /// Slot `attno - 1` contains the compact binding index, or
-    /// `UNMAPPED_FIELD` for a dropped or unselected attribute.
-    by_attno: Box<[usize]>,
-}
-
-impl RelationFieldIndex {
-    const UNMAPPED_FIELD: usize = usize::MAX;
-
-    fn new(field_map: RelationFieldMap) -> Self {
-        let mut by_attno = vec![Self::UNMAPPED_FIELD; field_map.relation_width];
-        for (index, binding) in field_map.fields.iter().enumerate() {
-            // `bind` validates every attno against `relation_width`, and
-            // `project` only copies bindings originating from such a map.
-            let offset = (binding.attno as usize) - 1;
-            by_attno[offset] = index;
-        }
-        Self {
-            field_map,
-            by_attno: by_attno.into_boxed_slice(),
-        }
-    }
-
-    pub(crate) fn binding_for_attno(
-        &self,
-        attno: pg_sys::AttrNumber,
-    ) -> Option<&RelationFieldBinding> {
-        if attno <= 0 {
-            return None;
-        }
-        let index = *self.by_attno.get((attno as usize) - 1)?;
-        (index != Self::UNMAPPED_FIELD).then(|| &self.field_map.fields[index])
-    }
-
-    fn relation_width(&self) -> usize {
-        self.by_attno.len()
     }
 }

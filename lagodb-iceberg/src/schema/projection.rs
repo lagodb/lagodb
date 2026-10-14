@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use arrow_schema::{Field, Schema as ArrowSchema};
+use arrow_schema::Schema as ArrowSchema;
 use iceberg_lite::spec::Schema as IcebergSchema;
 use pgrx::pg_sys;
 
-use super::type_mapping::IcebergTypeExt;
+use super::arrow_type::SemanticArrowType;
 use crate::error::{IcebergError, IcebergResult};
 
 /// One source PostgreSQL attribute and its destination in the scan tuple.
@@ -85,14 +85,15 @@ impl StorageProjection {
                     .ok_or_else(|| {
                         IcebergError::ColumnNotFound(format!("field id {field_id}"))
                     })?;
-                Ok(Field::new(
-                    &field.name,
-                    field.field_type.to_arrow_type()?,
-                    !field.required,
-                ))
+                SemanticArrowType::new(&field.field_type)
+                    .field(&field.name, !field.required)
             })
             .collect::<IcebergResult<Vec<_>>>()?;
         Ok(ArrowSchema::new(fields))
+    }
+
+    pub(crate) fn schema_ref(&self) -> Arc<IcebergSchema> {
+        Arc::clone(&self.schema)
     }
 
     pub(crate) fn schema(&self) -> &IcebergSchema {

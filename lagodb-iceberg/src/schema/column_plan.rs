@@ -10,13 +10,15 @@ use std::sync::Arc;
 use arrow_schema::Schema as ArrowSchema;
 use iceberg_lite::spec::Schema as IcebergSchema;
 use lagodb_arrow::{
-    ArrowColumnDecoder, BoundWriteColumnPlan, ColumnRule, DatumCodec, DecodedColumn,
+    ArrowColumnDecoder, BoundDatumPlan, BoundWriteColumnPlan, DecodedColumn,
 };
+use lagodb_core::tuple::PgType;
 use pgrx::pg_sys;
 
+use super::arrow_type::{IcebergSchemaExt, SemanticArrowType};
 use super::projection::{SlotProjection, StorageProjection};
 use super::relation::{RelationFieldBinding, RelationFieldMap, RelationLayout};
-use super::type_mapping::{IcebergSchemaExt, IcebergTypeExt};
+use super::write_mapping::WriteField;
 use crate::error::{IcebergError, IcebergResult};
 
 /// One selected Arrow column and its PostgreSQL destination and codec.
@@ -27,9 +29,7 @@ pub(crate) struct ReadColumnBinding {
     pub(crate) source_column: usize,
     /// Zero-based destination in the actual scan tuple.
     pub(crate) destination: usize,
-    pub(crate) rule: ColumnRule,
-    pub(crate) target_oid: pg_sys::Oid,
-    pub(crate) codec: DatumCodec,
+    pub(crate) plan: BoundDatumPlan,
 }
 
 /// Read rules and destinations in requested storage-column order.
@@ -59,29 +59,26 @@ impl ReadColumnPlan {
                 slot_width,
             )?;
             let target_oid = attr_types[destination].0;
-            let rule = field.field_type.resolve_rule_for_oid(target_oid)?;
-            let codec = match (target_oid, &rule) {
-                (pg_sys::JSONBOID, ColumnRule::PostgresJsonbVarlena) => {
-                    // SAFETY: the provider-selected rule is backed by the
-                    // Iceberg JSONB writer, which emits complete PostgreSQL
-                    // JSONB varlena bytes.
-                    unsafe { DatumCodec::postgres_jsonb_varlena() }
-                }
-                (pg_sys::JSONOID, ColumnRule::Utf8) => {
-                    // SAFETY: PostgreSQL JSON values entering this relation
-                    // have already passed json_in; the writer stores their
-                    // validated text payload unchanged.
-                    unsafe { DatumCodec::prevalidated_json_text() }
-                }
-                (_, _) => DatumCodec::standard(target_oid)?,
-            };
+            let semantic = SemanticArrowType::new(&field.field_type);
+            semantic.validate_supported()?;
+            // SAFETY: managed json/jsonb fields retain PG-validated, NUL-free
+            // type-output text, including array/composite leaves. The
+            // canonical foreign mapping uses text for strings and structural
+            // JSONB for containers, so it does not admit unvalidated PG JSON.
+            // Managed writers preserve the int2/OID/interval component ranges
+            // when widening their storage. The canonical foreign mapping never
+            // binds external wider numbers to those narrower PG declarations.
+            let plan = unsafe {
+                BoundDatumPlan::bind_with_prevalidated_json_text(
+                    &semantic.field(&field.name, !field.required)?,
+                    PgType::new(target_oid, attr_types[destination].1),
+                )
+            }?;
             columns.push(ReadColumnBinding {
                 source_base_attno: binding.attno,
                 source_column,
                 destination,
-                rule,
-                target_oid,
-                codec,
+                plan,
             });
         }
         Ok(Self {
@@ -97,15 +94,11 @@ impl ReadColumnPlan {
                 debug_assert!(e.source_base_attno > 0);
                 // SAFETY: construction bound the destination and actual OID to
                 // the output layout and selected the matching provider codec.
-                unsafe {
-                    DecodedColumn::new(
-                        e.rule,
-                        e.source_column,
-                        e.destination,
-                        e.target_oid,
-                        e.codec,
-                    )
-                }
+                // Managed TextIo fields retain PgTextIo's NUL-free output.
+                // ForeignSchemaBinding enforces the canonical foreign mapping:
+                // external strings become PG text, while nested JSONB uses
+                // the structural codec; neither enters the TextIo reader.
+                unsafe { DecodedColumn::bind(e.plan, e.source_column, e.destination) }
             })
             .collect::<Result<Vec<_>, _>>()
             .map(ArrowColumnDecoder::new)
@@ -149,8 +142,9 @@ impl PgReadPlan {
             });
         }
 
-        let full_map = RelationFieldMap::bind(&schema, layout)?;
-        let field_map = full_map.project(
+        let field_map = RelationFieldMap::bind_projection(
+            &schema,
+            layout,
             projection
                 .columns()
                 .iter()
@@ -213,66 +207,34 @@ impl WriteColumnPlan {
     ) -> IcebergResult<Vec<BoundWriteColumnPlan>> {
         let fields = schema.as_struct().fields();
         let mut columns = Vec::with_capacity(fields.len());
-        let mut matched_live = 0usize;
+        // Both managed and foreign writers require exact schema coverage.
+        // A SELECT projection is not a write contract, and SQL defaults have
+        // already been materialized into the source slot by PostgreSQL.
         let bindings_by_field_id: HashMap<i32, &RelationFieldBinding> = field_map
             .bindings()
             .iter()
-            .map(|field| (field.field_id, field))
+            .map(|binding| (binding.field_id, binding))
             .collect();
-        for field in fields.iter() {
-            let column = match bindings_by_field_id.get(&field.id) {
-                Some(binding) => {
-                    let destination = RelationFieldMap::validate_destination(
-                        binding.destination,
-                        slot_width,
-                    )?;
-                    let rule = field
-                        .field_type
-                        .resolve_rule_for_oid(attr_types[destination].0)?;
-                    matched_live += 1;
-                    BoundWriteColumnPlan::bind(
-                        rule,
-                        Some(destination),
-                        Some(attr_types[destination].0),
-                        slot_width,
-                    )?
-                }
-                None => {
-                    // An absent optional source produces a typed all-NULL column.
-                    if field.required {
-                        return Err(IcebergError::RequiredColumnMissingSource(
-                            field.name.clone(),
-                        ));
-                    }
-                    let pg = field.field_type.canonical_column_type().ok_or_else(
-                        || {
-                            IcebergError::UnsupportedColumnType(format!(
-                                "{:?} has no target PostgreSQL column type",
-                                field.field_type
-                            ))
-                        },
-                    )?;
-                    BoundWriteColumnPlan::bind(
-                        field.field_type.resolve_rule(pg)?,
-                        None,
-                        None,
-                        slot_width,
-                    )?
-                }
-            };
-            columns.push(column);
+        if fields.len() != bindings_by_field_id.len() {
+            return Err(IcebergError::InvariantViolated(
+                "Iceberg writes require an exact relation-to-storage field mapping",
+            ));
         }
-        // Every live binding must feed a top-level output field.
-        if matched_live != field_map.bindings().len() {
-            let missing = field_map
-                .bindings()
-                .iter()
-                .find(|binding| {
-                    !fields.iter().any(|field| field.id == binding.field_id)
-                })
-                .map(|binding| binding.debug_name.clone())
-                .unwrap_or_else(|| "<unknown>".to_string());
-            return Err(IcebergError::ColumnNotFound(missing));
+        for field in fields {
+            let binding = bindings_by_field_id.get(&field.id).ok_or(
+                IcebergError::InvariantViolated(
+                    "Iceberg writes require a relation source for every storage field",
+                ),
+            )?;
+            let destination = RelationFieldMap::validate_destination(
+                binding.destination,
+                slot_width,
+            )?;
+            let plan = WriteField::new(field).plan(PgType::new(
+                attr_types[destination].0,
+                attr_types[destination].1,
+            ))?;
+            columns.push(BoundWriteColumnPlan::bind(plan, destination, slot_width)?);
         }
         Ok(columns)
     }

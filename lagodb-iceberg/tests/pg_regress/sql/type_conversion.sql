@@ -4,6 +4,7 @@
 
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
+SET client_min_messages = notice;
 
 SET timezone = 'UTC';
 
@@ -69,11 +70,14 @@ INSERT INTO iceberg_all_primitives VALUES (
 -- Insert a row with all NULLs (except ID)
 INSERT INTO iceberg_all_primitives (id) VALUES (2);
 
+SELECT pg_typeof(num_default) AS numeric_type,
+       num_default = 123456789.0123456789::float8 AS roundtrip
+FROM iceberg_all_primitives WHERE id = 1;
 -- Verify all types can be read back correctly
 -- Note: for json/jsonb/bytea/char we might need specific output formats to be stable in regression tests
 SELECT 
     id, b, si, i, bi, r, dp, 
-    num_default, num_spec,
+    num_spec,
     t, vc, c, n, 
     j::text as j, jb::text as jb,
     d, tm, ts, tstz, 
@@ -86,7 +90,7 @@ DROP TABLE iceberg_all_primitives;
 -- ============================================================================
 -- 2. All Supported Array (List) Types Test
 -- ============================================================================
--- Only certain element types are currently supported for arrays in complex.rs
+-- Basic primitive arrays retain their specialized encoders.
 CREATE TABLE iceberg_all_arrays (
     id integer,
     b_arr boolean[],
@@ -121,6 +125,18 @@ INSERT INTO iceberg_all_arrays VALUES (
     '{}'
 );
 
+-- Vector types expose PG element metadata but are not ordinary array codecs.
+CREATE TABLE iceberg_int2vector (v int2vector) USING iceberg;
+CREATE TABLE iceberg_oidvector (v oidvector) USING iceberg;
+
+-- ADD COLUMN uses the same admission through composite, array and domain.
+CREATE DOMAIN iceberg_vector_domain AS oidvector;
+CREATE TYPE iceberg_vector_record AS (v iceberg_vector_domain[]);
+ALTER TABLE iceberg_all_arrays ADD COLUMN v iceberg_vector_record;
+DROP TYPE iceberg_vector_record;
+DROP DOMAIN iceberg_vector_domain;
+
+-- Rejected DDL leaves the original schema and ordinary array values intact.
 SELECT * FROM iceberg_all_arrays ORDER BY id;
 
 DROP TABLE iceberg_all_arrays;
@@ -207,13 +223,18 @@ SELECT * FROM iceberg_string_mapping ORDER BY id;
 DROP TABLE iceberg_string_mapping;
 
 -- ============================================================================
--- 5. Negative Test: Numeric Precision > 38
+-- 5. Numeric Precision > 38 Uses Double
 -- ============================================================================
--- This should fail because Iceberg only supports up to precision 38.
+-- Types outside Iceberg decimal capacity become SQL double precision.
 CREATE TABLE iceberg_numeric_fallback (
     id integer,
     n_huge numeric(40, 2)
 ) USING iceberg;
+INSERT INTO iceberg_numeric_fallback VALUES (1, 12.5);
+SELECT pg_typeof(n_huge) AS numeric_type,
+       n_huge = 12.5::float8 AS roundtrip
+FROM iceberg_numeric_fallback;
+DROP TABLE iceberg_numeric_fallback;
 
 -- ============================================================================
 -- 6. Numeric with Negative Scale: round-trip via decimal(p+|s|, 0)
@@ -237,13 +258,62 @@ SELECT * FROM iceberg_numeric_negscale ORDER BY id;
 DROP TABLE iceberg_numeric_negscale;
 
 -- ============================================================================
--- 7. Negative Test: Numeric Negative Scale Widens Beyond 38
+-- 7. Numeric Negative Scale Beyond 38 Uses Double
 -- ============================================================================
 -- numeric(20, -20) would map to decimal(40, 0) which exceeds Iceberg's cap.
 CREATE TABLE iceberg_numeric_negscale_overflow (
     id integer,
     n_too_wide numeric(20, -20)
 ) USING iceberg;
+INSERT INTO iceberg_numeric_negscale_overflow VALUES (1, 1e20);
+SELECT pg_typeof(n_too_wide) AS numeric_type,
+       n_too_wide = 1e20::float8 AS roundtrip
+FROM iceberg_numeric_negscale_overflow;
+DROP TABLE iceberg_numeric_negscale_overflow;
+
+-- Scalar/array numeric normalization preserves compatible domains and composites.
+CREATE DOMAIN iceberg_bounded AS numeric(12,2) DEFAULT 7 NOT NULL CHECK (VALUE > 0);
+CREATE DOMAIN iceberg_bounded_array AS numeric(12,2)[];
+CREATE TYPE iceberg_numeric_member AS (amount double precision, bounded numeric(12,2));
+CREATE TABLE iceberg_numeric_types (
+    amounts numeric[], domain_value iceberg_bounded,
+    entry iceberg_numeric_member, entries iceberg_numeric_member[],
+    elements iceberg_bounded[], container iceberg_bounded_array
+) USING iceberg;
+ALTER TABLE iceberg_numeric_types ADD COLUMN extra numeric;
+INSERT INTO iceberg_numeric_types VALUES
+    (ARRAY[2.5,NULL], 3.75, ROW(4.5,6.25), '{"(7.5,8.25)"}',
+     ARRAY[1,2], ARRAY[3,NULL], 9.5);
+SELECT attname, format_type(atttypid, atttypmod) AS type
+FROM pg_attribute
+WHERE attrelid = 'iceberg_numeric_types'::regclass
+  AND attname IN ('amounts', 'domain_value', 'extra')
+ORDER BY attnum;
+SELECT amounts, domain_value, (entry).amount AS member_amount,
+       ((entries)[1]).bounded AS bounded, extra,
+       pg_typeof((entry).amount) AS member_type
+FROM iceberg_numeric_types;
+SELECT elements = ARRAY[1,2]::iceberg_bounded[]
+       AND container = ARRAY[3,NULL]::iceberg_bounded_array
+       AND pg_typeof(elements) = 'iceberg_bounded[]'::regtype
+       AND pg_typeof(container) = 'iceberg_bounded_array'::regtype AS domain_arrays
+FROM iceberg_numeric_types;
+-- Domain defaults and constraints remain PostgreSQL semantics, not float8 semantics.
+INSERT INTO iceberg_numeric_types DEFAULT VALUES;
+SELECT domain_value FROM iceberg_numeric_types ORDER BY domain_value;
+INSERT INTO iceberg_numeric_types (domain_value) VALUES (-1); -- CHECK violation
+INSERT INTO iceberg_numeric_types (domain_value) VALUES (NULL); -- NOT NULL violation
+
+-- Reject declarations that would discard domain identity, including array domains.
+CREATE DOMAIN iceberg_unbounded AS numeric DEFAULT 7 NOT NULL CHECK (VALUE > 0);
+CREATE DOMAIN iceberg_unbounded_array AS numeric[];
+CREATE TABLE iceberg_rejected_domain (value iceberg_unbounded) USING iceberg;
+ALTER TABLE iceberg_numeric_types ADD COLUMN rejected iceberg_unbounded_array;
+DROP DOMAIN iceberg_unbounded_array, iceberg_unbounded;
+DROP TABLE iceberg_numeric_types;
+DROP TYPE iceberg_numeric_member;
+DROP DOMAIN iceberg_bounded_array;
+DROP DOMAIN iceberg_bounded;
 
 -- ============================================================================
 -- 8. Timestamp Round Trip Across the Unix and PG Epochs
@@ -342,13 +412,176 @@ ORDER BY label;
 
 DROP TABLE iceberg_binary_round_trip;
 
--- ============================================================================
--- Documented limitation
--- ============================================================================
--- Iceberg `timestamp_ns` / `timestamptz_ns` cannot be exercised end-to-end
--- through this harness: PostgreSQL `timestamp` / `timestamptz` map to
--- Iceberg `Timestamp` / `Timestamptz` in
--- `lagodb-iceberg/src/catalog/schema_builder.rs`, and there is currently no
--- SQL surface that materializes a column with the `_ns` Iceberg primitive.
--- When such a surface is added (e.g. importing an external Iceberg metadata
--- file that declares `_ns`), an end-to-end `_ns` test should be added here.
+-- 11. Native arrays, composites, domains and portable scalar adapters.
+SET lagodb.query_offload_mode = 'off';
+CREATE TYPE iceberg_colour AS ENUM ('red', 'blue');
+CREATE DOMAIN iceberg_positive AS integer CHECK (VALUE > 0);
+CREATE TYPE iceberg_leaf AS (
+    removed text, amount numeric(12,2), ids uuid[], flags iceberg_positive[], document jsonb
+);
+ALTER TYPE iceberg_leaf DROP ATTRIBUTE removed;
+CREATE TYPE iceberg_branch AS (leaf iceberg_leaf, leaves iceberg_leaf[], dates date[]);
+CREATE TABLE iceberg_type_source (
+    id integer, dates date[], times time[], stamps timestamp[], zoned timestamptz[],
+    decimals numeric(12,2)[], ids uuid[], blobs bytea[], documents jsonb[], oids oid[],
+    colour iceberg_colour, elapsed interval, positive iceberg_positive,
+    entry iceberg_branch, entries iceberg_branch[], document jsonb,
+    address inet, network cidr, mac macaddr, mac8 macaddr8,
+    bits bit(5), varbits varbit(8), lsn pg_lsn, vector tsvector, query tsquery
+);
+INSERT INTO iceberg_type_source VALUES (
+    1, ARRAY[DATE '1960-01-02', NULL], ARRAY[TIME '12:34:56.123456', NULL],
+    ARRAY[TIMESTAMP '1960-01-02 03:04:05.123456', NULL],
+    ARRAY[TIMESTAMPTZ '2024-01-02 03:04:05.123456+08', NULL],
+    ARRAY[12.34, NULL]::numeric(12,2)[],
+    ARRAY['a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', NULL]::uuid[],
+    ARRAY['\x0001ff', NULL, '\x']::bytea[],
+    ARRAY['{"a":[1,null]}', NULL, 'null']::jsonb[],
+    ARRAY[0, 4294967295, NULL]::oid[], 'red',
+    INTERVAL '2 months -3 days 04:05:06.123456', 7,
+    ROW(ROW(12.34, ARRAY[]::uuid[], ARRAY[1,NULL]::iceberg_positive[], '{"x":1}')::iceberg_leaf,
+        ARRAY[NULL]::iceberg_leaf[], ARRAY[DATE '2000-01-01'])::iceberg_branch,
+    ARRAY[ROW(NULL, ARRAY[]::iceberg_leaf[], ARRAY[]::date[])::iceberg_branch, NULL],
+    '{"nested":{"list":[1,null,"x"]}}',
+    '192.0.2.1/24', '192.0.2.0/24', '08:00:2b:01:02:03', '08:00:2b:01:02:03:04:05',
+    B'10101', B'101', '0/16B6C50', 'cat:1 dog:2', 'cat & dog'
+);
+INSERT INTO iceberg_type_source (id, dates, times, stamps, zoned, decimals, ids, blobs, documents, oids, entries)
+VALUES (2, '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}');
+INSERT INTO iceberg_type_source (id) VALUES (3);
+CREATE TABLE iceberg_type_target (LIKE iceberg_type_source) USING iceberg;
+INSERT INTO iceberg_type_target SELECT * FROM iceberg_type_source;
+SELECT coalesce(a.id, b.id) AS id,
+       to_jsonb(a) IS NOT DISTINCT FROM to_jsonb(b) AS roundtrip
+FROM iceberg_type_source a FULL JOIN iceberg_type_target b USING (id)
+ORDER BY id;
+-- Attribute create/drop/alter events all protect nested composites and arrays.
+\set VERBOSITY terse
+ALTER TYPE iceberg_leaf ADD ATTRIBUTE extra integer;
+ALTER TYPE iceberg_leaf DROP ATTRIBUTE amount;
+ALTER TYPE iceberg_leaf RENAME ATTRIBUTE amount TO total;
+\set VERBOSITY default
+-- Rejected DDL must leave the descriptors and stored values unchanged.
+SET lagodb.query_offload_mode = 'force';
+CREATE TEMP TABLE iceberg_type_output AS
+SELECT a.id, a.entry, b.entries, a.document, a.elapsed
+FROM iceberg_type_target a JOIN iceberg_type_target b USING (id);
+SET lagodb.query_offload_mode = 'off';
+SELECT coalesce(a.id, b.id) AS id,
+       to_jsonb(a) IS NOT DISTINCT FROM to_jsonb(b) AS roundtrip
+FROM iceberg_type_output b FULL JOIN
+    (SELECT id, entry, entries, document, elapsed FROM iceberg_type_source) a USING (id)
+ORDER BY id;
+-- Reuse populated, empty and NULL values across multiple Arrow batches.
+INSERT INTO iceberg_type_target
+SELECT source.* FROM iceberg_type_source source CROSS JOIN generate_series(1, 7000);
+SELECT count(*) = 21003 AND bool_and(to_jsonb(a) IS NOT DISTINCT FROM to_jsonb(b)) AS batch_roundtrip
+FROM iceberg_type_target a JOIN iceberg_type_source b USING (id);
+
+DROP TABLE iceberg_type_output, iceberg_type_target;
+-- Ordinary stored columns do not impose the managed schema restriction.
+ALTER TYPE iceberg_leaf ADD ATTRIBUTE extra integer;
+ALTER TYPE iceberg_leaf DROP ATTRIBUTE extra;
+ALTER TYPE iceberg_leaf RENAME ATTRIBUTE amount TO total;
+DROP TABLE iceberg_type_source;
+DROP TYPE iceberg_branch;
+DROP TYPE iceberg_leaf;
+DROP DOMAIN iceberg_positive;
+DROP TYPE iceberg_colour;
+
+-- 12. Object identity survives search-path and DDL changes.
+CREATE SCHEMA storage_identity_a;
+CREATE SCHEMA storage_identity_b;
+CREATE TABLE storage_identity_a.target (id integer);
+CREATE TABLE storage_identity_b.target (id integer);
+CREATE TABLE storage_identity (
+    object regclass, kind regtype, objects regclass[]
+) USING iceberg;
+SET search_path = storage_identity_a, public;
+INSERT INTO public.storage_identity VALUES (
+    'target'::regclass, 'target'::regtype, ARRAY['target'::regclass, NULL]
+);
+ALTER TABLE storage_identity_a.target RENAME TO renamed;
+SET search_path = storage_identity_b, public;
+SELECT object = 'storage_identity_a.renamed'::regclass
+       AND kind = 'storage_identity_a.renamed'::regtype
+       AND objects = ARRAY['storage_identity_a.renamed'::regclass, NULL] AS object_identity
+FROM public.storage_identity;
+RESET search_path;
+DROP TABLE storage_identity;
+DROP TABLE storage_identity_a.renamed, storage_identity_b.target;
+DROP SCHEMA storage_identity_a, storage_identity_b;
+
+-- 13. Extension-owned hstore supports scalar and array text storage.
+CREATE SCHEMA storage_hstore_extension;
+CREATE EXTENSION hstore WITH SCHEMA storage_hstore_extension;
+CREATE TABLE storage_hstore (
+    value storage_hstore_extension.hstore,
+    entries storage_hstore_extension.hstore[]
+) USING iceberg;
+INSERT INTO storage_hstore VALUES (
+    '"key"=>"value", "absent"=>NULL'::storage_hstore_extension.hstore,
+    ARRAY['"key"=>"value"'::storage_hstore_extension.hstore, NULL]
+);
+SELECT value::text = '"key"=>"value", "absent"=>NULL'::storage_hstore_extension.hstore::text
+       AND entries[1]::text = '"key"=>"value"'::storage_hstore_extension.hstore::text
+       AND entries[2] IS NULL AS hstore_roundtrip
+FROM storage_hstore;
+DROP TABLE storage_hstore;
+DROP EXTENSION hstore;
+DROP SCHEMA storage_hstore_extension;
+
+-- 14. Time storage preserves valid boundaries and rejects end-of-day values.
+CREATE DOMAIN storage_time AS time;
+CREATE TYPE storage_time_record AS (value storage_time);
+CREATE TABLE storage_time_source (
+    id integer, value time, entries storage_time_record[]
+);
+INSERT INTO storage_time_source VALUES
+    (1, '00:00:00', ARRAY[ROW('00:00:00')::storage_time_record]),
+    (2, '23:59:59.999999', ARRAY[ROW('23:59:59.999999')::storage_time_record]),
+    (3, '12:34:56.123456', ARRAY[ROW(NULL)::storage_time_record, NULL]),
+    (4, NULL, NULL);
+CREATE TABLE storage_time_target (LIKE storage_time_source) USING iceberg;
+INSERT INTO storage_time_target SELECT * FROM storage_time_source;
+\set VERBOSITY sqlstate
+INSERT INTO storage_time_target (id, entries)
+VALUES (5, ARRAY[ROW('24:00:00')::storage_time_record]);
+\set VERBOSITY default
+SELECT coalesce(a.id, b.id) AS id,
+       to_jsonb(a) IS NOT DISTINCT FROM to_jsonb(b) AS roundtrip
+FROM storage_time_source a FULL JOIN storage_time_target b USING (id)
+ORDER BY id;
+DROP TABLE storage_time_target, storage_time_source;
+DROP TYPE storage_time_record;
+DROP DOMAIN storage_time;
+RESET lagodb.query_offload_mode;
+
+-- Composite dependencies through a domain over an array use the same guard.
+CREATE TYPE iceberg_domain_leaf AS (amount integer);
+CREATE DOMAIN iceberg_composite_array AS iceberg_domain_leaf[];
+CREATE TABLE iceberg_domain_owner (value iceberg_composite_array) USING iceberg;
+\set VERBOSITY terse
+ALTER TYPE iceberg_domain_leaf RENAME ATTRIBUTE amount TO total;
+\set VERBOSITY default
+DROP TABLE iceberg_domain_owner;
+ALTER TYPE iceberg_domain_leaf RENAME ATTRIBUTE amount TO total;
+DROP DOMAIN iceberg_composite_array;
+DROP TYPE iceberg_domain_leaf;
+
+-- Dependency inspection must not retain locks on unrelated ordinary tables.
+CREATE TYPE iceberg_lock_colour AS ENUM ('red');
+CREATE TABLE iceberg_lock_owner (value iceberg_lock_colour);
+BEGIN;
+ALTER TYPE iceberg_lock_colour RENAME VALUE 'red' TO 'blue';
+SELECT NOT EXISTS (
+    SELECT FROM pg_locks
+    WHERE pid = pg_backend_pid()
+      AND relation = 'iceberg_lock_owner'::regclass
+      AND mode = 'AccessShareLock'
+) AS inspection_lock_released;
+COMMIT;
+DROP TABLE iceberg_lock_owner;
+DROP TYPE iceberg_lock_colour;
+
+RESET client_min_messages;
