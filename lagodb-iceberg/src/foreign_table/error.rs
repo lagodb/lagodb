@@ -36,25 +36,39 @@ pub(crate) enum IcebergFdwError {
         reason: &'static str,
     },
 
-    #[error("the foreign table's REST catalog identity changed after planning")]
+    #[error("the foreign table's catalog identity changed after planning")]
     PlanIdentityChanged,
 
     #[error("the Iceberg table generation or schema changed after planning")]
     PlanSourceChanged,
 
     #[error(
-        "foreign table schema does not match the current Iceberg schema: {detail}"
+        "foreign table schema does not match the selected Iceberg schema: {detail}"
     )]
     SchemaContractMismatch { detail: String },
 
-    #[error("Iceberg FDW requires foreign server TYPE 'rest', found {actual:?}")]
+    #[error(
+        "Iceberg schema ID {schema_id} does not exist in the selected table metadata"
+    )]
+    UnknownSchema { schema_id: i32 },
+
+    #[error(
+        "Iceberg FDW requires foreign server TYPE 'rest' or 'sqlite', found {actual:?}"
+    )]
     InvalidCatalogType { actual: String },
 
     #[error("permission denied for foreign server {server:?}")]
     ServerUsageDenied { server: String },
 
-    #[error("foreign table is read-only")]
-    ReadOnlyTable,
+    #[error(
+        "configuring a SQLite catalog requires pg_read_server_files and pg_write_server_files privileges"
+    )]
+    LocalFileAccessDenied,
+
+    #[error(
+        "cannot UPDATE Iceberg foreign table: column {column:?} maps nanosecond timestamps to PostgreSQL microseconds; rewriting the row would lose precision even if the column is not modified"
+    )]
+    LossyTimestampUpdate { column: String },
 
     #[error(
         "foreign server or user-mapping configuration changed after this writable transaction bound it"
@@ -114,13 +128,13 @@ impl SqlStateError for IcebergFdwError {
             | Self::CatalogBindingChanged => {
                 PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
             }
-            Self::ReadOnlyTable | Self::UnsupportedOperation { .. } => {
+            Self::LossyTimestampUpdate { .. } | Self::UnsupportedOperation { .. } => {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
             }
-            Self::SchemaContractMismatch { .. } => {
+            Self::UnknownSchema { .. } | Self::SchemaContractMismatch { .. } => {
                 PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH
             }
-            Self::ServerUsageDenied { .. } => {
+            Self::ServerUsageDenied { .. } | Self::LocalFileAccessDenied => {
                 PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE
             }
             Self::PlanData(_) | Self::InvalidPlan { .. } => {
