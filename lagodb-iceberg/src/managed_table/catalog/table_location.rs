@@ -3,7 +3,8 @@
 use lagodb_core::catalog::{current_database_name_bytes, get_namespace_name_bytes};
 use lagodb_core::handles::RelationHandle;
 use lagodb_core::object_cleanup::ObjectTreeTarget;
-use lagodb_core::options::{CachedTablespaceOpts, TableOptions, get_tablespace};
+use lagodb_core::options::TableOptions;
+use lagodb_core::storage::tablespace::{TablespaceStorage, TablespaceStorageBinding};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 
 use crate::error::{IcebergError, IcebergResult};
@@ -62,7 +63,8 @@ impl ManagedTableLocation {
 
     /// Resolve the authoritative root for an existing relation.
     pub(crate) fn for_relation(rel: &RelationHandle<'_>) -> IcebergResult<Self> {
-        let Some(tablespace) = get_tablespace(rel.tablespace().resolved_oid())?
+        let Some(tablespace) =
+            TablespaceStorage::resolve(rel.tablespace().resolved_oid())?
         else {
             return Ok(Self::Local(LocalTableRoot::for_relation(rel)?));
         };
@@ -134,7 +136,7 @@ impl ManagedTableLocation {
     }
 
     fn remote_default(
-        tablespace: &CachedTablespaceOpts,
+        tablespace: &TablespaceStorageBinding,
         schema: &str,
         table: &str,
         relation_oid: u32,
@@ -147,7 +149,7 @@ impl ManagedTableLocation {
     }
 
     fn build_remote_cleanup_target(
-        tablespace: &CachedTablespaceOpts,
+        tablespace: &TablespaceStorageBinding,
         location: &str,
     ) -> IcebergResult<ObjectTreeTarget> {
         let object_key_offset =

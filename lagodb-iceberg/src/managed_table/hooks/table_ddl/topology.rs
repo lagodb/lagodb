@@ -1,4 +1,8 @@
-//! Iceberg partitioned tables cannot participate in PostgreSQL inheritance.
+//! Iceberg tables cannot participate in PostgreSQL declarative partitioning.
+//! Provider-owned partitioned roots describe Iceberg's internal partitioning;
+//! they cannot have PG partition or inheritance relationships. Ordinary
+//! Iceberg tables retain normal INHERITS support: COPY targets the named table
+//! rather than routing rows to inheritance children.
 //!
 //! PostgreSQL's StoreCatalogInheritance1() emits pg_inherits OAT_POST_ALTER after
 //! acquiring the parent/child locks and recording the relationship, but before
@@ -29,28 +33,50 @@ impl IcebergPartitionTopologyGuard {
     const CHILD_ATTRIBUTE: pg_sys::AttrNumber = 1;
     const PARENT_ATTRIBUTE: pg_sys::AttrNumber = 2;
 
-    fn is_managed_partitioned_table(
-        oid: pg_sys::Oid,
-    ) -> Result<bool, ObjectAccessHookError> {
+    fn rejection_reason(
+        child: pg_sys::Oid,
+        parent: pg_sys::Oid,
+    ) -> Result<Option<&'static str>, ObjectAccessHookError> {
         // The event can precede a command-counter increment, including during
         // CREATE. PostgreSQL holds the target locks and both relations exist.
-        let relation = RelationCatalogEntry::find(oid, CatalogSnapshot::SelfVisible)?
+        let child = RelationCatalogEntry::find(child, CatalogSnapshot::SelfVisible)?
             .expect("PostgreSQL inheritance event identifies a live relation");
-        Ok(
-            relation.relkind() as u8 == pg_sys::RELKIND_PARTITIONED_TABLE
-                && IcebergAccessMethod::matches_oid(relation.access_method_oid()),
-        )
+        let parent =
+            RelationCatalogEntry::find(parent, CatalogSnapshot::SelfVisible)?
+                .expect("PostgreSQL inheritance event identifies a live relation");
+        let child_is_iceberg =
+            IcebergAccessMethod::matches_oid(child.access_method_oid());
+        let parent_is_iceberg =
+            IcebergAccessMethod::matches_oid(parent.access_method_oid());
+        let child_is_partitioned =
+            child.relkind() as u8 == pg_sys::RELKIND_PARTITIONED_TABLE;
+        let parent_is_partitioned =
+            parent.relkind() as u8 == pg_sys::RELKIND_PARTITIONED_TABLE;
+
+        if (child_is_iceberg && child_is_partitioned)
+            || (parent_is_iceberg && parent_is_partitioned)
+        {
+            return Ok(Some(
+                "Iceberg partitioned tables cannot participate in PostgreSQL partition or inheritance relationships",
+            ));
+        }
+        // A declarative partition's parent already has this relkind when
+        // pg_inherits is recorded; the child's relispartition is set later.
+        if child_is_iceberg && parent_is_partitioned {
+            return Ok(Some(
+                "Iceberg tables cannot be PostgreSQL partition children",
+            ));
+        }
+        Ok(None)
     }
 
     fn validate(
         child: pg_sys::Oid,
         parent: pg_sys::Oid,
     ) -> Result<(), ObjectAccessHookError> {
-        if !Self::is_managed_partitioned_table(child)?
-            && !Self::is_managed_partitioned_table(parent)?
-        {
+        let Some(reason) = Self::rejection_reason(child, parent)? else {
             return Ok(());
-        }
+        };
 
         // Removal also emits OAT_POST_ALTER with the same identifiers. Inspect
         // the command's own catalog changes so unlinking a relation is allowed.
@@ -72,7 +98,7 @@ impl IcebergPartitionTopologyGuard {
             if inherited_parent.value() == u32::from(parent) as usize {
                 return Err(HookError::with_code(
                     PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                    "Iceberg partitioned tables cannot participate in PostgreSQL partition or inheritance relationships",
+                    reason,
                 ));
             }
         }

@@ -47,7 +47,6 @@ impl<'a> ManagedTableCreation<'a> {
 
         IcebergMetadata::new(rel.oid())
             .with_metadata_location(metadata_location)
-            .with_default_spec_id(0)
             .insert()?;
         if let Some(file_io) = local_file_io {
             TxMetadata::current().record_local_rebuild(rel.oid(), &file_io);

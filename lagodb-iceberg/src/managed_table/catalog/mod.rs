@@ -5,20 +5,18 @@ pub(crate) mod local_storage;
 pub mod metadata_table;
 pub mod metadata_tracker;
 pub(crate) mod schema_evolution;
+mod sql_api;
 pub(crate) mod table_creation;
 pub(crate) mod table_drop;
 pub(crate) mod table_location;
 pub(crate) mod table_properties;
 pub(crate) mod table_truncate;
 
-// `schema_builder` is intentionally crate-private: PostgreSQL → Iceberg type
-// conversion has exactly one supported entry point, [`schema_builder::tuple_desc_to_schema`].
-// Keeping the module itself private (and `PgType` / `SchemaBuilder` along
-// with it) means the "single field-id counter" invariant is enforced by the
-// type system rather than by a doc comment. The only consumer,
-// `table_creation`, is a sibling module and reaches in via `super::`.
+// Managed type policy and schema construction remain provider-owned.
+pub(crate) mod numeric_type;
 mod schema_builder;
 pub(crate) mod table_definition;
+mod type_mapping;
 
 // AM identity is the one cross-cutting concept every layer of this crate
 // reaches for, so it is the only re-export hoisted to the `catalog` facade.

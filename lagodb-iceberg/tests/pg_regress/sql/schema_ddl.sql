@@ -305,6 +305,24 @@ SELECT count(*) AS rows,
        bool_and(must_keep IS NOT NULL) AS must_keep_not_null
 FROM schema_evolution_savepoint_t;
 
+-- Type defaults require the same old-file backfill as an explicit DEFAULT.
+CREATE DOMAIN schema_default_int AS integer DEFAULT 7;
+CREATE DOMAIN schema_default_child AS schema_default_int;
+CREATE TABLE schema_domain_default_t (
+    id integer, created_value schema_default_int
+) USING iceberg;
+-- Empty tables and inherited domain defaults follow the same admission policy.
+ALTER TABLE schema_domain_default_t ADD COLUMN added_value schema_default_child;
+INSERT INTO schema_domain_default_t (id) VALUES (1);
+ALTER TABLE schema_domain_default_t ADD COLUMN added_value schema_default_int;
+-- Removing the type default makes ADD COLUMN valid; CREATE/INSERT kept it.
+ALTER DOMAIN schema_default_int DROP DEFAULT;
+ALTER TABLE schema_domain_default_t ADD COLUMN added_value schema_default_int;
+SELECT id = 1 AND created_value = 7 AND added_value IS NULL AS domain_defaults
+FROM schema_domain_default_t;
+DROP TABLE schema_domain_default_t;
+DROP DOMAIN schema_default_child, schema_default_int;
+
 ALTER TABLE schema_evolution_t ADD COLUMN bad_required integer NOT NULL;
 ALTER TABLE schema_evolution_t ADD COLUMN bad_default integer DEFAULT 1;
 ALTER TABLE schema_evolution_t ADD COLUMN bad_identity integer GENERATED ALWAYS AS IDENTITY;
@@ -362,4 +380,40 @@ SELECT count(*) AS rows_after_rejected_dependency_drop
 FROM schema_dependency_drop_guard.dependency_t;
 
 DROP SCHEMA schema_dependency_drop_guard CASCADE;
+
+-- Enum labels are stored as text; ADD VALUE preserves existing data.
+CREATE TYPE storage_label AS ENUM ('red', 'green');
+CREATE TABLE storage_label_heap (value storage_label);
+INSERT INTO storage_label_heap VALUES ('red');
+CREATE TABLE storage_label_direct (value storage_label) USING iceberg;
+INSERT INTO storage_label_direct VALUES ('red');
+ALTER TYPE storage_label ADD VALUE 'blue';
+INSERT INTO storage_label_direct VALUES ('blue');
+
+-- Both direct and nested managed columns must prevent label renames.
+ALTER TYPE storage_label RENAME VALUE 'red' TO 'scarlet';
+SELECT value FROM storage_label_direct ORDER BY value;
+DROP TABLE storage_label_direct;
+
+-- A heap dependency alone does not restrict native enum DDL.
+ALTER TYPE storage_label RENAME VALUE 'red' TO 'scarlet';
+SELECT value FROM storage_label_heap;
+CREATE DOMAIN storage_label_domain AS storage_label;
+CREATE TYPE storage_label_record AS (labels storage_label_domain[]);
+CREATE TABLE storage_label_nested (records storage_label_record[]) USING iceberg;
+INSERT INTO storage_label_nested VALUES (
+    ARRAY[ROW(ARRAY['scarlet'::storage_label_domain, NULL])::storage_label_record, NULL]
+);
+ALTER TYPE storage_label RENAME VALUE 'scarlet' TO 'crimson';
+SELECT (records[1]).labels AS labels FROM storage_label_nested;
+DROP TABLE storage_label_nested;
+
+-- Unused domain/composite types do not prevent a rename either.
+ALTER TYPE storage_label RENAME VALUE 'scarlet' TO 'crimson';
+SELECT value FROM storage_label_heap;
+DROP TYPE storage_label_record;
+DROP DOMAIN storage_label_domain;
+DROP TABLE storage_label_heap;
+DROP TYPE storage_label;
+
 DROP EXTENSION lagodb_iceberg CASCADE;

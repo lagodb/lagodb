@@ -2,6 +2,7 @@
 
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION lagodb_iceberg;
+SET client_min_messages = notice;
 
 -- UNLOGGED disables Iceberg file WAL while retaining ordinary transaction
 -- and cleanup behavior, including partitioned tables and the default AM.
@@ -289,6 +290,100 @@ SELECT pg_stat_file(:'original_location', true) IS NULL
            AS recreated_storage_preserved;
 DROP TABLE iceberg_identity_test;
 
+-- Numeric normalization for LIKE sources and inherited columns.
+-- Basic LIKE preserves column order and metadata, skipping dropped attributes.
+CREATE DOMAIN ddl_positive_numeric AS double precision CHECK (VALUE > 0);
+CREATE TYPE ddl_numeric_member AS (amount ddl_positive_numeric, exact numeric(12,2));
+CREATE TABLE ddl_source (
+    gone integer, amount numeric NOT NULL DEFAULT 7, exact numeric(12,2),
+    amounts numeric[], member ddl_numeric_member, label text COLLATE "C"
+);
+ALTER TABLE ddl_source DROP COLUMN gone;
+CREATE TABLE ddl_suffix_source (suffix numeric);
+CREATE TABLE ddl_copied (
+    head integer, LIKE ddl_source, LIKE ddl_suffix_source, tail boolean
+) USING iceberg;
+
+INSERT INTO ddl_copied VALUES (1, 2.5, 3.25, ARRAY[4.5,NULL], '(5.5,6.25)', 'text', 7.5, true);
+SELECT * FROM ddl_copied;
+
+SELECT attname,
+       CASE WHEN attname = 'member' THEN 'composite'
+            ELSE format_type(atttypid, atttypmod) END AS type,
+       attnotnull, atthasdef, attcollation = '"C"'::regcollation AS c_collation
+FROM pg_attribute
+WHERE attrelid = 'ddl_copied'::regclass AND attnum > 0 AND NOT attisdropped
+ORDER BY attnum;
+
+-- Compatible composite members retain their declared domain identity.
+SELECT pg_typeof((member).amount) AS member_type FROM ddl_copied;
+
+SELECT attname, format_type(atttypid, atttypmod) AS type
+FROM pg_attribute
+WHERE attrelid = 'ddl_source'::regclass AND attname IN ('amount', 'member')
+ORDER BY attnum;
+
+-- A standalone composite is also a valid LIKE source.
+CREATE TABLE ddl_copied_type (LIKE ddl_numeric_member) USING iceberg;
+
+INSERT INTO ddl_copied_type VALUES (8.5, 9.25);
+SELECT * FROM ddl_copied_type;
+
+-- Unchanged INCLUDING clauses retain PG's deferred default/generated processing.
+CREATE TABLE ddl_stable_source (
+    base integer NOT NULL DEFAULT 4 CHECK (base > 0),
+    doubled integer GENERATED ALWAYS AS (base * 2) STORED
+);
+COMMENT ON COLUMN ddl_stable_source.base IS 'copied comment';
+CREATE TABLE ddl_stable_copy (
+    LIKE ddl_stable_source INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS INCLUDING COMMENTS
+) USING iceberg;
+INSERT INTO ddl_stable_copy DEFAULT VALUES;
+SELECT base, doubled, col_description('ddl_stable_copy'::regclass, 1) AS comment
+FROM ddl_stable_copy;
+
+-- IF NOT EXISTS must skip both source lookups when the target already exists.
+CREATE TABLE IF NOT EXISTS ddl_copied (LIKE missing_like_source)
+INHERITS (missing_parent) USING iceberg;
+
+CREATE TABLE ddl_parent_ok (amount double precision);
+CREATE TABLE ddl_child_ok (local_amount numeric) INHERITS (ddl_parent_ok) USING iceberg;
+
+INSERT INTO ddl_child_ok VALUES (10.5, 11.5);
+SELECT * FROM ONLY ddl_child_ok;
+
+-- Reject a violated copied CHECK and unsupported DDL/type combinations.
+CREATE TABLE ddl_parent_numeric (amount numeric);
+CREATE DOMAIN ddl_unbounded_numeric AS numeric;
+CREATE TYPE ddl_incompatible_member AS (amount ddl_unbounded_numeric[]);
+CREATE DOMAIN ddl_incompatible_array AS ddl_incompatible_member[];
+\set VERBOSITY sqlstate
+INSERT INTO ddl_stable_copy(base) VALUES (-1);
+
+CREATE TABLE ddl_rejected_child () INHERITS (ddl_parent_numeric) USING iceberg;
+
+CREATE TABLE ddl_rejected_copy (LIKE ddl_source INCLUDING DEFAULTS) USING iceberg;
+
+-- Composite definitions must already fit Iceberg; DDL never replaces their types.
+CREATE TABLE ddl_rejected_composite (member ddl_incompatible_array) USING iceberg;
+
+ALTER TABLE ddl_copied ADD COLUMN rejected ddl_incompatible_member;
+
+-- Type I/O functions alone do not establish a supported storage encoding.
+CREATE TABLE ddl_unsupported_type (value money) USING iceberg;
+
+\set VERBOSITY default
+SELECT to_regclass('ddl_rejected_child') IS NULL AS no_child,
+       to_regclass('ddl_rejected_copy') IS NULL AS no_copy;
+
+DROP TABLE ddl_child_ok, ddl_parent_ok, ddl_parent_numeric,
+    ddl_stable_copy, ddl_stable_source, ddl_copied_type, ddl_copied,
+    ddl_suffix_source, ddl_source;
+DROP TYPE ddl_numeric_member;
+DROP DOMAIN ddl_positive_numeric, ddl_incompatible_array;
+DROP TYPE ddl_incompatible_member;
+DROP DOMAIN ddl_unbounded_numeric;
+
 -- ============================================================================
 -- Clean up: Verify no orphaned entries remain
 -- ============================================================================
@@ -320,4 +415,6 @@ TRUNCATE dml_lifecycle.after_ctas_t;
 
 SET client_min_messages = warning;
 DROP SCHEMA dml_lifecycle CASCADE;
+SET client_min_messages = notice;
+
 RESET client_min_messages;

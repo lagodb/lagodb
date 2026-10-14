@@ -9,6 +9,8 @@
 //!   `ALTER TABLE ALL IN TABLESPACE`).
 //!   Its topology guard uses pg_inherits object-access events under PG's locks
 //!   to keep managed partitioned tables out of PostgreSQL partition hierarchies.
+//! - `enum_ddl` — prevents label renames while managed columns depend on the
+//!   enum's text representation, including through native containers.
 //! - `database_storage_policy` — rejects database-template cloning and
 //!   database-default tablespace moves that would duplicate or strand managed
 //!   Iceberg storage.
@@ -23,19 +25,18 @@
 //! module only routes PostgreSQL hook events into those parsers and into the
 //! Iceberg catalog.
 
-use lagodb_core::access::mutation;
-
 mod column_drop_guard;
 mod copy;
 mod database_storage_inventory;
 mod database_storage_policy;
+mod enum_ddl;
 pub mod object_access;
 pub mod table_ddl;
 
 pub fn init_hooks() {
-    mutation::init_lifecycle_hooks();
     copy::init();
     database_storage_policy::init_hook();
     table_ddl::init_hook();
+    enum_ddl::init_hook();
     object_access::init_hook();
 }

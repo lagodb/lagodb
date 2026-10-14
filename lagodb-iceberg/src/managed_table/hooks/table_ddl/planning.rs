@@ -296,6 +296,12 @@ impl AlterTableIcebergOperations {
                 continue;
             }
 
+            // CREATE TABLE LIKE expands copied defaults, generated expressions,
+            // and CHECK constraints into internal ALTER subcommands. PG owns
+            // their installation on the new table; they are not schema evolution.
+            if unsafe { Self::is_create_table_expansion(&*cmd) } {
+                continue;
+            }
             let (subtype, name_ptr) = unsafe { ((*cmd).subtype, (*cmd).name) };
             match subtype {
                 pg_sys::AlterTableType::AT_SetAccessMethod => {
@@ -336,8 +342,7 @@ impl AlterTableIcebergOperations {
                         schema_plan.push(AlterTableSchemaPass::Drop, idx, op);
                     }
                 }
-                pg_sys::AlterTableType::AT_ColumnDefault
-                | pg_sys::AlterTableType::AT_CookedColumnDefault => {
+                pg_sys::AlterTableType::AT_ColumnDefault => {
                     result.require_lock(pg_sys::AccessExclusiveLock as _);
                     result.reject_schema_operation(
                         "ALTER COLUMN SET/DROP DEFAULT is not supported for Iceberg relations",
@@ -392,6 +397,22 @@ impl AlterTableIcebergOperations {
 
         result.schema_update = schema_plan.into_update();
         result
+    }
+
+    /// The command must be a live PostgreSQL ALTER subcommand. In PG17's
+    /// expandTableLikeClause, copied CHECK constraints carry cooked_expr;
+    /// user-written ADD CONSTRAINT carries raw_expr instead.
+    unsafe fn is_create_table_expansion(command: &pg_sys::AlterTableCmd) -> bool {
+        match command.subtype {
+            pg_sys::AlterTableType::AT_CookedColumnDefault => true,
+            pg_sys::AlterTableType::AT_AddConstraint => {
+                let constraint =
+                    unsafe { &*command.def.cast::<pg_sys::Constraint>() };
+                constraint.contype == pg_sys::ConstrType::CONSTR_CHECK
+                    && !constraint.cooked_expr.is_null()
+            }
+            _ => false,
+        }
     }
 
     fn require_lock(&mut self, lockmode: pg_sys::LOCKMODE) {
@@ -466,6 +487,8 @@ impl AlterTableIcebergOperations {
             );
             return None;
         }
+        // Type-level defaults are checked by ManagedColumnTypes::alter after
+        // resolving the declaration and confirming the relation uses Iceberg.
         if !coldef.raw_default.is_null() || !coldef.cooked_default.is_null() {
             self.reject_schema_operation(
                 "ALTER TABLE ADD COLUMN with DEFAULT is not supported for Iceberg relations",

@@ -5,6 +5,7 @@ mod database;
 mod ids;
 mod relation;
 mod syscache;
+mod type_dependencies;
 
 pub use access::{
     CatalogOrderedScan, CatalogRelation, CatalogScan, CatalogScanKey,
@@ -21,6 +22,7 @@ pub(crate) use syscache::search_syscache2;
 pub use syscache::{
     SysCacheTuple, SysCacheTupleCopy, search_syscache_copy, search_syscache1,
 };
+pub use type_dependencies::TypeDependencies;
 
 use crate::diag::PgError;
 use crate::wrapper::PgWrapper;

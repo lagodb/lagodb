@@ -1,7 +1,5 @@
-use crate::error::IcebergError;
 use crate::managed_table::IcebergTableAm;
 use crate::managed_table::catalog::table_truncate::ManagedTableTruncate;
-use lagodb_core::options::get_tablespace;
 use lagodb_core::prelude::*;
 use pgrx::pg_sys;
 
@@ -16,16 +14,13 @@ impl AmDdl for IcebergTableAm {
         newrlocator: &RelFileLocator,
         persistence: u8,
     ) -> AmResult<(pg_sys::TransactionId, pg_sys::MultiXactId)> {
-        if get_tablespace(rel.tablespace().resolved_oid())
-            .map_err(IcebergError::from)?
-            .is_none()
-        {
-            // Create the native main fork for PG locator ownership and abort
-            // cleanup. Intentionally omit an init fork for UNLOGGED: Iceberg
-            // uses that persistence only to disable file WAL, without PG's
-            // crash-time reset. See StorageContext's UNLOGGED contract.
-            newrlocator.create_storage(persistence)?;
-        }
+        // Ordinary tables own a native main fork in either storage placement.
+        // Its presence protects the tablespace before CREATE commits. PG owns
+        // abort cleanup, DROP deletion and TRUNCATE locator replacement; the AM
+        // must not unlink this file itself. Object data remains remote.
+        // Intentionally omit an init fork for UNLOGGED: see StorageContext's
+        // UNLOGGED contract. Partitioned roots do not enter this PG callback.
+        newrlocator.create_storage(persistence)?;
         if !rel.is_being_created_in_current_subtransaction() {
             ManagedTableTruncate::execute(rel, Some(*newrlocator))?;
         }

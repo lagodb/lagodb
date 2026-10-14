@@ -1,3 +1,5 @@
+mod column_sources;
+mod column_types;
 mod index;
 mod planning;
 mod topology;
@@ -13,6 +15,7 @@ use lagodb_core::catalog::{
     CatalogRelation, CatalogScanKey, CatalogSnapshot, get_tablespace_oid,
     range_var_get_relid,
 };
+use lagodb_core::diag::PgReportError;
 use lagodb_core::handles::RelationGuard;
 use lagodb_core::hooks::{
     AlterTableMoveAllStmtNode, AlterTableStmtNode, CreateStmtNode,
@@ -21,10 +24,12 @@ use lagodb_core::hooks::{
     register_utility_hook,
 };
 use lagodb_core::options::{TableOptionAlterations, TableOptions};
-use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
+use pgrx::{PgTryBuilder, pg_sys};
 use std::ffi::CStr;
+use std::panic::AssertUnwindSafe;
 
+use self::column_types::ManagedColumnTypes;
 use self::index::IcebergPartitionedTableIndexGuard;
 use self::planning::{
     AlterTableIcebergOperations, IcebergStmtProbe, SchemaEvolutionTarget,
@@ -66,6 +71,7 @@ impl UtilityHook for IcebergTableHook {
             ));
         }
 
+        ManagedColumnTypes::create(stmt)?;
         TableOptions::extract_from_stmt(stmt, ICEBERG_TABLE_OPTIONS)?;
         Ok(())
     }
@@ -174,8 +180,14 @@ impl UtilityHook for IcebergAlterTableGuard {
             return Ok(());
         }
 
-        let oid =
-            unsafe { range_var_get_relid(stmt.relation, ops.lockmode(), true) }?;
+        // Use PG's ALTER lookup callback: ownership and relation-kind checks
+        // precede waiting for the DDL lock, including for ordinary heap tables.
+        let oid = PgTryBuilder::new(AssertUnwindSafe(|| {
+            // SAFETY: the utility dispatcher supplies a live AlterTableStmt.
+            Ok(unsafe { pg_sys::AlterTableLookupRelation(stmt, ops.lockmode()) })
+        }))
+        .catch_others(|error| Err(PgReportError::from_caught(error)))
+        .execute()?;
         if oid == pg_sys::InvalidOid {
             return Ok(());
         }
@@ -208,6 +220,7 @@ impl UtilityHook for IcebergAlterTableGuard {
                     message,
                 ));
             }
+            ManagedColumnTypes::alter(stmt.cmds)?;
             if !ops.schema_update.is_empty() {
                 let Some(target) = SchemaEvolutionTarget::resolve(
                     &rel,
@@ -297,9 +310,6 @@ impl IcebergRenameColumnHook {
         if stmt.renameType != pg_sys::ObjectType::OBJECT_COLUMN {
             return None;
         }
-        if stmt.relation.is_null() {
-            return None;
-        }
 
         let old_name = optional_string_from_ptr(stmt.subname)?;
         let new_name = optional_string_from_ptr(stmt.newname)?;
@@ -313,9 +323,7 @@ impl IcebergRenameColumnHook {
         stmt: &pg_sys::RenameStmt,
         lookup_lockmode: pg_sys::LOCKMODE,
     ) -> Result<Option<RelationGuard>, UtilityHookError> {
-        if stmt.renameType != pg_sys::ObjectType::OBJECT_COLUMN
-            || stmt.relation.is_null()
-        {
+        if stmt.renameType != pg_sys::ObjectType::OBJECT_COLUMN {
             return Ok(None);
         }
 

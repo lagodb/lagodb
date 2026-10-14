@@ -96,6 +96,19 @@ CREATE TABLE partitioned_ddl.root_index_t_child
 PARTITION OF partitioned_ddl.root_index_t
 FOR VALUES IN ('east') USING heap;
 
+-- Ordinary Iceberg tables cannot be PostgreSQL declarative partition children.
+CREATE TABLE partitioned_ddl.native_topology_root (id integer)
+PARTITION BY RANGE (id) USING heap;
+CREATE TABLE partitioned_ddl.iceberg_topology_t (id integer) USING iceberg;
+\set VERBOSITY terse
+ALTER TABLE partitioned_ddl.native_topology_root
+ATTACH PARTITION partitioned_ddl.iceberg_topology_t
+FOR VALUES FROM (0) TO (10);
+\set VERBOSITY default
+SELECT count(*) AS inherited_edges FROM pg_inherits
+WHERE inhrelid = 'partitioned_ddl.iceberg_topology_t'::regclass
+   OR inhparent = 'partitioned_ddl.iceberg_topology_t'::regclass;
+
 SET client_min_messages = warning;
 DROP SCHEMA partitioned_ddl CASCADE;
 RESET client_min_messages;
