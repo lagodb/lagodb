@@ -1,31 +1,30 @@
-//! Transaction-local state and post-commit publication for writable REST tables.
+//! Transaction-local state and post-commit publication for writable Iceberg tables.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::mem;
 use std::rc::Rc;
-use std::sync::Arc;
 
-use iceberg_lite::catalog::rest::{PreparedRestCommit, RestCatalog};
-use iceberg_lite::overlay::{DeleteFileIdentity, SnapshotDelta};
-use iceberg_lite::spec::DataFile;
 use iceberg_lite::table::Table;
-use iceberg_lite::transaction::{
-    PreparedTransaction, RowDeltaValidation, Transaction,
-};
+use iceberg_lite::transaction::{PreparedTransaction, Transaction};
 use lagodb_core::diag::{PgReportError, error_source_chain_detail, report_warning};
 use lagodb_core::transaction::{self, TransactionResource, TransactionResult};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
+use super::catalog::{ForeignCatalog, PreparedCatalogCommit};
 use super::error::IcebergFdwError;
-use super::options::{CatalogBindingKey, CatalogRuntimeConfig, ServerBindingKey};
-use super::relation::{RemoteTableKey, ResolvedCatalogBinding, RestForeignTable};
+use super::options::{CatalogRuntimeConfig, ServerBindingKey};
+use super::relation::{IcebergForeignTable, RemoteTableKey, ResolvedCatalogBinding};
 use crate::error::{IcebergError, IcebergResult};
 use crate::write::{
     ExclusiveTransactionAction, RelationRowRegistry, TableTransactionState,
+    TxWriteBatch,
 };
+
+mod read;
+pub(crate) use read::ForeignTableView;
 
 type ForeignTableTransaction = TableTransactionState<NoExclusiveAction, ()>;
 
@@ -72,37 +71,29 @@ impl ForeignTableState {
 
 #[derive(Debug)]
 struct CatalogBinding {
-    catalog: RestCatalog,
+    catalog: ForeignCatalog,
+    runtime_config: CatalogRuntimeConfig,
     tables: HashMap<RemoteTableKey, ForeignTableState>,
 }
 
 #[derive(Debug, Default)]
 struct ForeignTransactionInner {
-    server_configs: HashMap<ServerBindingKey, CatalogRuntimeConfig>,
     // Multiple immutable catalog bindings are deliberately supported. Each
-    // binding gets one atomic REST transaction request, but bindings publish
+    // binding gets one atomic catalog transaction, but bindings publish
     // independently after PostgreSQL commits; a later publication failure does
     // not roll back an earlier catalog. This is part of the current best-effort
     // post-commit contract, not cross-catalog atomicity.
-    catalogs: HashMap<CatalogBindingKey, CatalogBinding>,
+    catalogs: HashMap<ServerBindingKey, CatalogBinding>,
     prepared: Vec<PreparedPublication>,
 }
 
 #[derive(Debug)]
 struct PreparedPublication {
-    catalog: RestCatalog,
-    request: PreparedRestCommit,
+    request: PreparedCatalogCommit,
     targets: String,
 }
 
-/// A table plus the file overlay visible to a statement in this backend.
-pub(crate) struct ForeignTableView {
-    pub(crate) key: RemoteTableKey,
-    pub(crate) table: Table,
-    pub(crate) delta: Option<Arc<SnapshotDelta>>,
-}
-
-/// One top-level PostgreSQL transaction's writable REST catalog state.
+/// One top-level PostgreSQL transaction's writable Iceberg catalog state.
 #[derive(Debug)]
 pub(crate) struct ForeignTransaction {
     inner: RefCell<ForeignTransactionInner>,
@@ -130,98 +121,36 @@ impl ForeignTransaction {
         })
     }
 
-    /// Resolve an ordinary scan against transaction-local actions when present.
-    pub(crate) fn scan_view(
-        resolved: RestForeignTable,
-    ) -> Result<ForeignTableView, IcebergFdwError> {
-        CURRENT.with(|slot| {
-            let tracker = slot.borrow().as_ref().map(Rc::clone);
-            match tracker {
-                Some(tracker) => tracker.overlay(resolved),
-                None => {
-                    let (key, _binding, table) = resolved.into_parts();
-                    Ok(ForeignTableView {
-                        key,
-                        table,
-                        delta: None,
-                    })
-                }
-            }
-        })
-    }
-
     /// Enroll a writable table before any object is produced.
     pub(crate) fn begin_write(
-        resolved: RestForeignTable,
+        resolved: IcebergForeignTable,
+        read_command_id: Option<pg_sys::CommandId>,
     ) -> Result<ForeignTableView, IcebergFdwError> {
-        if !resolved.identity().mode().is_writable() {
-            return Err(IcebergFdwError::ReadOnlyTable);
-        }
         let tracker = Self::current();
-        tracker.attach_write(resolved)
-    }
-
-    /// Reject a changed server/user-mapping binding before a catalog client is
-    /// constructed or any remote table metadata is loaded.
-    pub(crate) fn validate_runtime_binding(
-        server_key: &ServerBindingKey,
-        runtime_config: &CatalogRuntimeConfig,
-    ) -> Result<(), IcebergFdwError> {
-        CURRENT.with(|slot| {
-            let tracker = slot.borrow().as_ref().map(Rc::clone);
-            if let Some(tracker) = tracker
-                && tracker
-                    .inner
-                    .borrow()
-                    .server_configs
-                    .get(server_key)
-                    .is_some_and(|frozen| frozen != runtime_config)
-            {
-                return Err(IcebergFdwError::CatalogBindingChanged);
-            }
-            Ok(())
-        })
+        tracker.attach_write(resolved, read_command_id)
     }
 
     fn attach_write(
         &self,
-        resolved: RestForeignTable,
+        resolved: IcebergForeignTable,
+        read_command_id: Option<pg_sys::CommandId>,
     ) -> Result<ForeignTableView, IcebergFdwError> {
         let (key, binding, table) = resolved.into_parts();
         let mut inner = self.inner.borrow_mut();
-        if key.catalog_binding() != &binding.key {
-            return Err(IcebergError::InvariantViolated(
-                "foreign table and resolved catalog binding disagree",
-            )
-            .into());
-        }
         Self::validate_binding(&inner, &binding)?;
-        if !inner.server_configs.contains_key(&binding.server_key) {
-            inner
-                .server_configs
-                .insert(binding.server_key.clone(), binding.runtime_config.clone());
-        }
         inner
             .catalogs
             .entry(binding.key)
             .or_insert_with(|| CatalogBinding {
                 catalog: binding.catalog,
+                runtime_config: binding.runtime_config,
                 tables: HashMap::new(),
             })
             .tables
             .entry(key.clone())
             .or_insert_with(|| ForeignTableState::new(table.clone()));
         drop(inner);
-        self.overlay_parts(key, table)
-    }
-
-    fn overlay(
-        &self,
-        resolved: RestForeignTable,
-    ) -> Result<ForeignTableView, IcebergFdwError> {
-        let (key, binding, table) = resolved.into_parts();
-        Self::validate_binding(&self.inner.borrow(), &binding)?;
-        self.overlay_parts(key, table)
+        self.overlay_parts(key, table, read_command_id)
     }
 
     fn validate_binding(
@@ -229,48 +158,13 @@ impl ForeignTransaction {
         binding: &ResolvedCatalogBinding,
     ) -> Result<(), IcebergFdwError> {
         if inner
-            .server_configs
-            .get(&binding.server_key)
-            .is_some_and(|config| config != &binding.runtime_config)
+            .catalogs
+            .get(&binding.key)
+            .is_some_and(|frozen| frozen.runtime_config != binding.runtime_config)
         {
             return Err(IcebergFdwError::CatalogBindingChanged);
         }
         Ok(())
-    }
-
-    fn overlay_parts(
-        &self,
-        key: RemoteTableKey,
-        table: Table,
-    ) -> Result<ForeignTableView, IcebergFdwError> {
-        let actions = self
-            .inner
-            .borrow()
-            .catalogs
-            .get(key.catalog_binding())
-            .and_then(|binding| binding.tables.get(&key))
-            .map(|state| Rc::clone(&state.transaction.actions));
-        let Some(actions) = actions else {
-            return Ok(ForeignTableView {
-                key,
-                table,
-                delta: None,
-            });
-        };
-        let metadata = actions.overlay_metadata(table.metadata().clone())?;
-        let delta = actions.combined_delta()?;
-        let mut builder = Table::builder()
-            .identifier(table.identifier().clone())
-            .file_io(table.file_io().clone())
-            .metadata(metadata);
-        if let Some(location) = table.metadata_location() {
-            builder = builder.metadata_location(location.to_owned());
-        }
-        Ok(ForeignTableView {
-            key,
-            table: builder.build()?,
-            delta,
-        })
     }
 
     pub(crate) fn row_registry(
@@ -292,44 +186,12 @@ impl ForeignTransaction {
             ))
     }
 
-    pub(crate) fn stage_data_files(
+    pub(crate) fn stage_batch(
         key: &RemoteTableKey,
-        files: Vec<DataFile>,
+        batch: TxWriteBatch,
     ) -> IcebergResult<()> {
         Self::stage(key, |transaction, level| {
-            transaction.record_data_files(level, files)
-        })
-    }
-
-    pub(crate) fn stage_position_delete_file(
-        key: &RemoteTableKey,
-        delete_file: DataFile,
-        referenced_data_files: Vec<String>,
-    ) -> IcebergResult<()> {
-        Self::stage(key, |transaction, level| {
-            transaction.record_position_delete_file(
-                level,
-                delete_file,
-                referenced_data_files,
-            )
-        })
-    }
-
-    pub(crate) fn stage_remove_delete_file(
-        key: &RemoteTableKey,
-        identity: DeleteFileIdentity,
-    ) -> IcebergResult<()> {
-        Self::stage(key, |transaction, level| {
-            transaction.record_remove_delete_file(level, identity)
-        })
-    }
-
-    pub(crate) fn stage_validation(
-        key: &RemoteTableKey,
-        validation: RowDeltaValidation,
-    ) -> IcebergResult<()> {
-        Self::stage(key, |transaction, level| {
-            transaction.record_validation(level, validation)
+            transaction.record_batch(level, batch)
         })
     }
 
@@ -390,14 +252,12 @@ impl ForeignTransaction {
         let mut groups = groups;
         groups.sort_unstable_by(|left, right| {
             (
-                u32::from(left.0.server.server_oid),
-                u32::from(left.0.server.effective_user),
-                &left.0.catalog_name,
+                u32::from(left.0.server_oid),
+                u32::from(left.0.effective_user),
             )
                 .cmp(&(
-                    u32::from(right.0.server.server_oid),
-                    u32::from(right.0.server.effective_user),
-                    &right.0.catalog_name,
+                    u32::from(right.0.server_oid),
+                    u32::from(right.0.effective_user),
                 ))
         });
         let mut prepared = Vec::with_capacity(groups.len());
@@ -413,7 +273,7 @@ impl ForeignTransaction {
                 let plan = actions.commit_plan()?;
                 let transaction = plan
                     .apply_to_transaction(Transaction::new(&base), base.metadata())?;
-                match transaction.prepare(&catalog)? {
+                match transaction.prepare(catalog.as_catalog())? {
                     PreparedTransaction::Noop(_) => {}
                     PreparedTransaction::Commit(commit) => commits.push(commit),
                 }
@@ -422,11 +282,7 @@ impl ForeignTransaction {
                 continue;
             }
             let request = catalog.prepare_transaction_commit(commits)?;
-            prepared.push(PreparedPublication {
-                catalog,
-                request,
-                targets,
-            });
+            prepared.push(PreparedPublication { request, targets });
         }
         self.inner.borrow_mut().prepared = prepared;
         Ok(())
@@ -476,31 +332,40 @@ impl TransactionResource for ForeignTransaction {
     }
 
     fn on_commit(&self) {
-        // REST has no PostgreSQL-compatible prepare/commit/abort protocol.
+        // Accepted transaction boundary: PostgreSQL and the external catalog
+        // make independent commit decisions. Iceberg's table commit and REST
+        // multi-table commit do not define a prepare/commit/abort participant
+        // protocol for PostgreSQL; neither adapter implements such a protocol.
+        // Atomic publication within one catalog is not atomicity with PG.
+        // See https://iceberg.apache.org/spec/#table-metadata and
+        // https://iceberg.apache.org/rest-catalog-spec/.
+        //
         // Publication deliberately runs synchronously from XACT_EVENT_COMMIT,
         // after the local commit record and before PostgreSQL releases all
-        // backend transaction resources and locks. A pending cancel or another
-        // PostgreSQL ERROR raised by the transport can therefore terminate the
-        // backend after local commit; a network failure is only observable and
-        // cannot roll back PostgreSQL or another catalog publication. Changing
-        // this contract requires a durable outbox/worker, not moving remote
-        // publication before the local commit decision.
+        // backend transaction resources and locks. Catalog conflicts, SQLite
+        // lock contention and transport failures can leave the local transaction
+        // committed without publishing its external changes. WARNING reports
+        // this accepted best-effort outcome; it cannot undo either commit.
+        //
+        // Retries or a durable outbox can improve delivery and recovery, but do
+        // not by themselves provide cross-system atomicity. Publishing before
+        // PG commits reverses the failure window instead of removing it.
+        // Revisit this boundary only if the transaction contract changes and a
+        // shared commit protocol is introduced; the absence of cross-system
+        // atomicity alone is not an implementation defect under this contract.
         let prepared = mem::take(&mut self.inner.borrow_mut().prepared);
         for publication in prepared {
-            if let Err(error) = publication
-                .catalog
-                .send_prepared_commit(publication.request)
-            {
+            if let Err(error) = publication.request.publish() {
                 if let Some(chain) =
                     error.source().and_then(error_source_chain_detail)
                 {
                     report_warning(format_args!(
-                        "local transaction committed but Iceberg REST catalog publication for {} failed: {error}; {chain}; external table state is unknown",
+                        "local transaction committed but Iceberg catalog publication for {} failed: {error}; {chain}; external table state is unknown",
                         publication.targets,
                     ));
                 } else {
                     report_warning(format_args!(
-                        "local transaction committed but Iceberg REST catalog publication for {} failed: {error}; external table state is unknown",
+                        "local transaction committed but Iceberg catalog publication for {} failed: {error}; external table state is unknown",
                         publication.targets,
                     ));
                 }

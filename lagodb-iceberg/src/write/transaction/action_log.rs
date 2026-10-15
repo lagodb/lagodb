@@ -1,18 +1,20 @@
 //! Ordered transaction-local Iceberg table actions and commit planning.
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use iceberg_lite::overlay::{DeleteFileIdentity, SnapshotDelta, SnapshotDeltaMarker};
-use iceberg_lite::spec::{DataFile, TableMetadata};
+use iceberg_lite::overlay::SnapshotDelta;
+use iceberg_lite::spec::{SchemaRef, TableMetadata};
 use iceberg_lite::transaction::{
-    ApplyTransactionAction, PreparedSchemaUpdate, RowDeltaValidation, Transaction,
+    ApplyTransactionAction, PreparedSchemaUpdate, Transaction,
 };
 
 use crate::error::{IcebergError, IcebergResult};
 
 use super::PreparedTablePropertyUpdate;
+use super::data_epoch::{TxDataEpoch, TxWriteBatch};
+use pgrx::pg_sys;
 
 /// Provider-owned operation that must be exclusive with ordinary Iceberg
 /// mutations in one PostgreSQL transaction.
@@ -33,12 +35,15 @@ pub(crate) struct TxTableActionLog<E, G> {
     /// Truncate, and Drop actions; schema actions are replayed separately onto
     /// the latest committed metadata and do not invalidate this value.
     combined_delta_cache: OnceCell<Option<Arc<SnapshotDelta>>>,
+    visible_delta_cache: RefCell<Option<VisibleDelta>>,
+    /// Maximum CID across Data batches and Truncate actions; None means no CIDs.
+    max_write_command_id_cache: OnceCell<Option<pg_sys::CommandId>>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TxTableActionLogMarker {
     action_len: usize,
-    current_data_epoch: Option<TxDataEpochMarker>,
+    current_data_epoch: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,12 +59,13 @@ enum TxTableAction<E, G> {
 #[derive(Debug, Clone)]
 pub(crate) struct TxTruncateAction<G> {
     pub(crate) guard: G,
+    command_id: pg_sys::CommandId,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct TxDataEpoch {
-    pub(crate) delta: Arc<SnapshotDelta>,
-    pub(crate) validations: Vec<RowDeltaValidation>,
+struct VisibleDelta {
+    read_command_id: pg_sys::CommandId,
+    delta: Option<Arc<SnapshotDelta>>,
 }
 
 pub(crate) struct TxTableCommitPlan<'a, E, G> {
@@ -119,17 +125,19 @@ impl<E, G> TxTableCommitPlan<'_, E, G> {
                     epoch,
                     truncate_base,
                 } => {
-                    transaction = if epoch.validations.is_empty() {
+                    let delta = epoch.delta()?;
+                    let validations = epoch.validations();
+                    transaction = if validations.is_empty() {
                         let mut action =
-                            transaction.snapshot_delta(Arc::clone(&epoch.delta));
+                            transaction.snapshot_delta(Arc::clone(delta));
                         if *truncate_base {
                             action = action.truncate_base();
                         }
                         action.apply(transaction)?
                     } else {
                         let mut action = transaction
-                            .row_delta(Arc::clone(&epoch.delta))
-                            .add_validations(epoch.validations.clone());
+                            .row_delta(Arc::clone(delta))
+                            .add_validations(validations);
                         if *truncate_base {
                             action = action.truncate_base();
                         }
@@ -148,32 +156,13 @@ impl<E, G> TxTableCommitPlan<'_, E, G> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct TxDataEpochMarker {
-    delta: SnapshotDeltaMarker,
-    validation_len: usize,
-}
-
-impl Default for TxDataEpoch {
-    fn default() -> Self {
-        Self {
-            delta: Arc::new(SnapshotDelta::new()),
-            validations: Vec::new(),
-        }
-    }
-}
-
-impl TxDataEpoch {
-    fn is_empty(&self) -> bool {
-        self.delta.is_empty() && self.validations.is_empty()
-    }
-}
-
 impl<E, G> Default for TxTableActionLog<E, G> {
     fn default() -> Self {
         Self {
             actions: Vec::new(),
             combined_delta_cache: OnceCell::new(),
+            visible_delta_cache: RefCell::new(None),
+            max_write_command_id_cache: OnceCell::new(),
         }
     }
 }
@@ -190,8 +179,10 @@ where
         })
     }
 
-    fn invalidate_combined_delta(&mut self) {
+    fn invalidate_read_caches(&mut self) {
         self.combined_delta_cache.take();
+        self.visible_delta_cache.get_mut().take();
+        self.max_write_command_id_cache.take();
     }
 
     pub(crate) fn last_truncate(&self) -> Option<(usize, &TxTruncateAction<G>)> {
@@ -241,9 +232,9 @@ where
                 TxTableAction::Data(epoch) => {
                     if let Some(truncate_index) = last_truncate_index {
                         let canceled = if index < truncate_index {
-                            epoch.delta.created_file_paths()
+                            epoch.delta()?.created_file_paths()
                         } else {
-                            epoch.delta.canceled_created_file_paths()
+                            epoch.delta()?.canceled_created_file_paths()
                         };
                         paths.extend(canceled);
 
@@ -289,10 +280,7 @@ where
 
     pub(crate) fn mark(&self) -> TxTableActionLogMarker {
         let current_data_epoch = match self.actions.last() {
-            Some(TxTableAction::Data(epoch)) => Some(TxDataEpochMarker {
-                delta: epoch.delta.mark(),
-                validation_len: epoch.validations.len(),
-            }),
+            Some(TxTableAction::Data(epoch)) => Some(epoch.mark()),
             _ => None,
         };
 
@@ -303,13 +291,12 @@ where
     }
 
     pub(crate) fn truncate(&mut self, marker: TxTableActionLogMarker) {
-        self.invalidate_combined_delta();
+        self.invalidate_read_caches();
         self.actions.truncate(marker.action_len);
         if let Some(epoch_marker) = marker.current_data_epoch
             && let Some(TxTableAction::Data(epoch)) = self.actions.last_mut()
         {
-            Arc::make_mut(&mut epoch.delta).truncate(epoch_marker.delta);
-            epoch.validations.truncate(epoch_marker.validation_len);
+            epoch.truncate(epoch_marker);
         }
     }
 
@@ -338,14 +325,14 @@ where
         if !self.actions.is_empty() {
             return Err(action.conflict_error());
         }
-        self.invalidate_combined_delta();
+        self.invalidate_read_caches();
         self.actions
             .push(TxTableAction::Exclusive(Box::new(action)));
         Ok(())
     }
 
     fn current_data_epoch_mut(&mut self) -> &mut TxDataEpoch {
-        self.invalidate_combined_delta();
+        self.invalidate_read_caches();
         let needs_new_epoch =
             !matches!(self.actions.last(), Some(TxTableAction::Data(_)));
         if needs_new_epoch {
@@ -358,14 +345,16 @@ where
         }
     }
 
-    pub(crate) fn stage_truncate(&mut self, guard: G) {
-        self.invalidate_combined_delta();
-        self.actions
-            .push(TxTableAction::Truncate(TxTruncateAction { guard }));
+    pub(crate) fn stage_truncate(&mut self, guard: G, command_id: pg_sys::CommandId) {
+        self.invalidate_read_caches();
+        self.actions.push(TxTableAction::Truncate(TxTruncateAction {
+            guard,
+            command_id,
+        }));
     }
 
     pub(crate) fn stage_drop(&mut self) {
-        self.invalidate_combined_delta();
+        self.invalidate_read_caches();
         self.actions.push(TxTableAction::Drop);
     }
 
@@ -373,43 +362,10 @@ where
         matches!(self.actions.last(), Some(TxTableAction::Drop))
     }
 
-    pub(crate) fn record_data_files(
-        &mut self,
-        new_data_files: Vec<DataFile>,
-    ) -> IcebergResult<()> {
-        if new_data_files.is_empty() {
-            return Ok(());
+    pub(crate) fn record_batch(&mut self, batch: TxWriteBatch) {
+        if !batch.is_empty() {
+            self.current_data_epoch_mut().push(batch);
         }
-        let epoch = self.current_data_epoch_mut();
-        let delta = Arc::make_mut(&mut epoch.delta);
-        for data_file in new_data_files {
-            delta.add_data_file(data_file)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn record_position_delete_file(
-        &mut self,
-        delete_file: DataFile,
-        referenced_data_files: Vec<String>,
-    ) -> IcebergResult<()> {
-        let epoch = self.current_data_epoch_mut();
-        Arc::make_mut(&mut epoch.delta)
-            .add_position_delete_file(delete_file, referenced_data_files)?;
-        Ok(())
-    }
-
-    pub(crate) fn record_remove_delete_file(
-        &mut self,
-        identity: DeleteFileIdentity,
-    ) -> IcebergResult<()> {
-        let epoch = self.current_data_epoch_mut();
-        Arc::make_mut(&mut epoch.delta).remove_delete_file(identity)?;
-        Ok(())
-    }
-
-    pub(crate) fn record_validation(&mut self, validation: RowDeltaValidation) {
-        self.current_data_epoch_mut().validations.push(validation);
     }
 
     pub(crate) fn overlay_metadata(
@@ -438,38 +394,114 @@ where
         Ok(metadata)
     }
 
+    /// Data-only writes need no metadata copy to obtain the current schema.
+    /// Replay definition actions only when a local schema update exists.
+    pub(crate) fn read_schema(
+        &self,
+        metadata: &TableMetadata,
+    ) -> IcebergResult<SchemaRef> {
+        if !self
+            .actions
+            .iter()
+            .any(|action| matches!(action, TxTableAction::Schema(_)))
+        {
+            return Ok(Arc::clone(metadata.current_schema()));
+        }
+        let definition = self.overlay_metadata(metadata.clone())?;
+        Ok(Arc::clone(definition.current_schema()))
+    }
+
     pub(crate) fn combined_delta(&self) -> IcebergResult<Option<Arc<SnapshotDelta>>> {
-        if let Some(delta) = self.combined_delta_cache.get() {
+        self.visible_delta(None)
+    }
+
+    /// Build only the file overlay, independently of current schema/property
+    /// replay. The bounded cache is invalidated by every file-log mutation.
+    pub(crate) fn visible_delta(
+        &self,
+        read_command_id: Option<pg_sys::CommandId>,
+    ) -> IcebergResult<Option<Arc<SnapshotDelta>>> {
+        if let Some(cid) = read_command_id {
+            // Later commands normally see all writes. Reuse the full overlay
+            // across different reader CIDs until the log changes.
+            // Completion order need not follow CID order. Cache the maximum
+            // so repeated reads do not revisit every batch before a cache hit.
+            let max_write_command_id =
+                self.max_write_command_id_cache.get_or_init(|| {
+                    self.actions
+                        .iter()
+                        .filter_map(|action| match action {
+                            TxTableAction::Data(epoch) => {
+                                epoch.max_write_command_id()
+                            }
+                            TxTableAction::Truncate(truncate) => {
+                                Some(truncate.command_id)
+                            }
+                            TxTableAction::Schema(_)
+                            | TxTableAction::Properties(_)
+                            | TxTableAction::Exclusive(_)
+                            | TxTableAction::Drop => None,
+                        })
+                        .max()
+                });
+            if max_write_command_id.is_none_or(|max| max < cid) {
+                return self.combined_delta();
+            }
+            if let Some(cached) = self.visible_delta_cache.borrow().as_ref()
+                && cached.read_command_id == cid
+            {
+                return Ok(cached.delta.clone());
+            }
+        } else if let Some(delta) = self.combined_delta_cache.get() {
             return Ok(delta.clone());
         }
 
-        let mut combined = SnapshotDelta::new();
-        let mut has_delta = false;
+        // Share the first complete epoch. Only a second file component or a
+        // TRUNCATE needs its own aggregate; the epoch cache stays immutable for
+        // commit planning and already-bound readers.
+        let mut combined: Option<Arc<SnapshotDelta>> = None;
         for action in &self.actions {
             match action {
-                TxTableAction::Data(epoch) if !epoch.delta.is_empty() => {
-                    combined.append_delta(&epoch.delta)?;
-                    has_delta = true;
+                TxTableAction::Data(epoch) => {
+                    if read_command_id.is_none() {
+                        let delta = epoch.delta()?;
+                        if !delta.is_empty() {
+                            match &mut combined {
+                                Some(combined) => {
+                                    Arc::make_mut(combined).append_delta(delta)?;
+                                }
+                                None => combined = Some(Arc::clone(delta)),
+                            }
+                        }
+                    } else {
+                        let combined = combined
+                            .get_or_insert_with(|| Arc::new(SnapshotDelta::new()));
+                        epoch.append_visible(
+                            Arc::make_mut(combined),
+                            read_command_id,
+                        )?;
+                    }
                 }
-                TxTableAction::Truncate(_) => {
-                    combined.truncate_table()?;
-                    has_delta = true;
+                TxTableAction::Truncate(truncate) => {
+                    if read_command_id.is_none_or(|cid| truncate.command_id < cid) {
+                        let combined = combined
+                            .get_or_insert_with(|| Arc::new(SnapshotDelta::new()));
+                        Arc::make_mut(combined).truncate_table()?;
+                    }
                 }
-                TxTableAction::Drop => return Ok(None),
-                TxTableAction::Exclusive(_) => return Ok(None),
-                TxTableAction::Schema(_)
-                | TxTableAction::Properties(_)
-                | TxTableAction::Data(_) => {}
+                TxTableAction::Drop | TxTableAction::Exclusive(_) => return Ok(None),
+                TxTableAction::Schema(_) | TxTableAction::Properties(_) => {}
             }
         }
-        let delta = has_delta.then(|| Arc::new(combined));
-        self.combined_delta_cache
-            .set(delta.clone())
-            .map_err(|_| {
-                IcebergError::InvariantViolated(
-                    "combined delta cache was initialized more than once without invalidation",
-                )
-            })?;
-        Ok(delta)
+        let delta = combined.filter(|delta| !delta.is_empty());
+        if let Some(read_command_id) = read_command_id {
+            *self.visible_delta_cache.borrow_mut() = Some(VisibleDelta {
+                read_command_id,
+                delta: delta.clone(),
+            });
+            Ok(delta)
+        } else {
+            Ok(self.combined_delta_cache.get_or_init(|| delta).clone())
+        }
     }
 }

@@ -18,8 +18,8 @@
 //!   the identifier surface; it sees a synthetic `pg.<oid>` ident and treats
 //!   it as opaque, exactly as it would a real catalog identifier.
 //!
-//! When a real Iceberg catalog backend lands, [`IcebergTableId`] is the
-//! single point that needs to change.
+//! The external JDBC catalog projects PostgreSQL names through SQL views.
+//! That public naming contract does not change these opaque internal handles.
 //!
 //! # Why two adapters and why only one of them implements `Catalog`
 //!

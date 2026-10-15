@@ -75,6 +75,30 @@ ROLLBACK TO SAVEPOINT repeated_truncate;
 COMMIT;
 SELECT array_agg(id ORDER BY id) AS restored FROM truncate_table_test.t;
 
+-- Read-only SPI keeps the outer command snapshot while the volatile callee
+-- clears this transaction-owned directory again. That snapshot's metadata
+-- path is now gone even though the root has not changed. The nested INSERT
+-- becomes visible only to the following command.
+BEGIN;
+TRUNCATE truncate_table_test.t;
+CREATE FUNCTION truncate_table_test.truncate_from_nested_command()
+RETURNS void LANGUAGE plpgsql VOLATILE AS $$
+BEGIN
+    TRUNCATE truncate_table_test.t;
+    INSERT INTO truncate_table_test.t VALUES (12, 'nested');
+END;
+$$;
+CREATE FUNCTION truncate_table_test.read_across_rebuild()
+RETURNS bigint LANGUAGE plpgsql STABLE AS $$
+BEGIN
+    PERFORM truncate_table_test.truncate_from_nested_command();
+    RETURN (SELECT count(*) FROM truncate_table_test.t);
+END;
+$$;
+SELECT truncate_table_test.read_across_rebuild() AS rows;
+SELECT id FROM truncate_table_test.t ORDER BY id;
+ROLLBACK;
+
 BEGIN;
 TRUNCATE truncate_table_test.t;
 SELECT count(*) AS rows_inside_rollback FROM truncate_table_test.t;
@@ -111,7 +135,12 @@ BEGIN;
 SAVEPOINT before_truncate;
 TRUNCATE truncate_table_test.t;
 INSERT INTO truncate_table_test.t VALUES (70, 'discarded');
+SAVEPOINT nested_truncate;
+TRUNCATE truncate_table_test.t;
+INSERT INTO truncate_table_test.t VALUES (71, 'released');
+RELEASE SAVEPOINT nested_truncate;
 ROLLBACK TO SAVEPOINT before_truncate;
+SELECT id FROM truncate_table_test.t ORDER BY id;
 COMMIT;
 SELECT array_agg(id ORDER BY id) AS truncate_savepoint_rollback_rows
 FROM truncate_table_test.t;

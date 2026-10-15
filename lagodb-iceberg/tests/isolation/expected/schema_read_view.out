@@ -1,0 +1,55 @@
+Parsed test spec with 2 sessions
+
+starting permutation: am begin snapshot rename read commit
+step am: SET lagodb.customscan_mode = 'off'; SET lagodb.query_offload_mode = 'off';
+step begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step snapshot: SELECT id FROM schema_view_anchor;
+id
+--
+ 1
+(1 row)
+
+step rename: BEGIN; ALTER TABLE schema_read_view RENAME COLUMN id TO renamed; INSERT INTO schema_read_view VALUES (2); COMMIT;
+step read: SELECT renamed FROM schema_read_view WHERE renamed >= 1 ORDER BY renamed;
+renamed
+-------
+      1
+(1 row)
+
+step commit: COMMIT;
+
+starting permutation: custom begin snapshot rename read commit
+step custom: SET lagodb.customscan_mode = 'force'; SET lagodb.query_offload_mode = 'off';
+step begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step snapshot: SELECT id FROM schema_view_anchor;
+id
+--
+ 1
+(1 row)
+
+step rename: BEGIN; ALTER TABLE schema_read_view RENAME COLUMN id TO renamed; INSERT INTO schema_read_view VALUES (2); COMMIT;
+step read: SELECT renamed FROM schema_read_view WHERE renamed >= 1 ORDER BY renamed;
+renamed
+-------
+      1
+(1 row)
+
+step commit: COMMIT;
+
+starting permutation: offload begin snapshot rename read commit
+step offload: SET lagodb.customscan_mode = 'off'; SET lagodb.query_offload_mode = 'force';
+step begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step snapshot: SELECT id FROM schema_view_anchor;
+id
+--
+ 1
+(1 row)
+
+step rename: BEGIN; ALTER TABLE schema_read_view RENAME COLUMN id TO renamed; INSERT INTO schema_read_view VALUES (2); COMMIT;
+step read: SELECT renamed FROM schema_read_view WHERE renamed >= 1 ORDER BY renamed;
+renamed
+-------
+      1
+(1 row)
+
+step commit: COMMIT;

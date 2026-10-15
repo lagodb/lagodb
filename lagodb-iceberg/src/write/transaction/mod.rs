@@ -5,6 +5,7 @@
 //! authoritative metadata location and does not publish catalog changes.
 
 mod action_log;
+mod data_epoch;
 mod properties;
 mod table_state;
 
@@ -13,5 +14,6 @@ pub(crate) use action_log::EffectiveCommitAction;
 pub(crate) use action_log::{
     ExclusiveTransactionAction, TxTableActionLog, TxTableCommitPlan,
 };
+pub(crate) use data_epoch::TxWriteBatch;
 pub(crate) use properties::PreparedTablePropertyUpdate;
 pub(crate) use table_state::TableTransactionState;

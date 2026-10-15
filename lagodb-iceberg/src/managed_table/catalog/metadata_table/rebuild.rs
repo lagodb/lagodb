@@ -45,10 +45,6 @@ impl IcebergMetadata {
             let mut replacement = unsafe { TupleReplacement::new(descriptor) };
             replacement.set(column::METADATA_LOCATION, Some(location));
             replacement.set::<&str>(column::PREVIOUS_METADATA_LOCATION, None);
-            replacement.set(
-                column::DEFAULT_SPEC_ID,
-                Some(table.metadata().default_partition_spec_id()),
-            );
             replacement.set::<pg_sys::TimestampTz>(column::MAINTENANCE_DUE_AT, None);
             // SAFETY: replacement and tuple use the same live descriptor.
             let updated = unsafe { replacement.apply(descriptor, tuple.as_raw()) };

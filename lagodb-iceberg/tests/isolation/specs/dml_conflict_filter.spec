@@ -40,6 +40,7 @@ teardown
 }
 
 session s1
+setup { SET lagodb.customscan_mode = 'force'; }
 step s1_begin          { BEGIN; }
 step s1_insert         { INSERT INTO iceberg_cf.t VALUES (200, 'new'); }
 step s1_update         { UPDATE iceberg_cf.t SET label = 's1' WHERE id = 100; }
@@ -47,6 +48,8 @@ step s1_insert_overlap { INSERT INTO iceberg_cf.t VALUES (1, 'inserted'); }
 step s1_commit         { COMMIT; }
 
 session s2
+setup { SET lagodb.customscan_mode = 'force'; }
+step s2_seqscan { SET lagodb.customscan_mode = 'off'; }
 step s2_begin         { BEGIN; }
 step s2_delete        { DELETE FROM iceberg_cf.t WHERE id = 1; }
 step s2_update        { UPDATE iceberg_cf.t SET label = 's2' WHERE id = 1; }
@@ -57,11 +60,14 @@ step s2_update_self   { UPDATE iceberg_cf.t AS target SET label = 's2' FROM iceb
 step s2_commit        { COMMIT; }
 
 session s2_param
+setup { SET lagodb.customscan_mode = 'force'; }
+step s2p_seqscan { SET lagodb.customscan_mode = 'off'; }
 step s2p_generic { SET plan_cache_mode = force_generic_plan; }
 step s2p_prepare { PREPARE delete_param(int) AS DELETE FROM iceberg_cf.t WHERE id = $1; }
 step s2p_begin   { BEGIN; }
 step s2p_delete  { EXECUTE delete_param(1); }
 step s2p_commit  { COMMIT; }
+teardown { DEALLOCATE ALL; }
 
 session observer
 step verify { SELECT string_agg(id || ':' || label, ',' ORDER BY id, label) AS rows FROM iceberg_cf.t; }
@@ -99,3 +105,13 @@ permutation s2p_generic s2p_prepare s2p_begin s2p_delete s1_begin s1_insert s1_c
 
 # 10. Self-join: target RTI identifies correct relation → no conflict
 permutation s2_begin s2_update_self s1_begin s1_insert s1_commit s2_commit verify
+
+# Native SeqScan has a separate target binder. Cover its disjoint/overlapping
+# scopes, mixed predicates, generic parameters, and self-join target identity.
+# The operation cross-product and standalone expression fallback are above.
+permutation s2_seqscan s2_begin s2_delete s1_begin s1_insert s1_commit s2_commit verify
+permutation s2_seqscan s2_begin s2_delete s1_begin s1_insert_overlap s1_commit s2_commit verify
+permutation s2_seqscan s2_begin s2_del_mixed_and s1_begin s1_insert s1_commit s2_commit verify
+permutation s2_seqscan s2_begin s2_del_or s1_begin s1_insert s1_commit s2_commit verify
+permutation s2p_seqscan s2p_generic s2p_prepare s2p_begin s2p_delete s1_begin s1_insert s1_commit s2p_commit verify
+permutation s2_seqscan s2_begin s2_update_self s1_begin s1_insert s1_commit s2_commit verify

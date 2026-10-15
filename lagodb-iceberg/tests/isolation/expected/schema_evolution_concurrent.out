@@ -6,11 +6,11 @@ step s1_add_local: ALTER TABLE schema_evolution_iso.concurrent_t ADD COLUMN loca
 step s1_insert_local: INSERT INTO schema_evolution_iso.concurrent_t (id, local_col) VALUES (1, 10);
 step s2_swap_metadata: 
   UPDATE iceberg.iceberg_metadata AS target
-  SET metadata_location = shadow.metadata_location,
+  SET metadata_location = external.metadata_location,
       previous_metadata_location = target.metadata_location
-  FROM iceberg.iceberg_metadata AS shadow
+  FROM schema_evolution_iso.external_commits AS external
   WHERE target.relid = 'schema_evolution_iso.concurrent_t'::regclass
-    AND shadow.relid = 'schema_evolution_iso.shadow_t'::regclass;
+    AND external.relid = target.relid;
 
 step s1_commit: COMMIT;
 ERROR:  Iceberg schema evolution conflict: PreconditionFailed => Cannot apply prepared schema update: current schema id changed from 0 to 1
@@ -38,11 +38,11 @@ step s1_begin_rebase: BEGIN;
 step s1_add_rebase: ALTER TABLE schema_evolution_iso.data_rebase_t ADD COLUMN added_col int;
 step s2_swap_data_metadata: 
   UPDATE iceberg.iceberg_metadata AS target
-  SET metadata_location = shadow.metadata_location,
+  SET metadata_location = external.metadata_location,
       previous_metadata_location = target.metadata_location
-  FROM iceberg.iceberg_metadata AS shadow
+  FROM schema_evolution_iso.external_commits AS external
   WHERE target.relid = 'schema_evolution_iso.data_rebase_t'::regclass
-    AND shadow.relid = 'schema_evolution_iso.data_shadow_t'::regclass;
+    AND external.relid = target.relid;
 
 step s1_commit_rebase: COMMIT;
 step s3_rebase_columns: 

@@ -2,16 +2,15 @@
 
 use std::rc::Rc;
 
-use iceberg_lite::overlay::DeleteFileIdentity;
-use iceberg_lite::spec::DataFile;
-use iceberg_lite::transaction::{PreparedSchemaUpdate, RowDeltaValidation};
+use iceberg_lite::transaction::PreparedSchemaUpdate;
+use pgrx::pg_sys;
 
 use crate::error::IcebergResult;
 
-use super::PreparedTablePropertyUpdate;
 use super::action_log::{
     ExclusiveTransactionAction, TxTableActionLog, TxTableActionLogMarker,
 };
+use super::{PreparedTablePropertyUpdate, TxWriteBatch};
 
 // =============================================================================
 // Per-table state
@@ -90,17 +89,18 @@ where
         Ok(())
     }
 
-    pub(crate) fn record_validation(
+    pub(crate) fn record_batch(
         &mut self,
         nest_level: i32,
-        validation: RowDeltaValidation,
+        batch: TxWriteBatch,
     ) -> IcebergResult<()> {
-        if let Some(error) = self.actions.exclusive_conflict_error() {
-            return Err(error);
+        if batch.is_empty() {
+            return Ok(());
         }
-        self.record_history(nest_level);
-        Rc::make_mut(&mut self.actions).record_validation(validation);
-        Ok(())
+        self.record_action_mutation(nest_level, |actions| {
+            actions.record_batch(batch);
+            Ok(())
+        })
     }
 
     pub(crate) fn record_schema_update(
@@ -148,27 +148,15 @@ where
         Ok(())
     }
 
-    pub(crate) fn record_data_files(
-        &mut self,
-        nest_level: i32,
-        new_data_files: Vec<DataFile>,
-    ) -> IcebergResult<()> {
-        if new_data_files.is_empty() {
-            return Ok(());
-        }
-
-        self.record_action_mutation(nest_level, |actions| {
-            actions.record_data_files(new_data_files)
-        })
-    }
-
     pub(crate) fn record_truncate(
         &mut self,
         nest_level: i32,
         guard: G,
     ) -> IcebergResult<()> {
         self.record_action_mutation(nest_level, |actions| {
-            actions.stage_truncate(guard);
+            // SAFETY: TRUNCATE is staged synchronously by its utility command.
+            let command_id = unsafe { pg_sys::GetCurrentCommandId(true) };
+            actions.stage_truncate(guard, command_id);
             Ok(())
         })
     }
@@ -177,27 +165,6 @@ where
         self.record_action_mutation(nest_level, |actions| {
             actions.stage_drop();
             Ok(())
-        })
-    }
-
-    pub(crate) fn record_position_delete_file(
-        &mut self,
-        nest_level: i32,
-        delete_file: DataFile,
-        referenced_data_files: Vec<String>,
-    ) -> IcebergResult<()> {
-        self.record_action_mutation(nest_level, |actions| {
-            actions.record_position_delete_file(delete_file, referenced_data_files)
-        })
-    }
-
-    pub(crate) fn record_remove_delete_file(
-        &mut self,
-        nest_level: i32,
-        identity: DeleteFileIdentity,
-    ) -> IcebergResult<()> {
-        self.record_action_mutation(nest_level, |actions| {
-            actions.record_remove_delete_file(identity)
         })
     }
 

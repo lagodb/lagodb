@@ -27,9 +27,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use iceberg_lite::io::FileIO;
-use iceberg_lite::overlay::DeleteFileIdentity;
-use iceberg_lite::spec::DataFile;
-use iceberg_lite::transaction::{PreparedSchemaUpdate, RowDeltaValidation};
+use iceberg_lite::transaction::PreparedSchemaUpdate;
 use lagodb_core::diag::PgReportError;
 use lagodb_core::transaction::{self, TransactionResource, TransactionResult};
 use pgrx::pg_sys;
@@ -42,10 +40,11 @@ use crate::managed_table::maintenance::{
 };
 use crate::write::{
     ExclusiveTransactionAction, PreparedTablePropertyUpdate, RelationRowRegistry,
-    TableTransactionState, TxTableActionLog as SharedActionLog,
+    TableTransactionState, TxTableActionLog as SharedActionLog, TxWriteBatch,
 };
 
 pub use self::loaded_metadata::LoadedTableMetadata;
+pub(crate) use self::loaded_metadata::LoadedTableRead;
 
 type ManagedTableActionLog = SharedActionLog<PreparedVacuum, String>;
 type ManagedTableTransaction = TableTransactionState<PreparedVacuum, String>;
@@ -142,66 +141,15 @@ impl TxMetadata {
         inner.tables.insert(relid, state);
     }
 
-    /// Statement write path: record new data files in the transaction-local
-    /// delta without generating Iceberg metadata files.
-    pub fn stage_data_files(
+    /// Publish one fully constructed relation-local write batch atomically.
+    pub(crate) fn stage_batch(
         &self,
         relid: pg_sys::Oid,
-        new_data_files: Vec<DataFile>,
+        batch: TxWriteBatch,
         file_io: &FileIO,
     ) -> IcebergResult<()> {
         self.stage_table_mutation(relid, file_io, |state, nest_level| {
-            state.record_data_files(nest_level, new_data_files)
-        })
-    }
-
-    /// Statement write path: record a position delete file in the
-    /// transaction-local delta without generating Iceberg metadata files.
-    pub fn stage_position_delete_file<I, S>(
-        &self,
-        relid: pg_sys::Oid,
-        delete_file: DataFile,
-        referenced_data_files: I,
-        file_io: &FileIO,
-    ) -> IcebergResult<()>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let referenced_data_files: Vec<String> =
-            referenced_data_files.into_iter().map(Into::into).collect();
-        self.stage_table_mutation(relid, file_io, |state, nest_level| {
-            state.record_position_delete_file(
-                nest_level,
-                delete_file,
-                referenced_data_files,
-            )
-        })
-    }
-
-    /// Statement write path: remove a live delete manifest entry by identity
-    /// in the transaction-local delta.
-    pub fn stage_remove_delete_file(
-        &self,
-        relid: pg_sys::Oid,
-        identity: DeleteFileIdentity,
-        file_io: &FileIO,
-    ) -> IcebergResult<()> {
-        self.stage_table_mutation(relid, file_io, |state, nest_level| {
-            state.record_remove_delete_file(nest_level, identity)
-        })
-    }
-
-    /// Statement write path: record Iceberg RowDelta conflict validation to be
-    /// evaluated at the transaction's final metadata commit.
-    pub fn stage_row_delta_validation(
-        &self,
-        relid: pg_sys::Oid,
-        validation: RowDeltaValidation,
-        file_io: &FileIO,
-    ) -> IcebergResult<()> {
-        self.stage_table_mutation(relid, file_io, |state, nest_level| {
-            state.record_validation(nest_level, validation)
+            state.record_batch(nest_level, batch)
         })
     }
 

@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use iceberg_lite::io::FileIO;
 use iceberg_lite::overlay::SnapshotDelta;
-use iceberg_lite::spec::{DataContentType, ManifestContentType, TableMetadata};
+use iceberg_lite::spec::{
+    DataContentType, ManifestContentType, SchemaRef, TableMetadata,
+};
 use pgrx::pg_sys;
 
 use crate::error::IcebergResult;
@@ -26,6 +28,27 @@ pub struct LoadedTableMetadata {
     pub maintenance_due_at: Option<pg_sys::TimestampTz>,
     pub metadata: TableMetadata,
     pub delta: Option<Arc<SnapshotDelta>>,
+}
+
+/// Metadata context and an explicitly selected data baseline for one read.
+/// When the PG snapshot has no metadata row in the active storage generation,
+/// or this transaction rebuilt that local generation, `loaded` supplies the
+/// current definition/storage context, but `snapshot_id` remains `None`.
+/// The transaction-local delta is independent of that committed baseline.
+pub(crate) struct LoadedTableRead {
+    pub(crate) loaded: LoadedTableMetadata,
+    pub(crate) read_schema: SchemaRef,
+    pub(crate) snapshot_id: Option<i64>,
+}
+
+impl LoadedTableRead {
+    pub(crate) fn current(loaded: LoadedTableMetadata) -> Self {
+        Self {
+            read_schema: Arc::clone(loaded.metadata.current_schema()),
+            snapshot_id: loaded.metadata.current_snapshot_id(),
+            loaded,
+        }
+    }
 }
 
 impl LoadedTableMetadata {

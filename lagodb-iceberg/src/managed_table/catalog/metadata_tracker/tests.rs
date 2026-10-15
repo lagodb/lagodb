@@ -6,20 +6,24 @@ use iceberg_lite::spec::{
 };
 
 use crate::managed_table::maintenance::PreparedVacuum;
-use crate::write::{EffectiveCommitAction, TxTableActionLog as SharedActionLog};
+use crate::write::{
+    EffectiveCommitAction, TxTableActionLog as SharedActionLog, TxWriteBatch,
+};
 
 type TxTableActionLog = SharedActionLog<PreparedVacuum, String>;
 
 #[test]
 fn combined_delta_keeps_only_data_after_last_truncate() {
     let mut actions = TxTableActionLog::default();
-    actions
-        .record_data_files(vec![data_file("before.parquet")])
-        .unwrap();
-    actions.stage_truncate("metadata-v1.json".to_owned());
-    actions
-        .record_data_files(vec![data_file("after.parquet")])
-        .unwrap();
+    actions.record_batch(
+        TxWriteBatch::new(0, vec![data_file("before.parquet")], Vec::new(), None)
+            .unwrap(),
+    );
+    actions.stage_truncate("metadata-v1.json".to_owned(), 0);
+    actions.record_batch(
+        TxWriteBatch::new(0, vec![data_file("after.parquet")], Vec::new(), None)
+            .unwrap(),
+    );
 
     let delta = actions.combined_delta().unwrap().unwrap();
     assert!(delta.truncates_base());
@@ -48,9 +52,10 @@ fn combined_delta_keeps_only_data_after_last_truncate() {
 #[test]
 fn commit_plan_preserves_data_only_epochs_without_truncate() {
     let mut actions = TxTableActionLog::default();
-    actions
-        .record_data_files(vec![data_file("data.parquet")])
-        .unwrap();
+    actions.record_batch(
+        TxWriteBatch::new(0, vec![data_file("data.parquet")], Vec::new(), None)
+            .unwrap(),
+    );
 
     let plan = actions.commit_plan().unwrap();
     assert!(plan.truncate_guard.is_none());
@@ -67,10 +72,11 @@ fn commit_plan_preserves_data_only_epochs_without_truncate() {
 #[test]
 fn commit_plan_replaces_pre_truncate_data_with_truncate_only() {
     let mut actions = TxTableActionLog::default();
-    actions
-        .record_data_files(vec![data_file("discarded.parquet")])
-        .unwrap();
-    actions.stage_truncate("metadata-v1.json".to_owned());
+    actions.record_batch(
+        TxWriteBatch::new(0, vec![data_file("discarded.parquet")], Vec::new(), None)
+            .unwrap(),
+    );
+    actions.stage_truncate("metadata-v1.json".to_owned(), 0);
 
     let plan = actions.commit_plan().unwrap();
     assert_eq!(
@@ -90,17 +96,19 @@ fn commit_plan_replaces_pre_truncate_data_with_truncate_only() {
 #[test]
 fn combined_delta_is_shared_until_the_action_log_changes() {
     let mut actions = TxTableActionLog::default();
-    actions
-        .record_data_files(vec![data_file("first.parquet")])
-        .unwrap();
+    actions.record_batch(
+        TxWriteBatch::new(0, vec![data_file("first.parquet")], Vec::new(), None)
+            .unwrap(),
+    );
 
     let first = actions.combined_delta().unwrap().unwrap();
     let cached = actions.combined_delta().unwrap().unwrap();
     assert!(Arc::ptr_eq(&first, &cached));
 
-    actions
-        .record_data_files(vec![data_file("second.parquet")])
-        .unwrap();
+    actions.record_batch(
+        TxWriteBatch::new(0, vec![data_file("second.parquet")], Vec::new(), None)
+            .unwrap(),
+    );
     let rebuilt = actions.combined_delta().unwrap().unwrap();
     assert!(!Arc::ptr_eq(&first, &rebuilt));
     assert!(rebuilt.has_live_added_data_file_path("second.parquet"));
@@ -109,13 +117,14 @@ fn combined_delta_is_shared_until_the_action_log_changes() {
 #[test]
 fn populated_combined_delta_cache_is_invalidated_by_savepoint_rollback() {
     let mut actions = TxTableActionLog::default();
-    actions
-        .record_data_files(vec![data_file("before.parquet")])
-        .unwrap();
+    actions.record_batch(
+        TxWriteBatch::new(0, vec![data_file("before.parquet")], Vec::new(), None)
+            .unwrap(),
+    );
     let marker = actions.mark();
     let before = actions.combined_delta().unwrap().unwrap();
 
-    actions.stage_truncate("metadata-v1.json".to_owned());
+    actions.stage_truncate("metadata-v1.json".to_owned(), 0);
     let truncated = actions.combined_delta().unwrap().unwrap();
     assert!(truncated.truncates_base());
     assert!(!Arc::ptr_eq(&before, &truncated));
@@ -130,14 +139,16 @@ fn populated_combined_delta_cache_is_invalidated_by_savepoint_rollback() {
 #[test]
 fn shared_action_log_snapshot_is_copy_on_write() {
     let mut current = Rc::new(TxTableActionLog::default());
-    Rc::make_mut(&mut current)
-        .record_data_files(vec![data_file("before.parquet")])
-        .unwrap();
+    Rc::make_mut(&mut current).record_batch(
+        TxWriteBatch::new(0, vec![data_file("before.parquet")], Vec::new(), None)
+            .unwrap(),
+    );
     let commit_snapshot = Rc::clone(&current);
 
-    Rc::make_mut(&mut current)
-        .record_data_files(vec![data_file("after.parquet")])
-        .unwrap();
+    Rc::make_mut(&mut current).record_batch(
+        TxWriteBatch::new(0, vec![data_file("after.parquet")], Vec::new(), None)
+            .unwrap(),
+    );
 
     let snapshotted_delta = commit_snapshot.combined_delta().unwrap().unwrap();
     assert!(snapshotted_delta.has_live_added_data_file_path("before.parquet"));
@@ -149,14 +160,16 @@ fn shared_action_log_snapshot_is_copy_on_write() {
 #[test]
 fn last_truncate_controls_baseline_and_canceled_regions() {
     let mut actions = TxTableActionLog::default();
-    actions.stage_truncate("metadata-v1.json".to_owned());
-    actions
-        .record_data_files(vec![data_file("middle.parquet")])
-        .unwrap();
-    actions.stage_truncate("metadata-v2.json".to_owned());
-    actions
-        .record_data_files(vec![data_file("after.parquet")])
-        .unwrap();
+    actions.stage_truncate("metadata-v1.json".to_owned(), 0);
+    actions.record_batch(
+        TxWriteBatch::new(0, vec![data_file("middle.parquet")], Vec::new(), None)
+            .unwrap(),
+    );
+    actions.stage_truncate("metadata-v2.json".to_owned(), 0);
+    actions.record_batch(
+        TxWriteBatch::new(0, vec![data_file("after.parquet")], Vec::new(), None)
+            .unwrap(),
+    );
 
     let (index, truncate) = actions.last_truncate().unwrap();
     assert_eq!(index, 2);
@@ -170,14 +183,16 @@ fn last_truncate_controls_baseline_and_canceled_regions() {
 #[test]
 fn action_log_marker_rolls_back_truncate_and_later_data() {
     let mut actions = TxTableActionLog::default();
-    actions
-        .record_data_files(vec![data_file("before.parquet")])
-        .unwrap();
+    actions.record_batch(
+        TxWriteBatch::new(0, vec![data_file("before.parquet")], Vec::new(), None)
+            .unwrap(),
+    );
     let marker = actions.mark();
-    actions.stage_truncate("metadata-v1.json".to_owned());
-    actions
-        .record_data_files(vec![data_file("after.parquet")])
-        .unwrap();
+    actions.stage_truncate("metadata-v1.json".to_owned(), 0);
+    actions.record_batch(
+        TxWriteBatch::new(0, vec![data_file("after.parquet")], Vec::new(), None)
+            .unwrap(),
+    );
 
     actions.truncate(marker);
 
@@ -191,7 +206,7 @@ fn action_log_marker_rolls_back_truncate_and_later_data() {
 #[test]
 fn drop_suppresses_commit_but_marker_can_restore_actions() {
     let mut actions = TxTableActionLog::default();
-    actions.stage_truncate("metadata-v1.json".to_owned());
+    actions.stage_truncate("metadata-v1.json".to_owned(), 0);
     let marker = actions.mark();
     actions.stage_drop();
 

@@ -1,0 +1,91 @@
+Parsed test spec with 2 sessions
+
+starting permutation: am prepare read lock begin read insert publish read commit deallocate
+step am: SET lagodb.customscan_mode = 'off'; SET lagodb.query_offload_mode = 'off';
+step prepare: PREPARE read_view AS SELECT a.id FROM statement_read_view a JOIN statement_read_view b USING (id) ORDER BY a.id;
+step read: EXECUTE read_view;
+id
+--
+ 1
+(1 row)
+
+step lock: BEGIN; LOCK TABLE iceberg.iceberg_metadata IN ACCESS EXCLUSIVE MODE;
+step begin: BEGIN ISOLATION LEVEL READ COMMITTED;
+step read: EXECUTE read_view; <waiting ...>
+step insert: INSERT INTO statement_read_view VALUES (2);
+step publish: COMMIT;
+step read: <... completed>
+id
+--
+ 1
+(1 row)
+
+step read: EXECUTE read_view;
+id
+--
+ 1
+ 2
+(2 rows)
+
+step commit: COMMIT;
+step deallocate: DEALLOCATE read_view;
+
+starting permutation: custom prepare read lock begin read insert publish read commit deallocate
+step custom: SET lagodb.customscan_mode = 'force'; SET lagodb.query_offload_mode = 'off';
+step prepare: PREPARE read_view AS SELECT a.id FROM statement_read_view a JOIN statement_read_view b USING (id) ORDER BY a.id;
+step read: EXECUTE read_view;
+id
+--
+ 1
+(1 row)
+
+step lock: BEGIN; LOCK TABLE iceberg.iceberg_metadata IN ACCESS EXCLUSIVE MODE;
+step begin: BEGIN ISOLATION LEVEL READ COMMITTED;
+step read: EXECUTE read_view; <waiting ...>
+step insert: INSERT INTO statement_read_view VALUES (2);
+step publish: COMMIT;
+step read: <... completed>
+id
+--
+ 1
+(1 row)
+
+step read: EXECUTE read_view;
+id
+--
+ 1
+ 2
+(2 rows)
+
+step commit: COMMIT;
+step deallocate: DEALLOCATE read_view;
+
+starting permutation: offload prepare read lock begin read insert publish read commit deallocate
+step offload: SET lagodb.customscan_mode = 'off'; SET lagodb.query_offload_mode = 'force';
+step prepare: PREPARE read_view AS SELECT a.id FROM statement_read_view a JOIN statement_read_view b USING (id) ORDER BY a.id;
+step read: EXECUTE read_view;
+id
+--
+ 1
+(1 row)
+
+step lock: BEGIN; LOCK TABLE iceberg.iceberg_metadata IN ACCESS EXCLUSIVE MODE;
+step begin: BEGIN ISOLATION LEVEL READ COMMITTED;
+step read: EXECUTE read_view; <waiting ...>
+step insert: INSERT INTO statement_read_view VALUES (2);
+step publish: COMMIT;
+step read: <... completed>
+id
+--
+ 1
+(1 row)
+
+step read: EXECUTE read_view;
+id
+--
+ 1
+ 2
+(2 rows)
+
+step commit: COMMIT;
+step deallocate: DEALLOCATE read_view;

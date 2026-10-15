@@ -1,0 +1,110 @@
+Parsed test spec with 2 sessions
+
+starting permutation: am begin snapshot create read own_write read rollback read
+step am: SET lagodb.customscan_mode = 'off'; SET lagodb.query_offload_mode = 'off';
+step begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step snapshot: SELECT id FROM creation_view_anchor;
+id
+--
+ 1
+(1 row)
+
+step create: CREATE TABLE created_read_view (id integer) USING iceberg; INSERT INTO created_read_view VALUES (1);
+step read: SELECT id FROM created_read_view WHERE id >= 1 ORDER BY id;
+id
+--
+(0 rows)
+
+step own_write: INSERT INTO created_read_view VALUES (2);
+step read: SELECT id FROM created_read_view WHERE id >= 1 ORDER BY id;
+id
+--
+ 2
+(1 row)
+
+step rollback: ROLLBACK;
+step read: SELECT id FROM created_read_view WHERE id >= 1 ORDER BY id;
+id
+--
+ 1
+(1 row)
+
+
+starting permutation: custom begin snapshot create read own_write read rollback read
+step custom: SET lagodb.customscan_mode = 'force'; SET lagodb.query_offload_mode = 'off';
+step begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step snapshot: SELECT id FROM creation_view_anchor;
+id
+--
+ 1
+(1 row)
+
+step create: CREATE TABLE created_read_view (id integer) USING iceberg; INSERT INTO created_read_view VALUES (1);
+step read: SELECT id FROM created_read_view WHERE id >= 1 ORDER BY id;
+id
+--
+(0 rows)
+
+step own_write: INSERT INTO created_read_view VALUES (2);
+step read: SELECT id FROM created_read_view WHERE id >= 1 ORDER BY id;
+id
+--
+ 2
+(1 row)
+
+step rollback: ROLLBACK;
+step read: SELECT id FROM created_read_view WHERE id >= 1 ORDER BY id;
+id
+--
+ 1
+(1 row)
+
+
+starting permutation: offload begin snapshot create read own_write read rollback read
+step offload: SET lagodb.customscan_mode = 'off'; SET lagodb.query_offload_mode = 'force';
+step begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step snapshot: SELECT id FROM creation_view_anchor;
+id
+--
+ 1
+(1 row)
+
+step create: CREATE TABLE created_read_view (id integer) USING iceberg; INSERT INTO created_read_view VALUES (1);
+step read: SELECT id FROM created_read_view WHERE id >= 1 ORDER BY id;
+id
+--
+(0 rows)
+
+step own_write: INSERT INTO created_read_view VALUES (2);
+step read: SELECT id FROM created_read_view WHERE id >= 1 ORDER BY id;
+id
+--
+ 2
+(1 row)
+
+step rollback: ROLLBACK;
+step read: SELECT id FROM created_read_view WHERE id >= 1 ORDER BY id;
+id
+--
+ 1
+(1 row)
+
+
+starting permutation: offload lock stable_read create publish fresh_count
+step offload: SET lagodb.customscan_mode = 'off'; SET lagodb.query_offload_mode = 'force';
+step lock: BEGIN; LOCK TABLE creation_view_anchor IN ACCESS EXCLUSIVE MODE;
+step stable_read: SELECT count_created_table() AS rows; <waiting ...>
+step create: CREATE TABLE created_read_view (id integer) USING iceberg; INSERT INTO created_read_view VALUES (1);
+step publish: COMMIT;
+step stable_read: <... completed>
+rows
+----
+   0
+(1 row)
+
+step fresh_count: SELECT count(*) AS rows FROM created_read_view;
+rows
+----
+   1
+(1 row)
+

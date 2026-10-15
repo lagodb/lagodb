@@ -1,0 +1,163 @@
+Parsed test spec with 2 sessions
+
+starting permutation: am begin snapshot replace read read_partitioned read_control own_write read read_partitioned rollback read read_partitioned
+step am: SET lagodb.customscan_mode = 'off'; SET lagodb.query_offload_mode = 'off';
+step begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step snapshot: SELECT id FROM truncate_view_anchor;
+id
+--
+ 1
+(1 row)
+
+step replace: TRUNCATE truncate_view_t, truncate_view_partitioned; INSERT INTO truncate_view_t VALUES (2); INSERT INTO truncate_view_partitioned VALUES (2); INSERT INTO truncate_view_control VALUES (2);
+step read: SELECT id FROM truncate_view_t ORDER BY id;
+id
+--
+(0 rows)
+
+step read_partitioned: SELECT count(*) AS rows FROM truncate_view_partitioned;
+rows
+----
+   0
+(1 row)
+
+step read_control: SELECT id FROM truncate_view_control ORDER BY id;
+id
+--
+ 1
+(1 row)
+
+step own_write: INSERT INTO truncate_view_t VALUES (3); INSERT INTO truncate_view_partitioned VALUES (3);
+step read: SELECT id FROM truncate_view_t ORDER BY id;
+id
+--
+ 3
+(1 row)
+
+step read_partitioned: SELECT count(*) AS rows FROM truncate_view_partitioned;
+rows
+----
+   1
+(1 row)
+
+step rollback: ROLLBACK;
+step read: SELECT id FROM truncate_view_t ORDER BY id;
+id
+--
+ 2
+(1 row)
+
+step read_partitioned: SELECT count(*) AS rows FROM truncate_view_partitioned;
+rows
+----
+   1
+(1 row)
+
+
+starting permutation: custom begin snapshot replace read read_partitioned read_control own_write read read_partitioned rollback read read_partitioned
+step custom: SET lagodb.customscan_mode = 'force'; SET lagodb.query_offload_mode = 'off';
+step begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step snapshot: SELECT id FROM truncate_view_anchor;
+id
+--
+ 1
+(1 row)
+
+step replace: TRUNCATE truncate_view_t, truncate_view_partitioned; INSERT INTO truncate_view_t VALUES (2); INSERT INTO truncate_view_partitioned VALUES (2); INSERT INTO truncate_view_control VALUES (2);
+step read: SELECT id FROM truncate_view_t ORDER BY id;
+id
+--
+(0 rows)
+
+step read_partitioned: SELECT count(*) AS rows FROM truncate_view_partitioned;
+rows
+----
+   0
+(1 row)
+
+step read_control: SELECT id FROM truncate_view_control ORDER BY id;
+id
+--
+ 1
+(1 row)
+
+step own_write: INSERT INTO truncate_view_t VALUES (3); INSERT INTO truncate_view_partitioned VALUES (3);
+step read: SELECT id FROM truncate_view_t ORDER BY id;
+id
+--
+ 3
+(1 row)
+
+step read_partitioned: SELECT count(*) AS rows FROM truncate_view_partitioned;
+rows
+----
+   1
+(1 row)
+
+step rollback: ROLLBACK;
+step read: SELECT id FROM truncate_view_t ORDER BY id;
+id
+--
+ 2
+(1 row)
+
+step read_partitioned: SELECT count(*) AS rows FROM truncate_view_partitioned;
+rows
+----
+   1
+(1 row)
+
+
+starting permutation: offload begin snapshot replace read read_partitioned read_control own_write read read_partitioned rollback read read_partitioned
+step offload: SET lagodb.customscan_mode = 'off'; SET lagodb.query_offload_mode = 'force';
+step begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step snapshot: SELECT id FROM truncate_view_anchor;
+id
+--
+ 1
+(1 row)
+
+step replace: TRUNCATE truncate_view_t, truncate_view_partitioned; INSERT INTO truncate_view_t VALUES (2); INSERT INTO truncate_view_partitioned VALUES (2); INSERT INTO truncate_view_control VALUES (2);
+step read: SELECT id FROM truncate_view_t ORDER BY id;
+id
+--
+(0 rows)
+
+step read_partitioned: SELECT count(*) AS rows FROM truncate_view_partitioned;
+rows
+----
+   0
+(1 row)
+
+step read_control: SELECT id FROM truncate_view_control ORDER BY id;
+id
+--
+ 1
+(1 row)
+
+step own_write: INSERT INTO truncate_view_t VALUES (3); INSERT INTO truncate_view_partitioned VALUES (3);
+step read: SELECT id FROM truncate_view_t ORDER BY id;
+id
+--
+ 3
+(1 row)
+
+step read_partitioned: SELECT count(*) AS rows FROM truncate_view_partitioned;
+rows
+----
+   1
+(1 row)
+
+step rollback: ROLLBACK;
+step read: SELECT id FROM truncate_view_t ORDER BY id;
+id
+--
+ 2
+(1 row)
+
+step read_partitioned: SELECT count(*) AS rows FROM truncate_view_partitioned;
+rows
+----
+   1
+(1 row)
+

@@ -8,7 +8,6 @@
 //!     relid regclass NOT NULL,
 //!     metadata_location text,
 //!     previous_metadata_location text,
-//!     default_spec_id integer,
 //!     maintenance_due_at timestamptz,
 //!     PRIMARY KEY (relid)
 //! );
@@ -47,8 +46,7 @@ mod column {
     pub const RELID: i16 = 1;
     pub const METADATA_LOCATION: i16 = 2;
     pub const PREVIOUS_METADATA_LOCATION: i16 = 3;
-    pub const DEFAULT_SPEC_ID: i16 = 4;
-    pub const MAINTENANCE_DUE_AT: i16 = 5;
+    pub const MAINTENANCE_DUE_AT: i16 = 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,8 +189,8 @@ impl TupleFields {
 /// [`TupleFields`] so callers can express "replace these columns, leave the
 /// rest alone". Only columns explicitly set via [`Self::set`] are replaced.
 ///
-/// This is what lets the CAS update path leave columns like `default_spec_id`
-/// untouched without re-reading them from the catalog first.
+/// Maintenance-only updates preserve the metadata pointers, while CAS updates
+/// can preserve the maintenance deadline without copying untouched fields.
 struct TupleReplacement {
     fields: TupleFields,
     repls: Vec<bool>,
@@ -255,9 +253,8 @@ impl TupleReplacement {
 
 /// Replacement values for the next [`IcebergMetadata::cas_update`].
 ///
-/// Every field listed here is written on a successful CAS. Columns that are
-/// **not** present on this struct (e.g. `default_spec_id`) are preserved
-/// as-is on the existing row.
+/// Both metadata pointers are written on a successful CAS. The maintenance
+/// schedule determines whether and how the existing deadline is updated.
 ///
 /// Using a struct of named fields rather than positional `Option<&str>`
 /// arguments removes a class of "I swapped the second and third argument"
@@ -308,7 +305,6 @@ pub struct IcebergMetadata {
     pub relid: pg_sys::Oid,
     pub metadata_location: Option<String>,
     pub previous_metadata_location: Option<String>,
-    pub default_spec_id: Option<i32>,
     pub maintenance_due_at: Option<pg_sys::TimestampTz>,
 }
 
@@ -322,11 +318,6 @@ impl IcebergMetadata {
 
     pub fn with_metadata_location(mut self, location: impl Into<String>) -> Self {
         self.metadata_location = Some(location.into());
-        self
-    }
-
-    pub fn with_default_spec_id(mut self, spec_id: i32) -> Self {
-        self.default_spec_id = Some(spec_id);
         self
     }
 
@@ -371,7 +362,6 @@ impl IcebergMetadata {
             column::PREVIOUS_METADATA_LOCATION,
             self.previous_metadata_location.as_deref(),
         );
-        fields.set(column::DEFAULT_SPEC_ID, self.default_spec_id);
         fields.set(column::MAINTENANCE_DUE_AT, self.maintenance_due_at);
 
         // SAFETY: `heap_form_tuple` returns an owned heap tuple freed by
@@ -393,6 +383,13 @@ impl IcebergMetadata {
 
     /// Look up by relid. Returns `None` if the row does not exist.
     pub fn find_by_relid(relid: pg_sys::Oid) -> IcebergResult<Option<Self>> {
+        Self::find_with_snapshot(relid, CatalogSnapshot::Default)
+    }
+
+    pub(super) fn find_with_snapshot(
+        relid: pg_sys::Oid,
+        snapshot: CatalogSnapshot<'_>,
+    ) -> IcebergResult<Option<Self>> {
         let table_guard =
             CatalogRelation::open(Self::table_oid()?, pg_sys::AccessShareLock as _)
                 .map_catalog_err(CatalogOp::Read)?;
@@ -401,7 +398,7 @@ impl IcebergMetadata {
             .begin_scan(
                 Self::pkey_oid()?,
                 true,
-                CatalogSnapshot::Default,
+                snapshot,
                 [CatalogScanKey::oid_eq(column::RELID as _, relid)],
             )
             .map_catalog_err(CatalogOp::Read)?;
@@ -420,9 +417,17 @@ impl IcebergMetadata {
 
     /// Look up by relid; returns [`MetadataCatalogError::NotFound`] when absent.
     pub fn get(relid: pg_sys::Oid) -> IcebergResult<Self> {
-        Self::find_by_relid(relid)?.ok_or(IcebergError::MetadataCatalog(
-            MetadataCatalogError::NotFound(relid),
-        ))
+        Self::get_with_snapshot(relid, CatalogSnapshot::Default)
+    }
+
+    /// Read the metadata pointer using the caller's visibility boundary.
+    pub(super) fn get_with_snapshot(
+        relid: pg_sys::Oid,
+        snapshot: CatalogSnapshot<'_>,
+    ) -> IcebergResult<Self> {
+        Self::find_with_snapshot(relid, snapshot)?.ok_or(
+            IcebergError::MetadataCatalog(MetadataCatalogError::NotFound(relid)),
+        )
     }
 
     /// Existence probe.
@@ -643,9 +648,8 @@ impl IcebergMetadata {
     ///
     /// Reads the row, verifies its `metadata_location` matches
     /// `expected_previous_location`, then writes the columns named in
-    /// `new`. Columns absent from [`CasUpdate`] (e.g. `default_spec_id`)
-    /// are preserved as-is, which is what lets us avoid an extra row
-    /// fetch for columns we never modify on this path.
+    /// `new`. The maintenance deadline follows `new.maintenance_schedule`;
+    /// the relation identity is preserved.
     ///
     /// Returns [`MetadataCatalogError::Conflict`] for both the
     /// logical CAS mismatch and PostgreSQL's tuple-version conflict
@@ -803,7 +807,6 @@ impl IcebergMetadata {
                     tup_desc,
                     column::PREVIOUS_METADATA_LOCATION,
                 ),
-                default_spec_id: get_attr(tuple, tup_desc, column::DEFAULT_SPEC_ID),
                 maintenance_due_at: get_attr::<TimestampWithTimeZone>(
                     tuple,
                     tup_desc,
