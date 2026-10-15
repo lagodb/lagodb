@@ -9,21 +9,24 @@ mod pg_test;
 
 use core::ffi::CStr;
 
+use lagodb_core::access::mutation::ModifyScanBinding;
 use lagodb_core::api::TableAccessMethod;
 use lagodb_core::customscan::modify::{
     LagodbCustomModifyProvider, ModifyBindContext, ModifyCapabilities,
-    register_provider as register_modify_provider,
+    PreparedModifyScan, register_provider as register_modify_provider,
 };
 use lagodb_core::customscan::provider::{
     BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
-    CustomScanError, EndContext, LagodbCustomScanProvider, NextSlotContext,
-    NextSlotResult, NoPrivateData, PathContext, PathVariant, ReScanContext,
-    RelationContext, StartContext, register_provider as register_scan_provider,
+    CustomScanError, EndContext, LagodbCustomScanProvider, NeededColumns,
+    NextSlotContext, NextSlotResult, NoPrivateData, PathContext, PathVariant,
+    ReScanContext, RelationContext, StartContext,
+    register_provider as register_scan_provider,
 };
 use lagodb_core::expr::RuntimeValueBindings;
 use lagodb_core::expr::pushdown::{
-    FilterBindResult, FilterPlanningContext, FilterPushdown,
+    BoundFilterSet, FilterBindResult, FilterPlanningContext, FilterPushdown,
 };
+use lagodb_core::handles::{RelationHandle, SnapshotHandle};
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 use lagodb_core::runtime_api::TableScanTaskMetrics;
 use pgrx::pg_sys;
@@ -32,7 +35,10 @@ use crate::config::scan_fraction;
 use crate::error::IcebergError;
 use crate::managed_table::IcebergTableAm;
 use crate::managed_table::ManagedTableReadView;
-use crate::managed_table::access::mutation::IcebergModifyScanContext;
+use crate::managed_table::access::mutation::{
+    IcebergModifyQueryState, IcebergModifyScanContext,
+};
+use crate::managed_table::access::scan::IcebergScan;
 use crate::managed_table::catalog::IcebergAccessMethod;
 use crate::managed_table::catalog::metadata_tracker::TxMetadata;
 use crate::predicate::{
@@ -199,6 +205,25 @@ impl LagodbCustomModifyProvider for IcebergCustomScanProvider {
     const MODIFY_NAME: &'static CStr = c"LagoDBModifyTable";
 
     const MODIFY_CAPABILITIES: ModifyCapabilities = ModifyCapabilities::NONE;
+
+    fn prepare_modify_seq_scan(
+        relation: &RelationHandle<'_>,
+        snapshot: &SnapshotHandle<'_>,
+        filters: BoundFilterSet<'_, BoundIcebergPredicate>,
+        needed_columns: NeededColumns<'_>,
+    ) -> Result<PreparedModifyScan<IcebergTableAm>, CustomScanError> {
+        let (session, context) =
+            IcebergScan::prepare_modify(relation, snapshot, filters, needed_columns)
+                .map_err(CustomScanError::provider)?;
+        Ok(PreparedModifyScan { session, context })
+    }
+
+    fn bind_modify_seq_scan(
+        session: &mut IcebergScan,
+        binding: ModifyScanBinding<IcebergModifyQueryState>,
+    ) -> Result<(), CustomScanError> {
+        session.bind_modify(binding).map_err(Into::into)
+    }
 
     fn bind_modify(ctx: ModifyBindContext<'_, Self>) -> Result<(), CustomScanError> {
         IcebergScanState::bind_modify(ctx)

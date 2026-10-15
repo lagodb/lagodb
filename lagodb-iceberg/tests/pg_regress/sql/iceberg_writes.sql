@@ -145,14 +145,20 @@ INSERT INTO dml_lifecycle.generated_t (id, base)
 VALUES (1, 5), (2, 7)
 RETURNING id, base, doubled;
 
+-- Bind parameters anew per execution, including one shared by SET and WHERE.
+SET lagodb.customscan_mode = 'off';
+SET plan_cache_mode = force_generic_plan;
 PREPARE update_generated(integer, integer) AS
 UPDATE dml_lifecycle.generated_t
-SET base = $2
+SET id = $1, base = $2
 WHERE id = $1
 RETURNING id, base, doubled;
 
 EXECUTE update_generated(2, 9);
+EXECUTE update_generated(1, 5);
 DEALLOCATE update_generated;
+RESET plan_cache_mode;
+RESET lagodb.customscan_mode;
 
 UPDATE dml_lifecycle.generated_t SET base = -1 WHERE id = 1;
 
@@ -207,7 +213,8 @@ WHEN NOT MATCHED THEN
 SELECT id, label FROM dml_lifecycle.v1_dml_t ORDER BY id;
 
 -- Matched MERGE branches exercise the same AM update/delete/lock paths through
--- PostgreSQL's MERGE executor.
+-- PostgreSQL's MERGE executor with native target SeqScans.
+SET lagodb.customscan_mode = 'off';
 CREATE TABLE dml_lifecycle.merge_update_t (
     id integer,
     label text
@@ -241,6 +248,7 @@ WHEN MATCHED THEN
 SELECT id, label FROM dml_lifecycle.merge_delete_t ORDER BY id;
 INSERT INTO dml_lifecycle.merge_delete_t VALUES (42, 'after_merge');
 SELECT id, label FROM dml_lifecycle.merge_delete_t ORDER BY id;
+RESET lagodb.customscan_mode;
 
 -- UPDATE ... FROM: only the target scan receives Modify identity binding; the
 -- Iceberg source remains a plain join input regardless of chosen scan path.
@@ -284,18 +292,9 @@ WHERE target.id = sibling.id AND target.id = 2;
 
 SELECT id, label FROM dml_lifecycle.upd_target ORDER BY id;
 
-EXPLAIN (COSTS OFF)
-UPDATE dml_lifecycle.upd_target
-SET label = label
-WHERE id = 999;
-
--- The GUC controls query optimization only. ModifyTarget-purpose CustomScan remains
--- mandatory so row identity and OCC context cannot be disabled.
+-- Disabling optional CustomScans selects a native target SeqScan. ModifyTable
+-- still supplies its row identity binding and OCC context.
 SET lagodb.customscan_mode = 'off';
-EXPLAIN (COSTS OFF)
-UPDATE dml_lifecycle.upd_target
-SET label = label || '_seqscan'
-WHERE id = 1;
 UPDATE dml_lifecycle.upd_target
 SET label = label || '_seqscan'
 WHERE id = 1;

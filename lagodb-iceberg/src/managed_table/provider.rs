@@ -3,6 +3,7 @@
 use std::ffi::CStr;
 
 use lagodb_core::prelude::*;
+use lagodb_core::runtime_api::TableCopyCallbacks;
 use lagodb_core::table_maintenance::{
     TableMaintenanceError, TableMaintenanceReport, TableMaintenanceRequest,
     TableMaintenanceStats,
@@ -51,6 +52,12 @@ impl TableAccessMethod for IcebergTableAm {
 }
 
 impl LagodbTableProvider for IcebergTableProvider {
+    fn copy_callbacks() -> Option<&'static TableCopyCallbacks> {
+        static CALLBACKS: TableCopyCallbacks =
+            TableCopyCallbacks::for_am::<IcebergTableAm>();
+        Some(&CALLBACKS)
+    }
+
     const OWNS_PARTITIONED_TABLE: bool = IcebergTableAm::OWNS_PARTITIONED_TABLE;
     const NAME: &'static CStr = c"iceberg";
     const EXTENSION_NAME: &'static CStr = c"lagodb_iceberg";

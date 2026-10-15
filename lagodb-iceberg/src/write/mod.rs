@@ -28,5 +28,5 @@ pub(crate) use scan_tasks::PlannedMutationTasks;
 pub(crate) use transaction::EffectiveCommitAction;
 pub(crate) use transaction::{
     ExclusiveTransactionAction, PreparedTablePropertyUpdate, TableTransactionState,
-    TxTableActionLog, TxTableCommitPlan,
+    TxTableActionLog, TxTableCommitPlan, TxWriteBatch,
 };

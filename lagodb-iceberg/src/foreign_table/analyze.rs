@@ -12,8 +12,10 @@ use lagodb_core::tuple::SlotColumns;
 use pgrx::pg_sys;
 use rand::Rng;
 
+use super::error::IcebergFdwError;
+use super::options::ForeignTableIdentity;
 use super::provider::LagodbIceberg;
-use super::relation::RestForeignTable;
+use super::relation::IcebergForeignTable;
 use super::schema::ForeignSchemaBinding;
 use super::transaction::{ForeignTableView, ForeignTransaction};
 use crate::scan::{IcebergReadSnapshot, PreparedRowScan, ScanPredicates};
@@ -24,8 +26,8 @@ impl FdwAnalyze for LagodbIceberg {
     fn analyze(
         context: &ForeignAnalyzeContext<'_>,
     ) -> Result<Option<ForeignAnalyzeSupport>, ForeignTableMaintenanceError> {
-        let view = analyze_view(context.relation().oid())?;
-        let tasks = plan_files(&view)?;
+        let source = AnalyzeSource::load(context.relation().oid())?;
+        let tasks = source.plan_files()?;
         let bytes = tasks.iter().try_fold(0_u64, |total, task| {
             total.checked_add(task.file_size_in_bytes).ok_or_else(|| {
                 ForeignTableMaintenanceError::unsupported(
@@ -41,12 +43,19 @@ impl FdwAnalyze for LagodbIceberg {
     fn acquire_sample_rows(
         context: &mut ForeignSampleContext<'_>,
     ) -> Result<ForeignSampleStatistics, ForeignTableMaintenanceError> {
-        let view = analyze_view(context.relation().oid())?;
-        let layout = ForeignSchemaBinding::bind(
-            context.relation(),
-            view.table.metadata().current_schema(),
-        )?
-        .into_relation_layout();
+        let source = AnalyzeSource::load(context.relation().oid())?;
+        let view = source.view;
+        let binding = ForeignSchemaBinding::new(context.relation())?;
+        binding.validate_read(
+            view.table.metadata(),
+            &source.identity,
+            binding
+                .layout()
+                .live_columns()
+                .iter()
+                .map(|column| column.attno),
+        )?;
+        let layout = binding.into_relation_layout();
         let mut prepared = PreparedRowScan::full(
             IcebergReadSnapshot::new(view.table, view.delta),
             ScanPredicates::unfiltered(),
@@ -62,13 +71,11 @@ impl FdwAnalyze for LagodbIceberg {
         loop {
             row_context.reset();
             unsafe { pg_sys::ExecClearTuple(slot.raw()) };
-            let prior = unsafe { pg_sys::MemoryContextSwitchTo(row_context.raw()) };
-            let produced = {
+            let produced = row_context.with(|| {
                 let mut columns =
                     unsafe { SlotColumns::new(slot.raw(), row_context.raw()) };
                 cursor.next_into_slot(&mut columns)
-            };
-            unsafe { pg_sys::MemoryContextSwitchTo(prior) };
+            });
             if !produced? {
                 break;
             }
@@ -102,26 +109,31 @@ impl FdwAnalyze for LagodbIceberg {
     }
 }
 
-fn analyze_view(
-    relation_oid: pg_sys::Oid,
-) -> Result<ForeignTableView, ForeignTableMaintenanceError> {
-    let effective_user = unsafe { pg_sys::GetUserId() };
-    let resolved = RestForeignTable::resolve(relation_oid, effective_user)?;
-    Ok(ForeignTransaction::scan_view(resolved)?)
+struct AnalyzeSource {
+    view: ForeignTableView,
+    identity: ForeignTableIdentity,
 }
 
-fn plan_files(
-    view: &ForeignTableView,
-) -> Result<Vec<FileScanTask>, ForeignTableMaintenanceError> {
-    let mut builder = view.table.scan();
-    if let Some(delta) = view.delta.as_ref() {
-        builder = builder.with_delta(Arc::clone(delta));
+impl AnalyzeSource {
+    fn load(relation_oid: pg_sys::Oid) -> Result<Self, ForeignTableMaintenanceError> {
+        let effective_user = unsafe { pg_sys::GetUserId() };
+        let resolved = IcebergForeignTable::resolve(relation_oid, effective_user)?;
+        let identity = resolved.identity().clone();
+        let view = ForeignTransaction::scan_view(resolved, None)?;
+        Ok(Self { view, identity })
     }
-    Ok(builder
-        .build()
-        .map_err(super::error::IcebergFdwError::from)?
-        .plan_files()
-        .map_err(super::error::IcebergFdwError::from)?)
+
+    fn plan_files(&self) -> Result<Vec<FileScanTask>, ForeignTableMaintenanceError> {
+        let mut builder = self.view.table.scan();
+        if let Some(delta) = self.view.delta.as_ref() {
+            builder = builder.with_delta(Arc::clone(delta));
+        }
+        Ok(builder
+            .build()
+            .map_err(IcebergFdwError::from)?
+            .plan_files()
+            .map_err(IcebergFdwError::from)?)
+    }
 }
 
 struct AnalyzeSlot(*mut pg_sys::TupleTableSlot);
@@ -167,6 +179,28 @@ impl AnalyzeRowContext {
 
     fn reset(&self) {
         unsafe { pg_sys::MemoryContextReset(self.0) };
+    }
+
+    fn with<R>(&self, allocate: impl FnOnce() -> R) -> R {
+        // SAFETY: ANALYZE runs on the backend thread. Both the caller's
+        // context and this owned child outlive the closure and its guard.
+        let _restore = unsafe {
+            let restore = RestoreAnalyzeContext(pg_sys::CurrentMemoryContext);
+            pg_sys::CurrentMemoryContext = self.0;
+            restore
+        };
+        allocate()
+    }
+}
+
+// Restore on PG ERROR unwinding as well as normal return, before the owned
+// row context is deleted. Sample tuples are copied after this guard is gone.
+struct RestoreAnalyzeContext(pg_sys::MemoryContext);
+
+impl Drop for RestoreAnalyzeContext {
+    fn drop(&mut self) {
+        // SAFETY: the caller's context outlives the scoped row allocation.
+        unsafe { pg_sys::CurrentMemoryContext = self.0 };
     }
 }
 

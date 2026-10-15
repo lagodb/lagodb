@@ -87,21 +87,138 @@ OPTIONS (
     secret_access_key :'regress_s3_secret_access_key'
 );
 
--- Explicit CREATE FOREIGN TABLE validates the complete remote schema before
--- PostgreSQL creates the local relation.
+-- CREATE checks declared names and types; the write entry point checks the
+-- complete writable contract after PostgreSQL has processed local columns.
 CREATE FOREIGN TABLE iceberg_fdw_regress.writable (
     id integer,
     payload text
 )
 SERVER iceberg_rest
 OPTIONS (
-    catalog_name 'regress',
-    catalog_namespace 'fdw_writes',
-    catalog_table_name 'rows_v2',
-    mode 'read_write'
+    table 'fdw_writes.rows_v2'
 );
 
 SELECT * FROM iceberg_fdw_regress.writable ORDER BY id;
+
+-- JSONB writes use the remote schema, including recursive values and NULLs.
+SET lagodb.query_offload_mode = 'off';
+CREATE FOREIGN TABLE iceberg_fdw_regress.nested (
+    id integer, record jsonb, items jsonb, labels jsonb,
+    indexed jsonb, structured jsonb, numbers integer[]
+)
+SERVER iceberg_rest
+OPTIONS (
+    table 'fdw_writes.nested_rows_v2'
+);
+CREATE TEMP TABLE nested_before AS SELECT * FROM iceberg_fdw_regress.nested;
+INSERT INTO iceberg_fdw_regress.nested
+SELECT id + 10, record, items, labels, indexed, structured, numbers
+FROM nested_before;
+
+SELECT count(*) = 3 AND bool_and(
+           ROW(a.record, a.items, a.labels, a.indexed, a.structured, a.numbers)
+           IS NOT DISTINCT FROM
+           ROW(b.record, b.items, b.labels, b.indexed, b.structured, b.numbers)) AS roundtrip
+FROM iceberg_fdw_regress.nested a JOIN nested_before b ON a.id = b.id + 10;
+
+-- Display precision and Numeric zero normalization must not alter float leaves.
+-- Both float widths retain signed zero through INSERT and id-only UPDATE.
+SET extra_float_digits = 0;
+SELECT record->'special' = '[1.2345678901234567,"NaN","Infinity","-Infinity","-0.0",0]'::jsonb
+       AND record->'single' = '[1.25,"-0.0",0]'::jsonb
+       AS exact_read
+FROM iceberg_fdw_regress.nested WHERE id = 11;
+UPDATE iceberg_fdw_regress.nested SET id = 21 WHERE id = 11;
+RESET extra_float_digits;
+SELECT ROW(a.record, a.items, a.labels, a.indexed, a.structured, a.numbers)
+       IS NOT DISTINCT FROM
+       ROW(b.record, b.items, b.labels, b.indexed, b.structured, b.numbers)
+       AND a.record->'special' = '[1.2345678901234567,"NaN","Infinity","-Infinity","-0.0",0]'::jsonb
+       AND a.record->'single' = '[1.25,"-0.0",0]'::jsonb
+       AS exact_update
+FROM iceberg_fdw_regress.nested a JOIN nested_before b ON b.id = 1
+WHERE a.id = 21;
+
+-- Updating one field also rewrites the other nested columns without loss.
+UPDATE iceberg_fdw_regress.nested
+SET id = 11, record = jsonb_set(record, '{label}', '"updated"') WHERE id = 21;
+
+SELECT record->>'label' = 'updated'
+       AND record->'amount' = '123456789012345678901234567890.12345678'::jsonb
+       AND indexed = '[{"key":7,"value":["x",null]},{"key":8,"value":null}]'::jsonb
+       AND numbers = ARRAY[1,NULL,2] AS updated
+FROM iceberg_fdw_regress.nested WHERE id = 11;
+
+-- Alternate populated, empty and NULL containers across FDW insert batches.
+INSERT INTO iceberg_fdw_regress.nested
+SELECT 100 + n, record, items, labels, indexed, structured, numbers
+FROM generate_series(0, 1099) AS n
+JOIN nested_before ON id = n % 3 + 1
+ORDER BY n;
+
+SELECT count(*) = 1100 AND count(DISTINCT a.id) = 1100 AND bool_and(
+           ROW(a.record, a.items, a.labels, a.indexed, a.structured, a.numbers)
+           IS NOT DISTINCT FROM
+           ROW(b.record, b.items, b.labels, b.indexed, b.structured, b.numbers))
+       AS bulk_values
+FROM iceberg_fdw_regress.nested a
+LEFT JOIN nested_before b ON b.id = (a.id - 100) % 3 + 1
+WHERE a.id >= 100;
+
+CREATE FOREIGN TABLE iceberg_fdw_regress.nanos ()
+SERVER iceberg_rest
+OPTIONS (
+    table 'fdw_writes.nanos_v3'
+);
+CREATE TEMP TABLE nanos_before AS SELECT id, detail FROM iceberg_fdw_regress.nanos;
+INSERT INTO iceberg_fdw_regress.nanos (id, detail)
+SELECT id + 20, detail FROM nanos_before;
+
+SELECT count(*) = 9 AND bool_and(a.detail IS NOT DISTINCT FROM b.detail) AS nanos_roundtrip
+FROM iceberg_fdw_regress.nanos a JOIN nanos_before b ON a.id = b.id + 20;
+
+-- Missing fields use write-default, not initial-default; explicit null stays null.
+INSERT INTO iceberg_fdw_regress.nanos (id, detail) VALUES
+    (40, '{"ts":"1969-12-31T23:59:59.999999999"}'),
+    (41, '{"ts":"1970-01-01T00:00:00.000000000","label":null}');
+
+SELECT count(*) = 2 AND bool_and(detail IS NOT DISTINCT FROM CASE id
+           WHEN 40 THEN '{"ts":"1969-12-31T23:59:59.999999999","tz":null,"label":"written"}'::jsonb
+           WHEN 41 THEN '{"ts":"1970-01-01T00:00:00.000000000","tz":null,"label":null}'::jsonb
+       END) AS defaults
+FROM iceberg_fdw_regress.nanos WHERE id IN (40, 41);
+
+-- Invalid shapes, required fields, and typed duplicate map keys are errors.
+\set VERBOSITY sqlstate
+-- UPDATE rewrites native nanosecond columns even when only id is assigned.
+UPDATE iceberg_fdw_regress.nanos SET id = 100 WHERE id = 1;
+
+INSERT INTO iceberg_fdw_regress.nested (id, record) VALUES (50, '{"unknown":1}');
+
+-- Special float strings do not make arbitrary numeric strings valid input.
+INSERT INTO iceberg_fdw_regress.nested (id, record) VALUES (50, '{"single":["0.0"]}');
+
+INSERT INTO iceberg_fdw_regress.nanos (id, detail) VALUES (50, '{"ts":null}');
+
+-- Removing the nanosecond fraction must not make an invalid time valid.
+INSERT INTO iceberg_fdw_regress.nanos (id, detail)
+VALUES (50, '{"ts":"1970-01-01T24:00:00.000000001"}');
+
+INSERT INTO iceberg_fdw_regress.nested (id, indexed)
+VALUES (50, '[{"key":1,"value":[]},{"key":1.0,"value":[]}]');
+
+\set VERBOSITY default
+-- DELETE does not rewrite timestamp values and remains supported.
+DELETE FROM iceberg_fdw_regress.nanos WHERE id = 1 RETURNING id;
+
+-- A failed append must not leave a partial row visible to the next statement.
+INSERT INTO iceberg_fdw_regress.nested (id, numbers) VALUES (60, ARRAY[3,NULL,4]);
+
+SELECT count(*) = 1 AND bool_and(id = 60 AND numbers = ARRAY[3,NULL,4]) AS recovered
+FROM iceberg_fdw_regress.nested WHERE id IN (50, 60);
+
+DROP TABLE nested_before, nanos_before;
+RESET lagodb.query_offload_mode;
 
 -- The provisioned format-v3 table already contains Spark deletion vectors.
 -- Exercise FDW reads of that state, then create FDW deletion vectors through
@@ -112,10 +229,7 @@ CREATE FOREIGN TABLE iceberg_fdw_regress.v3_mutations (
 )
 SERVER iceberg_rest
 OPTIONS (
-    catalog_name 'regress',
-    catalog_namespace 'fdw_writes',
-    catalog_table_name 'deletion_vectors_v3',
-    mode 'read_write'
+    table 'fdw_writes.deletion_vectors_v3'
 );
 SELECT * FROM iceberg_fdw_regress.v3_mutations ORDER BY id;
 BEGIN;
@@ -136,10 +250,7 @@ SELECT * FROM iceberg_fdw_regress.v3_mutations ORDER BY id;
 CREATE FOREIGN TABLE iceberg_fdw_regress.partition_evolution_v2 ()
 SERVER iceberg_rest
 OPTIONS (
-    catalog_name 'regress',
-    catalog_namespace 'fdw_writes',
-    catalog_table_name 'partition_evolution_v2',
-    mode 'read_write'
+    table 'fdw_writes.partition_evolution_v2'
 );
 SELECT array_agg(id ORDER BY id) AS initial_partitioned_rows
 FROM iceberg_fdw_regress.partition_evolution_v2;
@@ -171,10 +282,7 @@ FROM iceberg_fdw_regress.partition_evolution_v2;
 CREATE FOREIGN TABLE iceberg_fdw_regress.inferred ()
 SERVER iceberg_rest
 OPTIONS (
-    catalog_name 'regress',
-    catalog_namespace 'fdw_writes',
-    catalog_table_name 'import_rows_v2',
-    mode 'read_only'
+    table 'fdw_writes.import_rows_v2'
 );
 SELECT * FROM iceberg_fdw_regress.inferred ORDER BY id;
 
@@ -186,20 +294,14 @@ CREATE FOREIGN TABLE iceberg_fdw_regress.fallback_writable (
 )
 SERVER iceberg_rest_fallback
 OPTIONS (
-    catalog_name 'regress',
-    catalog_namespace 'fdw_writes',
-    catalog_table_name 'rows_v2',
-    mode 'read_write'
+    table 'fdw_writes.rows_v2'
 );
 SELECT * FROM iceberg_fdw_regress.fallback_writable ORDER BY id;
 
 CREATE FOREIGN TABLE iceberg_fdw_regress.fallback_second_bucket ()
 SERVER iceberg_rest_fallback
 OPTIONS (
-    catalog_name 'regress',
-    catalog_namespace 'fdw_reads',
-    catalog_table_name 'second_bucket_v2',
-    mode 'read_only'
+    table 'fdw_reads.second_bucket_v2'
 );
 SELECT * FROM iceberg_fdw_regress.fallback_second_bucket ORDER BY id;
 INSERT INTO iceberg_fdw_regress.fallback_writable
@@ -210,30 +312,25 @@ CREATE SCHEMA iceberg_fdw_import;
 IMPORT FOREIGN SCHEMA fdw_writes
 LIMIT TO (import_rows_v2)
 FROM SERVER iceberg_rest
-INTO iceberg_fdw_import
-OPTIONS (mode 'read_write');
+INTO iceberg_fdw_import;
 INSERT INTO iceberg_fdw_import.import_rows_v2 VALUES (15, 'fifteen');
 SELECT array_agg(id ORDER BY id) AS imported_write_rows
 FROM iceberg_fdw_import.import_rows_v2;
 
--- Mismatched explicit columns are rejected and leave no local catalog entry.
+-- Incompatible explicit types are rejected during CREATE.
 CREATE FOREIGN TABLE iceberg_fdw_regress.invalid_schema (
     id bigint,
     payload text
 )
 SERVER iceberg_rest
 OPTIONS (
-    catalog_name 'regress',
-    catalog_namespace 'fdw_writes',
-    catalog_table_name 'rows_v2',
-    mode 'read_write'
+    table 'fdw_writes.rows_v2'
 );
-SELECT to_regclass('iceberg_fdw_regress.invalid_schema') IS NULL
-       AS invalid_schema_not_created;
 
+-- Inferred definitions are writable without an opt-in mode.
 INSERT INTO iceberg_fdw_regress.inferred VALUES (11, 'eleven');
-ALTER FOREIGN TABLE iceberg_fdw_regress.writable ADD COLUMN extra integer;
-ALTER FOREIGN TABLE iceberg_fdw_regress.writable RENAME TO renamed;
+SELECT array_agg(id ORDER BY id) AS inferred_write_rows
+FROM iceberg_fdw_regress.inferred;
 TRUNCATE iceberg_fdw_regress.writable;
 VACUUM iceberg_fdw_regress.writable;
 VACUUM (ANALYZE) iceberg_fdw_regress.writable;
@@ -278,10 +375,7 @@ CREATE FOREIGN TABLE iceberg_fdw_regress.second (
 )
 SERVER iceberg_rest
 OPTIONS (
-    catalog_name 'regress',
-    catalog_namespace 'fdw_writes',
-    catalog_table_name 'import_rows_v2',
-    mode 'read_write'
+    table 'fdw_writes.import_rows_v2'
 );
 BEGIN;
 INSERT INTO iceberg_fdw_regress.writable VALUES (7, 'seven');
@@ -300,10 +394,7 @@ CREATE FOREIGN TABLE iceberg_fdw_regress.second_server_table (
 )
 SERVER iceberg_rest_second
 OPTIONS (
-    catalog_name 'regress',
-    catalog_namespace 'fdw_writes',
-    catalog_table_name 'import_rows_v2',
-    mode 'read_write'
+    table 'fdw_writes.import_rows_v2'
 );
 BEGIN;
 INSERT INTO iceberg_fdw_regress.writable VALUES (30, 'thirty');
@@ -389,10 +480,7 @@ SELECT to_regclass('iceberg_fdw_regress.writable') IS NULL
 CREATE FOREIGN TABLE iceberg_fdw_regress.rebound ()
 SERVER iceberg_rest
 OPTIONS (
-    catalog_name 'regress',
-    catalog_namespace 'fdw_writes',
-    catalog_table_name 'rows_v2',
-    mode 'read_only'
+    table 'fdw_writes.rows_v2'
 );
 SELECT array_agg(id ORDER BY id) AS remote_rows_survive_local_drop
 FROM iceberg_fdw_regress.rebound;
@@ -406,16 +494,43 @@ CREATE FOREIGN TABLE iceberg_fdw_regress.failure_writable (
 )
 SERVER iceberg_rest_failure
 OPTIONS (
-    catalog_name 'regress',
-    catalog_namespace 'fdw_writes',
-    catalog_table_name 'rows_v2',
-    mode 'read_write'
+    table 'fdw_writes.rows_v2'
 );
 BEGIN;
 INSERT INTO iceberg_fdw_regress.failure_writable VALUES (99, 'not-published');
 COMMIT;
 SELECT count(*) AS unpublished_remote_rows
 FROM iceberg_fdw_regress.rebound WHERE id = 99;
+
+-- Retargeting affects later statements, not writes already staged for A.
+CREATE FOREIGN TABLE iceberg_fdw_regress.retargeted (id integer, payload text)
+SERVER iceberg_rest OPTIONS (table 'fdw_writes.rows_v2');
+BEGIN;
+INSERT INTO iceberg_fdw_regress.retargeted VALUES (60, 'target-a');
+ALTER FOREIGN TABLE iceberg_fdw_regress.retargeted
+    OPTIONS (SET table 'fdw_writes.import_rows_v2');
+INSERT INTO iceberg_fdw_regress.retargeted VALUES (61, 'target-b');
+COMMIT;
+SELECT array_agg(id ORDER BY id) AS target_a
+FROM iceberg_fdw_regress.rebound WHERE id IN (60, 61);
+SELECT array_agg(id ORDER BY id) AS target_b
+FROM iceberg_fdw_regress.retargeted WHERE id IN (60, 61);
+
+-- Rollback removes staged writes to both targets and restores local options.
+BEGIN;
+INSERT INTO iceberg_fdw_regress.retargeted VALUES (62, 'rollback-b');
+ALTER FOREIGN TABLE iceberg_fdw_regress.retargeted
+    OPTIONS (SET table 'fdw_writes.rows_v2');
+INSERT INTO iceberg_fdw_regress.retargeted VALUES (63, 'rollback-a');
+ROLLBACK;
+SELECT array_agg(id ORDER BY id) AS target_a
+FROM iceberg_fdw_regress.rebound WHERE id BETWEEN 60 AND 63;
+SELECT array_agg(id ORDER BY id) AS target_b
+FROM iceberg_fdw_regress.retargeted WHERE id BETWEEN 60 AND 63;
+SELECT option_name, option_value
+FROM pg_foreign_table, LATERAL pg_options_to_table(ftoptions)
+WHERE ftrelid = 'iceberg_fdw_regress.retargeted'::regclass
+ORDER BY option_name;
 
 SET client_min_messages = warning;
 DROP SCHEMA iceberg_fdw_regress CASCADE;

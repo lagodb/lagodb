@@ -107,12 +107,8 @@ impl FdwScan for LagodbIceberg {
             total,
             IcebergFdwScanPrivate::new(state.source.identity().clone()),
         );
-        // A read-write table can carry a backend-local transaction overlay.
-        // Until that overlay is part of the worker payload, neither a partial
-        // worker nor an independently rebuilt complete path may read it.
-        path.set_native_parallel_partial(
-            !state.source.identity().mode().is_writable(),
-        );
+        // Workers cannot reconstruct this backend's transaction-local actions.
+        path.set_native_parallel_partial(!state.source.has_local_actions());
         path.set_scanned_pages(scanned_pages);
         path.retrieved_rows = retrieved_rows;
         paths.push(path);
@@ -191,6 +187,10 @@ impl FdwScan for LagodbIceberg {
     fn end(state: &mut Self::State) -> Result<(), ForeignScanError> {
         state.end();
         Ok(())
+    }
+
+    fn parallel_workers_allowed(state: &Self::State) -> bool {
+        state.parallel_workers_allowed()
     }
 
     fn estimate_dsm(

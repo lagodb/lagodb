@@ -1,4 +1,43 @@
 //! PostgreSQL tuple-slot to rolling Parquet data-file pipeline.
+//!
+//! The underlying issue is whether a nested query in the same transaction can
+//! read an ongoing statement's unfinished writes according to PostgreSQL's
+//! snapshot and command-ID visibility rules. Transaction-local visibility does
+//! not require committing an Iceberg snapshot or exposing rows to other
+//! transactions: completed files can already be read through our transaction
+//! delta. What is missing is a readable representation of rows still held by
+//! the unfinished writer.
+//!
+//! Visibility policy: managed-table and foreign-table adapters finalize files
+//! through `finish` and then stage them in their transaction delta. Flushing
+//! the column buffer into the writer does not publish rows to table scans.
+//! COPY-time reads of its own unfinished writes are therefore unsupported:
+//! this includes target-table queries from BEFORE INSERT ROW triggers,
+//! volatile defaults/COPY WHERE, and functions in AFTER INSERT ROW WHEN clauses.
+//! WHEN is evaluated while queuing the event, before final publication.
+//!
+//! Supporting those reads would require repeatable publication or a scan path
+//! over unfinished writes, with CID visibility, nested execution and rollback
+//! handled together. Closing/reopening files per row would put file-finalization
+//! costs on the insert hot path. We deliberately defer that work to preserve
+//! the current bulk-write model. This is a support limitation, not an enforced
+//! rejection of these expressions; it does not prohibit checks using only NEW.
+//! Managed COPY publishes before queued AFTER trigger bodies execute. The FDW's
+//! separate AFTER-trigger restriction is documented in its modify adapter.
+//!
+//! FIXME(iceberg-after-row-visibility): this also affects ModifyTable, not just
+//! COPY. Both paths evaluate AFTER ROW WHEN conditions while queuing events,
+//! before the writer's changes are staged. A WHEN function querying the target
+//! can therefore observe incomplete data and silently skip an event; publishing
+//! before queued trigger bodies execute does not reevaluate skipped conditions.
+//! Retaining OLD/NEW images only supplies trigger arguments, not table visibility.
+//! Keep bulk publication unchanged: a readable staging layer would add storage
+//! and lifecycle costs, and per-row file finalization is not an accepted option.
+//! The preferred restriction is to reject AFTER ROW trigger creation in the
+//! Iceberg DDL layer, rather than restrict WHEN expressions on the write path.
+//! This work is deferred; no such rejection is implemented here. That DDL
+//! restriction alone would not resolve unfinished-write reads from BEFORE
+//! triggers, volatile defaults, COPY WHERE, or other executing expressions.
 
 use std::sync::Arc;
 

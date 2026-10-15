@@ -2,13 +2,8 @@
 
 use core::ffi::c_void;
 
-use crate::managed_table::access::mutation::{
-    IcebergModifyQueryState, IcebergModifyScanContext, ManagedMutationCursor,
-    PreparedManagedMutationScan,
-};
 use crate::scan::parallel::PostgresParallelExecution;
 use crate::scan::{PgRowCursor, PreparedRowScan, ReaderPredicate};
-use lagodb_core::access::mutation::ModifyScanBinding;
 use lagodb_core::customscan::provider::{
     CustomScanError, NextSlotAttempt, NextSlotEmitter, NextSlotResult,
 };
@@ -41,7 +36,7 @@ impl SerialScan {
         &mut self,
         emitter: NextSlotEmitter<'a>,
     ) -> Result<NextSlotResult<'a>, CustomScanError> {
-        emitter.emit_columns(&mut self.cursor)
+        emitter.emit_columns(|columns| self.cursor.next_into_slot(columns))
     }
 
     pub(super) fn rescan(
@@ -95,7 +90,9 @@ impl PostgresParallelScan {
     ) -> Result<NextSlotResult<'a>, CustomScanError> {
         loop {
             if let Some(cursor) = self.execution.cursor() {
-                match emitter.try_emit_columns(cursor)? {
+                match emitter
+                    .try_emit_columns(|columns| cursor.next_into_slot(columns))?
+                {
                     NextSlotAttempt::Produced(produced) => return Ok(produced),
                     NextSlotAttempt::Exhausted(exhausted) => {
                         emitter = exhausted;
@@ -153,61 +150,5 @@ impl PostgresParallelScan {
 
     pub(super) fn shutdown(&mut self) {
         self.execution.shutdown();
-    }
-}
-
-/// Bound target-row scan used by PostgreSQL managed-table modification plans.
-pub(super) struct MutationTargetScan {
-    // The cursor carries a binding into the outer ModifyTable state and must
-    // close before the prepared mutation scan and its task inventory.
-    cursor: ManagedMutationCursor,
-    prepared: PreparedManagedMutationScan,
-    binding: ModifyScanBinding<IcebergModifyQueryState>,
-}
-
-impl MutationTargetScan {
-    pub(super) fn new(
-        mut prepared: PreparedManagedMutationScan,
-        binding: ModifyScanBinding<IcebergModifyQueryState>,
-        predicate: ReaderPredicate,
-        relation_oid: pg_sys::Oid,
-    ) -> Result<Self, CustomScanError> {
-        prepared.rebind_reader_filter(predicate);
-        let cursor = prepared.open_cursor(binding.clone(), relation_oid)?;
-        Ok(Self {
-            cursor,
-            prepared,
-            binding,
-        })
-    }
-
-    pub(super) fn binding(&self) -> &ModifyScanBinding<IcebergModifyQueryState> {
-        &self.binding
-    }
-
-    pub(super) fn context(&self) -> IcebergModifyScanContext {
-        self.prepared.context()
-    }
-
-    #[inline]
-    pub(super) fn next_slot<'a>(
-        &mut self,
-        emitter: NextSlotEmitter<'a>,
-    ) -> Result<NextSlotResult<'a>, CustomScanError> {
-        emitter.emit_columns(&mut self.cursor)
-    }
-
-    pub(super) fn rescan(
-        &mut self,
-        replacement: Option<ReaderPredicate>,
-        relation_oid: pg_sys::Oid,
-    ) -> Result<(), CustomScanError> {
-        if let Some(predicate) = replacement {
-            self.prepared.rebind_reader_filter(predicate);
-        }
-        self.cursor = self
-            .prepared
-            .open_cursor(self.binding.clone(), relation_oid)?;
-        Ok(())
     }
 }

@@ -6,7 +6,8 @@ use std::mem;
 use crate::error::IcebergError;
 use crate::managed_table::ManagedTableReadView;
 use crate::managed_table::access::mutation::{
-    IcebergModifyQueryState, IcebergModifyScanContext, PreparedManagedMutationScan,
+    IcebergModifyQueryState, IcebergModifyScanContext, ManagedMutationScan,
+    PreparedManagedMutationScan,
 };
 use crate::predicate::BoundIcebergPredicate;
 use crate::scan::{
@@ -24,7 +25,7 @@ use lagodb_core::runtime_api::TableScanTaskMetrics;
 use pgrx::pg_sys;
 
 use super::IcebergCustomScanProvider;
-use super::execution::{MutationTargetScan, PostgresParallelScan, SerialScan};
+use super::execution::{PostgresParallelScan, SerialScan};
 use super::projection::ProjectionResolver;
 
 /// Per-scan runtime state inside the framework wrapper.
@@ -44,7 +45,7 @@ enum ScanExecutionState {
         prepared: PreparedManagedMutationScan,
         binding: ModifyScanBinding<IcebergModifyQueryState>,
     },
-    MutationTargetScan(MutationTargetScan),
+    MutationTargetScan(ManagedMutationScan),
     Finished,
 }
 
@@ -74,7 +75,8 @@ impl IcebergScanState {
             ProjectionResolver.resolve(ctx.required_columns(), scan_tuple)?;
         let layout = RelationLayout::from_relation(&ctx.relation)?;
         let snapshot =
-            ManagedTableReadView::load(relation_oid)?.into_read_snapshot()?;
+            ManagedTableReadView::for_snapshot(relation_oid, &ctx.snapshot)?
+                .into_read_snapshot()?;
 
         let mut prepared = match projection {
             None => PreparedRowScan::full(
@@ -136,11 +138,14 @@ impl IcebergScanState {
                 scan.start(predicate);
                 ScanExecutionState::PostgresParallelScan(scan)
             }
-            ScanExecutionState::MutationAwaitingStart { prepared, binding } => {
-                ScanExecutionState::MutationTargetScan(MutationTargetScan::new(
+            ScanExecutionState::MutationAwaitingStart {
+                mut prepared,
+                binding,
+            } => {
+                prepared.rebind_reader_filter(predicate);
+                ScanExecutionState::MutationTargetScan(ManagedMutationScan::new(
                     prepared,
                     binding,
-                    predicate,
                     ctx.relation.oid(),
                 )?)
             }
@@ -220,7 +225,9 @@ impl IcebergScanState {
         match &mut state.execution {
             ScanExecutionState::SerialScan(scan) => scan.next_slot(emitter),
             ScanExecutionState::PostgresParallelScan(scan) => scan.next_slot(emitter),
-            ScanExecutionState::MutationTargetScan(scan) => scan.next_slot(emitter),
+            ScanExecutionState::MutationTargetScan(scan) => {
+                emitter.emit_columns(|columns| scan.next_into_slot(columns))
+            }
             ScanExecutionState::SerialAwaitingStart(_)
             | ScanExecutionState::MutationAwaitingBinding(_)
             | ScanExecutionState::MutationAwaitingStart { .. } => {
@@ -248,7 +255,7 @@ impl IcebergScanState {
                 scan.rescan(replacement)
             }
             ScanExecutionState::MutationTargetScan(scan) => {
-                scan.rescan(replacement, ctx.relation.oid())
+                scan.rescan(replacement).map_err(Into::into)
             }
             ScanExecutionState::SerialAwaitingStart(_)
             | ScanExecutionState::MutationAwaitingBinding(_)

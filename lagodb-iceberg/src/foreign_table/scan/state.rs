@@ -1,33 +1,28 @@
 //! Typed ForeignScan lifecycle over the shared Iceberg query reader.
 
+mod begin;
+
 use std::mem;
 
 use lagodb_core::fdw::{
-    BeginForeignScanContext, ForeignRowIdentityRequirement, ForeignScanError,
-    ReScanForeignScanContext, ScanSlotWriter, StartForeignScanContext,
+    ForeignScanError, ReScanForeignScanContext, ScanSlotWriter,
+    StartForeignScanContext,
 };
 use lagodb_core::runtime_api::TableScanTaskMetrics;
 use pgrx::pg_sys;
 
 use super::super::error::IcebergFdwError;
 use super::super::provider::LagodbIceberg;
-use super::super::relation::RestForeignTable;
-use super::super::schema::ForeignSchemaBinding;
-use super::super::source_identity::PlanSourceIdentity;
-use super::super::transaction::ForeignTransaction;
 use super::ForeignMutationScan;
 use super::cursor::ForeignMutationCursor;
 use crate::predicate::BoundIcebergPredicate;
 use crate::scan::parallel::PostgresParallelExecution;
-use crate::scan::{
-    IcebergReadSnapshot, PgRowCursor, PreparedRowScan, ReaderPredicate,
-    ScanPredicates, StablePruningPredicate,
-};
-use crate::schema::projection::{ProjectedAttribute, SlotProjection};
+use crate::scan::{PgRowCursor, PreparedRowScan, ReaderPredicate};
 use crate::write::RelationRowRegistry;
 
 pub(crate) struct IcebergFdwScanState {
     phase: ForeignScanPhase,
+    parallel_workers_allowed: bool,
 }
 
 enum ForeignScanPhase {
@@ -57,6 +52,10 @@ enum ForeignScanPhase {
 }
 
 impl IcebergFdwScanState {
+    pub(crate) fn parallel_workers_allowed(&self) -> bool {
+        self.parallel_workers_allowed
+    }
+
     pub(crate) fn task_metrics(&self) -> Option<TableScanTaskMetrics> {
         match &self.phase {
             ForeignScanPhase::SerialQuery { prepared, .. }
@@ -65,109 +64,6 @@ impl IcebergFdwScanState {
             }
             _ => None,
         }
-    }
-
-    pub(crate) fn begin(
-        context: BeginForeignScanContext<'_, LagodbIceberg>,
-    ) -> Result<Self, ForeignScanError> {
-        let resolved = RestForeignTable::resolve(
-            context.relation.oid(),
-            context.effective_user_id(),
-        )?;
-        if resolved.identity() != context.private_data.identity() {
-            return Err(IcebergFdwError::PlanIdentityChanged.into());
-        }
-        let source = PlanSourceIdentity::from_table(resolved.table());
-        if context
-            .private_data
-            .source()
-            .is_some_and(|planned| planned != &source)
-        {
-            return Err(IcebergFdwError::PlanSourceChanged.into());
-        }
-
-        let mutation = matches!(
-            context.row_identity_requirement,
-            ForeignRowIdentityRequirement::ItemPointer
-        );
-        if mutation && context.parallel_aware {
-            return Err(IcebergFdwError::InvalidPlan {
-                detail: "mutation ForeignScan cannot be parallel-aware",
-            }
-            .into());
-        }
-        let view = if mutation {
-            ForeignTransaction::begin_write(resolved)?
-        } else {
-            ForeignTransaction::scan_view(resolved)?
-        };
-        let table = view.table;
-        let mutation_table = mutation.then(|| table.clone());
-        let schema = table.metadata().current_schema();
-        let layout = ForeignSchemaBinding::bind(&context.relation, schema)?
-            .into_relation_layout();
-        let projection = SlotProjection::from_outputs(
-            context
-                .output_layout
-                .columns()
-                .iter()
-                .map(|column| {
-                    ProjectedAttribute::new(column.attno(), column.destination())
-                })
-                .collect(),
-        );
-        let planning_filter =
-            BoundIcebergPredicate::conjoin(context.filters.rescan_stable());
-        let predicates = ScanPredicates::new(
-            StablePruningPredicate::new(planning_filter.clone()),
-            ReaderPredicate::new(planning_filter),
-        );
-        let mut prepared = PreparedRowScan::projected(
-            IcebergReadSnapshot::new(table, view.delta),
-            projection,
-            predicates,
-            &layout,
-            context.output_layout.slot_types(),
-        )
-        .map_err(IcebergFdwError::from)?;
-
-        let phase = if mutation {
-            let tasks = prepared
-                .plan_row_location_tasks()
-                .map_err(IcebergFdwError::from)?;
-            let registry = ForeignTransaction::row_registry(&view.key)?;
-            let mutation_table =
-                mutation_table.ok_or_else(|| IcebergFdwError::InvalidPlan {
-                    detail: "mutation scan did not retain its transaction table",
-                })?;
-            let mutation_context = ForeignMutationScan::new(
-                context.private_data.identity().clone(),
-                view.key,
-                mutation_table,
-                layout,
-                prepared.starting_snapshot_id(),
-                tasks,
-            );
-            ForeignScanPhase::PreparedMutation {
-                prepared,
-                registry,
-                context: mutation_context,
-            }
-        } else if context.parallel_aware {
-            let mut execution = PostgresParallelExecution::new();
-            if unsafe { pg_sys::ParallelWorkerNumber } < 0 {
-                execution
-                    .prepare(&mut prepared)
-                    .map_err(ForeignScanError::provider)?;
-            }
-            ForeignScanPhase::ParallelQuery {
-                execution,
-                prepared,
-            }
-        } else {
-            ForeignScanPhase::PreparedQuery { prepared }
-        };
-        Ok(Self { phase })
     }
 
     pub(crate) fn start(

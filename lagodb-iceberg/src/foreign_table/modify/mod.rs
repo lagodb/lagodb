@@ -14,7 +14,7 @@ use pgrx::pg_sys;
 
 use super::options::ForeignTableIdentity;
 use super::provider::LagodbIceberg;
-use super::relation::RestForeignTable;
+use super::relation::IcebergForeignTable;
 use super::scan::ForeignMutationScan;
 use super::schema::ForeignSchemaBinding;
 use super::transaction::ForeignTransaction;
@@ -27,23 +27,14 @@ impl FdwModify for LagodbIceberg {
     type TargetScanContext = ForeignMutationScan;
 
     fn capabilities(
-        context: &ForeignModifyRelationContext<'_>,
+        _context: &ForeignModifyRelationContext<'_>,
     ) -> Result<ForeignModifyCapabilities, ForeignModifyError> {
-        let identity = ForeignTableIdentity::resolve(context.relation().oid())?;
-        Ok(if identity.mode().is_writable() {
-            ForeignModifyCapabilities::insert_update_delete()
-        } else {
-            ForeignModifyCapabilities::default()
-        })
+        Ok(ForeignModifyCapabilities::insert_update_delete())
     }
 
     fn add_update_targets(
         context: &mut ForeignUpdateTargetContext<'_>,
     ) -> Result<(), ForeignModifyError> {
-        let identity = ForeignTableIdentity::resolve(context.relation().oid())?;
-        if !identity.mode().is_writable() {
-            return Err(super::error::IcebergFdwError::ReadOnlyTable.into());
-        }
         context.add_item_pointer_identity()?;
         if matches!(context.operation(), ForeignModifyOperation::Delete) {
             let returning = context.returning_columns().to_vec();
@@ -59,9 +50,6 @@ impl FdwModify for LagodbIceberg {
     ) -> Result<ForeignModifyPlanSpec<Self::ModifyPrivateData>, ForeignModifyError>
     {
         let identity = ForeignTableIdentity::resolve(context.relation().oid())?;
-        if !identity.mode().is_writable() {
-            return Err(super::error::IcebergFdwError::ReadOnlyTable.into());
-        }
         Ok(ForeignModifyPlanSpec::new(IcebergFdwModifyPrivate::new(
             identity,
         )))
@@ -96,7 +84,7 @@ impl FdwModify for LagodbIceberg {
             ForeignModifyOperation::Insert,
             None,
             None,
-            0,
+            context.command_id()?,
         )
     }
 }
@@ -137,16 +125,14 @@ impl LagodbIceberg {
             );
         }
 
-        let resolved = RestForeignTable::resolve(relation.oid(), effective_user)?;
+        let resolved = IcebergForeignTable::resolve(relation.oid(), effective_user)?;
         if planned.is_some_and(|private| private.identity() != resolved.identity()) {
             return Err(super::error::IcebergFdwError::PlanIdentityChanged.into());
         }
-        let view = ForeignTransaction::begin_write(resolved)?;
-        let layout = ForeignSchemaBinding::bind(
-            relation,
-            view.table.metadata().current_schema(),
-        )?
-        .into_relation_layout();
+        let view = ForeignTransaction::begin_write(resolved, None)?;
+        let binding = ForeignSchemaBinding::new(relation)?;
+        binding.validate_write(view.table.metadata().current_schema())?;
+        let layout = binding.into_relation_layout();
         IcebergFdwModifyState::new(
             &view.key,
             operation,

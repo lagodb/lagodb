@@ -15,13 +15,14 @@ use pgrx::pg_sys;
 
 use super::super::relation::RemoteTableKey;
 use super::super::scan::ForeignMutationScan;
+use super::super::schema::ForeignSchemaBinding;
 use super::super::transaction::ForeignTransaction;
 use crate::config::mutation_buffer_flush_bytes;
 use crate::error::IcebergError;
 use crate::schema::relation::RelationLayout;
 use crate::write::{
     DataFileSink, IcebergRowIdentity, MutationSinks, PgTransactionIsolation,
-    RowDeleteClaim, RowDeleteState,
+    RowDeleteClaim, RowDeleteState, TxWriteBatch,
 };
 
 pub(crate) struct IcebergFdwModifyState {
@@ -61,6 +62,9 @@ impl IcebergFdwModifyState {
                 "writable Iceberg foreign-table UPDATE/DELETE requires format v2 or later",
             )
             .into());
+        }
+        if matches!(operation, ForeignModifyOperation::Update) {
+            ForeignSchemaBinding::validate_update(table.metadata().current_schema())?;
         }
         let writer_properties = WriterProperties::builder().build();
         let rows = writes_rows
@@ -205,32 +209,29 @@ impl ForeignModifyState for IcebergFdwModifyState {
     }
 
     fn finish(&mut self) -> Result<(), ForeignModifyError> {
+        // Iceberg foreign tables intentionally do not support AFTER triggers
+        // (ROW or STATEMENT). PostgreSQL calls EndForeignModify/EndForeignInsert
+        // after queued AFTER events, so publishing here cannot make these writes
+        // visible to queries executed by those triggers. Keep file finalization
+        // and transaction-local staging at this boundary; supporting AFTER
+        // triggers is not currently planned for this provider.
+        // TODO(iceberg-fdw-after-triggers): reject their creation in the foreign
+        // DDL layer. That guard is not implemented yet, so this support policy
+        // is not currently enforced. Managed-table trigger support is separate.
         let referenced_files = self.sinks.referenced_data_files()?;
         let data_files = self.sinks.finish_data_files()?;
         let delete_files = self.sinks.finish_position_deletes()?;
         let has_delta = !data_files.is_empty() || !delete_files.is_empty();
-        if !data_files.is_empty() {
-            ForeignTransaction::stage_data_files(&self.key, data_files)?;
-        }
-        for output in delete_files {
-            for identity in output.removed_delete_files {
-                ForeignTransaction::stage_remove_delete_file(&self.key, identity)?;
-            }
-            ForeignTransaction::stage_position_delete_file(
-                &self.key,
-                output.delete_file,
-                output.referenced_data_files,
-            )?;
-        }
-        if let Some((command, isolation)) = self.validation.take()
-            && has_delta
-        {
-            let validation =
+        let validation = self.validation.take().filter(|_| has_delta).map(
+            |(command, isolation)| {
                 RowDeltaValidation::new(command, Predicate::AlwaysTrue, isolation)
                     .with_starting_snapshot_id(self.starting_snapshot_id)
-                    .with_referenced_data_files(referenced_files);
-            ForeignTransaction::stage_validation(&self.key, validation)?;
-        }
+                    .with_referenced_data_files(referenced_files)
+            },
+        );
+        let batch =
+            TxWriteBatch::new(self.command_id, data_files, delete_files, validation)?;
+        ForeignTransaction::stage_batch(&self.key, batch)?;
         Ok(())
     }
 }

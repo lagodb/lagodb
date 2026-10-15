@@ -14,7 +14,7 @@ mod sampling;
 
 pub(crate) use population::AnalyzePopulation;
 
-use iceberg_lite::scan::{FileScanTask, TableScan};
+use iceberg_lite::scan::TableScan;
 use lagodb_arrow::ArrowColumnDecoder;
 use lagodb_core::api::AnalyzeTupleOutcome;
 use lagodb_core::prelude::*;
@@ -26,6 +26,7 @@ use self::cursor::AnalyzeBatchCursor;
 use self::sampling::AnalyzeSampler;
 use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::gucs::analyze_max_data_files;
+use crate::scan::AnalyzeScanInput;
 
 const MAX_VIRTUAL_BLOCKS: u64 = u32::MAX as u64 - 1;
 
@@ -38,12 +39,13 @@ pub(crate) struct AnalyzePreparation {
     virtual_blocks: u64,
 }
 impl AnalyzePreparation {
-    pub(crate) fn try_new(
-        scan: TableScan,
-        tasks: Vec<FileScanTask>,
-        decoder: ArrowColumnDecoder,
-        storage_bytes: u64,
-    ) -> IcebergResult<Self> {
+    pub(crate) fn try_new(input: AnalyzeScanInput) -> IcebergResult<Self> {
+        let AnalyzeScanInput {
+            scan,
+            tasks,
+            decoder,
+            storage_bytes,
+        } = input;
         let population = AnalyzePopulation::try_new(tasks)?;
         let page_size = pg_sys::BLCKSZ as u64;
         let virtual_blocks =
@@ -88,14 +90,18 @@ impl AnalyzePreparation {
                 * (physical_rows as f64 / sample.candidate_count as f64)
         };
         let (source, expected) = sample.read_plan.open(&self.scan)?;
-        Ok(AnalyzeBatchCursor::try_new(
-            source,
-            self.decoder,
-            expected,
-            tickets,
-            sample.candidate_count,
-            weight,
-        )?)
+        // SAFETY: AnalyzeScanInput supplies the scan and decoder from one
+        // PgReadPlan. Sampling changes selected rows, not the scan projection.
+        Ok(unsafe {
+            AnalyzeBatchCursor::try_new(
+                source,
+                self.decoder,
+                expected,
+                tickets,
+                sample.candidate_count,
+                weight,
+            )
+        }?)
     }
 }
 

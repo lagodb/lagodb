@@ -4,8 +4,9 @@ use once_cell::unsync::OnceCell;
 use pgrx::pg_sys;
 
 use super::error::IcebergFdwError;
-use super::options::ForeignTableIdentity;
-use super::relation::RestForeignTable;
+use super::options::{ForeignTableIdentity, ServerBindingKey};
+use super::relation::{IcebergForeignTable, RemoteTableKey};
+use super::transaction::ForeignTransaction;
 
 /// Relation-owned foreign metadata resolved at most once during planning.
 /// Execution deliberately resolves the table again against its own catalog
@@ -14,7 +15,7 @@ pub(crate) struct ForeignPlanningSource {
     server_oid: pg_sys::Oid,
     effective_user_oid: pg_sys::Oid,
     identity: ForeignTableIdentity,
-    resolved: OnceCell<RestForeignTable>,
+    resolved: OnceCell<IcebergForeignTable>,
 }
 
 impl ForeignPlanningSource {
@@ -36,9 +37,20 @@ impl ForeignPlanningSource {
         &self.identity
     }
 
-    pub(crate) fn resolved(&self) -> Result<&RestForeignTable, IcebergFdwError> {
+    pub(crate) fn has_local_actions(&self) -> bool {
+        let key = RemoteTableKey::new(
+            ServerBindingKey {
+                server_oid: self.server_oid,
+                effective_user: self.effective_user_oid,
+            },
+            &self.identity,
+        );
+        ForeignTransaction::has_local_actions(&key)
+    }
+
+    pub(crate) fn resolved(&self) -> Result<&IcebergForeignTable, IcebergFdwError> {
         self.resolved.get_or_try_init(|| {
-            RestForeignTable::load(
+            IcebergForeignTable::load(
                 self.server_oid,
                 self.effective_user_oid,
                 self.identity.clone(),

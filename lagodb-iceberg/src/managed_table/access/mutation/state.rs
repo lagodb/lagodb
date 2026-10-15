@@ -21,7 +21,7 @@ use crate::schema::relation::RelationLayout;
 use crate::write::PgTransactionIsolation;
 use crate::write::{
     DataFileSink, IcebergRowIdentity, MutationSinks, RowDeleteClaim, RowDeleteOutput,
-    RowDeleteState,
+    RowDeleteState, TxWriteBatch,
 };
 
 /// Final output of one relation-local PostgreSQL ModifyTable session.
@@ -62,6 +62,7 @@ impl StatementOutcome {
 /// command/dependency decisions needed after writers finish.
 pub struct IcebergModifyState {
     rel_oid: pg_sys::Oid,
+    command_id: pg_sys::CommandId,
     file_io: FileIO,
     validation: ValidationPlan,
     sinks: MutationSinks,
@@ -140,7 +141,10 @@ impl AmModifyState for IcebergModifyState {
 }
 
 impl AmCopySession for IcebergModifyState {
-    fn begin_copy(rel: &RelationHandle) -> AmResult<Self> {
+    fn begin_copy(
+        rel: &RelationHandle,
+        command_id: pg_sys::CommandId,
+    ) -> AmResult<Self> {
         let query_state = ModifyQueryState::<IcebergModifyQueryState>::new()?;
         Self::open(
             rel,
@@ -151,6 +155,7 @@ impl AmCopySession for IcebergModifyState {
                 query_state,
                 pg_sys::CmdType::CMD_INSERT,
                 ModifyActions::INSERT,
+                command_id,
             ),
         )
     }
@@ -201,6 +206,7 @@ impl IcebergModifyState {
             IcebergModifyScanContext,
         >,
     ) -> AmResult<Self> {
+        let command_id = context.command_id();
         let (query_state, cmd_type, actions, scan_context) = context.into_parts();
         let command = ModifyCommand::from_pg(cmd_type)?;
         let target_dependency = TargetDependency::from_context(scan_context.as_ref());
@@ -277,38 +283,19 @@ impl IcebergModifyState {
 
         Ok(Self {
             rel_oid,
+            command_id,
             file_io,
             validation,
             sinks,
         })
     }
 
-    fn stage_data_files(&self, new_files: Vec<DataFile>) -> IcebergResult<()> {
-        TxMetadata::current().stage_data_files(self.rel_oid, new_files, &self.file_io)
-    }
-
-    fn stage_row_delete_file(&self, output: RowDeleteOutput) -> IcebergResult<()> {
-        for identity in output.removed_delete_files {
-            TxMetadata::current().stage_remove_delete_file(
-                self.rel_oid,
-                identity,
-                &self.file_io,
-            )?;
-        }
-        TxMetadata::current().stage_position_delete_file(
-            self.rel_oid,
-            output.delete_file,
-            output.referenced_data_files,
-            &self.file_io,
-        )
-    }
-
-    fn stage_validation(
+    fn build_validation(
         &mut self,
         command: RowLevelCommand,
         starting_snapshot_id: Option<i64>,
         referenced_data_files: BTreeSet<String>,
-    ) -> IcebergResult<()> {
+    ) -> IcebergResult<RowDeltaValidation> {
         let Some(isolation_level) = self.validation.isolation_level else {
             return Err(IcebergError::InvariantViolated(
                 "row-level mutation validation has no effective isolation level",
@@ -326,11 +313,7 @@ impl IcebergModifyState {
             RowDeltaValidation::new(command, conflict_filter, isolation_level)
                 .with_starting_snapshot_id(starting_snapshot_id)
                 .with_referenced_data_files(referenced_data_files);
-        TxMetadata::current().stage_row_delta_validation(
-            self.rel_oid,
-            validation,
-            &self.file_io,
-        )
+        Ok(validation)
     }
 
     fn finish_statement(&mut self) -> IcebergResult<StatementOutcome> {
@@ -347,21 +330,20 @@ impl IcebergModifyState {
     }
 
     fn stage_statement(&mut self, outcome: StatementOutcome) -> IcebergResult<()> {
-        let validation = outcome.row_delta_validation()?;
-
-        if !outcome.new_data_files.is_empty() {
-            self.stage_data_files(outcome.new_data_files)?;
-        }
-        for output in outcome.row_delete_files {
-            self.stage_row_delete_file(output)?;
-        }
-        if let Some((command, starting_snapshot_id)) = validation {
-            self.stage_validation(
+        let validation = match outcome.row_delta_validation()? {
+            Some((command, starting_snapshot_id)) => Some(self.build_validation(
                 command,
                 starting_snapshot_id,
                 outcome.referenced_data_files,
-            )?;
-        }
-        Ok(())
+            )?),
+            None => None,
+        };
+        let batch = TxWriteBatch::new(
+            self.command_id,
+            outcome.new_data_files,
+            outcome.row_delete_files,
+            validation,
+        )?;
+        TxMetadata::current().stage_batch(self.rel_oid, batch, &self.file_io)
     }
 }

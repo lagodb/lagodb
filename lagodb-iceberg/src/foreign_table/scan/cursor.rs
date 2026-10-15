@@ -103,12 +103,13 @@ impl ForeignMutationCursor {
         };
         let locations = unsafe { layout.bind(&batch) }?;
         let Some(locations) = locations else {
-            let _ = self.decoder.bind(batch)?;
             return Ok(None);
         };
         let file_id = self.register_file(locations.file_path())?;
         let positions = locations.into_positions();
-        let decoded = self.decoder.bind(batch)?;
+        // SAFETY: RowLocationScanInput preserves the PgReadPlan pairing;
+        // iceberg-lite transforms file batches to that projected scan schema.
+        let decoded = unsafe { self.decoder.bind_batch_unchecked(batch) }?;
         Ok(Some(MutationBoundBatch {
             decoded,
             positions,

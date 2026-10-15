@@ -9,6 +9,7 @@ use pgrx::pg_sys;
 use crate::managed_table::access::mutation::{
     IcebergFileSource, IcebergModifyQueryState,
 };
+use crate::scan::RowLocationScanInput;
 use crate::scan::batch::{RowLocationLayout, ScanBatchSource, position_unchecked};
 use crate::write::IcebergFileId;
 
@@ -19,15 +20,14 @@ pub(crate) struct ManagedMutationCursor {
 
 impl ManagedMutationCursor {
     pub(crate) fn new(
-        source: ScanBatchSource,
-        decoder: ArrowColumnDecoder,
+        input: RowLocationScanInput,
         binding: ModifyScanBinding<IcebergModifyQueryState>,
         table_oid: pg_sys::Oid,
     ) -> Self {
         Self {
             inner: MutationBatchCursor {
-                source,
-                decoder,
+                source: input.source,
+                decoder: input.decoder,
                 current: None,
                 row_location_layout: None,
                 row_index: 0,
@@ -39,17 +39,11 @@ impl ManagedMutationCursor {
             },
         }
     }
-}
 
-impl ScanBatchDriver for ManagedMutationCursor {
-    fn next_into_slot(
+    pub(crate) fn next_into_slot(
         &mut self,
-        direction: ScanDirection,
         out: &mut SlotColumns<'_>,
     ) -> AmResult<bool> {
-        if direction != ScanDirection::Forward {
-            return unsupported_callback("non-forward Iceberg scan");
-        }
         self.inner.next_into_slot(out)
     }
 }
@@ -86,14 +80,13 @@ impl MutationBatchCursor {
         // stable layout; `bind` handles empty batches without reading `_file`.
         let locations = unsafe { layout.bind(&batch) }?;
         let Some(locations) = locations else {
-            // Preserve the old empty-batch schema validation without creating
-            // a row-bearing mutation state.
-            let _ = self.decoder.bind(batch)?;
             return Ok(None);
         };
         let file_id = self.context.register_file(locations.file_path())?;
         let positions = locations.into_positions();
-        let decoded = self.decoder.bind(batch)?;
+        // SAFETY: RowLocationScanInput preserves the PgReadPlan pairing;
+        // iceberg-lite transforms file batches to that projected scan schema.
+        let decoded = unsafe { self.decoder.bind_batch_unchecked(batch) }?;
         Ok(Some(MutationBoundBatch {
             decoded,
             positions,

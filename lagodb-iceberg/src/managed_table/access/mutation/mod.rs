@@ -14,5 +14,5 @@ pub(crate) use cursor::ManagedMutationCursor;
 pub use row_identity::{
     IcebergFileSource, IcebergModifyQueryState, IcebergModifyScanContext,
 };
-pub(crate) use scan::PreparedManagedMutationScan;
+pub(crate) use scan::{ManagedMutationScan, PreparedManagedMutationScan};
 pub use state::IcebergModifyState;

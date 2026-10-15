@@ -77,7 +77,9 @@ pub(super) struct AnalyzeBatchCursor {
 }
 
 impl AnalyzeBatchCursor {
-    pub(super) fn try_new(
+    /// # Safety
+    /// `source` must emit the projected schema used to construct `decoder`.
+    pub(super) unsafe fn try_new(
         source: AnalyzeBatchSource,
         decoder: ArrowColumnDecoder,
         expected: ExpectedCursor,
@@ -224,9 +226,6 @@ impl AnalyzeBatchCursor {
         // stable layout; `bind` handles empty batches without reading `_file`.
         let locations = unsafe { layout.bind(&batch) }?;
         let Some(locations) = locations else {
-            // Preserve the old empty-batch schema validation without creating
-            // a row-bearing ANALYZE state.
-            let _ = self.decoder.bind(batch)?;
             return Ok(None);
         };
         let path = locations.file_path();
@@ -244,7 +243,9 @@ impl AnalyzeBatchCursor {
 
         // Preserve the old validation order: decoded columns are bound before
         // ANALYZE reports a returned file outside its expected population.
-        let decoded = self.decoder.bind(batch)?;
+        // SAFETY: the constructor pairs the decoder with this scan source;
+        // selected-row and full reads both use iceberg-lite's schema conversion.
+        let decoded = unsafe { self.decoder.bind_batch_unchecked(batch) }?;
         let file_index =
             resolved_file_index.ok_or(IcebergError::InvariantViolated(
                 "ANALYZE reader returned an unplanned data file",

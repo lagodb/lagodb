@@ -20,8 +20,8 @@ use iceberg_lite::catalog::rest::{RestError, RestErrorKind};
 use lagodb_core::diag::{PgError, SqlStateError, domain_error_report};
 use lagodb_core::extension_worker::WorkerNotificationError;
 use lagodb_core::object_cleanup::ObjectCleanupError;
-use lagodb_core::options::TablespaceError;
-use lagodb_core::options::{TableOptionError, TablespaceCacheError};
+use lagodb_core::options::TableOptionError;
+use lagodb_core::storage::tablespace::TablespaceStorageError;
 use lagodb_storage::{StorageError, StorageErrorKind};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
@@ -71,11 +71,8 @@ pub enum IcebergError {
     #[error("cannot commit truncate: Iceberg metadata changed after TRUNCATE")]
     TruncateCommitConflict { relid: pg_sys::Oid },
 
-    #[error("tablespace error: {0}")]
-    TablespaceError(#[from] TablespaceError),
-
-    #[error("tablespace cache error: {0}")]
-    TablespaceCacheError(#[from] TablespaceCacheError),
+    #[error("tablespace storage error: {0}")]
+    TablespaceStorageError(#[from] TablespaceStorageError),
 
     #[error("table option error: {0}")]
     TableOptionError(#[from] TableOptionError),
@@ -133,12 +130,6 @@ pub enum IcebergError {
 
     #[error("column {0} is not found in source")]
     ColumnNotFound(String),
-
-    #[error(
-        "required column \"{0}\" has no live PostgreSQL column to write \
-         (was it dropped without a default?)"
-    )]
-    RequiredColumnMissingSource(String),
 
     #[error("column '{0}' data type is not supported")]
     UnsupportedColumnType(String),
@@ -203,9 +194,7 @@ impl SqlStateError for IcebergError {
 
             IcebergError::Vacuum { source } => source.sql_error_code(),
 
-            IcebergError::TablespaceError(error) => error.sql_error_code(),
-
-            IcebergError::TablespaceCacheError(error) => error.sql_error_code(),
+            IcebergError::TablespaceStorageError(error) => error.sql_error_code(),
 
             IcebergError::TableOptionError(error) => error.sql_error_code(),
 
@@ -275,10 +264,6 @@ impl SqlStateError for IcebergError {
 
             IcebergError::ColumnNotFound(_) => {
                 PgSqlErrorCode::ERRCODE_UNDEFINED_COLUMN
-            }
-
-            IcebergError::RequiredColumnMissingSource(_) => {
-                PgSqlErrorCode::ERRCODE_NOT_NULL_VIOLATION
             }
 
             IcebergError::UnsupportedColumnType(_)
