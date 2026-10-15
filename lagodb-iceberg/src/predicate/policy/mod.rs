@@ -39,6 +39,8 @@ pub(crate) enum PredicateValueKind {
     Decimal,
     Float,
     String,
+    Binary,
+    Time,
 }
 
 /// Pure Iceberg predicate policy used by planned-predicate construction.
@@ -53,6 +55,31 @@ pub(crate) enum PredicateValueKind {
 pub(crate) struct PredicatePushdownPolicy;
 
 impl PredicatePushdownPolicy {
+    // TODO: reconcile Exact with the missing-column row-filter bug inherited
+    // by iceberg-lite (pinned at 9e924457126383c7e1b5cafa7279a9421b338e35):
+    // https://github.com/apache/iceberg-rust/issues/3355
+    // PredicateConverter::{less_than, less_than_or_eq} use build_always_true()
+    // when the field ID is absent from the Parquet file. For an optional column
+    // added without an initial-default or identity partition value, projection
+    // yields NULL, so SQL `<` / `<=` must reject those rows. Declaring the filter
+    // Exact and removing the residual instead exposes false-positive rows.
+    // Physically stored NULLs do not use this missing-field branch.
+    //
+    // The branch is type-independent: affected ordered kinds admitted here are
+    // Integer/Long (int2/int4/int8), Decimal (numeric), String (text/varchar),
+    // Binary (bytea, including fixed binary, and uuid), and Date/Timestamp/
+    // Timestamptz. PostgreSQL temporal and fixed-binary comparisons already keep
+    // Conservative residuals; those residuals remove these false positives.
+    // Boolean admits only equality/inequality; Float/Time comparisons are off.
+    // This defect therefore predates the addition of binary ordered pushdown.
+    //
+    // Any capability correction must account for operand mirroring and native
+    // negation: `k > col` becomes `col < k`, and `NOT(col > k)` becomes `col <= k`
+    // (likewise `>=` becomes `<` under NOT). Checking only the original operator
+    // or excluding only Binary would leave the same correctness hole.
+    // Related PR https://github.com/apache/iceberg-rust/pull/3302 handles missing
+    // fields with defaults/identity partition values; its scope explicitly
+    // leaves the no-value NULL case unchanged. Track #3355 separately.
     pub(crate) fn comparison_capability(
         value_kind: PredicateValueKind,
         operator: ComparisonOpClass,
@@ -64,14 +91,15 @@ impl PredicatePushdownPolicy {
                 }
                 _ => None,
             },
-            PredicateValueKind::Float => None,
+            PredicateValueKind::Float | PredicateValueKind::Time => None,
             PredicateValueKind::Integer
             | PredicateValueKind::Long
             | PredicateValueKind::Date
             | PredicateValueKind::Timestamp
             | PredicateValueKind::Timestamptz
             | PredicateValueKind::Decimal
-            | PredicateValueKind::String => Some(SupportedPredicateCapability::Exact),
+            | PredicateValueKind::String
+            | PredicateValueKind::Binary => Some(SupportedPredicateCapability::Exact),
         }
     }
 
@@ -95,7 +123,9 @@ impl PredicatePushdownPolicy {
             | PredicateValueKind::Timestamptz
             | PredicateValueKind::Decimal
             | PredicateValueKind::Float
-            | PredicateValueKind::String => true,
+            | PredicateValueKind::String
+            | PredicateValueKind::Binary
+            | PredicateValueKind::Time => true,
         }
     }
 
@@ -106,9 +136,13 @@ impl PredicatePushdownPolicy {
     pub(crate) fn op_class(opno: pg_sys::Oid) -> Option<ComparisonOpClass> {
         let signature = PgComparisonSignature::for_operator(opno)?;
         match (signature.left_type(), signature.right_type()) {
-            (pg_sys::INT2OID, pg_sys::INT2OID)
-            | (pg_sys::INT4OID, pg_sys::INT4OID)
-            | (pg_sys::INT8OID, pg_sys::INT8OID)
+            (
+                pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID,
+                pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID,
+            )
+            | (pg_sys::BOOLOID, pg_sys::BOOLOID)
+            | (pg_sys::UUIDOID, pg_sys::UUIDOID)
+            | (pg_sys::BYTEAOID, pg_sys::BYTEAOID)
             | (pg_sys::DATEOID, pg_sys::DATEOID)
             | (pg_sys::TIMESTAMPOID, pg_sys::TIMESTAMPOID)
             | (pg_sys::TIMESTAMPTZOID, pg_sys::TIMESTAMPTZOID)
@@ -125,6 +159,12 @@ impl PredicatePushdownPolicy {
         class: ComparisonOpClass,
     ) -> Option<SupportedPredicateCapability> {
         match PgOid::from(type_oid) {
+            PgOid::BuiltIn(PgBuiltInOids::BOOLOID) => {
+                Self::comparison_capability(PredicateValueKind::Boolean, class)
+            }
+            PgOid::BuiltIn(PgBuiltInOids::UUIDOID | PgBuiltInOids::BYTEAOID) => {
+                Self::comparison_capability(PredicateValueKind::Binary, class)
+            }
             PgOid::BuiltIn(
                 PgBuiltInOids::INT2OID
                 | PgBuiltInOids::INT4OID
@@ -164,7 +204,7 @@ impl PredicatePushdownPolicy {
                     _ => unreachable!("matched temporal PostgreSQL type"),
                 };
                 Self::comparison_capability(kind, class)?;
-                Self::conservative_pruning_for_eq_and_ordered(class)
+                Some(SupportedPredicateCapability::Conservative)
             }
 
             PgOid::BuiltIn(PgBuiltInOids::NUMERICOID) => {
@@ -219,24 +259,6 @@ impl PredicatePushdownPolicy {
         )
     }
 
-    /// Accept equality and ordered temporal comparisons as conservative
-    /// pruning; reject `<>`.
-    #[inline]
-    fn conservative_pruning_for_eq_and_ordered(
-        class: ComparisonOpClass,
-    ) -> Option<SupportedPredicateCapability> {
-        match class {
-            ComparisonOpClass::NotEqual => None,
-            ComparisonOpClass::Equal
-            | ComparisonOpClass::Less
-            | ComparisonOpClass::LessEqual
-            | ComparisonOpClass::Greater
-            | ComparisonOpClass::GreaterEqual => {
-                Some(SupportedPredicateCapability::Conservative)
-            }
-        }
-    }
-
     /// `(opcollid, inputcollid) == (InvalidOid, InvalidOid)` — integer Exact guard.
     #[inline]
     fn is_collation_free(op_key: PgComparisonIdentity) -> bool {
@@ -255,9 +277,8 @@ impl PredicatePushdownPolicy {
     /// *comparison* pushdown does not apply here. Float IS NULL / IS NOT NULL
     /// remains safe even though float comparisons are unsupported.
     ///
-    /// The type allowlist admits every logical scalar kind that the provider
-    /// schema can map without inspecting the value. Types outside this set
-    /// (for example `bytea`) remain unsupported.
+    /// Scalar validity support is independent of comparison support. Nested
+    /// types remain excluded because their Parquet validity belongs to groups.
     fn null_test_value_kind(type_oid: pg_sys::Oid) -> Option<PredicateValueKind> {
         // IS NULL / IS NOT NULL only inspects the null bitmap — there is no
         // value comparison, so NaN ordering/equality divergence does not apply.
@@ -266,6 +287,10 @@ impl PredicatePushdownPolicy {
             PgOid::BuiltIn(PgBuiltInOids::BOOLOID) => {
                 Some(PredicateValueKind::Boolean)
             }
+            PgOid::BuiltIn(PgBuiltInOids::UUIDOID | PgBuiltInOids::BYTEAOID) => {
+                Some(PredicateValueKind::Binary)
+            }
+            PgOid::BuiltIn(PgBuiltInOids::TIMEOID) => Some(PredicateValueKind::Time),
             PgOid::BuiltIn(PgBuiltInOids::INT2OID | PgBuiltInOids::INT4OID) => {
                 Some(PredicateValueKind::Integer)
             }

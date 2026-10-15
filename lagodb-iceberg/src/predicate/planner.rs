@@ -1,25 +1,25 @@
 //! Relation-scoped `PredicateFragment` to Iceberg planned-predicate conversion.
 
-use lagodb_core::expr::RuntimeValueSource;
 use lagodb_core::expr::pushdown::{
     FilterPlan, FilterPlanningContext, FilterPushdownPlanner, PredicateFragment,
     PredicatePlan, PredicatePlanner, ScalarExpr,
 };
+use lagodb_core::expr::{BooleanTestKind, RuntimeValueSource};
 use lagodb_core::expr::{PgComparisonOp, PushdownCosting};
 use lagodb_core::handles::RelationGuard;
-use lagodb_core::tuple::Utf8ServerEncoding;
+use lagodb_core::tuple::{Utf8ServerEncoding, numeric_typmod};
 use pgrx::pg_sys;
 use std::sync::Arc;
 
-use iceberg_lite::spec::Schema as IcebergSchema;
+use iceberg_lite::spec::{PrimitiveType, Schema as IcebergSchema, Type};
 
 use crate::error::IcebergError;
-use crate::schema::relation::{RelationFieldIndex, RelationFieldMap, RelationLayout};
+use crate::schema::relation::RelationLayout;
 
 use super::error::IcebergFilterError;
 use super::plan::{
     PlannedComparisonOperator, PlannedIcebergColumn, PlannedIcebergNode,
-    PlannedIcebergPredicate,
+    PlannedIcebergPredicate, PlannedValueType,
 };
 use super::policy::{
     ComparisonOpClass, PgPredicatePushdownPolicy, PredicatePushdownPolicy,
@@ -27,8 +27,8 @@ use super::policy::{
 };
 
 pub(crate) struct IcebergFilterPlanner {
-    schema_id: i32,
-    fields: RelationFieldIndex,
+    schema: Arc<IcebergSchema>,
+    layout: RelationLayout,
     utf8: Option<Utf8ServerEncoding>,
 }
 
@@ -44,10 +44,9 @@ impl IcebergFilterPlanner {
         )
         .map_err(IcebergError::from)?;
         let layout = RelationLayout::from_relation(&relation.as_handle())?;
-        let fields = RelationFieldMap::bind(schema, &layout)?.into_index();
         Ok(Self {
-            schema_id: schema.schema_id(),
-            fields,
+            schema: Arc::clone(schema),
+            layout,
             utf8: Utf8ServerEncoding::resolve().ok(),
         })
     }
@@ -69,7 +68,7 @@ impl IcebergFilterPlanner {
             _ => return Ok(PredicatePlan::Unsupported),
         };
         let value_slot = fragment.value(value);
-        let Some((supported, value_type)) =
+        let Some((mut supported, value_type)) =
             PgPredicatePushdownPolicy::plan_comparison(
                 column,
                 value_slot,
@@ -79,6 +78,21 @@ impl IcebergFilterPlanner {
         else {
             return Ok(PredicatePlan::Unsupported);
         };
+        let Some(planned_column) = self.column(column.attno)? else {
+            return Ok(PredicatePlan::Unsupported);
+        };
+        let field = self
+            .schema
+            .field_by_id(planned_column.field_id)
+            .expect("relation field binding belongs to the planner schema");
+        let Some(value_type) = value_type.with_source_type(&field.field_type) else {
+            return Ok(PredicatePlan::Unsupported);
+        };
+        if matches!(value_type, PlannedValueType::FixedBinary(_)) {
+            // PostgreSQL bytea values do not carry Iceberg's fixed width.
+            // A different-width value stays with the residual at bind time.
+            supported.capability = SupportedPredicateCapability::Conservative;
+        }
         let mut planned_operator =
             PlannedComparisonOperator::from(supported.operator);
         if mirrored {
@@ -88,6 +102,7 @@ impl IcebergFilterPlanner {
         let costing = if supported.capability
             == SupportedPredicateCapability::Conservative
             && (source_kind != RuntimeValueSource::Constant
+                || matches!(value_type, PlannedValueType::FixedBinary(_))
                 || PredicatePushdownPolicy::is_value_sensitive_type(
                     column.declared_type.type_oid,
                 )) {
@@ -98,7 +113,7 @@ impl IcebergFilterPlanner {
         let planned = PlannedNode {
             node: PlannedIcebergNode::Comparison {
                 operator: planned_operator,
-                column: self.column(column.attno)?,
+                column: planned_column,
                 value,
                 value_type,
             },
@@ -125,7 +140,9 @@ impl IcebergFilterPlanner {
         ) {
             return Ok(PredicatePlan::Unsupported);
         }
-        let column = self.column(column.attno)?;
+        let Some(column) = self.column(column.attno)? else {
+            return Ok(PredicatePlan::Unsupported);
+        };
         Ok(PredicatePlan::Exact(PlannedNode {
             node: if is_not_null {
                 PlannedIcebergNode::IsNotNull(column)
@@ -147,7 +164,9 @@ impl IcebergFilterPlanner {
         if !PgPredicatePushdownPolicy::supports_nan_test(column) {
             return Ok(PredicatePlan::Unsupported);
         }
-        let column = self.column(column.attno)?;
+        let Some(column) = self.column(column.attno)? else {
+            return Ok(PredicatePlan::Unsupported);
+        };
         let planned = PlannedNode {
             node: if is_not_nan {
                 PlannedIcebergNode::IsNotNan(column)
@@ -181,9 +200,12 @@ impl IcebergFilterPlanner {
         {
             return Ok(PredicatePlan::Unsupported);
         }
+        let Some(column) = self.column(column.attno)? else {
+            return Ok(PredicatePlan::Unsupported);
+        };
         Ok(PredicatePlan::ExactNoComplement(PlannedNode {
             node: PlannedIcebergNode::StartsWith {
-                column: self.column(column.attno)?,
+                column,
                 prefix: *prefix,
             },
             costing: PushdownCosting::CostedPruning,
@@ -193,15 +215,31 @@ impl IcebergFilterPlanner {
     fn column(
         &self,
         attno: pg_sys::AttrNumber,
-    ) -> Result<PlannedIcebergColumn, IcebergFilterError> {
-        let binding = self
-            .fields
-            .binding_for_attno(attno)
-            .ok_or(IcebergFilterError::MissingFieldBinding(attno))?;
-        Ok(PlannedIcebergColumn {
-            field_id: binding.field_id,
-            debug_name: binding.debug_name.clone(),
-        })
+    ) -> Result<Option<PlannedIcebergColumn>, IcebergFilterError> {
+        let column = self.layout.column(attno)?;
+        let field = self
+            .schema
+            .as_struct()
+            .field_by_name(&column.name)
+            .ok_or_else(|| IcebergError::ColumnNotFound(column.name.clone()))?;
+        if let Type::Primitive(PrimitiveType::Decimal { precision, scale }) =
+            field.field_type.as_ref()
+            && self.layout.attr_types()[(attno - 1) as usize].1
+                != numeric_typmod(*precision, *scale as i32)
+        {
+            // Decimal predicate pushdown deliberately requires an exact typmod
+            // match. Users are responsible for matching the local declaration
+            // to the remote decimal type to retain pushdown; mismatches accept
+            // the cost of local predicate evaluation, including safe precision
+            // widening and unconstrained numeric. We do not special-case those
+            // here. For narrowing, this also prevents pruning from bypassing
+            // numeric conversion errors before local predicate evaluation.
+            return Ok(None);
+        }
+        Ok(Some(PlannedIcebergColumn {
+            field_id: field.id,
+            debug_name: column.name.clone(),
+        }))
     }
 }
 
@@ -258,7 +296,9 @@ impl PredicatePlanner<ScalarExpr, PgComparisonOp> for RelationPredicateAdapter<'
         let ScalarExpr::Column(column) = value else {
             return Ok(PredicatePlan::Unsupported);
         };
-        let column = self.planner.column(column.attno)?;
+        let Some(column) = self.planner.column(column.attno)? else {
+            return Ok(PredicatePlan::Unsupported);
+        };
         Ok(PredicatePlan::ExactNoComplement(PlannedNode {
             node: PlannedIcebergNode::IsNotNull(column),
             costing: PushdownCosting::CostedPruning,
@@ -272,10 +312,9 @@ impl PredicatePlanner<ScalarExpr, PgComparisonOp> for RelationPredicateAdapter<'
         let ScalarExpr::Column(column) = value else {
             return Ok(PredicatePlan::Unsupported);
         };
-        self.planner
-            .fields
-            .binding_for_attno(column.attno)
-            .ok_or(IcebergFilterError::MissingFieldBinding(column.attno))?;
+        if self.planner.column(column.attno)?.is_none() {
+            return Ok(PredicatePlan::Unsupported);
+        }
         Ok(PredicatePlan::ExactNoComplement(PlannedNode {
             node: PlannedIcebergNode::AlwaysFalse,
             costing: PushdownCosting::CostedPruning,
@@ -290,6 +329,23 @@ impl PredicatePlanner<ScalarExpr, PgComparisonOp> for RelationPredicateAdapter<'
     ) -> Result<PredicatePlan<PlannedNode>, Self::Error> {
         self.planner
             .plan_comparison(self.fragment, *operator, left, right)
+    }
+
+    fn boolean_test(
+        &self,
+        kind: BooleanTestKind,
+        value: &ScalarExpr,
+    ) -> Result<PredicatePlan<PlannedNode>, Self::Error> {
+        let ScalarExpr::Column(column) = value else {
+            return Ok(PredicatePlan::Unsupported);
+        };
+        let Some(column) = self.planner.column(column.attno)? else {
+            return Ok(PredicatePlan::Unsupported);
+        };
+        Ok(PredicatePlan::Exact(PlannedNode {
+            node: PlannedIcebergNode::BooleanTest { kind, column },
+            costing: PushdownCosting::CostedPruning,
+        }))
     }
 
     fn is_null(
@@ -359,16 +415,16 @@ impl FilterPushdownPlanner for IcebergFilterPlanner {
         Ok(match fragment.root().plan_with(&adapter)? {
             PredicatePlan::Unsupported => FilterPlan::Unsupported,
             PredicatePlan::Partial(planned) => FilterPlan::partial(
-                PlannedIcebergPredicate::new(self.schema_id, planned.node),
+                PlannedIcebergPredicate::new(self.schema.schema_id(), planned.node),
                 planned.costing,
             ),
             PredicatePlan::Exact(planned)
             | PredicatePlan::ExactNoComplement(planned) => FilterPlan::exact(
-                PlannedIcebergPredicate::new(self.schema_id, planned.node),
+                PlannedIcebergPredicate::new(self.schema.schema_id(), planned.node),
                 planned.costing,
             ),
             PredicatePlan::Conservative(planned) => FilterPlan::conservative(
-                PlannedIcebergPredicate::new(self.schema_id, planned.node),
+                PlannedIcebergPredicate::new(self.schema.schema_id(), planned.node),
                 planned.costing,
             ),
         })

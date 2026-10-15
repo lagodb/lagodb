@@ -351,15 +351,10 @@ fn supported_predicate_ignores_diagnostic_fields() {
 #[test]
 fn supported_predicate_numeric_temporal_float_matrix() {
     for (type_oid, opnos) in opno_table().into_iter().skip(3).take(3) {
-        for (column, opno) in opnos.into_iter().enumerate() {
-            let expected = if CLASS_BY_COLUMN[column] == ComparisonOpClass::NotEqual {
-                None
-            } else {
-                Some(SupportedPredicateCapability::Conservative)
-            };
+        for opno in opnos {
             assert_eq!(
                 capability(type_oid, triple(opno), CollationSemantics::None),
-                expected,
+                Some(SupportedPredicateCapability::Conservative),
             );
         }
     }
@@ -403,7 +398,7 @@ fn supported_predicate_non_decimal_non_text_types_are_not_exact() {
 #[test]
 fn supported_predicate_unknown_inputs_are_unsupported() {
     let int4 = op::int4();
-    for type_oid in [pg_sys::BOOLOID, pg_sys::BYTEAOID] {
+    for type_oid in [pg_sys::TIMEOID, pg_sys::OIDOID] {
         assert_eq!(
             capability(type_oid, triple(int4[0]), CollationSemantics::None),
             None,
@@ -477,7 +472,7 @@ fn null_tests_admit_supported_types_including_float() {
 
 #[test]
 fn null_tests_reject_unsupported_types() {
-    for type_oid in [pg_sys::BYTEAOID, Oid::from(9_999_999u32)] {
+    for type_oid in [pg_sys::INT4ARRAYOID, Oid::from(9_999_999u32)] {
         assert!(
             !PgPredicatePushdownPolicy::supports_null_test(type_oid),
             "null tests must be unsupported for type {}",

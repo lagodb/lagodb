@@ -6,6 +6,7 @@ mod error;
 mod plan;
 mod planner;
 pub(crate) mod policy;
+mod temporal;
 
 pub(crate) use binding::BoundIcebergPredicate;
 pub(crate) use builder::IcebergPredicateBuilder;

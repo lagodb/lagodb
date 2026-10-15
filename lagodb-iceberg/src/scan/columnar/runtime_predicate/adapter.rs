@@ -1,11 +1,12 @@
 //! Runtime predicate trait adapter.
 
 use iceberg_lite::expr::Predicate;
+use lagodb_core::expr::BooleanTestKind;
 use lagodb_core::expr::pushdown::{PredicatePlan, PredicatePlanner};
 use lagodb_core::runtime_api::{RuntimeComparisonOperator, RuntimePredicateScalar};
 
 use crate::error::{IcebergError, IcebergResult};
-use crate::predicate::policy::PredicatePushdownPolicy;
+use crate::predicate::policy::{PredicatePushdownPolicy, PredicateValueKind};
 
 use super::IcebergPredicatePlanner;
 
@@ -69,6 +70,24 @@ impl<'predicate>
         right: &RuntimePredicateScalar<'predicate>,
     ) -> IcebergResult<PredicatePlan<Predicate>> {
         IcebergPredicatePlanner::comparison(self, *operator, left, right)
+    }
+
+    fn boolean_test(
+        &self,
+        kind: BooleanTestKind,
+        value: &RuntimePredicateScalar<'predicate>,
+    ) -> IcebergResult<PredicatePlan<Predicate>> {
+        let RuntimePredicateScalar::Column(column) = value else {
+            return Ok(PredicatePlan::Unsupported);
+        };
+        if self.column_kind(*column) != Some(PredicateValueKind::Boolean) {
+            return Ok(PredicatePlan::Unsupported);
+        }
+        // The shared walker negates BooleanTest by flipping its semantic kind.
+        // A native complement of the compiled truth set is not used.
+        Ok(PredicatePlan::ExactNoComplement(
+            self.reference(*column)?.boolean_test(kind),
+        ))
     }
 
     fn is_null(

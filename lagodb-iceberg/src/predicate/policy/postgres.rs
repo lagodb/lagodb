@@ -8,6 +8,7 @@ use lagodb_core::tuple::{Decimal128Semantics, Utf8ServerEncoding};
 use pgrx::{PgBuiltInOids, PgOid, pg_sys};
 
 use super::super::plan::PlannedValueType;
+use super::super::temporal::TimestampPrecision;
 use super::{PredicatePushdownPolicy, PredicateValueKind, SupportedComparison};
 
 /// PostgreSQL-facing adapter that resolves catalog-backed collation facts
@@ -89,10 +90,16 @@ impl PgPredicatePushdownPolicy {
             PlannedValueType::Int2 | PlannedValueType::Int4 => {
                 PredicateValueKind::Integer
             }
-            PlannedValueType::Int8 => PredicateValueKind::Long,
+            PlannedValueType::Int8
+            | PlannedValueType::Int2ToLong
+            | PlannedValueType::Int4ToLong => PredicateValueKind::Long,
+            PlannedValueType::Boolean => PredicateValueKind::Boolean,
+            PlannedValueType::Uuid
+            | PlannedValueType::Binary
+            | PlannedValueType::FixedBinary(_) => PredicateValueKind::Binary,
             PlannedValueType::Date => PredicateValueKind::Date,
-            PlannedValueType::Timestamp => PredicateValueKind::Timestamp,
-            PlannedValueType::Timestamptz => PredicateValueKind::Timestamptz,
+            PlannedValueType::Timestamp(_) => PredicateValueKind::Timestamp,
+            PlannedValueType::Timestamptz(_) => PredicateValueKind::Timestamptz,
             PlannedValueType::String => PredicateValueKind::String,
             PlannedValueType::Decimal128(_) => PredicateValueKind::Decimal,
             PlannedValueType::Int8ToInt => PredicateValueKind::Integer,
@@ -123,15 +130,57 @@ impl PgPredicatePushdownPolicy {
         }
         match (declared, effective, value_oid) {
             (
-                PgOid::BuiltIn(PgBuiltInOids::INT2OID),
-                PgOid::BuiltIn(PgBuiltInOids::INT2OID),
+                PgOid::BuiltIn(PgBuiltInOids::BOOLOID),
+                PgOid::BuiltIn(PgBuiltInOids::BOOLOID),
+                PgOid::BuiltIn(PgBuiltInOids::BOOLOID),
+            ) => Some(PlannedValueType::Boolean),
+            (
+                PgOid::BuiltIn(PgBuiltInOids::UUIDOID),
+                PgOid::BuiltIn(PgBuiltInOids::UUIDOID),
+                PgOid::BuiltIn(PgBuiltInOids::UUIDOID),
+            ) => Some(PlannedValueType::Uuid),
+            (
+                PgOid::BuiltIn(PgBuiltInOids::BYTEAOID),
+                PgOid::BuiltIn(PgBuiltInOids::BYTEAOID),
+                PgOid::BuiltIn(PgBuiltInOids::BYTEAOID),
+            ) => Some(PlannedValueType::Binary),
+            (
+                PgOid::BuiltIn(PgBuiltInOids::INT2OID | PgBuiltInOids::INT4OID),
+                PgOid::BuiltIn(
+                    PgBuiltInOids::INT2OID
+                    | PgBuiltInOids::INT4OID
+                    | PgBuiltInOids::INT8OID,
+                ),
+                PgOid::BuiltIn(PgBuiltInOids::INT8OID),
+            ) => Some(PlannedValueType::Int8ToInt),
+            (
+                PgOid::BuiltIn(PgBuiltInOids::INT2OID | PgBuiltInOids::INT4OID),
+                PgOid::BuiltIn(
+                    PgBuiltInOids::INT2OID
+                    | PgBuiltInOids::INT4OID
+                    | PgBuiltInOids::INT8OID,
+                ),
                 PgOid::BuiltIn(PgBuiltInOids::INT2OID),
             ) => Some(PlannedValueType::Int2),
             (
-                PgOid::BuiltIn(PgBuiltInOids::INT4OID),
-                PgOid::BuiltIn(PgBuiltInOids::INT4OID),
+                PgOid::BuiltIn(PgBuiltInOids::INT2OID | PgBuiltInOids::INT4OID),
+                PgOid::BuiltIn(
+                    PgBuiltInOids::INT2OID
+                    | PgBuiltInOids::INT4OID
+                    | PgBuiltInOids::INT8OID,
+                ),
                 PgOid::BuiltIn(PgBuiltInOids::INT4OID),
             ) => Some(PlannedValueType::Int4),
+            (
+                PgOid::BuiltIn(PgBuiltInOids::INT8OID),
+                PgOid::BuiltIn(PgBuiltInOids::INT8OID),
+                PgOid::BuiltIn(PgBuiltInOids::INT2OID),
+            ) => Some(PlannedValueType::Int2ToLong),
+            (
+                PgOid::BuiltIn(PgBuiltInOids::INT8OID),
+                PgOid::BuiltIn(PgBuiltInOids::INT8OID),
+                PgOid::BuiltIn(PgBuiltInOids::INT4OID),
+            ) => Some(PlannedValueType::Int4ToLong),
             (
                 PgOid::BuiltIn(PgBuiltInOids::INT8OID),
                 PgOid::BuiltIn(PgBuiltInOids::INT8OID),
@@ -146,12 +195,16 @@ impl PgPredicatePushdownPolicy {
                 PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPOID),
                 PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPOID),
                 PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPOID),
-            ) => Some(PlannedValueType::Timestamp),
+            ) => Some(PlannedValueType::Timestamp(
+                TimestampPrecision::Microseconds,
+            )),
             (
                 PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPTZOID),
                 PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPTZOID),
                 PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPTZOID),
-            ) => Some(PlannedValueType::Timestamptz),
+            ) => Some(PlannedValueType::Timestamptz(
+                TimestampPrecision::Microseconds,
+            )),
             (
                 PgOid::BuiltIn(PgBuiltInOids::NUMERICOID),
                 PgOid::BuiltIn(PgBuiltInOids::NUMERICOID),

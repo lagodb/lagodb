@@ -51,6 +51,9 @@ impl FdwPlannedPredicate {
                 operator.explain_symbol(),
                 values.value(*value)
             ),
+            PlannedIcebergNode::BooleanTest { kind, column } => {
+                format!("{} IS {}", column.debug_name, kind)
+            }
             PlannedIcebergNode::IsNull(column) => {
                 format!("{} IS NULL", column.debug_name)
             }

@@ -1,8 +1,11 @@
 //! Owned, copyObject-serializable Iceberg predicate plans.
 
-use lagodb_core::expr::{PgComparisonKind, RuntimeValueId};
+use lagodb_core::expr::{BooleanTestKind, PgComparisonKind, RuntimeValueId};
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
-use lagodb_core::tuple::Decimal128Semantics;
+
+mod value;
+
+pub(crate) use value::PlannedValueType;
 
 use super::error::IcebergFilterError;
 
@@ -17,6 +20,7 @@ const NODE_ALWAYS_FALSE: i32 = 7;
 const NODE_IS_NAN: i32 = 8;
 const NODE_IS_NOT_NAN: i32 = 9;
 const NODE_STARTS_WITH: i32 = 10;
+const NODE_BOOLEAN_TEST: i32 = 11;
 
 const OP_EQ: i32 = 0;
 const OP_NOT_EQ: i32 = 1;
@@ -24,16 +28,6 @@ const OP_LT: i32 = 2;
 const OP_LE: i32 = 3;
 const OP_GT: i32 = 4;
 const OP_GE: i32 = 5;
-
-const VALUE_INT2: i32 = 0;
-const VALUE_INT4: i32 = 1;
-const VALUE_INT8: i32 = 2;
-const VALUE_DATE: i32 = 3;
-const VALUE_TIMESTAMP: i32 = 4;
-const VALUE_TIMESTAMPTZ: i32 = 5;
-const VALUE_STRING: i32 = 6;
-const VALUE_DECIMAL128: i32 = 7;
-const VALUE_INT8_TO_INT: i32 = 8;
 
 #[derive(Debug)]
 pub(crate) struct PlannedIcebergPredicate {
@@ -83,6 +77,10 @@ pub(crate) enum PlannedIcebergNode {
         value: RuntimeValueId,
         value_type: PlannedValueType,
     },
+    BooleanTest {
+        kind: BooleanTestKind,
+        column: PlannedIcebergColumn,
+    },
     IsNull(PlannedIcebergColumn),
     IsNotNull(PlannedIcebergColumn),
     IsNan(PlannedIcebergColumn),
@@ -117,6 +115,12 @@ impl PlannedIcebergNode {
                 column.encode(writer);
                 writer.append_count(value.index());
                 value_type.encode(writer);
+            }
+            Self::BooleanTest { kind, column } => {
+                writer
+                    .append_i32(NODE_BOOLEAN_TEST)
+                    .append_i32(kind.wire_id());
+                column.encode(writer);
             }
             Self::IsNull(column) => {
                 writer.append_i32(NODE_IS_NULL);
@@ -185,6 +189,15 @@ impl PlannedIcebergNode {
                     value_type,
                 })
             }
+            NODE_BOOLEAN_TEST => {
+                let tag = reader.read_i32()?;
+                let kind = BooleanTestKind::from_wire_id(tag)
+                    .ok_or(IcebergFilterError::UnknownBooleanTest(tag))?;
+                Ok(Self::BooleanTest {
+                    kind,
+                    column: PlannedIcebergColumn::decode(reader)?,
+                })
+            }
             NODE_IS_NULL => Ok(Self::IsNull(PlannedIcebergColumn::decode(reader)?)),
             NODE_IS_NOT_NULL => {
                 Ok(Self::IsNotNull(PlannedIcebergColumn::decode(reader)?))
@@ -238,64 +251,6 @@ impl PlannedIcebergNode {
             );
         }
         Ok(children.into_boxed_slice())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlannedValueType {
-    Int2,
-    Int4,
-    Int8,
-    Date,
-    Timestamp,
-    Timestamptz,
-    String,
-    Decimal128(Decimal128Semantics),
-    Int8ToInt,
-}
-
-impl PlannedValueType {
-    fn encode(self, writer: &mut PlanDataWriter) {
-        match self {
-            Self::Int2 => writer.append_i32(VALUE_INT2),
-            Self::Int4 => writer.append_i32(VALUE_INT4),
-            Self::Int8 => writer.append_i32(VALUE_INT8),
-            Self::Date => writer.append_i32(VALUE_DATE),
-            Self::Timestamp => writer.append_i32(VALUE_TIMESTAMP),
-            Self::Timestamptz => writer.append_i32(VALUE_TIMESTAMPTZ),
-            Self::String => writer.append_i32(VALUE_STRING),
-            Self::Decimal128(semantics) => writer
-                .append_i32(VALUE_DECIMAL128)
-                .append_i32(i32::from(semantics.precision()))
-                .append_i32(i32::from(semantics.scale())),
-            Self::Int8ToInt => writer.append_i32(VALUE_INT8_TO_INT),
-        };
-    }
-
-    fn decode(reader: &mut PlanDataReader<'_>) -> Result<Self, IcebergFilterError> {
-        match reader.read_i32()? {
-            VALUE_INT2 => Ok(Self::Int2),
-            VALUE_INT4 => Ok(Self::Int4),
-            VALUE_INT8 => Ok(Self::Int8),
-            VALUE_DATE => Ok(Self::Date),
-            VALUE_TIMESTAMP => Ok(Self::Timestamp),
-            VALUE_TIMESTAMPTZ => Ok(Self::Timestamptz),
-            VALUE_STRING => Ok(Self::String),
-            VALUE_DECIMAL128 => {
-                let encoded_precision = reader.read_i32()?;
-                let encoded_scale = reader.read_i32()?;
-                let semantics = u8::try_from(encoded_precision)
-                    .ok()
-                    .and_then(|precision| {
-                        let scale = i8::try_from(encoded_scale).ok()?;
-                        Decimal128Semantics::new(precision, scale)
-                    })
-                    .ok_or(IcebergFilterError::InvalidDecimalShape)?;
-                Ok(Self::Decimal128(semantics))
-            }
-            VALUE_INT8_TO_INT => Ok(Self::Int8ToInt),
-            tag => Err(IcebergFilterError::UnknownValueTypeTag(tag)),
-        }
     }
 }
 

@@ -2,10 +2,10 @@
 
 mod adapter;
 mod integer;
+mod value;
 
 use arrow_schema::{DataType, Schema, TimeUnit};
 use iceberg_lite::expr::{Predicate, PredicateOperator};
-use iceberg_lite::spec::Datum;
 use lagodb_core::expr::pushdown::PredicatePlan;
 use lagodb_core::runtime_api::{
     RuntimeComparisonOperator, RuntimePredicateScalar, RuntimePredicateValue,
@@ -88,9 +88,12 @@ impl<'a> IcebergPredicatePlanner<'a> {
         ) else {
             return Ok(PredicatePlan::Unsupported);
         };
+        let Some(datum) = self.comparison_datum(column, value)? else {
+            return Ok(PredicatePlan::Unsupported);
+        };
         let predicate = self
             .reference(column)?
-            .comparison(Self::predicate_operator(operator), Self::datum(value)?);
+            .comparison(Self::predicate_operator(operator), datum);
         Ok(Self::accepted(capability, predicate))
     }
 
@@ -197,6 +200,11 @@ impl<'a> IcebergPredicatePlanner<'a> {
             }
             DataType::Int64 => Some(PredicateValueKind::Long),
             DataType::Date32 => Some(PredicateValueKind::Date),
+            DataType::Time64(TimeUnit::Microsecond) => Some(PredicateValueKind::Time),
+            DataType::Binary
+            | DataType::LargeBinary
+            | DataType::BinaryView
+            | DataType::FixedSizeBinary(_) => Some(PredicateValueKind::Binary),
             DataType::Timestamp(TimeUnit::Microsecond, timezone) => {
                 Some(if timezone.is_some() {
                     PredicateValueKind::Timestamptz
@@ -227,6 +235,7 @@ impl<'a> IcebergPredicatePlanner<'a> {
             }
             RuntimePredicateValue::Decimal128 { .. } => PredicateValueKind::Decimal,
             RuntimePredicateValue::String(_) => PredicateValueKind::String,
+            RuntimePredicateValue::Binary(_) => PredicateValueKind::Binary,
         }
     }
 
@@ -317,34 +326,5 @@ impl<'a> IcebergPredicatePlanner<'a> {
                 RuntimeComparisonOperator::LessThanOrEqual
             }
         }
-    }
-
-    fn datum(value: &RuntimePredicateValue<'_>) -> IcebergResult<Datum> {
-        Ok(match value {
-            RuntimePredicateValue::Boolean(value) => Datum::bool(*value),
-            RuntimePredicateValue::Int32(value) => Datum::int(*value),
-            RuntimePredicateValue::Int64(value) => Datum::long(*value),
-            RuntimePredicateValue::Date32(value) => Datum::date(*value),
-            RuntimePredicateValue::TimestampMicrosecond(value) => {
-                Datum::timestamp_micros(*value)
-            }
-            RuntimePredicateValue::TimestampTzMicrosecond(value) => {
-                Datum::timestamptz_micros(*value)
-            }
-            RuntimePredicateValue::Decimal128 {
-                coefficient,
-                precision,
-                scale,
-            } => Datum::decimal_from_unscaled(
-                *coefficient,
-                u32::from(*precision),
-                u32::try_from(*scale).map_err(|_| {
-                    IcebergError::InvariantViolated(
-                        "table-scan decimal predicate has a negative scale",
-                    )
-                })?,
-            )?,
-            RuntimePredicateValue::String(value) => Datum::string(value.as_ref()),
-        })
     }
 }

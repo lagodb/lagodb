@@ -4,7 +4,9 @@ use iceberg_lite::expr::{
     BinaryExpression, Predicate, PredicateOperator, Reference, UnaryExpression,
 };
 use iceberg_lite::spec::Datum;
+use lagodb_core::expr::BooleanTestKind;
 
+#[derive(Clone)]
 pub(crate) struct IcebergPredicateBuilder {
     reference: Reference,
 }
@@ -54,6 +56,25 @@ impl IcebergPredicateBuilder {
             )
         } else {
             predicate
+        }
+    }
+
+    /// BooleanTest is two-valued in SQL; unlike a strict comparison, its
+    /// NOT TRUE / NOT FALSE cases include a NULL input.
+    pub(crate) fn boolean_test(self, kind: BooleanTestKind) -> Predicate {
+        match kind {
+            BooleanTestKind::IsTrue | BooleanTestKind::IsFalse => self.comparison(
+                PredicateOperator::Eq,
+                Datum::bool(kind == BooleanTestKind::IsTrue),
+            ),
+            BooleanTestKind::IsNotTrue | BooleanTestKind::IsNotFalse => {
+                self.clone().null_test(false).or(self.comparison(
+                    PredicateOperator::Eq,
+                    Datum::bool(kind == BooleanTestKind::IsNotFalse),
+                ))
+            }
+            BooleanTestKind::IsUnknown => self.null_test(false),
+            BooleanTestKind::IsNotUnknown => self.null_test(true),
         }
     }
 

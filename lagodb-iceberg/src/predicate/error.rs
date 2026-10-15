@@ -10,6 +10,8 @@ use crate::error::IcebergError;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum IcebergFilterError {
+    #[error("Iceberg planned filter contains unknown boolean test tag {0}")]
+    UnknownBooleanTest(i32),
     #[error(transparent)]
     Iceberg(#[from] IcebergError),
 
@@ -36,9 +38,6 @@ pub(crate) enum IcebergFilterError {
     )]
     BindingSlotOutOfBounds { index: usize, binding_count: usize },
 
-    #[error("Iceberg filter planner has no field binding for attno {0}")]
-    MissingFieldBinding(pg_sys::AttrNumber),
-
     #[error(
         "Iceberg planned filter schema id {planned} does not match execution schema id {execution}"
     )]
@@ -55,14 +54,14 @@ impl SqlStateError for IcebergFilterError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
             Self::Iceberg(error) => error.sql_error_code(),
-            Self::PlanData(_)
+            Self::UnknownBooleanTest(_)
+            | Self::PlanData(_)
             | Self::UnknownNodeTag(_)
             | Self::UnknownOperatorTag(_)
             | Self::UnknownValueTypeTag(_)
             | Self::InvalidDecimalShape
             | Self::EmptyLogicalNode { .. }
             | Self::BindingSlotOutOfBounds { .. }
-            | Self::MissingFieldBinding(_)
             | Self::SchemaMismatch { .. }
             | Self::DatumDecode { .. }
             | Self::DecimalCodec(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,

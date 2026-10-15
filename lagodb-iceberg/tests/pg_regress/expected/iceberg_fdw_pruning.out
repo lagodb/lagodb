@@ -17,18 +17,12 @@ CREATE USER MAPPING FOR CURRENT_USER SERVER iceberg_pruning_rest;
 CREATE FOREIGN TABLE iceberg_fdw_pruning.source ()
 SERVER iceberg_pruning_rest
 OPTIONS (
-    catalog_name 'regress',
-    catalog_namespace 'fdw_reads',
-    catalog_table_name 'partition_evolution_v2',
-    mode 'read_only'
+    table 'fdw_reads.partition_evolution_v2'
 );
 CREATE FOREIGN TABLE iceberg_fdw_pruning.inventory ()
 SERVER iceberg_pruning_rest
 OPTIONS (
-    catalog_name 'regress',
-    catalog_namespace 'fdw_reads',
-    catalog_table_name 'partition_pruning_inventory',
-    mode 'read_only'
+    table 'fdw_reads.partition_pruning_inventory'
 );
 SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
@@ -85,22 +79,21 @@ CROSS JOIN LATERAL jsonb_path_query_first(plan,
 CROSS JOIN LATERAL concat_ws(' ', scan->>'Pushed Filter Exact', scan->>'Pushed Filter Conservative',
                                 scan #>> '{LagoDB Pushdown,Pushed Filter Exact}',
                                 scan #>> '{LagoDB Pushdown,Pushed Filter Conservative}') AS filters(pushed);
--- Offload supported predicates; DATE values retain native FDW execution
--- because ExecutionScalarRepr does not admit DATE runtime bindings.
+-- Finite DATE literals now execute through query offload as well.
 -- Both routes must bind and physically prune the same predicates.
 SET lagodb.query_offload_mode = 'force';
 SELECT case_name, scan_type, files_match, filter_bound, ids
 FROM pruning_results ORDER BY ordinal;
-  case_name  |  scan_type   | files_match | filter_bound |        ids         
--------------+--------------+-------------+--------------+--------------------
- all         | Table Scan   | t           | t            | [1, 2, 3, 4, 5, 6]
- old_day     | Foreign Scan | t           | t            | [1, 2]
- new_day     | Foreign Scan | t           | t            | [4]
- new_range   | Foreign Scan | t           | t            | [4, 5]
- cross_range | Foreign Scan | t           | t            | [3, 4]
- category    | Table Scan   | t           | t            | [1, 4]
- bucket      | Table Scan   | t           | t            | [4]
- null_day    | Table Scan   | t           | t            | [6]
+  case_name  | scan_type  | files_match | filter_bound |        ids         
+-------------+------------+-------------+--------------+--------------------
+ all         | Table Scan | t           | t            | [1, 2, 3, 4, 5, 6]
+ old_day     | Table Scan | t           | t            | [1, 2]
+ new_day     | Table Scan | t           | t            | [4]
+ new_range   | Table Scan | t           | t            | [4, 5]
+ cross_range | Table Scan | t           | t            | [3, 4]
+ category    | Table Scan | t           | t            | [1, 4]
+ bucket      | Table Scan | t           | t            | [4]
+ null_day    | Table Scan | t           | t            | [6]
 (8 rows)
 
 -- Native FDW must independently bind and prune the same predicates.
@@ -121,6 +114,466 @@ FROM pruning_results ORDER BY ordinal;
 
 DROP VIEW pruning_results;
 DROP TABLE pruning_cases;
+-- A range over the bucket source also retains the complete row truth set.
+SELECT array_agg(id ORDER BY id) AS partitioned_id_rows
+FROM iceberg_fdw_pruning.source
+WHERE id >= 4;
+ partitioned_id_rows 
+---------------------
+ {4,5,6}
+(1 row)
+
+-- Nanosecond storage comparisons preserve PostgreSQL microsecond predicates.
+CREATE FOREIGN TABLE iceberg_fdw_pruning.nanos ()
+SERVER iceberg_pruning_rest
+OPTIONS (
+    table 'fdw_nanos.rows_v3'
+);
+SET TimeZone = 'UTC';
+SET DateStyle = 'ISO, MDY';
+CREATE TEMP TABLE nanos_pg AS SELECT id, ts, tz FROM iceberg_fdw_pruning.nanos;
+-- These three distinct Arrow nanoseconds decode to the same PG microsecond.
+SELECT id, ts, tz FROM iceberg_fdw_pruning.nanos WHERE id >= 5 AND id <= 7 ORDER BY id;
+ id |         ts          |           tz           
+----+---------------------+------------------------
+  5 | 1970-01-01 00:00:00 | 1970-01-01 00:00:00+00
+  6 | 1970-01-01 00:00:00 | 1970-01-01 00:00:00+00
+  7 | 1970-01-01 00:00:00 | 1970-01-01 00:00:00+00
+(3 rows)
+
+-- Six supported comparisons, both time types, and both sides of the epoch.
+-- Every case has excluded rows in the same file. Zero rows removed by the PG
+-- residual proves that storage filtering ran, not just that planning accepted it.
+CREATE TEMP TABLE nanos_cases AS
+SELECT col, op, ordinal,
+       format('%I %s %s %L', col, op, typ, instant) AS predicate
+FROM (VALUES ('ts', 'TIMESTAMP'), ('tz', 'TIMESTAMPTZ')) AS types(col, typ)
+CROSS JOIN (VALUES (1, '='), (2, '<'), (3, '<='), (4, '>'), (5, '>='), (6, '<>')) AS ops(ordinal, op)
+CROSS JOIN (VALUES ('1970-01-01 00:00:00'),
+                   ('1969-12-31 23:59:59.999999')) AS instants(instant);
+SELECT col, op,
+       bool_and(pg_temp.partition_query_json(
+           'SELECT to_jsonb(array_agg(id ORDER BY id)) FROM iceberg_fdw_pruning.nanos WHERE ' || predicate)
+           IS NOT DISTINCT FROM pg_temp.partition_query_json(
+           'SELECT to_jsonb(array_agg(id ORDER BY id)) FROM nanos_pg WHERE ' || predicate)) AS same_rows,
+       bool_and((scan->>'Node Type' = 'Foreign Scan'
+           AND (scan->'LagoDB Pushdown') ? 'Pushed Filter Conservative' AND scan ? 'Filter'
+           AND (scan->>'Rows Removed by Filter')::integer = 0) IS TRUE) AS storage_filtered
+FROM nanos_cases
+CROSS JOIN LATERAL pg_temp.partition_query_json(
+    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
+     SELECT id FROM iceberg_fdw_pruning.nanos WHERE ' || predicate) AS explained(plan)
+CROSS JOIN LATERAL (SELECT plan->0->'Plan') AS selected(scan)
+GROUP BY col, op, ordinal ORDER BY col, ordinal;
+ col | op | same_rows | storage_filtered 
+-----+----+-----------+------------------
+ ts  | =  | t         | t
+ ts  | <  | t         | t
+ ts  | <= | t         | t
+ ts  | >  | t         | t
+ ts  | >= | t         | t
+ ts  | <> | t         | t
+ tz  | =  | t         | t
+ tz  | <  | t         | t
+ tz  | <= | t         | t
+ tz  | >  | t         | t
+ tz  | >= | t         | t
+ tz  | <> | t         | t
+(12 rows)
+
+-- Reversed operands and Boolean composition retain the PG truth set.
+SELECT array_agg(id ORDER BY id) = ARRAY[2,3,4,8] AS composed
+FROM iceberg_fdw_pruning.nanos
+WHERE (TIMESTAMP '1970-01-01' > ts AND ts >= TIMESTAMP '1969-12-31 23:59:59.999999')
+   OR tz >= TIMESTAMPTZ '1970-01-01 00:00:00.000001+00';
+ composed 
+----------
+ t
+(1 row)
+
+-- Generic cached plans must retain source precision through plan serialization.
+SET plan_cache_mode = force_generic_plan;
+PREPARE nanos_lookup(timestamp, timestamptz) AS
+SELECT coalesce(array_agg(id ORDER BY id), '{}'::integer[]) AS ids
+FROM iceberg_fdw_pruning.nanos WHERE ts = $1 AND tz = $2;
+EXECUTE nanos_lookup('1970-01-01', '1970-01-01 00:00:00+00');
+   ids   
+---------
+ {5,6,7}
+(1 row)
+
+EXECUTE nanos_lookup('1969-12-31 23:59:59.999999', '1969-12-31 23:59:59.999999+00');
+   ids   
+---------
+ {2,3,4}
+(1 row)
+
+EXECUTE nanos_lookup(NULL, NULL);
+ ids 
+-----
+ {}
+(1 row)
+
+SELECT jsonb_path_exists(pg_temp.partition_query_json(
+    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
+     EXECUTE nanos_lookup(''1970-01-01'', ''1970-01-01 00:00:00+00'')'),
+    '$[0].Plan.** ? (@."Node Type" == "Foreign Scan" && exists(@."LagoDB Pushdown"."Pushed Filter Conservative") && @."Rows Removed by Filter" == 0)') AS parameter_filtered;
+ parameter_filtered 
+--------------------
+ t
+(1 row)
+
+-- Parameterized rescans must rebind each outer timestamp value.
+SELECT wanted.label, array_agg(matched.id ORDER BY matched.id) AS ids
+FROM (VALUES ('negative', TIMESTAMP '1969-12-31 23:59:59.999999'),
+             ('zero', TIMESTAMP '1970-01-01')) AS wanted(label, ts)
+CROSS JOIN LATERAL (
+    SELECT id FROM iceberg_fdw_pruning.nanos WHERE nanos.ts = wanted.ts OFFSET 0
+) AS matched
+GROUP BY wanted.label ORDER BY wanted.label;
+  label   |   ids   
+----------+---------
+ negative | {2,3,4}
+ zero     | {5,6,7}
+(2 rows)
+
+DEALLOCATE nanos_lookup;
+RESET plan_cache_mode;
+-- Out-of-range constants and infinity retain PG residual evaluation.
+SELECT array_agg(id ORDER BY id) = ARRAY[1,2,3,4,5,6,7,8] AS rows_ok
+FROM iceberg_fdw_pruning.nanos WHERE ts < TIMESTAMP '2500-01-01';
+ rows_ok 
+---------
+ t
+(1 row)
+
+SELECT array_agg(id ORDER BY id) = ARRAY[1,2,3,4,5,6,7,8] AS rows_ok
+FROM iceberg_fdw_pruning.nanos WHERE tz > TIMESTAMPTZ '1600-01-01 00:00:00+00';
+ rows_ok 
+---------
+ t
+(1 row)
+
+SELECT array_agg(id ORDER BY id) = ARRAY[1,2,3,4,5,6,7,8] AS rows_ok
+FROM iceberg_fdw_pruning.nanos WHERE ts > '-infinity'::timestamp AND tz < 'infinity'::timestamptz;
+ rows_ok 
+---------
+ t
+(1 row)
+
+-- Scalar operators: exercise each truth set once on matching, nonmatching and
+-- NULL rows. UUID, fixed binary and time retain their actual Iceberg types.
+CREATE FOREIGN TABLE iceberg_fdw_pruning.scalars ()
+SERVER iceberg_pruning_rest
+OPTIONS (table 'fdw_predicates.rows_v2');
+EXPLAIN (COSTS OFF)
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE flag IS NOT TRUE;
+            QUERY PLAN             
+-----------------------------------
+ Foreign Scan on scalars
+   Pushed Filter: flag IS NOT TRUE
+(2 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE payload < '\x8000'::bytea;
+                 QUERY PLAN                 
+--------------------------------------------
+ Foreign Scan on scalars
+   Pushed Filter: payload < '\x8000'::bytea
+(2 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE key >= '80000000-0000-0000-0000-000000000000'::uuid;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Foreign Scan on scalars
+   Pushed Filter: key >= '80000000-0000-0000-0000-000000000000'::uuid
+(2 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE flag ORDER BY id;
+ id 
+----
+  1
+  4
+(2 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE NOT flag ORDER BY id;
+ id 
+----
+  2
+(1 row)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE flag IS TRUE ORDER BY id;
+ id 
+----
+  1
+  4
+(2 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE flag IS NOT TRUE ORDER BY id;
+ id 
+----
+  2
+  3
+(2 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE flag IS FALSE ORDER BY id;
+ id 
+----
+  2
+(1 row)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE flag IS NOT FALSE ORDER BY id;
+ id 
+----
+  1
+  3
+  4
+(3 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE flag IS UNKNOWN ORDER BY id;
+ id 
+----
+  3
+(1 row)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE flag IS NOT UNKNOWN ORDER BY id;
+ id 
+----
+  1
+  2
+  4
+(3 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE payload = '\x8000'::bytea ORDER BY id;
+ id 
+----
+  2
+(1 row)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE payload <> '\x8000'::bytea ORDER BY id;
+ id 
+----
+  1
+  4
+(2 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE payload < '\x8000'::bytea ORDER BY id;
+ id 
+----
+  1
+(1 row)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE payload <= '\x8000'::bytea ORDER BY id;
+ id 
+----
+  1
+  2
+(2 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE payload > '\x8000'::bytea ORDER BY id;
+ id 
+----
+  4
+(1 row)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE payload >= '\x8000'::bytea ORDER BY id;
+ id 
+----
+  2
+  4
+(2 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE payload IS NULL ORDER BY id;
+ id 
+----
+  3
+(1 row)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE payload IS NOT NULL ORDER BY id;
+ id 
+----
+  1
+  2
+  4
+(3 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE key = '80000000-0000-0000-0000-000000000000'::uuid ORDER BY id;
+ id 
+----
+  2
+(1 row)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE key <> '80000000-0000-0000-0000-000000000000'::uuid ORDER BY id;
+ id 
+----
+  1
+  4
+(2 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE key < '80000000-0000-0000-0000-000000000000'::uuid ORDER BY id;
+ id 
+----
+  1
+(1 row)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE key <= '80000000-0000-0000-0000-000000000000'::uuid ORDER BY id;
+ id 
+----
+  1
+  2
+(2 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE key > '80000000-0000-0000-0000-000000000000'::uuid ORDER BY id;
+ id 
+----
+  4
+(1 row)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE key >= '80000000-0000-0000-0000-000000000000'::uuid ORDER BY id;
+ id 
+----
+  2
+  4
+(2 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE key IS NULL ORDER BY id;
+ id 
+----
+  3
+(1 row)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE key IS NOT NULL ORDER BY id;
+ id 
+----
+  1
+  2
+  4
+(3 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE day <> DATE '2000-01-01' ORDER BY id;
+ id 
+----
+  1
+  4
+(2 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE stamp <> TIMESTAMP '2000-01-01' ORDER BY id;
+ id 
+----
+  1
+  4
+(2 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE instant <> TIMESTAMPTZ '2000-01-01+00' ORDER BY id;
+ id 
+----
+  1
+  4
+(2 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE clock IS NULL ORDER BY id;
+ id 
+----
+  3
+(1 row)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE clock IS NOT NULL ORDER BY id;
+ id 
+----
+  1
+  2
+  4
+(3 rows)
+
+-- Fixed binary equality uses the source width, not UUID semantics.
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE fixed_payload = '\x8000'::bytea ORDER BY id;
+ id 
+----
+  2
+  4
+(2 rows)
+
+-- A newly added optional boolean is NULL in every older data file.
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE later_flag IS TRUE ORDER BY id;
+ id 
+----
+(0 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalars WHERE later_flag IS NOT TRUE ORDER BY id;
+ id 
+----
+  1
+  2
+  3
+  4
+(4 rows)
+
+-- CustomScan shares predicate planning with FDW; check its exact and
+-- conservative execution boundaries without repeating the operator matrix.
+CREATE TABLE iceberg_fdw_pruning.scalar_managed (
+    id integer, flag boolean, stamp timestamp(6), small smallint, wide bigint
+) USING iceberg;
+INSERT INTO iceberg_fdw_pruning.scalar_managed
+SELECT id, flag, stamp, small, wide FROM iceberg_fdw_pruning.scalars;
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id FROM iceberg_fdw_pruning.scalar_managed WHERE flag IS NOT TRUE;
+                   QUERY PLAN                   
+------------------------------------------------
+ Custom Scan (lagodb-iceberg) on scalar_managed
+   Pushed Filter: (flag IS NOT TRUE)
+(2 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalar_managed WHERE flag IS NOT TRUE ORDER BY id;
+ id 
+----
+  2
+  3
+(2 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM iceberg_fdw_pruning.scalar_managed WHERE stamp <> TIMESTAMP '2000-01-01';
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
+ Custom Scan (lagodb-iceberg) on scalar_managed
+   Filter: (stamp <> '2000-01-01 00:00:00'::timestamp without time zone)
+   Pushed Filter: (stamp <> '2000-01-01 00:00:00'::timestamp without time zone)
+(3 rows)
+
+SELECT id FROM iceberg_fdw_pruning.scalar_managed WHERE stamp <> TIMESTAMP '2000-01-01' ORDER BY id;
+ id 
+----
+  1
+  4
+(2 rows)
+
+-- Cross-width operators and an int8 boundary outside Iceberg int range.
+SELECT id FROM iceberg_fdw_pruning.scalar_managed WHERE small = 2::bigint ORDER BY id;
+ id 
+----
+  2
+(1 row)
+
+SELECT id FROM iceberg_fdw_pruning.scalar_managed WHERE wide > 2::smallint ORDER BY id;
+ id 
+----
+  4
+(1 row)
+
+SELECT id FROM iceberg_fdw_pruning.scalar_managed WHERE small < 2147483648::bigint ORDER BY id;
+ id 
+----
+  1
+  2
+  4
+(3 rows)
+
+DROP TABLE iceberg_fdw_pruning.scalar_managed;
+DROP FOREIGN TABLE iceberg_fdw_pruning.scalars;
+DROP TABLE nanos_cases, nanos_pg;
+RESET TimeZone;
+RESET DateStyle;
 DROP FUNCTION pg_temp.partition_query_json(text);
 SET client_min_messages = warning;
 DROP SCHEMA iceberg_fdw_pruning CASCADE;
