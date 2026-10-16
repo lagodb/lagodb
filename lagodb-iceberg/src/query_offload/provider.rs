@@ -1,6 +1,8 @@
 //! Iceberg implementation of the provider-neutral table-scan SPI.
 
-use arrow_schema::SchemaRef;
+use std::sync::Arc;
+
+use arrow_schema::{Schema as ArrowSchema, SchemaRef};
 use iceberg_lite::expr::Predicate;
 use lagodb_arrow::scan::{
     PlannedScan, PlannedScanTasks, ScanPlanningContext, ScanProjection,
@@ -10,6 +12,7 @@ use lagodb_arrow::scan::{
 };
 use lagodb_core::expr::pushdown::{FilterPlanningContext, PredicatePlan};
 use lagodb_core::fdw::{FdwScan, ForeignDataWrapper};
+use lagodb_core::handles::{ExecutorHandle, RelationGuard};
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 use lagodb_core::query_contract::ScanCost;
 use lagodb_core::runtime_api::{
@@ -19,15 +22,19 @@ use pgrx::pg_sys;
 
 use crate::config::scan_fraction;
 use crate::error::IcebergError;
-use crate::foreign_table::{ForeignPlanningSource, LagodbIceberg};
-use crate::managed_table::ICEBERG_AM_NAME;
+use crate::foreign_table::{
+    ForeignPlanningSource, ForeignSchemaBinding, LagodbIceberg, PlanSourceIdentity,
+};
+use crate::managed_table::{ICEBERG_AM_NAME, ManagedTableReadView};
 use crate::scan::ScanError;
 use crate::scan::columnar::PlannedScan as PlannedQueryScan;
 use crate::scan::parallel::WorkerSource;
+use crate::schema::projection::StorageProjection;
 
 use super::error::Error;
 use super::filter::{Filter, FilterPlanner};
-use super::plan::{BoundScan, Plan, PlanProjection};
+use super::plan::{BoundScan, Plan};
+use super::projection::PlanProjection;
 use super::stream::{Stream as QueryStream, WorkerStream};
 use super::worker::ReopenPlan;
 
@@ -117,21 +124,72 @@ impl TableScanProvider for Provider {
             ScanProjection::RowCount => PlanProjection::CountRows,
             ScanProjection::Columns(attnos) => PlanProjection::Columns(attnos.into()),
         };
-        let plan = match context.relation_kind() {
+        let (plan, schema) = match context.relation_kind() {
             pg_sys::RELKIND_RELATION => {
-                Plan::managed(context.relation_oid(), projection)
+                let schema =
+                    projection.planned_schema(context.relation_oid(), || {
+                        let view =
+                            ManagedTableReadView::load(context.relation_oid())?;
+                        Ok(Arc::clone(view.schema()))
+                    })?;
+                (Plan::managed(context.relation_oid(), projection), schema)
             }
-            pg_sys::RELKIND_FOREIGN_TABLE => Plan::foreign(
-                context.relation_oid(),
-                context.check_as_user_id(),
-                self.foreign_planning_source(context).identity().clone(),
-                projection,
-            ),
+            pg_sys::RELKIND_FOREIGN_TABLE => {
+                let source = self.foreign_planning_source(context);
+                let (schema, generation) = match &projection {
+                    // CountRows has no physical representation to pin. The
+                    // option's schema ID is still resolved at executor binding.
+                    PlanProjection::CountRows => {
+                        (Arc::new(ArrowSchema::empty()), None)
+                    }
+                    PlanProjection::Columns(attnos) => {
+                        let table = source.resolved()?.table();
+                        let relation = RelationGuard::open_table(
+                            context.relation_oid(),
+                            pg_sys::NoLock as pg_sys::LOCKMODE,
+                        )?;
+                        let binding =
+                            ForeignSchemaBinding::new(&relation.as_handle())?;
+                        binding.validate_read(
+                            table.metadata(),
+                            source.identity(),
+                            attnos.iter().copied(),
+                        )?;
+                        let schema = table.metadata().current_schema();
+                        if !binding.supports_columnar_read(schema, attnos)? {
+                            return Ok(ScanSupport::Unsupported);
+                        }
+                        let field_ids = binding
+                            .layout()
+                            .project_field_ids(schema, attnos.iter().copied())?;
+                        let schema = StorageProjection::from_field_ids(
+                            Arc::clone(schema),
+                            field_ids,
+                        )
+                        .to_arrow_schema()?;
+                        (
+                            Arc::new(schema),
+                            Some(PlanSourceIdentity::from_table(table)),
+                        )
+                    }
+                };
+                (
+                    Plan::foreign(
+                        context.relation_oid(),
+                        context.check_as_user_id(),
+                        source.identity().clone(),
+                        generation,
+                        projection,
+                    ),
+                    schema,
+                )
+            }
             _ => return Ok(ScanSupport::Unsupported),
         };
         Ok(ScanSupport::Planned(PlannedScan::new(
             plan,
             self.scan_cost(context)?,
+            schema,
         )))
     }
 
@@ -154,8 +212,9 @@ impl TableScanProvider for Provider {
     fn bind_scan(
         &self,
         plan: &Self::ScanPlan,
+        executor: &ExecutorHandle<'_>,
     ) -> Result<Self::BoundScan, Self::Error> {
-        plan.bind()
+        plan.bind(executor)
     }
 
     fn bound_schema(&self, bound: &Self::BoundScan) -> SchemaRef {

@@ -1,6 +1,7 @@
 //! Query-offload worker FileIO reopen plan around the shared task inventory.
 
 use bincode::Options;
+use iceberg_lite::catalog::TableIdent;
 use iceberg_lite::io::FileIO;
 use lagodb_core::handles::RelationGuard;
 use pgrx::pg_sys;
@@ -8,8 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::IcebergError;
 use crate::foreign_table::{
-    ForeignTableIdentity, ForeignTableMode, IcebergFdwError, PlanSourceIdentity,
-    RestForeignTable,
+    ForeignTableIdentity, IcebergFdwError, IcebergForeignTable, PlanSourceIdentity,
 };
 use crate::managed_table::StorageContext;
 use crate::scan::ScanError;
@@ -41,10 +41,8 @@ enum EncodedWorkerPlan<'a> {
     Foreign {
         relation_oid: u32,
         effective_user_oid: u32,
-        catalog_name: &'a str,
-        namespace: &'a str,
-        table_name: &'a str,
-        writable: bool,
+        table: &'a TableIdent,
+        definition_schema_id: Option<i32>,
         table_uuid: [u8; 16],
         schema_id: i32,
     },
@@ -58,10 +56,8 @@ enum DecodedWorkerPlan {
     Foreign {
         relation_oid: u32,
         effective_user_oid: u32,
-        catalog_name: String,
-        namespace: String,
-        table_name: String,
-        writable: bool,
+        table: TableIdent,
+        definition_schema_id: Option<i32>,
         table_uuid: [u8; 16],
         schema_id: i32,
     },
@@ -83,10 +79,8 @@ impl ReopenPlan {
                 EncodedWorkerPlan::Foreign {
                     relation_oid: u32::from(*relation_oid),
                     effective_user_oid: u32::from(*effective_user_oid),
-                    catalog_name: identity.catalog_name(),
-                    namespace: identity.namespace(),
-                    table_name: identity.table_name(),
-                    writable: identity.mode().is_writable(),
+                    table: identity.table(),
+                    definition_schema_id: identity.schema_id(),
                     table_uuid,
                     schema_id,
                 }
@@ -150,25 +144,14 @@ impl ReopenPlan {
             DecodedWorkerPlan::Foreign {
                 relation_oid,
                 effective_user_oid,
-                catalog_name,
-                namespace,
-                table_name,
-                writable,
+                table,
+                definition_schema_id,
                 table_uuid,
                 schema_id,
             } => Self::Foreign {
                 relation_oid: pg_sys::Oid::from(relation_oid),
                 effective_user_oid: pg_sys::Oid::from(effective_user_oid),
-                identity: ForeignTableIdentity::with_mode(
-                    catalog_name,
-                    namespace,
-                    table_name,
-                    if writable {
-                        ForeignTableMode::ReadWrite
-                    } else {
-                        ForeignTableMode::ReadOnly
-                    },
-                ),
+                identity: ForeignTableIdentity::new(table, definition_schema_id),
                 generation: PlanSourceIdentity::from_parts(table_uuid, schema_id),
             },
         };
@@ -194,7 +177,7 @@ impl ReopenPlan {
                 generation,
             } => {
                 let resolved =
-                    RestForeignTable::resolve(*relation_oid, *effective_user_oid)?;
+                    IcebergForeignTable::resolve(*relation_oid, *effective_user_oid)?;
                 if resolved.identity() != identity {
                     return Err(IcebergFdwError::PlanIdentityChanged.into());
                 }

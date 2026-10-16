@@ -767,6 +767,34 @@ FROM query_offload_aggregate_basic;
   70
 (1 row)
 
+-- SUM(real) must round to Float32 before HAVING, not only at final output.
+-- 2^24 + 1 is exact in Float64 but rounds to 2^24 in Float32.
+SET lagodb.query_offload_mode = 'force';
+CREATE TABLE query_offload_real_sum (group_id integer, value real) USING iceberg;
+INSERT INTO query_offload_real_sum VALUES (1, 16777216), (1, 1), (2, NULL);
+SELECT sum(value) = 16777216::real AS rounded
+FROM query_offload_real_sum
+GROUP BY group_id
+HAVING sum(value) = 16777216::real;
+ rounded 
+---------
+ t
+(1 row)
+
+SELECT sum(value) IS NULL AS empty_sum
+FROM query_offload_real_sum WHERE value < 0;
+ empty_sum 
+-----------
+ t
+(1 row)
+
+TRUNCATE query_offload_real_sum;
+INSERT INTO query_offload_real_sum VALUES (1, 3e38::real), (1, 3e38::real);
+\set VERBOSITY sqlstate
+SELECT sum(value) FROM query_offload_real_sum;
+ERROR:  22003
+\set VERBOSITY default
+DROP TABLE query_offload_real_sum;
 -- ============================================================================
 -- PARAM_EXTERN is bound when each query-offload execution begins.
 -- Separate prepared statements prevent a cached generic plan from crossing

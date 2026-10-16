@@ -7,6 +7,7 @@
 mod error;
 mod filter;
 mod plan;
+mod projection;
 mod provider;
 mod stream;
 mod worker;

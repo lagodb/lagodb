@@ -31,6 +31,33 @@ BEGIN
     RETURN plan;
 END;
 $$;
+-- Closing or aborting an unfetched cursor releases Begin-bound sources
+-- without preparing a physical plan.
+BEGIN;
+DECLARE unstarted_offload NO SCROLL CURSOR FOR
+SELECT id FROM query_offload_explain_left;
+CLOSE unstarted_offload;
+COMMIT;
+BEGIN;
+DECLARE aborted_offload NO SCROLL CURSOR FOR
+SELECT id FROM query_offload_explain_left;
+ROLLBACK;
+-- UNION ALL stays in PG. LIMIT stops after the first branch, so EXPLAIN
+-- must describe the unstarted offload child without preparing an engine plan.
+SELECT (scan->>'Actual Loops')::integer = 0 AS not_started,
+       NOT (scan ? 'Engine Plan') AS no_engine_plan
+FROM query_offload_explain_json(
+    'ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF',
+    'SELECT 0::bigint AS id UNION ALL
+     SELECT sum(id) FROM query_offload_explain_left LIMIT 1'
+) AS document(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Custom Plan Provider" == "LagoDB Query Offload")') AS scans(scan);
+ not_started | no_engine_plan 
+-------------+----------------
+ t           | t
+(1 row)
+
 -- Default output is one logical tree without configuration, internal IDs, or
 -- projection details. COSTS OFF removes every provider estimate.
 EXPLAIN (COSTS OFF)
