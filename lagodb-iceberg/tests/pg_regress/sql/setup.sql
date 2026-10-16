@@ -52,17 +52,7 @@ DROP ROLE IF EXISTS lagodb_runtime_non_superuser;
 -- Remove durable cancellation fixtures left by an interrupted run.
 DELETE FROM lagodb.maintenance_queue
 WHERE item_id = '00000000-0000-0000-0000-000000000004';
--- Discard only the state-dependent cleanup result; assert the postcondition.
-SELECT lagodb.drop_storage_volume(storage_volume_name)
-FROM lagodb.storage_volumes
-WHERE storage_volume_name =
-      'regress-worker-statement-cancel-' || current_database()
-\g /dev/null
-SELECT NOT EXISTS (
-    SELECT FROM lagodb.storage_volumes
-    WHERE storage_volume_name =
-          'regress-worker-statement-cancel-' || current_database()
-) AS worker_cancel_cleanup_completed;
+DROP TABLESPACE IF EXISTS iceberg_worker_cancel;
 RESET client_min_messages;
 \! python3 ../../../scripts/pg_regress/regress_fixture.py wait-storage
 \i ../../../scripts/pg_regress/fixture_command_result.sql

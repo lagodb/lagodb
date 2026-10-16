@@ -114,69 +114,110 @@ CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 CREATE EXTENSION IF NOT EXISTS lagodb_connectors;
 ```
 
-#### 1. Managed Iceberg tables (`USING iceberg`)
+#### 1. Managed Iceberg tables on local storage
 
-Create and modify PostgreSQL-managed Iceberg tables with full ACID transactional semantics. Managed tables support two storage foundations: **object storage** (via a storage volume tablespace) and the **local filesystem** (via standard local tablespaces or the default tablespace).
-
-**Object-storage backed**
-
-Bind the table to a PostgreSQL tablespace linked to a storage volume so table data (Parquet) and Iceberg metadata live in object storage:
+Create an Iceberg table, write rows, and query it with ordinary PostgreSQL SQL.
+LagoDB manages the Iceberg metadata and Parquet files in the selected tablespace.
 
 ```sql
--- 1. Create a storage volume pointing to your object store (e.g. S3 / MinIO)
+CREATE TABLESPACE lake_local LOCATION '/path/to/lake_local';
+
+CREATE TABLE events (
+    event_time  timestamptz NOT NULL,
+    device_id   bigint      NOT NULL,
+    temperature double precision
+) USING iceberg TABLESPACE lake_local;
+
+BEGIN;
+INSERT INTO events VALUES
+    (now(), 101, 21.5),
+    (now(), 102, 22.0);
+UPDATE events
+SET temperature = 22.1
+WHERE device_id = 101;
+COMMIT;
+
+SELECT device_id, temperature FROM events ORDER BY device_id;
+-- 101 | 22.1
+-- 102 | 22
+
+-- Changes can also be rolled back.
+BEGIN;
+DELETE FROM events WHERE device_id = 102;
+ROLLBACK;
+SELECT count(*) FROM events; -- 2
+```
+
+Omit `TABLESPACE lake_local` to use the database's default tablespace instead.
+
+Partition by day with `RANGE` on a date column. LagoDB manages the Iceberg
+partitions automatically:
+
+```sql
+CREATE TABLE daily_events (
+    event_date  date NOT NULL,
+    device_id   bigint NOT NULL,
+    temperature double precision
+) PARTITION BY RANGE (event_date) USING iceberg TABLESPACE lake_local;
+
+INSERT INTO daily_events VALUES
+    ('2026-10-01', 101, 21.5),
+    ('2026-10-02', 102, 22.0);
+
+SELECT * FROM daily_events WHERE event_date = DATE '2026-10-01';
+```
+
+#### 2. Managed Iceberg tables on object storage
+
+Use the same table definition and SQL with an S3-backed tablespace. First create
+a dedicated, empty tablespace, then bind it to a storage volume **before creating
+any tables in it**. Prepare its local directory as above; Iceberg metadata and
+Parquet files will be stored under the object-storage location.
+
+```sql
+CREATE TABLESPACE lake_s3 LOCATION '/path/to/lake_s3';
+
 SELECT lagodb.create_storage_volume(
     'events-lake',
+    'lake_s3',
     's3://my-lake-bucket/lagodb',
     '{"type":"default_chain"}'::jsonb,
     '{"region":"us-east-1"}'::jsonb
 );
 
--- 2. Bind the storage volume to a PostgreSQL tablespace
-CREATE TABLESPACE lake_s3
-LOCATION '/path/to/local/tablespace'
-WITH (storage_volume = 'events-lake');
-
--- 3. Create the managed Iceberg table in that tablespace
-CREATE TABLE events (
+CREATE TABLE cloud_events (
     event_time  timestamptz NOT NULL,
     device_id   bigint      NOT NULL,
     temperature double precision
 ) USING iceberg TABLESPACE lake_s3;
 
--- 4. ACID transactions (writes commit metadata snapshots and Parquet data directly to object storage)
-BEGIN;
+INSERT INTO cloud_events SELECT * FROM events;
 
-INSERT INTO events VALUES
-    (now(), 101, 21.5),
-    (now(), 102, 22.0);
-
-UPDATE events
-SET temperature = 22.1
-WHERE device_id = 101;
-
-COMMIT;
-
-SELECT *
-FROM events
-WHERE device_id = 101;
+SELECT device_id, avg(temperature) AS avg_temperature
+FROM cloud_events
+GROUP BY device_id
+ORDER BY device_id;
 ```
 
-**Local filesystem backed**
-
-Store Iceberg tables directly on the local filesystem by using a standard local tablespace (created without a `storage_volume`) or PostgreSQL's default tablespace:
+Partition object-backed data by region with `LIST`:
 
 ```sql
--- Standard local tablespace or default database storage:
-CREATE TABLE local_events (
-    event_time  timestamptz NOT NULL,
-    device_id   bigint      NOT NULL,
+CREATE TABLE regional_events (
+    region      text NOT NULL,
+    device_id   bigint NOT NULL,
     temperature double precision
-) USING iceberg;
+) PARTITION BY LIST (region) USING iceberg TABLESPACE lake_s3;
+
+INSERT INTO regional_events VALUES
+    ('east', 101, 21.5),
+    ('west', 102, 22.0);
+
+SELECT * FROM regional_events WHERE region = 'east';
 ```
 
-#### 2. Iceberg foreign tables
+#### 3. Query existing Iceberg tables through a REST catalog
 
-Query external Iceberg tables registered in an Iceberg REST catalog:
+Query existing Iceberg tables without copying data or defining columns by hand.
 
 ```sql
 CREATE SERVER iceberg_catalog
@@ -184,64 +225,56 @@ TYPE 'rest'
 FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (uri 'https://catalog.example.com');
 
-CREATE USER MAPPING FOR CURRENT_USER
-SERVER iceberg_catalog
-OPTIONS (credential 'my_client_id:my_client_secret');
-
--- Automatically fetches and binds columns from the Iceberg REST catalog schema
+-- Replace the URI above with your catalog endpoint.
+-- An empty column list infers columns and types from the remote Iceberg schema.
 CREATE FOREIGN TABLE ext_iceberg_events ()
 SERVER iceberg_catalog
-OPTIONS (
-    catalog_name 'production',
-    catalog_namespace 'analytics',
-    catalog_table_name 'events',
-    mode 'read_only'
-);
+OPTIONS (table 'analytics.events');
 
 SELECT *
 FROM ext_iceberg_events
 WHERE device_id = 101;
 ```
 
-#### 3. LagoDB connectors (Object storage and direct COPY)
+#### 4. Query files and move data with LagoDB connectors
 
-Query raw data files (Parquet, CSV, JSON, Avro, Text) on object storage or export/import data directly with object URIs:
+Read and write Parquet, CSV, JSON, Avro, and Text on the local filesystem or
+object storage. Start with a file on the PostgreSQL server:
+
+```sql
+-- Export the events table to a local Parquet file.
+COPY events TO '/tmp/lagodb-events.parquet';
+
+CREATE SERVER local_files FOREIGN DATA WRAPPER lagodb_connectors;
+
+-- The file extension selects the format; columns are inferred automatically.
+CREATE FOREIGN TABLE file_events ()
+SERVER local_files
+OPTIONS (path '/tmp/lagodb-events.parquet');
+
+SELECT * FROM file_events WHERE device_id = 101;
+
+-- Import the file into another managed Iceberg table.
+CREATE TABLE imported_events (LIKE events) USING iceberg;
+COPY imported_events FROM '/tmp/lagodb-events.parquet';
+```
+
+The same workflow works with S3. Configure AWS access for the PostgreSQL server
+process, then use your own bucket and region:
 
 ```sql
 CREATE SERVER s3_store
 FOREIGN DATA WRAPPER lagodb_connectors
-OPTIONS (
-    provider 's3_compatible',
-    endpoint 'http://127.0.0.1:9000',
-    allow_http 'true',
-    scope 's3://analytics/'  -- Enables automatic server matching for URIs under this scope
-);
+OPTIONS (provider 's3', region 'us-east-1');
 
-CREATE USER MAPPING FOR CURRENT_USER
+COPY events TO 's3://my-lake-bucket/exports/events.parquet'
+WITH (server 's3_store');
+
+CREATE FOREIGN TABLE s3_events ()
 SERVER s3_store
-OPTIONS (
-    access_key_id 'minioadmin',
-    secret_access_key 'minioadmin'
-);
+OPTIONS (path 's3://my-lake-bucket/exports/events.parquet');
 
--- Fast export directly to object storage as Parquet
--- (Server is automatically matched by the longest matching scope 's3://analytics/',
---  and format is automatically inferred from the '.parquet' suffix)
-COPY events
-TO 's3://analytics/exports/events.parquet';
-
--- Or query raw Parquet files in object storage as a foreign table
--- (An empty column list '()' automatically infers columns and types from Parquet schema)
-CREATE FOREIGN TABLE s3_logs ()
-SERVER s3_store
-OPTIONS (
-    path 's3://analytics/logs/',
-    format 'parquet'
-);
-
-SELECT *
-FROM s3_logs
-WHERE id >= 100;
+SELECT * FROM s3_events WHERE device_id = 101;
 ```
 
 ## Roadmap

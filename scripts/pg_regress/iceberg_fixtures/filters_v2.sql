@@ -1,3 +1,6 @@
+-- Stable current-schema rows for pushed predicates and PostgreSQL residuals.
+-- Keep the date column and independent payload/date NULLs: rows_v2.sql does
+-- not provide these cases. Cached-plan tests recreate a separate copy.
 DROP TABLE IF EXISTS $table;
 CREATE TABLE $table (
     id integer,

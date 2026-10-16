@@ -18,6 +18,7 @@ from pathlib import Path
 from fixture_runtime import DockerClient, FixtureConfig, FixtureError, FixtureRuntime
 from iceberg_fixture import IcebergServices
 from iceberg_provision import IcebergProvision
+from sqlite_fixture import SqliteFixture
 
 
 class RegressionFixture:
@@ -110,7 +111,7 @@ class RegressionFixture:
     def wait_storage(self) -> None:
         deadline = time.monotonic() + self.config.timeout
         query = (
-            "SELECT json_build_object('enabled', enabled, 'state', state, "
+            "SELECT json_build_object('state', state, "
             "'error', last_error) FROM lagodb.storage_service_status()"
         )
         while True:
@@ -121,10 +122,10 @@ class RegressionFixture:
             if result.returncode:
                 raise FixtureError(f"storage readiness query failed: {result.stderr.strip()}")
             status = json.loads(result.stdout)
-            if status["enabled"] and status["state"] == "running":
+            if status["state"] == "running":
                 print("storage_service_ready: true")
                 return
-            if not status["enabled"] or status["state"] == "failed":
+            if status["state"] == "failed":
                 raise FixtureError(f"storage service cannot start: {status}")
             if time.monotonic() >= deadline:
                 raise FixtureError(f"storage service readiness timed out: {status}")
@@ -136,7 +137,10 @@ class RegressionFixture:
         print("object_storage_teardown: true")
 
     def provision(self, selection: str) -> None:
-        IcebergServices(self.runtime).provision(selection)
+        if selection == "sqlite":
+            SqliteFixture(self.runtime).provision()
+        else:
+            IcebergServices(self.runtime).provision(selection)
         print(f"iceberg_fixture_provisioned: {selection}")
 
     @staticmethod
@@ -152,7 +156,7 @@ class RegressionFixture:
         commands.add_parser("teardown")
         commands.add_parser("wait-storage")
         commands.add_parser("provision").add_argument(
-            "selection", choices=IcebergProvision.SELECTIONS[1:],
+            "selection", choices=(*IcebergProvision.SELECTIONS[1:], "sqlite"),
         )
         args = parser.parse_args()
         for signum in (signal.SIGTERM, signal.SIGHUP):

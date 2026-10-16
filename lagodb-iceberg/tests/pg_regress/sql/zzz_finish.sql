@@ -28,14 +28,9 @@ $$;
 DROP EXTENSION injection_points;
 DROP DATABASE IF EXISTS lagodb_runtime_source WITH (FORCE);
 DROP ROLE IF EXISTS lagodb_runtime_non_superuser;
-SELECT 'regress-worker-statement-cancel-' || current_database()
-       AS cancel_volume_name
-\gset
 DELETE FROM lagodb.maintenance_queue
 WHERE item_id = '00000000-0000-0000-0000-000000000004';
-SELECT lagodb.drop_storage_volume(:'cancel_volume_name')
-FROM lagodb.storage_volumes
-WHERE storage_volume_name = :'cancel_volume_name';
+DROP TABLESPACE IF EXISTS iceberg_worker_cancel;
 DROP TABLE IF EXISTS remote_cleanup_drop;
 DROP TABLE IF EXISTS remote_cleanup_rollback;
 DROP TABLESPACE IF EXISTS regress_object;
