@@ -119,7 +119,9 @@ fn main() {
     }
 
     let mut build = cc::Build::new();
-    build.include(include);
+    // PostgreSQL headers are external runtime headers; keep the bridge's
+    // warning checks without applying them to PostgreSQL inline functions.
+    build.flag("-isystem").flag(include.as_os_str());
     let mut has_sources = false;
     // The COPY bridges own command preparation, raw-field parsing, and the
     // PostgreSQL Text/CSV row encoder. Sources are selected per PostgreSQL

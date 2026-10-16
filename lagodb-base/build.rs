@@ -83,7 +83,9 @@ fn main() {
         .file("csrc/maintenance/lagodb_maintenance.c")
         .include(PathBuf::from("csrc/maintenance"))
         .include(PathBuf::from("csrc/compat"))
-        .include(include)
+        // Match core: PostgreSQL runtime headers are external to the bridge.
+        .flag("-isystem")
+        .flag(include.as_os_str())
         .flag_if_supported("-Wno-unused-function")
         .flag_if_supported("-Wno-unused-parameter")
         .compile("lagodb_runtime_pg_bridges");
