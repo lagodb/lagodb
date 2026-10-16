@@ -28,7 +28,7 @@ INSERT INTO customscan_dml_other VALUES (2, 0);
 
 SELECT COUNT(*) AS lake_rows FROM customscan_dml_lake;
 
--- DML targets require ModifyTarget scans even when optional read CustomScans are off.
+-- Ordinary DML targets support both ModifyTarget CustomScan and native SeqScan.
 
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -155,6 +155,24 @@ SELECT customscan_dml_lake FROM customscan_dml_lake WHERE k = 1 ORDER BY k;
 
 SET lagodb.customscan_mode = 'off';
 SELECT customscan_dml_lake FROM customscan_dml_lake WHERE k = 1 ORDER BY k;
+
+-- Inheritance keeps PG's Append in both native and forced CustomScan modes.
+CREATE TABLE inherit_scan_parent (k integer, v integer) USING iceberg;
+CREATE TABLE inherit_scan_child () INHERITS (inherit_scan_parent) USING iceberg;
+-- COPY writes only the named inheritance parent, not its children.
+COPY inherit_scan_parent FROM stdin;
+1	10
+\.
+INSERT INTO inherit_scan_child VALUES (2, 20);
+SELECT count(*) AS parent_rows FROM ONLY inherit_scan_parent;
+SET lagodb.customscan_mode = 'off';
+UPDATE inherit_scan_parent SET v = v + 1;
+SET lagodb.customscan_mode = 'force';
+SELECT * FROM inherit_scan_parent ORDER BY k;
+DELETE FROM inherit_scan_parent;
+SELECT * FROM inherit_scan_parent ORDER BY k;
+DROP TABLE inherit_scan_child;
+DROP TABLE inherit_scan_parent;
 
 RESET lagodb.customscan_mode;
 DROP TABLE customscan_dml_lake;
@@ -619,7 +637,7 @@ FROM generate_series(100, 105) AS g;
 
 SELECT COUNT(*) AS lake_total_rows FROM customscan_rto_lake;
 
--- Use the bare-table query as the result baseline for the wrappers below.
+-- Use the bare-table query as the result baseline for the outer queries below.
 
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)

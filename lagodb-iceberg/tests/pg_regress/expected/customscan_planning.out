@@ -24,7 +24,7 @@ SELECT COUNT(*) AS lake_rows FROM customscan_dml_lake;
          3
 (1 row)
 
--- DML targets require ModifyTarget scans even when optional read CustomScans are off.
+-- Ordinary DML targets support both ModifyTarget CustomScan and native SeqScan.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 UPDATE customscan_dml_lake SET v = v + 1 WHERE k = 1;
@@ -41,15 +41,14 @@ UPDATE customscan_dml_lake SET v = v + 1 WHERE k = 1;
 SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 UPDATE customscan_dml_lake SET v = v + 1 WHERE k = 1;
-                           QUERY PLAN                            
------------------------------------------------------------------
+                 QUERY PLAN                  
+---------------------------------------------
  Custom Scan (LagoDBModifyTable)
    Executor: PG17 LagoDB ModifyTable fork
    ->  Update on customscan_dml_lake
-         ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake
-               Scan Purpose: ModifyTarget
-               Pushed Filter: (k = 1)
-(6 rows)
+         ->  Seq Scan on customscan_dml_lake
+               Filter: (k = 1)
+(5 rows)
 
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -67,15 +66,14 @@ DELETE FROM customscan_dml_lake WHERE k = 1;
 SET lagodb.customscan_mode = 'off';
 EXPLAIN (COSTS OFF)
 DELETE FROM customscan_dml_lake WHERE k = 1;
-                           QUERY PLAN                            
------------------------------------------------------------------
+                 QUERY PLAN                  
+---------------------------------------------
  Custom Scan (LagoDBModifyTable)
    Executor: PG17 LagoDB ModifyTable fork
    ->  Delete on customscan_dml_lake
-         ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake
-               Scan Purpose: ModifyTarget
-               Pushed Filter: (k = 1)
-(6 rows)
+         ->  Seq Scan on customscan_dml_lake
+               Filter: (k = 1)
+(5 rows)
 
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -99,15 +97,14 @@ MERGE INTO customscan_dml_lake AS t
 USING (VALUES (1, 999)) AS s(k, v)
 ON t.k = s.k
 WHEN MATCHED THEN UPDATE SET v = s.v;
-                            QUERY PLAN                             
--------------------------------------------------------------------
+                  QUERY PLAN                   
+-----------------------------------------------
  Custom Scan (LagoDBModifyTable)
    Executor: PG17 LagoDB ModifyTable fork
    ->  Merge on customscan_dml_lake t
-         ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake t
-               Scan Purpose: ModifyTarget
-               Pushed Filter: (k = 1)
-(6 rows)
+         ->  Seq Scan on customscan_dml_lake t
+               Filter: (k = 1)
+(5 rows)
 
 -- An Iceberg source in UPDATE ... FROM has a rowmark and uses the native scan path.
 SET lagodb.customscan_mode = 'force';
@@ -298,6 +295,36 @@ SELECT customscan_dml_lake FROM customscan_dml_lake WHERE k = 1 ORDER BY k;
  (1,100)
 (1 row)
 
+-- Inheritance keeps PG's Append in both native and forced CustomScan modes.
+CREATE TABLE inherit_scan_parent (k integer, v integer) USING iceberg;
+CREATE TABLE inherit_scan_child () INHERITS (inherit_scan_parent) USING iceberg;
+-- COPY writes only the named inheritance parent, not its children.
+COPY inherit_scan_parent FROM stdin;
+INSERT INTO inherit_scan_child VALUES (2, 20);
+SELECT count(*) AS parent_rows FROM ONLY inherit_scan_parent;
+ parent_rows 
+-------------
+           1
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+UPDATE inherit_scan_parent SET v = v + 1;
+SET lagodb.customscan_mode = 'force';
+SELECT * FROM inherit_scan_parent ORDER BY k;
+ k | v  
+---+----
+ 1 | 11
+ 2 | 21
+(2 rows)
+
+DELETE FROM inherit_scan_parent;
+SELECT * FROM inherit_scan_parent ORDER BY k;
+ k | v 
+---+---
+(0 rows)
+
+DROP TABLE inherit_scan_child;
+DROP TABLE inherit_scan_parent;
 RESET lagodb.customscan_mode;
 DROP TABLE customscan_dml_lake;
 DROP TABLE customscan_dml_other;
@@ -1046,7 +1073,7 @@ SELECT COUNT(*) AS lake_total_rows FROM customscan_rto_lake;
               11
 (1 row)
 
--- Use the bare-table query as the result baseline for the wrappers below.
+-- Use the bare-table query as the result baseline for the outer queries below.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT k, payload FROM customscan_rto_lake WHERE k = 3 ORDER BY k, payload;

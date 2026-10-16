@@ -24,19 +24,40 @@ use super::batch::{
 use super::columnar::{ScanSourceBinding, ScanTaskPlanner};
 use super::{IcebergTaskMetrics, PgRowCursor};
 
-/// Iceberg transaction view captured once for a statement.
+/// Iceberg transaction view captured once for a statement. Managed reads keep
+/// the PG-visible data version separate from the current definition's schema;
+/// foreign reads use the schema of their executor-bound remote Table.
 pub(crate) struct IcebergReadSnapshot {
     table: Table,
     delta: Option<Arc<SnapshotDelta>>,
+    read_schema: Arc<IcebergSchema>,
+    /// Fixed committed baseline; None means empty, never "use current".
+    snapshot_id: Option<i64>,
 }
 
 impl IcebergReadSnapshot {
     pub(crate) fn new(table: Table, delta: Option<Arc<SnapshotDelta>>) -> Self {
-        Self { table, delta }
+        let read_schema = Arc::clone(table.metadata().current_schema());
+        let snapshot_id = table.metadata().current_snapshot_id();
+        Self::with_baseline(table, delta, read_schema, snapshot_id)
+    }
+
+    pub(crate) fn with_baseline(
+        table: Table,
+        delta: Option<Arc<SnapshotDelta>>,
+        read_schema: Arc<IcebergSchema>,
+        snapshot_id: Option<i64>,
+    ) -> Self {
+        Self {
+            table,
+            delta,
+            read_schema,
+            snapshot_id,
+        }
     }
 
     pub(crate) fn schema(&self) -> &Arc<IcebergSchema> {
-        self.table.metadata().current_schema()
+        &self.read_schema
     }
 }
 
@@ -93,6 +114,7 @@ impl ScanPredicates {
 /// bind field ids and Arrow schema without constructing a decoder it discards.
 pub(crate) struct PreparedIcebergRead {
     table: Table,
+    snapshot_id: Option<i64>,
     projection: StorageProjection,
     predicates: ScanPredicates,
     delta: Option<Arc<SnapshotDelta>>,
@@ -142,6 +164,7 @@ impl PreparedIcebergRead {
     ) -> Self {
         Self {
             table: snapshot.table,
+            snapshot_id: snapshot.snapshot_id,
             projection,
             predicates,
             delta: snapshot.delta,
@@ -211,7 +234,7 @@ impl PreparedIcebergRead {
     }
 
     pub(crate) fn starting_snapshot_id(&self) -> Option<i64> {
-        self.table.metadata().current_snapshot_id()
+        self.snapshot_id
     }
 
     pub(crate) fn bind_scan_source(self) -> IcebergResult<ScanSourceBinding> {
@@ -223,6 +246,8 @@ impl PreparedIcebergRead {
         )?;
         let task_planner = ScanTaskPlanner::new(
             self.table,
+            self.snapshot_id,
+            self.projection.schema_ref(),
             field_ids,
             self.predicates.stable_pruning.0,
             self.delta,
@@ -240,7 +265,14 @@ impl PreparedIcebergRead {
         row_locations: RowLocationProjection,
         filter: Option<&Predicate>,
     ) -> IcebergResult<TableScan> {
-        let mut builder = self.table.scan();
+        let mut builder = self
+            .table
+            .scan()
+            .with_read_schema(self.projection.schema_ref());
+        builder = match self.snapshot_id {
+            Some(snapshot_id) => builder.snapshot_id(snapshot_id),
+            None => builder.without_snapshot(),
+        };
         builder = match row_locations {
             RowLocationProjection::Exclude => {
                 builder.select_field_ids(self.projection.field_ids().iter().copied())
@@ -384,7 +416,9 @@ impl PreparedRowScan {
             self.read
                 .read_planned_tasks(RowLocationProjection::Exclude, tasks)?,
         ));
-        Ok(PgRowCursor::new(source, self.decoder.clone()))
+        // SAFETY: from_plan derives projection and decoder from one PgReadPlan;
+        // iceberg-lite transforms each file batch to that projected scan schema.
+        Ok(unsafe { PgRowCursor::new(source, self.decoder.clone()) })
     }
 
     pub(crate) fn open_row_cursor_with_tasks(
@@ -395,7 +429,9 @@ impl PreparedRowScan {
             self.read
                 .read_planned_tasks(RowLocationProjection::Exclude, tasks)?,
         ));
-        Ok(PgRowCursor::new(source, self.decoder.clone()))
+        // SAFETY: from_plan derives projection and decoder from one PgReadPlan;
+        // iceberg-lite transforms each file batch to that projected scan schema.
+        Ok(unsafe { PgRowCursor::new(source, self.decoder.clone()) })
     }
 
     pub(crate) fn query_arrow_schema(
@@ -466,6 +502,9 @@ enum RowLocationProjection {
 }
 
 /// Shared ANALYZE planning output.
+/// Constructed by PreparedRowScan: scan projection and decoder share one
+/// PgReadPlan. Consumers must preserve this pairing; iceberg-lite resolves file
+/// schema evolution before returning batches in that projection.
 pub(crate) struct AnalyzeScanInput {
     pub(crate) scan: TableScan,
     pub(crate) tasks: Vec<FileScanTask>,
@@ -475,6 +514,8 @@ pub(crate) struct AnalyzeScanInput {
 
 /// Low-level row-location reader input. Managed and foreign mutation adapters
 /// bind it to their own distinct identity and lifecycle objects.
+/// Constructed by PreparedRowScan from one PgReadPlan. Keep source and decoder
+/// paired: the reader transforms file batches to the decoder's scan projection.
 pub(crate) struct RowLocationScanInput {
     pub(crate) source: ScanBatchSource,
     pub(crate) decoder: ArrowColumnDecoder,

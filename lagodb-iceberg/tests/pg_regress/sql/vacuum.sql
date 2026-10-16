@@ -416,8 +416,12 @@ RESET client_min_messages;
 \! rm -rf /tmp/iceberg_regress_vacuum_object_matrix/*
 
 SELECT 'regress-vacuum-matrix-' || gen_random_uuid() AS volume_name \gset
+CREATE TABLESPACE regress_vacuum_object_matrix
+LOCATION '/tmp/iceberg_regress_vacuum_object_matrix';
+
 SELECT lagodb.create_storage_volume(
     :'volume_name',
+    'regress_vacuum_object_matrix',
     format('s3://%s', :'lagodb_regress_bucket'),
     jsonb_build_object(
         'type', 's3_access_key',
@@ -431,9 +435,6 @@ SELECT lagodb.create_storage_volume(
     )
 ) AS created_volume \gset
 
-CREATE TABLESPACE regress_vacuum_object_matrix
-LOCATION '/tmp/iceberg_regress_vacuum_object_matrix'
-WITH (storage_volume = :'volume_name');
 
 SELECT internal_volume_id AS volume_id,
        regexp_replace(effective_location, '^[^:]+://[^/]+/', '') AS effective_root

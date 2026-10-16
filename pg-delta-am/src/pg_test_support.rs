@@ -106,6 +106,7 @@ mod delta {
             access_method_name: c"iceberg".as_ptr(),
             owns_partitioned_table: false,
             supports_analyze: false,
+            copy: std::ptr::null(),
             access_method_oid: duplicate_am_oid,
             truncate_partitioned_table: duplicate_truncate_partitioned_table,
             execute_maintenance: duplicate_execute,
