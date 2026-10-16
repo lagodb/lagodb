@@ -21,8 +21,9 @@ pub(crate) struct ForeignTableView {
 
 impl ForeignTransaction {
     /// Validate an existing write binding before any catalog I/O and reuse its
-    /// connection when the backend supports it. A read never enrolls a writer.
-    pub(crate) fn catalog_for_binding(
+    /// SQLite connection. REST reuse belongs to the executor, not this write
+    /// transaction. A read never enrolls a writer.
+    pub(crate) fn connection_from_write_binding(
         server_key: &ServerBindingKey,
         runtime_config: &CatalogRuntimeConfig,
     ) -> Result<Option<ForeignCatalog>, IcebergFdwError> {
@@ -38,7 +39,7 @@ impl ForeignTransaction {
             if &binding.runtime_config != runtime_config {
                 return Err(IcebergFdwError::CatalogBindingChanged);
             }
-            Ok(binding.catalog.reuse_connection())
+            Ok(binding.catalog.reuse_transaction_connection())
         })
     }
 

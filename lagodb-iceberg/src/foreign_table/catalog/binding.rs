@@ -14,10 +14,10 @@ pub(crate) enum ForeignCatalog {
 }
 
 impl ForeignCatalog {
-    /// Reuse a transaction's local connection without retaining a table view.
-    /// REST bindings still initialize a new client for fresh table loads so
-    /// the server's configuration handshake keeps its existing lifetime.
-    pub(crate) fn reuse_connection(&self) -> Option<Self> {
+    /// Reuse a write transaction's SQLite connection without its table view.
+    /// REST clients are shared only within an executor, never acquired from
+    /// a write binding that can outlive that executor.
+    pub(crate) fn reuse_transaction_connection(&self) -> Option<Self> {
         match self {
             Self::Rest(_) => None,
             Self::Sqlite(catalog) => Some(Self::Sqlite(catalog.clone())),

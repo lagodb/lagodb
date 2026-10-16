@@ -6,7 +6,7 @@ use core::ptr;
 
 use pgrx::pg_sys;
 
-use crate::handles::{RelationHandle, SnapshotHandle};
+use crate::handles::{ExecutorHandle, RelationHandle};
 
 use super::super::payload::ProviderPayload;
 use super::super::row_identity::RowIdentityLayout;
@@ -50,7 +50,6 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         let operation =
             ForeignModifyOperation::from_pg(unsafe { (*mtstate).operation })?;
         let query_context = unsafe { (*estate).es_query_cxt };
-        let snapshot = unsafe { (*estate).es_snapshot };
 
         let decoded = unsafe { decode_modify_private::<P>(fdw_private) }?;
         if decoded.operation != operation {
@@ -164,7 +163,9 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         };
         let context = wrapper.begin_context(
             unsafe { RelationHandle::from_raw(relation) },
-            unsafe { SnapshotHandle::from_raw(snapshot) },
+            // SAFETY: normal ModifyTable initialization supplies a live
+            // executor with its registered statement snapshot.
+            unsafe { ExecutorHandle::from_raw(estate) },
             subplan_index,
             eflags,
             effective_user_id,
@@ -243,13 +244,18 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         let per_tuple_context = unsafe { Self::per_tuple_context(estate) };
         let effective_user_id =
             unsafe { pg_sys::ExecGetResultRelCheckAsUser(rinfo, estate) };
-        // COPY builds a plan-less temporary ModifyTable/EState and does not
-        // set es_output_cid. Record the source without requiring COPY context
-        // from providers that do not use a local CID.
+        // COPY builds a plan-less temporary ModifyTable/EState without
+        // es_output_cid or es_snapshot. Only normal tuple routing exposes an
+        // ExecutorHandle; COPY providers request their CID independently.
         let command = if plan.is_null() {
             InsertCommand::CopyFrom
         } else {
-            InsertCommand::ModifyTable(unsafe { (*estate).es_output_cid })
+            InsertCommand::ModifyTable {
+                // SAFETY: this route belongs to a normal ModifyTable with
+                // a live executor and registered statement snapshot.
+                executor: unsafe { ExecutorHandle::from_raw(estate) },
+                command_id: unsafe { (*estate).es_output_cid },
+            }
         };
         let mut context = ForeignInsertBeginContext::new(
             unsafe { RelationHandle::from_raw(relation) },

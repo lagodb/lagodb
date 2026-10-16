@@ -140,10 +140,10 @@ impl ForeignTransaction {
         Self::validate_binding(&inner, &binding)?;
         inner
             .catalogs
-            .entry(binding.key)
+            .entry(binding.key.clone())
             .or_insert_with(|| CatalogBinding {
-                catalog: binding.catalog,
-                runtime_config: binding.runtime_config,
+                catalog: binding.catalog.clone(),
+                runtime_config: binding.runtime_config.clone(),
                 tables: HashMap::new(),
             })
             .tables

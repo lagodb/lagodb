@@ -19,7 +19,7 @@ pub(crate) struct PgStorageFactory {
     endpoint: StorageEndpoint,
     staging_resolver: StagingPathResolver,
     catalog_identity: ServerBindingKey,
-    profiles: StorageProfiles,
+    owner_fdw_oid: pg_sys::Oid,
     backend_thread: PhantomData<Rc<()>>,
 }
 
@@ -39,8 +39,6 @@ impl PgStorageFactory {
         effective_user: pg_sys::Oid,
     ) -> Self {
         let staging_resolver = StagingPathResolver::new(endpoint.cache_dir());
-        let profiles =
-            StorageProfiles::new(owner_fdw_oid, c"storage", effective_user);
         Self {
             endpoint,
             staging_resolver,
@@ -48,7 +46,7 @@ impl PgStorageFactory {
                 server_oid: catalog_server_oid,
                 effective_user,
             },
-            profiles,
+            owner_fdw_oid,
             backend_thread: PhantomData,
         }
     }
@@ -65,12 +63,19 @@ impl fmt::Debug for PgStorageFactory {
 impl StorageFactory for PgStorageFactory {
     fn build(&self, config: StorageConfig) -> Result<Arc<dyn Storage>> {
         let (location, properties, credentials) = config.into_parts();
+        // A shared catalog must not share a prior table's local routing snapshot.
+        // All routes in this table's storage retain this one lazy snapshot.
+        let profiles = StorageProfiles::new(
+            self.owner_fdw_oid,
+            c"storage",
+            self.catalog_identity.effective_user,
+        );
         let storage = CatalogStorage::new(
             location,
             properties,
             credentials,
             &self.catalog_identity,
-            &self.profiles,
+            &profiles,
             &self.endpoint,
             &self.staging_resolver,
         )?;

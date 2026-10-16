@@ -1,5 +1,7 @@
 //! Resolution of a PostgreSQL foreign table into one Iceberg catalog table.
 
+use std::rc::Rc;
+
 use iceberg_lite::catalog::TableIdent;
 use iceberg_lite::spec::SchemaRef;
 use iceberg_lite::table::Table;
@@ -57,6 +59,10 @@ impl RemoteTableKey {
         &self.catalog
     }
 
+    pub(super) fn table(&self) -> &TableIdent {
+        &self.table
+    }
+
     pub(crate) fn publication_name(&self) -> String {
         ForeignIdentifier::table_path(&self.table)
     }
@@ -71,7 +77,7 @@ pub(crate) struct ResolvedCatalogBinding {
 pub(crate) struct IcebergForeignTable {
     key: RemoteTableKey,
     identity: ForeignTableIdentity,
-    catalog: ResolvedCatalogBinding,
+    catalog: Rc<ResolvedCatalogBinding>,
     table: Table,
 }
 
@@ -127,34 +133,35 @@ impl IcebergForeignTable {
         let connection = CatalogConnection::resolve(server_oid, effective_user)?;
         let catalog_key = connection.server_binding_key();
         let runtime_config = connection.runtime_config();
-        let reusable_catalog =
-            ForeignTransaction::catalog_for_binding(&catalog_key, &runtime_config)?;
+        let reusable_catalog = ForeignTransaction::connection_from_write_binding(
+            &catalog_key,
+            &runtime_config,
+        )?;
         let key = RemoteTableKey::new(catalog_key.clone(), &identity);
-        let load = || -> Result<_, IcebergFdwError> {
-            let catalog = match reusable_catalog {
-                Some(catalog) => catalog,
-                None => connection.connect()?,
-            };
-            // Reusing a connection does not reuse another statement's metadata.
-            let table = catalog.as_catalog().load_table(identity.table())?;
-            Ok((catalog, table))
+        let connect = || match reusable_catalog {
+            Some(catalog) => Ok(catalog),
+            None => connection.connect(),
         };
         let (catalog, table) = match executor {
             Some(executor) => ForeignReadViews::acquire(executor).bind_table(
                 &key,
-                &runtime_config,
-                load,
+                runtime_config,
+                connect,
             )?,
-            None => load()?,
+            None => {
+                let catalog = Rc::new(ResolvedCatalogBinding {
+                    key: catalog_key,
+                    runtime_config,
+                    catalog: connect()?,
+                });
+                let table = catalog.catalog.as_catalog().load_table(key.table())?;
+                (catalog, table)
+            }
         };
         Ok(Self {
             key,
             identity,
-            catalog: ResolvedCatalogBinding {
-                key: catalog_key,
-                runtime_config,
-                catalog,
-            },
+            catalog,
             table,
         })
     }
@@ -177,7 +184,7 @@ impl IcebergForeignTable {
 
     pub(crate) fn into_parts(
         self,
-    ) -> (RemoteTableKey, ResolvedCatalogBinding, Table) {
+    ) -> (RemoteTableKey, Rc<ResolvedCatalogBinding>, Table) {
         (self.key, self.catalog, self.table)
     }
 }

@@ -9,7 +9,7 @@ use lagodb_core::fdw::{
     ForeignModifyPlanContext, ForeignModifyPlanSpec, ForeignModifyRelationContext,
     ForeignUpdateTargetContext,
 };
-use lagodb_core::handles::RelationHandle;
+use lagodb_core::handles::{ExecutorHandle, RelationHandle};
 use pgrx::pg_sys;
 
 use super::options::ForeignTableIdentity;
@@ -61,6 +61,7 @@ impl FdwModify for LagodbIceberg {
     ) -> Result<Self::ModifyState, ForeignModifyError> {
         Self::begin_state(
             context.relation(),
+            Some(context.executor()),
             context.effective_user_id(),
             context.operation(),
             Some(context.private_data()),
@@ -80,6 +81,7 @@ impl FdwModify for LagodbIceberg {
     ) -> Result<Self::ModifyState, ForeignModifyError> {
         Self::begin_state(
             context.relation(),
+            context.executor(),
             context.effective_user_id(),
             ForeignModifyOperation::Insert,
             None,
@@ -92,6 +94,7 @@ impl FdwModify for LagodbIceberg {
 impl LagodbIceberg {
     fn begin_state(
         relation: &RelationHandle<'_>,
+        executor: Option<&ExecutorHandle<'_>>,
         effective_user: pg_sys::Oid,
         operation: ForeignModifyOperation,
         planned: Option<&IcebergFdwModifyPrivate>,
@@ -125,7 +128,15 @@ impl LagodbIceberg {
             );
         }
 
-        let resolved = IcebergForeignTable::resolve(relation.oid(), effective_user)?;
+        let resolved = match executor {
+            Some(executor) => IcebergForeignTable::resolve_for_execution(
+                relation.oid(),
+                effective_user,
+                executor,
+            )?,
+            // COPY has no snapshot-bearing executor and keeps its own binding.
+            None => IcebergForeignTable::resolve(relation.oid(), effective_user)?,
+        };
         if planned.is_some_and(|private| private.identity() != resolved.identity()) {
             return Err(super::error::IcebergFdwError::PlanIdentityChanged.into());
         }

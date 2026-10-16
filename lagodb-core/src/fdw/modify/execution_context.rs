@@ -5,7 +5,7 @@ use core::ffi::c_int;
 use pgrx::pg_sys;
 
 use crate::access::mutation::current_copy_command_id;
-use crate::handles::{RelationHandle, SnapshotHandle};
+use crate::handles::{ExecutorHandle, RelationHandle, SnapshotHandle};
 
 use super::contract::{
     FdwModify, ForeignModifyOperation, ForeignModifyPrivate, ForeignReturnedIdentity,
@@ -17,7 +17,7 @@ use super::state::ForeignModifyStateWrapper;
 pub struct ForeignModifyBeginContext<'a, D: ForeignModifyPrivate> {
     private_data: &'a D,
     relation: RelationHandle<'a>,
-    snapshot: SnapshotHandle<'a>,
+    executor: ExecutorHandle<'a>,
     operation: ForeignModifyOperation,
     updated_columns: &'a [pg_sys::AttrNumber],
     row_identity_count: usize,
@@ -36,7 +36,7 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
     pub(super) fn begin_context<'a>(
         &'a self,
         relation: RelationHandle<'a>,
-        snapshot: SnapshotHandle<'a>,
+        executor: ExecutorHandle<'a>,
         subplan_index: c_int,
         eflags: c_int,
         effective_user_id: pg_sys::Oid,
@@ -45,7 +45,7 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         ForeignModifyBeginContext {
             private_data: self.private_data(),
             relation,
-            snapshot,
+            executor,
             operation: self.operation,
             updated_columns: &self.updated_columns,
             row_identity_count: self.row_identity_layout.len(),
@@ -74,8 +74,14 @@ impl<'a, D: ForeignModifyPrivate> ForeignModifyBeginContext<'a, D> {
     }
 
     #[inline]
-    pub fn snapshot(&self) -> &SnapshotHandle<'a> {
-        &self.snapshot
+    pub fn snapshot(&self) -> SnapshotHandle<'_> {
+        self.executor.snapshot()
+    }
+
+    /// Owning executor shared with source scans and other modify targets.
+    #[inline]
+    pub fn executor(&self) -> &ExecutorHandle<'a> {
+        &self.executor
     }
 
     #[inline]
@@ -141,8 +147,11 @@ impl<'a, D: ForeignModifyPrivate> ForeignModifyBeginContext<'a, D> {
     }
 }
 
-pub(super) enum InsertCommand {
-    ModifyTable(pg_sys::CommandId),
+pub(super) enum InsertCommand<'a> {
+    ModifyTable {
+        executor: ExecutorHandle<'a>,
+        command_id: pg_sys::CommandId,
+    },
     CopyFrom,
 }
 
@@ -153,7 +162,7 @@ pub struct ForeignInsertBeginContext<'a> {
     returned_identity: ForeignReturnedIdentity,
     returned_item_pointer_required: bool,
     effective_user_id: pg_sys::Oid,
-    command: InsertCommand,
+    command: InsertCommand<'a>,
 }
 
 impl<'a> ForeignInsertBeginContext<'a> {
@@ -161,7 +170,7 @@ impl<'a> ForeignInsertBeginContext<'a> {
         relation: RelationHandle<'a>,
         returned_item_pointer_required: bool,
         effective_user_id: pg_sys::Oid,
-        command: InsertCommand,
+        command: InsertCommand<'a>,
     ) -> Self {
         Self {
             relation,
@@ -177,6 +186,16 @@ impl<'a> ForeignInsertBeginContext<'a> {
         &self.relation
     }
 
+    /// Owning executor for partition routing under ModifyTable.
+    /// COPY uses a temporary EState without an executor snapshot, so it does
+    /// not provide the snapshot-bearing ExecutorHandle.
+    pub fn executor(&self) -> Option<&ExecutorHandle<'a>> {
+        match &self.command {
+            InsertCommand::ModifyTable { executor, .. } => Some(executor),
+            InsertCommand::CopyFrom => None,
+        }
+    }
+
     /// Output CID fixed by the owning ModifyTable or COPY command.
     ///
     /// Providers that need a COPY CID must register
@@ -187,8 +206,8 @@ impl<'a> ForeignInsertBeginContext<'a> {
     ///
     /// Returns an error if the required COPY command context is absent.
     pub fn command_id(&self) -> Result<pg_sys::CommandId, ForeignModifyError> {
-        match self.command {
-            InsertCommand::ModifyTable(command_id) => Ok(command_id),
+        match &self.command {
+            InsertCommand::ModifyTable { command_id, .. } => Ok(*command_id),
             InsertCommand::CopyFrom => {
                 current_copy_command_id().map_err(ForeignModifyError::from)
             }

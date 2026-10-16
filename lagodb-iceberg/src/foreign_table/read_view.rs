@@ -4,6 +4,8 @@
 //! commit. Choose each source on first bind, then keep that immutable Table
 //! until executor teardown. The next execution loads it again, including when
 //! it reuses a cached plan. This does not pin files against Iceberg expiration.
+//! REST catalog bindings are shared across tables only within this executor;
+//! keeping a client does not select another table's metadata or storage routes.
 
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
@@ -15,12 +17,11 @@ use pgrx::pg_sys;
 use super::catalog::ForeignCatalog;
 use super::error::IcebergFdwError;
 use super::options::CatalogRuntimeConfig;
-use super::relation::RemoteTableKey;
+use super::relation::{RemoteTableKey, ResolvedCatalogBinding};
 
 struct CachedTable {
     key: RemoteTableKey,
-    config: CatalogRuntimeConfig,
-    catalog: ForeignCatalog,
+    catalog: Rc<ResolvedCatalogBinding>,
     table: Table,
 }
 
@@ -34,6 +35,7 @@ thread_local! {
 }
 
 pub(super) struct ForeignReadViews {
+    rest_catalogs: RefCell<Vec<Rc<ResolvedCatalogBinding>>>,
     tables: RefCell<Vec<CachedTable>>,
 }
 
@@ -51,6 +53,7 @@ impl ForeignReadViews {
                 return views;
             }
             let views = Rc::new(Self {
+                rest_catalogs: RefCell::new(Vec::new()),
                 tables: RefCell::new(Vec::new()),
             });
             executor.retain(Rc::clone(&views));
@@ -62,28 +65,50 @@ impl ForeignReadViews {
         })
     }
 
-    /// Bind the table and its catalog together. A cache hit must not construct
-    /// another catalog connection just to return the already selected table.
+    /// Select each table once, sharing REST clients for matching server/user
+    /// identities and configurations without enrolling a write transaction.
     pub(super) fn bind_table(
         &self,
         key: &RemoteTableKey,
-        config: &CatalogRuntimeConfig,
-        load: impl FnOnce() -> Result<(ForeignCatalog, Table), IcebergFdwError>,
-    ) -> Result<(ForeignCatalog, Table), IcebergFdwError> {
+        config: CatalogRuntimeConfig,
+        connect: impl FnOnce() -> Result<ForeignCatalog, IcebergFdwError>,
+    ) -> Result<(Rc<ResolvedCatalogBinding>, Table), IcebergFdwError> {
         if let Some(cached) =
             self.tables.borrow().iter().find(|entry| &entry.key == key)
         {
-            if &cached.config != config {
+            if cached.catalog.runtime_config != config {
                 return Err(IcebergFdwError::CatalogBindingChanged);
             }
-            return Ok((cached.catalog.clone(), cached.table.clone()));
+            return Ok((Rc::clone(&cached.catalog), cached.table.clone()));
         }
+        let cached_catalog = self
+            .rest_catalogs
+            .borrow()
+            .iter()
+            .find(|binding| {
+                &binding.key == key.catalog_binding()
+                    && binding.runtime_config == config
+            })
+            .map(Rc::clone);
+        let is_new = cached_catalog.is_none();
         // No cache borrow survives catalog or table-file I/O.
-        let (catalog, table) = load()?;
+        let catalog = match cached_catalog {
+            Some(catalog) => catalog,
+            None => Rc::new(ResolvedCatalogBinding {
+                key: key.catalog_binding().clone(),
+                runtime_config: config,
+                catalog: connect()?,
+            }),
+        };
+        let table = catalog.catalog.as_catalog().load_table(key.table())?;
+        // SQLite retains its existing transaction-connection reuse policy.
+        // Only successful REST table loads populate the shared client bindings.
+        if is_new && matches!(&catalog.catalog, ForeignCatalog::Rest(_)) {
+            self.rest_catalogs.borrow_mut().push(Rc::clone(&catalog));
+        }
         self.tables.borrow_mut().push(CachedTable {
             key: key.clone(),
-            config: config.clone(),
-            catalog: catalog.clone(),
+            catalog: Rc::clone(&catalog),
             table: table.clone(),
         });
         Ok((catalog, table))
