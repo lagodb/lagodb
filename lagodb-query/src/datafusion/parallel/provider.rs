@@ -189,7 +189,7 @@ impl TableProvider for ParallelTableProvider {
         let (planned, _) = self
             .backend
             .bound
-            .plan_tasks(&projection, &predicate_handles, ptr::null())
+            .plan_tasks(&projection, &predicate_handles, ptr::null(), false)
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
         let prepared = self.backend.worker.prepare(&self.backend.bound, &planned);
         let cleanup = planned.close();

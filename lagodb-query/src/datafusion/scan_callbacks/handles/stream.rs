@@ -36,7 +36,7 @@ impl BoundTableScanHandle {
             ));
         }
         let (planned, metrics) =
-            self.plan_tasks(projection, static_predicates, fixed_predicate)?;
+            self.plan_tasks(projection, static_predicates, fixed_predicate, false)?;
         let request = TableScanStreamRequest::new(
             maximum_batch_rows,
             planned.stream_error.as_mut_ptr(),

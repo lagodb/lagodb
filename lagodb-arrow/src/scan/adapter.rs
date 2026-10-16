@@ -396,7 +396,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
             } else {
                 Some(unsafe { &*request.runtime_predicate.cast::<P::Predicate>() })
             };
-            let (planned, metrics) = provider
+            let (planned, metrics, exact_rows) = provider
                 .plan_scan_tasks(
                     scan,
                     &options,
@@ -410,6 +410,8 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
                     struct_size: size_of::<PlannedTableScanTasks>() as u32,
                     planned: Box::into_raw(Box::new(planned)).cast(),
                     metrics,
+                    has_exact_rows: u8::from(exact_rows.is_some()),
+                    exact_rows: exact_rows.unwrap_or_default(),
                 };
             }
             Ok(())

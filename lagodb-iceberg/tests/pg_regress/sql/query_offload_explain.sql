@@ -39,6 +39,16 @@ BEGIN
 END;
 $$;
 
+-- Metadata COUNT produces its result without opening a data-file reader.
+SELECT plan #>> '{0,Plan,Execution Mode}' AS execution_mode,
+       jsonb_path_query_first(plan,
+           '$[0].Plan.** ? (@."Node Type" == "Table Scan")')
+           ->>'Actual Input Rows' AS input_rows
+FROM query_offload_explain_json(
+    'ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF',
+    'SELECT count(*) FROM query_offload_explain_left'
+) AS document(plan);
+
 -- Closing or aborting an unfetched cursor releases Begin-bound sources
 -- without preparing a physical plan.
 BEGIN;
@@ -176,11 +186,11 @@ SELECT jsonb_typeof(jsonb_path_query_first(
            AS timing_off_hides_engine_time
 FROM query_offload_explain_json(
     'ANALYZE, VERBOSE, COSTS OFF, TIMING ON, SUMMARY OFF',
-    'SELECT count(*) FROM query_offload_explain_left'
+    'SELECT count(id) FROM query_offload_explain_left'
 ) AS timed_plan(timed)
 CROSS JOIN query_offload_explain_json(
     'ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF',
-    'SELECT count(*) FROM query_offload_explain_left'
+    'SELECT count(id) FROM query_offload_explain_left'
 ) AS untimed_plan(untimed);
 
 -- Zero fallback counts stay hidden; a real PostgreSQL evaluator boundary is

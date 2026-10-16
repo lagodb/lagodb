@@ -6,6 +6,7 @@ use lagodb_core::expr::ExprType;
 use lagodb_core::query_contract::OutputId;
 use pgrx::pg_sys;
 
+mod row_count;
 mod semantics;
 
 use super::semantics::ScalarSemantics;

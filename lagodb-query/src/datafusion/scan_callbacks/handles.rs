@@ -249,12 +249,14 @@ impl BoundTableScanHandle {
         projection: &[usize],
         static_predicates: &[*const c_void],
         fixed_predicate: *const c_void,
+        request_exact_rows: bool,
     ) -> Result<(PlannedTableScanHandle, TableScanTaskMetrics), PgReportError> {
-        let request = TableScanTaskPlanningRequest::new(
+        let mut request = TableScanTaskPlanningRequest::new(
             projection,
             static_predicates,
             fixed_predicate,
         );
+        request.request_exact_rows = u8::from(request_exact_rows);
         let mut output = PlannedTableScanTasks::default();
         let mut error = CallbackErrorReport::default();
         let status = unsafe {
@@ -288,6 +290,7 @@ impl BoundTableScanHandle {
                 callbacks: self.callbacks,
                 handle: Some(handle),
                 stream_error: Arc::new(StreamErrorSlot::new()),
+                exact_rows: (output.has_exact_rows != 0).then_some(output.exact_rows),
             },
             output.metrics,
         ))
@@ -404,9 +407,14 @@ pub(in crate::datafusion) struct PlannedTableScanHandle {
     callbacks: TableScanCallbacks,
     handle: Option<NonNull<c_void>>,
     pub(super) stream_error: Arc<StreamErrorSlot>,
+    exact_rows: Option<u64>,
 }
 
 impl PlannedTableScanHandle {
+    pub(in crate::datafusion) fn exact_rows(&self) -> Option<u64> {
+        self.exact_rows
+    }
+
     pub(super) fn as_ptr(&self) -> *mut c_void {
         self.handle.expect("planned table scan is open").as_ptr()
     }

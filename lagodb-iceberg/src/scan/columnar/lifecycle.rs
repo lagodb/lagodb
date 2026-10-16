@@ -17,8 +17,8 @@ use crate::scan::{
     IcebergTaskMetrics, ScanError, ScanSourceBinding, ScanTaskPlanner,
 };
 
-/// Immutable statement snapshot and schema binding. Physical tasks are
-/// deliberately absent and are planned only after DataFusion optimization.
+/// Immutable statement snapshot and schema binding. Physical tasks are planned
+/// on demand and cached for the bound snapshot, projection and predicates.
 #[derive(Debug)]
 pub(super) struct StatementScan {
     pub(super) scan: TableScan,
@@ -236,6 +236,20 @@ impl TaskSet {
 }
 
 impl PlannedScan {
+    /// File metrics can answer an unfiltered, zero-column scan only when no
+    /// task has deletes. These are whole-file tasks, before parallel splitting.
+    pub(crate) fn exact_rows(&self) -> Option<u64> {
+        if !self.schema.fields().is_empty() || self.row_filter.is_some() {
+            return None;
+        }
+        self.task_set.tasks.iter().try_fold(0_u64, |rows, task| {
+            if !task.deletes.is_empty() || task.predicate.is_some() {
+                return None;
+            }
+            rows.checked_add(task.record_count?)
+        })
+    }
+
     pub(crate) fn metrics(&self) -> TableScanTaskMetrics {
         self.task_set.metrics
     }

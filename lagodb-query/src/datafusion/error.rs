@@ -19,6 +19,8 @@ pub enum QueryExecutionError {
     DataFusion(#[from] DataFusionError),
     #[error("table scan binding failed: {0}")]
     ScanBind(#[source] PgReportError),
+    #[error("table scan task planning failed: {0}")]
+    ScanPlan(#[source] PgReportError),
     #[error("failed to initialize query runtime values: {0}")]
     RuntimeValues(#[source] RuntimeValueStateError),
     #[error("invalid PostgreSQL expression sections: {0}")]
@@ -50,6 +52,7 @@ impl SqlStateError for QueryExecutionError {
         match self {
             Self::DataFusion(error) => Self::datafusion_sqlstate(error),
             Self::ScanBind(error)
+            | Self::ScanPlan(error)
             | Self::ScanRelease(error)
             | Self::ParallelHost(error)
             | Self::OutputConversion(error) => error.sql_error_code(),
@@ -75,6 +78,7 @@ impl QueryExecutionError {
         match self {
             Self::DataFusion(error) => Self::datafusion_report(error),
             Self::ScanBind(error)
+            | Self::ScanPlan(error)
             | Self::OutputConversion(error)
             | Self::ParallelHost(error)
             | Self::ScanRelease(error) => error,

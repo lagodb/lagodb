@@ -24,6 +24,7 @@ use datafusion::physical_plan::filter_pushdown::{
     ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation,
 };
 use datafusion::physical_plan::metrics::MetricsSet;
+use datafusion::physical_plan::statistics::StatisticsArgs;
 use datafusion::physical_plan::{
     ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan,
     Partitioning, PlanProperties, ReplaceChildrenOptions,
@@ -41,13 +42,20 @@ use super::scan_callbacks::BoundTableScanHandle;
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ExternalTableStatistics {
     pub estimated_rows: usize,
+    exact_rows: Option<usize>,
 }
 
 impl ExternalTableStatistics {
     pub(super) fn from_scan_cost(cost: ScanCost) -> Self {
         Self {
             estimated_rows: cost.rows_read().min(usize::MAX as f64) as usize,
+            exact_rows: None,
         }
+    }
+
+    pub(super) fn with_exact_rows(mut self, rows: Option<usize>) -> Self {
+        self.exact_rows = rows;
+        self
     }
 }
 
@@ -132,8 +140,11 @@ impl TableProvider for ExternalTableProvider {
     }
 
     fn statistics(&self) -> Option<Statistics> {
-        let statistics = Statistics::default()
-            .with_num_rows(Precision::Inexact(self.statistics.estimated_rows));
+        let statistics =
+            Statistics::default().with_num_rows(self.statistics.exact_rows.map_or(
+                Precision::Inexact(self.statistics.estimated_rows),
+                Precision::Exact,
+            ));
         // DataFusion defines total_byte_size as Arrow output size, not the
         // provider's physical scan bytes. Only a genuinely empty output schema
         // has a proven exact size here; projected column sizes remain unknown.
@@ -196,6 +207,8 @@ pub(super) struct ExternalTableScanExec {
     schema: SchemaRef,
     projection: Box<[usize]>,
     static_filters: StaticFilterSet,
+    // Supplied only by the execution-local metadata COUNT preparation branch.
+    exact_rows: Option<usize>,
     limits: ExternalTableScanLimits,
     bound: Arc<BoundTableScanHandle>,
     metrics: Option<Arc<ExecutionMetrics>>,
@@ -222,6 +235,7 @@ impl ExternalTableScanExec {
             schema,
             projection,
             static_filters,
+            exact_rows: provider.statistics.exact_rows,
             limits: provider.limits,
             bound: Arc::clone(&provider.bound),
             metrics: provider.metrics.as_ref().map(Arc::clone),
@@ -240,6 +254,7 @@ impl ExternalTableScanExec {
             schema: Arc::clone(&self.schema),
             projection: self.projection.clone(),
             static_filters: self.static_filters.clone(),
+            exact_rows: None,
             limits: self.limits,
             bound: Arc::clone(&self.bound),
             metrics: self.metrics.as_ref().map(Arc::clone),
@@ -277,6 +292,18 @@ impl ExecutionPlan for ExternalTableScanExec {
 
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
+    }
+
+    fn statistics_from_inputs(
+        &self,
+        _input_stats: &[Arc<Statistics>],
+        _args: &StatisticsArgs,
+    ) -> Result<Arc<Statistics>> {
+        let mut statistics = Statistics::new_unknown(&self.schema);
+        if let Some(rows) = self.exact_rows {
+            statistics.num_rows = Precision::Exact(rows);
+        }
+        Ok(Arc::new(statistics))
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {

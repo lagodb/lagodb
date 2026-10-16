@@ -9,6 +9,7 @@ use datafusion::execution::memory_pool::PeakRecordingPool;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::execution::session_state::SessionStateBuilder;
 use lagodb_core::expr::RuntimeValueState;
+use lagodb_core::query_contract::ScanId;
 use tokio::runtime::Runtime;
 
 use crate::datafusion::compiler::{DataFusionPlanCompiler, DataFusionPlanError};
@@ -71,16 +72,27 @@ impl PreparedPhysicalPlan {
     pub(super) fn prepare(
         preparation: PhysicalPlanPreparation<'_>,
     ) -> Result<Self, QueryExecutionError> {
+        if let Some(scan) = preparation.fragment.metadata_count_scan()
+            && let Some(rows) = preparation
+                .bound_scans
+                .exact_count_rows(scan, preparation.metrics)?
+        {
+            // Let DataFusion's AggregateStatistics replace COUNT with a constant
+            // before preparing workers or opening a data-file stream.
+            return preparation
+                .prepare_serial(Some((scan, rows)))
+                .map(Self::Serial);
+        }
         if let Some(parallel) = preparation.prepare_parallel()? {
             return Ok(Self::Parallel(parallel));
         }
-        preparation.prepare_serial().map(Self::Serial)
+        preparation.prepare_serial(None).map(Self::Serial)
     }
 
     pub(super) fn prepare_serial(
         preparation: PhysicalPlanPreparation<'_>,
     ) -> Result<Self, QueryExecutionError> {
-        preparation.prepare_serial().map(Self::Serial)
+        preparation.prepare_serial(None).map(Self::Serial)
     }
 
     pub(super) fn plan(&self) -> &CompiledPhysicalPlan {
@@ -149,7 +161,10 @@ impl PreparedPhysicalPlan {
 }
 
 impl PhysicalPlanPreparation<'_> {
-    fn prepare_serial(&self) -> Result<PreparedSerialPlan, QueryExecutionError> {
+    fn prepare_serial(
+        &self,
+        exact_rows: Option<(ScanId, usize)>,
+    ) -> Result<PreparedSerialPlan, QueryExecutionError> {
         let config = SessionConfig::new()
             .with_target_partitions(1)
             .with_batch_size(self.limits.maximum_batch_rows());
@@ -175,9 +190,12 @@ impl PhysicalPlanPreparation<'_> {
             state
         };
         let session = SessionContext::new_with_state(state);
-        let providers =
-            self.bound_scans
-                .providers(self.fragment, self.limits, self.metrics)?;
+        let providers = self.bound_scans.providers(
+            self.fragment,
+            self.limits,
+            self.metrics,
+            exact_rows,
+        )?;
         let compiler = DataFusionPlanCompiler::new(&session, self.postgres);
         let plan = self.runtime.block_on(compiler.compile(
             self.fragment,

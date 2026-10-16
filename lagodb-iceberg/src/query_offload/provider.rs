@@ -246,7 +246,12 @@ impl TableScanProvider for Provider {
             runtime_predicate.cloned(),
         )?;
         let metrics = planned.metrics();
-        Ok(PlannedScanTasks::new(planned, metrics))
+        let exact_rows = if options.requests_exact_rows() {
+            planned.exact_rows()
+        } else {
+            None
+        };
+        Ok(PlannedScanTasks::new(planned, metrics).with_exact_rows(exact_rows))
     }
 
     fn open_stream(

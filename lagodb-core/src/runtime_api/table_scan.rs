@@ -141,10 +141,14 @@ pub struct PlannedTableScanTasks {
     pub struct_size: u32,
     pub planned: *mut c_void,
     pub metrics: TableScanTaskMetrics,
+    /// Whether `exact_rows` is the exact output cardinality of this task plan,
+    /// after its predicates and deletes. Zero denotes unavailable statistics.
+    pub has_exact_rows: u8,
+    pub exact_rows: u64,
 }
 
-/// Per-run physical task-planning inputs established after DataFusion has
-/// finished building any fixed runtime filters.
+/// Physical task-planning inputs. The engine may also request an unfiltered
+/// plan before optimization to obtain exact aggregate statistics.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TableScanTaskPlanningRequest {
@@ -159,6 +163,9 @@ pub struct TableScanTaskPlanningRequest {
     pub static_predicate_count: usize,
     /// Optional complete fixed predicate retained by this QueryRun.
     pub runtime_predicate: *const c_void,
+    /// Nonzero requests an optional exact output row count. Zero skips this
+    /// computation. This affects returned statistics, not the task inventory.
+    pub request_exact_rows: u8,
 }
 
 impl Default for PlannedTableScanTasks {
@@ -167,6 +174,8 @@ impl Default for PlannedTableScanTasks {
             struct_size: size_of_u32::<Self>(),
             planned: ptr::null_mut(),
             metrics: TableScanTaskMetrics::default(),
+            has_exact_rows: 0,
+            exact_rows: 0,
         }
     }
 }
@@ -402,6 +411,7 @@ impl TableScanTaskPlanningRequest {
             static_predicates: static_predicates.as_ptr(),
             static_predicate_count: static_predicates.len(),
             runtime_predicate,
+            request_exact_rows: 0,
         }
     }
 }

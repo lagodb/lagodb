@@ -225,11 +225,13 @@ pub enum ScanSupport<T> {
 pub struct PlannedScanTasks<P> {
     plan: P,
     metrics: TableScanTaskMetrics,
+    exact_rows: Option<u64>,
 }
 
 /// Owned inputs for one run-local physical task-planning call.
 pub struct ScanTaskPlanningOptions {
     projection: Box<[usize]>,
+    request_exact_rows: bool,
 }
 
 impl ScanTaskPlanningOptions {
@@ -260,12 +262,22 @@ impl ScanTaskPlanningOptions {
             }
             .into()
         };
-        Ok(Self { projection })
+        Ok(Self {
+            projection,
+            request_exact_rows: request.request_exact_rows != 0,
+        })
     }
 
     #[inline]
     pub fn projection(&self) -> &[usize] {
         &self.projection
+    }
+
+    /// Whether the caller needs exact output cardinality. A provider may still
+    /// return no statistics when it cannot prove the count from its tasks.
+    #[inline]
+    pub const fn requests_exact_rows(&self) -> bool {
+        self.request_exact_rows
     }
 }
 
@@ -273,12 +285,24 @@ impl<P> PlannedScanTasks<P> {
     #[inline]
     #[must_use]
     pub const fn new(plan: P, metrics: TableScanTaskMetrics) -> Self {
-        Self { plan, metrics }
+        Self {
+            plan,
+            metrics,
+            exact_rows: None,
+        }
+    }
+
+    /// Exact output cardinality, including the effects of predicates and deletes.
+    /// Providers must leave this unavailable when file metrics cannot prove it.
+    #[must_use]
+    pub const fn with_exact_rows(mut self, exact_rows: Option<u64>) -> Self {
+        self.exact_rows = exact_rows;
+        self
     }
 
     #[inline]
-    pub fn into_parts(self) -> (P, TableScanTaskMetrics) {
-        (self.plan, self.metrics)
+    pub fn into_parts(self) -> (P, TableScanTaskMetrics, Option<u64>) {
+        (self.plan, self.metrics, self.exact_rows)
     }
 }
 
@@ -522,9 +546,11 @@ pub trait TableScanProvider: Send + Sync + 'static {
         predicate: &RuntimePruningPredicate<'_>,
     ) -> Result<PredicatePlan<Self::Predicate>, Self::Error>;
 
-    /// Plan physical tasks for one execution run. This is intentionally
-    /// separate from [`Self::bind_scan`]: DataFusion needs the bound schema to
-    /// optimize the plan before storage task planning begins.
+    /// Plan physical tasks separately from [`Self::bind_scan`], so binding a
+    /// schema does not enumerate files. Metadata COUNT candidates request tasks
+    /// before optimization; ordinary scans request them during physical source
+    /// preparation or when opening their stream. Repeated requests with the
+    /// same projection and predicates can reuse the bound source's task cache.
     fn plan_scan_tasks(
         &self,
         bound: &Self::BoundScan,

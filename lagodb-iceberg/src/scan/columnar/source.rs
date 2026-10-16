@@ -18,7 +18,7 @@ pub(crate) struct ScanSourceBinding {
     pub(crate) task_planner: ScanTaskPlanner,
 }
 
-/// Statement-bound task planner used after DataFusion optimization.
+/// On-demand task planner retaining the statement's snapshot and overlay.
 #[derive(Debug)]
 pub(crate) struct ScanTaskPlanner {
     table: Table,

@@ -70,6 +70,32 @@ FROM query_offload_aggregate_basic
 WHERE id = 1;
 
 -- ============================================================================
+-- Metadata COUNT: exact snapshot counts and reader fallback for deletes.
+-- ============================================================================
+
+CREATE TABLE query_offload_metadata_count (id integer) USING iceberg;
+-- An empty snapshot still produces one COUNT row.
+SELECT count(*) FROM query_offload_metadata_count;
+-- Count all rows across two files, including NULL, using a reusable plan.
+INSERT INTO query_offload_metadata_count VALUES (1), (NULL);
+INSERT INTO query_offload_metadata_count VALUES (3);
+PREPARE metadata_count AS SELECT count(*) FROM query_offload_metadata_count;
+EXECUTE metadata_count;
+-- COUNT(column) must retain NULL exclusion.
+SELECT count(id) FROM query_offload_metadata_count;
+-- Each execution sees current transaction data, not a cached COUNT value.
+BEGIN;
+INSERT INTO query_offload_metadata_count VALUES (4);
+EXECUTE metadata_count;
+ROLLBACK;
+EXECUTE metadata_count;
+DEALLOCATE metadata_count;
+-- A positional delete requires reader fallback instead of raw file counts.
+DELETE FROM query_offload_metadata_count WHERE id = 1;
+SELECT count(*) FROM query_offload_metadata_count;
+DROP TABLE query_offload_metadata_count;
+
+-- ============================================================================
 -- Unfiltered and filtered grouped aggregates, pure GROUP BY, COUNT, and
 -- integer MIN/MAX. The filtered EXPLAIN must show both the exact `Filter`
 -- evaluated by DataFusion and the provider-accepted `Pushed Filter` used

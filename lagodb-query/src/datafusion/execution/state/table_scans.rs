@@ -1,5 +1,6 @@
 //! Statement-scoped provider bindings shared by physical-plan rebuilds.
 
+use std::ptr;
 use std::sync::Arc;
 
 use lagodb_core::query_contract::ScanCost;
@@ -99,6 +100,7 @@ impl BoundTableScans {
         fragment: &QueryFragment,
         limits: QueryExecutionLimits,
         metrics: Option<&Arc<ExecutionMetrics>>,
+        exact_rows: Option<(ScanId, usize)>,
     ) -> Result<Box<[Arc<ExternalTableProvider>]>, QueryExecutionError> {
         self.entries
             .iter()
@@ -112,7 +114,10 @@ impl BoundTableScans {
                     entry.scan,
                     schema,
                     projected_attnos,
-                    ExternalTableStatistics::from_scan_cost(entry.cost),
+                    ExternalTableStatistics::from_scan_cost(entry.cost)
+                        .with_exact_rows(exact_rows.and_then(|(scan, rows)| {
+                            (scan == entry.scan).then_some(rows)
+                        })),
                     ExternalTableScanLimits {
                         maximum_batch_rows: limits.maximum_batch_rows() as u64,
                     },
@@ -122,6 +127,33 @@ impl BoundTableScans {
             })
             .collect::<Result<Vec<_>, _>>()
             .map(Vec::into_boxed_slice)
+    }
+
+    /// Probe only after the fragment has established a metadata COUNT candidate.
+    /// Closing the temporary handle retains the provider's statement task cache,
+    /// so an unsupported result can reuse the inventory in the ordinary reader.
+    pub(super) fn exact_count_rows(
+        &self,
+        scan: ScanId,
+        metrics: Option<&Arc<ExecutionMetrics>>,
+    ) -> Result<Option<usize>, QueryExecutionError> {
+        let (planned, task_metrics) = self.entries[scan.index()]
+            .handle
+            .plan_tasks(&[], &[], ptr::null(), true)
+            .map_err(QueryExecutionError::ScanPlan)?;
+        // DataFusion COUNT and PostgreSQL COUNT both return signed int8.
+        // Statistics outside that representation cannot use this optimization.
+        let rows = planned
+            .exact_rows()
+            .and_then(|rows| i64::try_from(rows).ok())
+            .and_then(|rows| usize::try_from(rows).ok());
+        planned.close().map_err(QueryExecutionError::ScanRelease)?;
+        if rows.is_some()
+            && let Some(metrics) = metrics
+        {
+            metrics.record_task_plan(scan, task_metrics);
+        }
+        Ok(rows)
     }
 
     pub(super) fn parallel_providers(
