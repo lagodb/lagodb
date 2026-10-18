@@ -65,14 +65,15 @@ impl PlannedMutationTasks {
     /// delete file. `None` represents the original zero-field spec.
     ///
     /// iceberg-lite supplies the current table schema here. A historical
-    /// identity/truncate Int literal is paired with Unknown if its source was
-    /// removed, or Long after int -> long promotion. Both pairs reach
-    /// `Datum::fmt`'s unreachable arm while formatting a partition path.
-    /// Upstream iceberg-rust carries the snapshot schema in scan tasks rather
-    /// than the manifest's schema; a snapshot using the evolved schema exposes
-    /// the same `PartitionKey`/`partition_to_path` defect with old manifests.
-    /// iceberg-lite exposes it after schema-only evolution too. Issues #2842
-    /// and #2844 fixed related read-side failures only; #2530 tracks binding a
+    /// identity/truncate Int literal is paired with Long after int -> long
+    /// promotion, reaching `Datum::fmt`'s unreachable arm while formatting a
+    /// partition path. Unknown paired with Int or Long is supported when the
+    /// source column was removed; that case does not trigger this panic.
+    /// Upstream iceberg-rust also uses the current schema for default scans and
+    /// the snapshot schema for explicit snapshot scans, rather than each
+    /// manifest's schema. Both implementations expose the defect after
+    /// schema-only evolution and when an evolved snapshot retains old manifests.
+    /// Issues #2842 and #2844 concern dropped source columns; #2530 tracks binding a
     /// partition spec to its schema. The durable fix is a manifest-bound result type
     /// in the scan task, not a second type resolver in LagoDB. Wait for that
     /// upstream fix, then merge it into iceberg-lite and remove this limitation.

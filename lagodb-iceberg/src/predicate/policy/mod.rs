@@ -56,7 +56,7 @@ pub(crate) struct PredicatePushdownPolicy;
 
 impl PredicatePushdownPolicy {
     // TODO: reconcile Exact with the missing-column row-filter bug inherited
-    // by iceberg-lite (pinned at 9e924457126383c7e1b5cafa7279a9421b338e35):
+    // by iceberg-lite:
     // https://github.com/apache/iceberg-rust/issues/3355
     // PredicateConverter::{less_than, less_than_or_eq} use build_always_true()
     // when the field ID is absent from the Parquet file. For an optional column

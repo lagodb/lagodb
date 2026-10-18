@@ -683,11 +683,13 @@ impl Write for PgFileWrite {
 }
 
 impl FileWrite for PgFileWrite {
-    fn close(&mut self) -> Result<()> {
+    fn close(&mut self) -> Result<FileMetadata> {
         self.flush()?;
         // Drop only closes the VFD. Keeping FileSync in explicit close lets
         // callers observe and propagate durability errors.
-        Ok(())
+        Ok(FileMetadata {
+            size: self.position as u64,
+        })
     }
 }
 

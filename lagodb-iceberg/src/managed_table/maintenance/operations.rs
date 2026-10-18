@@ -343,9 +343,9 @@ impl IcebergTableMaintenance {
                     ),
                 })?;
             for delete in &task.deletes {
-                if delete_paths.insert(delete.file_path.as_str()) {
+                if delete_paths.insert(delete.file_path()) {
                     current_content_bytes = current_content_bytes
-                        .checked_add(delete.file_size_in_bytes)
+                        .checked_add(delete.file_size_in_bytes())
                         .ok_or_else(|| IcebergError::Vacuum {
                             source: IcebergVacuumError::ResourceLimit(
                                 "current content byte count overflow".to_owned(),

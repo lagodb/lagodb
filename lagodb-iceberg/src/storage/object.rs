@@ -436,6 +436,7 @@ impl FileRead for ObjectReader {
 
 pub(crate) struct ObjectWriter {
     staging: Option<StagingFile>,
+    bytes_written: u64,
     backend_thread: PhantomData<Rc<()>>,
 }
 
@@ -451,6 +452,7 @@ impl ObjectWriter {
     pub(crate) fn new(staging: StagingFile) -> Self {
         Self {
             staging: Some(staging),
+            bytes_written: 0,
             backend_thread: PhantomData,
         }
     }
@@ -464,6 +466,7 @@ impl std::io::Write for ObjectWriter {
             .ok_or_else(|| std::io::Error::other("writer already closed"))?;
         let _wait = StorageWaitGuard::start(StorageWaitEvent::StagingFileWrite);
         staging.write(buf).map_err(std::io::Error::other)?;
+        self.bytes_written += buf.len() as u64;
         Ok(buf.len())
     }
 
@@ -477,7 +480,7 @@ impl std::io::Write for ObjectWriter {
 }
 
 impl FileWrite for ObjectWriter {
-    fn close(&mut self) -> Result<()> {
+    fn close(&mut self) -> Result<FileMetadata> {
         // Intentionally do not call `flush()` here. Object writes stage bytes in
         // a local file that `Storage::finalize_write` uploads in the same
         // statement path; a crash before upload aborts the transaction and leaves
@@ -485,6 +488,8 @@ impl FileWrite for ObjectWriter {
         // can call `flush()` explicitly, but making close fsync every object file
         // would add latency without improving the committed object-store state.
         self.staging.take();
-        Ok(())
+        Ok(FileMetadata {
+            size: self.bytes_written,
+        })
     }
 }

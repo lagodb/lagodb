@@ -231,9 +231,9 @@ impl TaskGrouping {
     fn range_weight(self, task: &FileScanTask, range_length: u64) -> u64 {
         let delete_bytes = task.deletes.iter().fold(0_u64, |total, delete| {
             let bytes = delete
-                .content_size_in_bytes
-                .and_then(|bytes| u64::try_from(bytes).ok())
-                .unwrap_or(delete.file_size_in_bytes);
+                .content_size_in_bytes()
+                .map(|bytes| bytes as u64)
+                .unwrap_or(delete.file_size_in_bytes());
             total.saturating_add(bytes)
         });
         let data_bytes = if range_length == 0 {

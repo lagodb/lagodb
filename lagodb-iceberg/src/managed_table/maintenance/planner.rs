@@ -50,9 +50,9 @@ impl VacuumPlanner {
                 if delete.referenced_data_file_path() == Some(input.file.file_path())
                 {
                     identities.insert(DeleteFileIdentity::new(
-                        delete.file_path.clone(),
-                        delete.content_offset,
-                        delete.content_size_in_bytes,
+                        delete.file_path().to_owned(),
+                        delete.content_offset(),
+                        delete.content_size_in_bytes(),
                     ));
                 }
             }
@@ -136,8 +136,8 @@ impl VacuumPlanner {
         for planned in &scan_plan.files {
             owned_table_root.ensure_path(planned.task.data_file_path())?;
             for delete in &planned.task.deletes {
-                owned_table_root.ensure_path(&delete.file_path)?;
-                scanned_delete_paths.insert(delete.file_path.as_str());
+                owned_table_root.ensure_path(delete.file_path())?;
+                scanned_delete_paths.insert(delete.file_path());
             }
         }
         metrics.scanned_delete_files =
@@ -308,7 +308,7 @@ impl VacuumPlanner {
                 delete.referenced_data_file_path() == Some(file.file_path())
             })
             .try_fold(0_u64, |total, delete| {
-                total.checked_add(delete.record_count).ok_or_else(|| {
+                total.checked_add(delete.record_count()).ok_or_else(|| {
                     IcebergError::Vacuum {
                         source: IcebergVacuumError::ResourceLimit(
                             "file-scoped deleted-row count overflow".to_owned(),

@@ -294,10 +294,10 @@ impl PreparedIcebergRead {
             // it. ExpressionEvaluator compares that Datum with the predicate's
             // Long literal: equality is false and PartialOrd returns None, so
             // equality/range visitors can discard a live data file.
-            // Upstream uses the snapshot schema, so this occurs when a snapshot
-            // uses the promoted schema and retains old manifests. iceberg-lite
-            // defaults to the current table schema, exposing it after schema-only
-            // evolution too. Neither coerces values at this pruning boundary.
+            // Upstream and iceberg-lite default scans use the current table
+            // schema, exposing this after schema-only evolution. Explicit
+            // snapshot scans also expose it when the snapshot uses the promoted
+            // schema and retains old manifests. Neither coerces values here.
             //
             // A separate upstream fallback checks whether any source id in a
             // spec is absent from the current schema before projection. On the
@@ -309,8 +309,7 @@ impl PreparedIcebergRead {
             // per-spec cache and made the whole-spec behavior persistent.
             // Related issue #3122 and PR #3123 cover Arrow reader/page-index
             // promotion, not this manifest partition/metrics pruning boundary.
-            // No upstream issue currently tracks this exact manifest-pruning
-            // defect; the linked issue and PR must not be treated as its fix.
+            // Those reader changes do not fix manifest partition pruning.
             // Do not add a LagoDB-only coercion here. Wait for iceberg-rust to
             // make these evaluators promotion-aware, then merge that upstream
             // change into iceberg-lite and remove this limitation.

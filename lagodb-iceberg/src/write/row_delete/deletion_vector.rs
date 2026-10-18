@@ -74,12 +74,6 @@ impl PlannedDataFile {
                     self.push_position_delete_file(delete_file.clone());
                 }
                 Some(_) => {}
-                None if delete_file.is_deletion_vector() => {
-                    return Err(IcebergError::MetadataTracker(format!(
-                        "deletion vector delete file {} is missing a referenced data file",
-                        delete_file.file_path
-                    )));
-                }
                 None => {
                     self.push_position_delete_file(delete_file.clone());
                 }
@@ -161,15 +155,15 @@ impl DeletionVectorSink {
                 .or_default();
             for existing_delete_file in &planned_data_file.position_delete_files {
                 let existing = ExistingPositionDeleteFile::new(
-                    &existing_delete_file.file_path,
-                    existing_delete_file.file_size_in_bytes,
-                    existing_delete_file.file_format,
+                    existing_delete_file.file_path(),
+                    existing_delete_file.file_size_in_bytes(),
+                    existing_delete_file.file_format(),
                     existing_delete_file.referenced_data_file_path(),
-                    existing_delete_file.content_offset,
-                    existing_delete_file.content_size_in_bytes,
-                    existing_delete_file.record_count,
+                    existing_delete_file.content_offset(),
+                    existing_delete_file.content_size_in_bytes(),
+                    existing_delete_file.record_count(),
                 )
-                .with_key_metadata(existing_delete_file.key_metadata.as_deref());
+                .with_key_metadata(existing_delete_file.key_metadata());
                 let merge = writer.merge_existing_position_delete_file(
                     target.clone(),
                     &existing,
@@ -179,9 +173,9 @@ impl DeletionVectorSink {
                     && existing_delete_file.can_remove_after_dv_rewrite()
                 {
                     removed_delete_files.insert(DeleteFileIdentity::new(
-                        existing_delete_file.file_path.clone(),
-                        existing_delete_file.content_offset,
-                        existing_delete_file.content_size_in_bytes,
+                        existing_delete_file.file_path().to_owned(),
+                        existing_delete_file.content_offset(),
+                        existing_delete_file.content_size_in_bytes(),
                     ));
                 }
             }

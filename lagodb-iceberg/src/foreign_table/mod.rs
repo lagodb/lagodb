@@ -10,8 +10,10 @@
 //! and PR #2790 track preserving and accepting the original unknown transform.
 //!
 //! Iceberg v3 partition fields may also use `source-ids` for multi-source
-//! transforms, while the current iceberg-lite metadata model accepts only the
-//! single `source-id` form. Such metadata fails at the same load boundary.
+//! transforms. `UnboundPartitionField` accepts this form for transport, but
+//! binding rejects multiple sources. Table metadata uses bound `PartitionField`,
+//! which still requires a single `source-id`; `source-ids`-only fields therefore
+//! fail at the same table metadata load boundary.
 //! Upstream issue #2801 and PR #2802 track that model change. Both fixes belong
 //! in iceberg-rust/iceberg-lite rather than REST JSON preprocessing in LagoDB.
 //!

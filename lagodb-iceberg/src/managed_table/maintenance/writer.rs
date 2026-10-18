@@ -106,11 +106,11 @@ impl RewriteGroupWriter {
         // Rewrite tasks retain the historical spec and manifest tuple but use
         // the current rewrite schema. The shared upstream iceberg-rust and
         // iceberg-lite path formatter pairs a historical identity/truncate Int
-        // literal with Unknown when its source was removed, or Long after
-        // int -> long promotion. Both pairs reach `Datum::fmt`'s unreachable
-        // arm. Related read-side issues #2842 and #2844 are fixed upstream,
-        // but #2530 still tracks binding a
-        // partition spec to its schema. Do not duplicate that resolver here:
+        // literal with Long after int -> long promotion, reaching `Datum::fmt`'s
+        // unreachable arm. Unknown paired with Int or Long is supported when
+        // the source column was removed. Issues #2842 and #2844 concern dropped
+        // source columns; #2530 tracks binding a partition spec to its schema.
+        // Do not duplicate that resolver here:
         // wait for the upstream manifest-bound partition identity fix, merge it
         // into iceberg-lite, and then remove this limitation.
         // https://github.com/apache/iceberg-rust/issues/2530

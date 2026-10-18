@@ -8,13 +8,11 @@ use arrow_array::{
 use arrow_schema::{DataType, Schema as ArrowSchema};
 use iceberg_lite::arrow::schema_to_arrow_schema;
 use iceberg_lite::io::FileIO;
-use iceberg_lite::metadata_columns::{delete_file_path_field, delete_file_pos_field};
 use iceberg_lite::spec::{
     DataFileFormat, PartitionKey, Schema as IcebergSchema, TableMetadata,
 };
 use iceberg_lite::writer::base_writer::position_delete_writer::{
-    PositionDeleteFileWriter, PositionDeleteFileWriterBuilder,
-    PositionDeleteWriterConfig,
+    PositionDeleteFileWriter, PositionDeleteFileWriterBuilder, position_delete_schema,
 };
 use iceberg_lite::writer::file_writer::ParquetWriterBuilder;
 use iceberg_lite::writer::file_writer::location_generator::{
@@ -25,7 +23,7 @@ use iceberg_lite::writer::{IcebergWriter, IcebergWriterBuilder};
 use parquet::file::properties::WriterProperties;
 
 use super::{PositionDeleteAccumulator, RowDeleteOutput};
-use crate::error::{IcebergError, IcebergResult};
+use crate::error::IcebergResult;
 use crate::write::{PlannedMutationTasks, RelationRowRegistry};
 
 type ParquetPositionDeleteFileWriter = PositionDeleteFileWriter<
@@ -50,26 +48,10 @@ impl PositionDeleteSink {
         table_metadata: &TableMetadata,
         writer_properties: &WriterProperties,
     ) -> IcebergResult<Self> {
-        let schema = Arc::new(
-            IcebergSchema::builder()
-                .with_fields([
-                    Arc::clone(delete_file_path_field()),
-                    Arc::clone(delete_file_pos_field()),
-                ])
-                .build()?,
-        );
+        let schema = position_delete_schema();
         let arrow_schema = schema_to_arrow_schema(&schema)?;
         let mut fields = arrow_schema.fields().to_vec();
-        let file_path_field =
-            fields.first_mut().ok_or(IcebergError::InvariantViolated(
-                "position-delete schema is missing the file path field",
-            ))?;
-        if file_path_field.data_type() != &DataType::Utf8 {
-            return Err(IcebergError::InvariantViolated(
-                "position-delete file path field has an unexpected Arrow type",
-            ));
-        }
-        *file_path_field = Arc::new(file_path_field.as_ref().clone().with_data_type(
+        fields[0] = Arc::new(fields[0].as_ref().clone().with_data_type(
             DataType::Dictionary(Box::new(DataType::UInt8), Box::new(DataType::Utf8)),
         ));
         let batch_schema = Arc::new(ArrowSchema::new_with_metadata(
@@ -96,8 +78,7 @@ impl PositionDeleteSink {
             let referenced_data_file = row_registry.file_path(file_id)?;
             let partition_key =
                 scan_tasks.partition_key_for_path(&referenced_data_file)?;
-            let mut writer =
-                self.build_writer(&referenced_data_file, partition_key)?;
+            let mut writer = self.build_writer(partition_key)?;
             let mut chunk = Vec::with_capacity(POSITION_DELETE_BATCH_ROWS);
             let positions = positions.borrow()?;
             for position in positions.iter() {
@@ -126,7 +107,6 @@ impl PositionDeleteSink {
 
     fn build_writer(
         &self,
-        referenced_data_file: &str,
         partition_key: Option<PartitionKey>,
     ) -> IcebergResult<ParquetPositionDeleteFileWriter> {
         let file_name_generator = DefaultFileNameGenerator::new(
@@ -145,10 +125,7 @@ impl PositionDeleteSink {
                 self.location_generator.clone(),
                 file_name_generator,
             );
-        let builder = PositionDeleteFileWriterBuilder::new(
-            rolling_writer_builder,
-            PositionDeleteWriterConfig::new(referenced_data_file),
-        );
+        let builder = PositionDeleteFileWriterBuilder::new(rolling_writer_builder);
         Ok(builder.build(partition_key)?)
     }
 

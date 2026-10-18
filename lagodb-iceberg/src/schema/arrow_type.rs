@@ -9,9 +9,9 @@ use iceberg_lite::spec::{PrimitiveType, Schema as IcebergSchema, Type};
 
 use crate::error::{IcebergError, IcebergResult};
 
-/// Enrich the upstream physical schema for read/write conversion plans and
-/// the query scan's Arrow C Schema. UUID is the only supported Iceberg leaf whose
-/// semantics cannot be recovered from its physical Arrow type.
+/// Preserve UUID semantics for read/write conversion plans and the query scan's
+/// Arrow C Schema. Upstream schema conversion already annotates UUID fields;
+/// fields assembled from a physical `DataType` still need the annotation.
 pub(crate) struct SemanticArrowType<'a>(&'a Type);
 
 impl<'a> SemanticArrowType<'a> {
