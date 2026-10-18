@@ -7,7 +7,6 @@ use lagodb_core::handles::RelationGuard;
 use pgrx::pg_sys;
 use serde::{Deserialize, Serialize};
 
-use crate::error::IcebergError;
 use crate::foreign_table::{
     ForeignTableIdentity, IcebergFdwError, IcebergForeignTable, PlanSourceIdentity,
 };
@@ -86,10 +85,7 @@ impl ReopenPlan {
                 }
             }
         };
-        let payload = codec()
-            .serialize(&encoded)
-            .map_err(IcebergError::from)
-            .map_err(Error::from)?;
+        let payload = codec().serialize(&encoded)?;
         let payload_len = u64::try_from(payload.len()).map_err(|_| {
             Error::Scan(ScanError::WorkerPayload(
                 "query worker reopen plan exceeds u64".to_owned(),
@@ -133,11 +129,7 @@ impl ReopenPlan {
         let inventory = data.get(inventory_offset..).ok_or_else(|| {
             Self::payload_error("query worker task inventory is missing")
         })?;
-        let plan = match codec()
-            .deserialize(encoded)
-            .map_err(IcebergError::from)
-            .map_err(Error::from)?
-        {
+        let plan = match codec().deserialize(encoded)? {
             DecodedWorkerPlan::Managed { relation_oid } => Self::Managed {
                 relation_oid: pg_sys::Oid::from(relation_oid),
             },

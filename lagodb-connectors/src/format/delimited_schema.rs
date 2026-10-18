@@ -316,9 +316,10 @@ impl CopyDataSource for SchemaCopySource<'_> {
         output: &mut [u8],
         min_read: usize,
     ) -> Result<usize, CopyError> {
-        self.decoder
+        let read = self
+            .decoder
             .read_at_least(output, min_read)
-            .map_err(ConnectorError::copy_stream_io)
-            .map_err(CopyError::from)
+            .map_err(ConnectorError::copy_stream_io)?;
+        Ok(read)
     }
 }

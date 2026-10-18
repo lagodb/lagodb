@@ -12,7 +12,6 @@ use lagodb_arrow::scan::{
     RuntimePredicateUpdate, ScanStreamOptions, TableScanStream,
 };
 
-use crate::error::IcebergError;
 use crate::scan::ScanError;
 
 use super::lifecycle::StatementScan;
@@ -52,17 +51,11 @@ impl ArrowStream {
         options: ScanStreamOptions,
     ) -> Result<Self, ScanError> {
         let reader = if options.has_evolving_predicate() {
-            ReaderMode::Evolving(
-                bound
-                    .scan
-                    .shared_task_arrow_reader(
-                        Arc::clone(&tasks),
-                        batch_size,
-                        row_filter,
-                    )
-                    .map_err(IcebergError::from)
-                    .map_err(ScanError::from)?,
-            )
+            ReaderMode::Evolving(bound.scan.shared_task_arrow_reader(
+                Arc::clone(&tasks),
+                batch_size,
+                row_filter,
+            )?)
         } else {
             ReaderMode::Static { tasks, row_filter }
         };
@@ -81,11 +74,11 @@ impl ArrowStream {
         let ReaderMode::Static { tasks, row_filter } = &self.reader else {
             unreachable!("static cursor opening requires the static reader mode")
         };
-        let cursor = self
-            .bound
-            .open_batches(Arc::clone(tasks), row_filter.clone(), self.batch_size)
-            .map_err(IcebergError::from)
-            .map_err(ScanError::from)?;
+        let cursor = self.bound.open_batches(
+            Arc::clone(tasks),
+            row_filter.clone(),
+            self.batch_size,
+        )?;
         self.cursor = BatchCursor::OpenAll(cursor);
         Ok(())
     }
@@ -105,16 +98,10 @@ impl ArrowStream {
                 }
                 RuntimePredicateUpdate::Clear { .. } => None,
             };
-            reader
-                .replace_supplemental_filter(evolving)
-                .map_err(IcebergError::from)?;
+            reader.replace_supplemental_filter(evolving)?;
             self.predicate_generation = generation;
         }
-        let cursor = match reader
-            .read_next_task()
-            .map_err(IcebergError::from)
-            .map_err(ScanError::from)
-        {
+        let cursor = match reader.read_next_task() {
             Ok(Some(cursor)) => cursor,
             Ok(None) => {
                 self.cursor = BatchCursor::Finished;
@@ -122,7 +109,7 @@ impl ArrowStream {
             }
             Err(error) => {
                 self.cursor = BatchCursor::Finished;
-                return Err(error);
+                return Err(error.into());
             }
         };
         self.cursor = BatchCursor::OpenTask(cursor);
@@ -164,7 +151,7 @@ impl TableScanStream for ArrowStream {
                 Some(Ok(batch)) => return Ok(Some(batch)),
                 Some(Err(error)) => {
                     self.cursor = BatchCursor::Finished;
-                    return Err(ScanError::from(IcebergError::from(error)));
+                    return Err(error.into());
                 }
                 None if matches!(&self.cursor, BatchCursor::OpenTask(_)) => {
                     self.cursor = BatchCursor::Pending;

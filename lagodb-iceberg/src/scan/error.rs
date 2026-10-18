@@ -1,5 +1,7 @@
 //! Catalog-independent Iceberg query and parallel-scan failures.
 
+use bincode::Error as BinaryCodecError;
+use iceberg_lite::Error as IcebergLiteError;
 use lagodb_core::diag::SqlStateError;
 use lagodb_core::parallel_scan::ParallelScanError;
 use lagodb_core::runtime_api::RuntimePredicateCodecError;
@@ -19,6 +21,18 @@ pub(crate) enum ScanError {
     WorkerPayload(String),
     #[error("invalid PostgreSQL parallel scan state: {0}")]
     ParallelCoordinator(#[from] ParallelScanError),
+}
+
+impl From<IcebergLiteError> for ScanError {
+    fn from(error: IcebergLiteError) -> Self {
+        Self::Iceberg(error.into())
+    }
+}
+
+impl From<BinaryCodecError> for ScanError {
+    fn from(error: BinaryCodecError) -> Self {
+        Self::Iceberg(error.into())
+    }
 }
 
 impl SqlStateError for ScanError {

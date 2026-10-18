@@ -160,9 +160,8 @@ pub(super) unsafe extern "C-unwind" fn execute_provider(
             budget: context.budget.without_soft_limit(context.mode),
             command_time: context.command_time,
         })
-        .map_err(HookError::from)
         .map_err(|error| {
-            error.with_utility_context(
+            HookError::from(error.into_report_error()).with_utility_context(
                 "TableMaintenanceRouter",
                 UtilityHookPhase::Pre,
                 pg_sys::NodeTag::T_VacuumStmt,

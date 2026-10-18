@@ -65,9 +65,8 @@ mod lagodb {
         )
         .map_err(PgReportError::from_domain_error)
         .report_unwrap();
-        let stats = TableMaintenanceRouter::inspect(&relation.as_handle())
-            .map_err(PgReportError::from_domain_error)
-            .report_unwrap();
+        let stats =
+            TableMaintenanceRouter::inspect(&relation.as_handle()).report_unwrap();
         let sql_i64 = |value: u64, metric: &'static str| {
             i64::try_from(value).unwrap_or_else(|_| {
                 PgReportError::from_message(

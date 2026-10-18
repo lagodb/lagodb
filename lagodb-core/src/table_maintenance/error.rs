@@ -75,6 +75,12 @@ impl TableMaintenanceError {
         })
     }
 
+    /// Preserve maintenance context, source diagnostics, and structured
+    /// PostgreSQL DETAIL/HINT when crossing a runtime or hook boundary.
+    pub fn into_report_error(self) -> PgReportError {
+        self.report_parts().into_pg_report_error()
+    }
+
     fn append_pg_report_extras(
         &self,
         details: &mut Vec<String>,

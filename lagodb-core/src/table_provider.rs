@@ -11,7 +11,7 @@ use std::mem::size_of;
 use pgrx::pg_sys;
 
 use crate::api::{AmResult, unsupported_callback};
-use crate::diag::{PgReportError, ReportableError};
+use crate::diag::ReportableError;
 use crate::handles::RelationHandle;
 use crate::hooks::{HookRegistrationError, freeze_hooks_with_provider};
 use crate::runtime_api::{
@@ -157,7 +157,7 @@ where
                 request.command_time_ms,
             ),
         })
-        .map_err(|error| PgReportError::from(error.with_provider(P::NAME)))?;
+        .map_err(|error| error.with_provider(P::NAME).into_report_error())?;
         // SAFETY: the runtime owns this writable output for the callback.
         unsafe { report.write(result.into()) };
         Ok(())
@@ -180,7 +180,7 @@ where
         // output/error records for the synchronous exact-build callback.
         let relation = unsafe { RelationHandle::from_raw(relation) };
         let inspected = P::inspect_maintenance(&relation)
-            .map_err(|error| PgReportError::from(error.with_provider(P::NAME)))?;
+            .map_err(|error| error.with_provider(P::NAME).into_report_error())?;
         let inspected =
             MaintenanceStats::try_from_stats(inspected).ok_or_else(|| {
                 TableMaintenanceError::framework(

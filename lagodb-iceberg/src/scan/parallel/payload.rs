@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 
 use super::super::ScanError;
 use super::grouping::{GroupedTaskRanges, TaskRange};
-use crate::error::IcebergError;
 
 mod flat;
 mod metadata;
@@ -167,10 +166,6 @@ fn codec() -> impl Options {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .reject_trailing_bytes()
-}
-
-fn codec_error(error: bincode::Error) -> ScanError {
-    ScanError::from(IcebergError::from(error))
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]

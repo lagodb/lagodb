@@ -1,5 +1,6 @@
 //! Query-offload provider failures before the runtime callback boundary.
 
+use bincode::Error as BinaryCodecError;
 use lagodb_core::diag::{PgError, SqlStateError};
 use lagodb_core::expr::ExpressionCodecError;
 use lagodb_core::plan_data::PlanDataError;
@@ -50,6 +51,12 @@ impl From<PlanDataError> for Error {
 
 impl From<PgError> for Error {
     fn from(error: PgError) -> Self {
+        Self::Iceberg(error.into())
+    }
+}
+
+impl From<BinaryCodecError> for Error {
+    fn from(error: BinaryCodecError) -> Self {
         Self::Iceberg(error.into())
     }
 }

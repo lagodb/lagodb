@@ -6,7 +6,6 @@ use serde::Serialize;
 
 use super::super::{
     TaskRange, WorkerFileRecord, WorkerTaskMetadata, WorkerTaskMetadataCodec, codec,
-    codec_error,
 };
 use super::{
     DESCRIPTOR_BYTES, HEADER_BYTES, MAGIC, PayloadLayout, RANGE_BYTES, SPLIT,
@@ -127,9 +126,7 @@ impl FlatPayloadEncoder {
         value: &T,
     ) -> Result<(usize, usize), ScanError> {
         let offset = self.bytes.len() - self.base;
-        codec()
-            .serialize_into(&mut self.bytes, value)
-            .map_err(codec_error)?;
+        codec().serialize_into(&mut self.bytes, value)?;
         Ok((offset, self.bytes.len() - self.base - offset))
     }
 

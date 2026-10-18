@@ -15,7 +15,6 @@ use lagodb_arrow::scan::TableScanStream;
 use lagodb_core::runtime_api::SourceWorkId;
 
 use super::ScanError;
-use crate::error::IcebergError;
 pub(crate) use execution::PostgresParallelExecution;
 pub(crate) use grouping::{TaskGrouping, TaskGroupingConfig};
 use payload::WorkerSourcePayload;
@@ -83,9 +82,7 @@ impl WorkerSource {
         let batches = ArrowReaderBuilder::new(self.file_io.clone())
             .with_batch_size(batch_size)
             .build()
-            .read(tasks)
-            .map_err(IcebergError::from)
-            .map_err(ScanError::from)?;
+            .read(tasks)?;
         Ok(WorkerStream {
             schema: Arc::clone(&self.schema),
             batches,
@@ -124,10 +121,6 @@ impl TableScanStream for WorkerStream {
         // wrapper checks STOP/PG interrupts before this call and immediately
         // after synchronous provider I/O returns; no cancellation check belongs
         // on the per-row/per-datum path.
-        self.batches
-            .next()
-            .transpose()
-            .map_err(IcebergError::from)
-            .map_err(ScanError::from)
+        self.batches.next().transpose().map_err(ScanError::from)
     }
 }

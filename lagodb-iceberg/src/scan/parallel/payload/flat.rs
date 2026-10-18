@@ -333,7 +333,7 @@ impl<'a> PayloadView<'a> {
     ) -> Result<T, ScanError> {
         codec()
             .deserialize(self.slice(descriptor)?)
-            .map_err(super::codec_error)
+            .map_err(ScanError::from)
     }
 
     fn decode_metadata(
