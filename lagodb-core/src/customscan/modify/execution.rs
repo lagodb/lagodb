@@ -17,13 +17,6 @@ use crate::diag::PgReportError;
 use crate::handles::{ItemPointer, RelationHandle};
 use crate::tuple::TupleSlotRow;
 
-#[derive(Debug)]
-enum RelationAccess<C> {
-    Unbound,
-    TargetRead(C),
-    InsertOnly,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RelationPhase {
     Ready,
@@ -78,6 +71,12 @@ unsafe fn modify_actions(plan: *mut pg_sys::ModifyTable) -> AmResult<ModifyActio
     }
 }
 
+/// Relation binding and lazy writer owned by the enclosing ModifyTable.
+///
+/// BeginCustomScan binds target scans before any row callback. Relations without
+/// a target scan, including routed INSERT destinations, use independent writes.
+/// PostgreSQL's mt_done gate and executor teardown delimit row callbacks; phase
+/// tracking here is for completion and abort, including partially finished nodes.
 pub(super) struct ResultRelationState<P: LagodbCustomModifyProvider> {
     relation: NonNull<pg_sys::RelationData>,
     command: pg_sys::CmdType::Type,
@@ -85,7 +84,7 @@ pub(super) struct ResultRelationState<P: LagodbCustomModifyProvider> {
     query_state: ModifyQueryState<
         <P::AccessMethod as TableAccessMethod>::ModifyQueryState,
     >,
-    access: RelationAccess<
+    scan_context: Option<
         <<P::AccessMethod as TableAccessMethod>::ModifyState as AmModifyState>::ScanContext,
     >,
     modify_state: Option<<P::AccessMethod as TableAccessMethod>::ModifyState>,
@@ -119,7 +118,7 @@ impl<P: LagodbCustomModifyProvider> ResultRelationState<P> {
             command,
             actions,
             query_state,
-            access: RelationAccess::Unbound,
+            scan_context: None,
             modify_state: None,
             phase: RelationPhase::Ready,
         })
@@ -130,56 +129,22 @@ impl<P: LagodbCustomModifyProvider> ResultRelationState<P> {
         unsafe { self.relation.as_ref().rd_id }
     }
 
-    fn ensure_ready(&self) -> AmResult<()> {
-        match self.phase {
-            RelationPhase::Ready => Ok(()),
-            RelationPhase::Finished => Err(internal_error(
-                "mutation relation execution is already finished",
-            )),
-            RelationPhase::Aborted => {
-                Err(internal_error("mutation relation execution was aborted"))
-            }
-        }
-    }
-
-    fn create_modify_state(
-        &mut self,
-        context: ModifyStateContext<
-            <P::AccessMethod as TableAccessMethod>::ModifyQueryState,
-            <<P::AccessMethod as TableAccessMethod>::ModifyState as AmModifyState>::ScanContext,
-        >,
-    ) -> AmResult<()> {
-        // SAFETY: the owning ModifyTableState keeps the relation open; the AM
-        // contract requires the state to retain only derived owned data.
-        let relation = unsafe { RelationHandle::from_raw(self.relation.as_ptr()) };
-        let modify_state =
-            <P::AccessMethod as TableAccessMethod>::ModifyState::begin_modify(
-                &relation, context,
-            )?;
-        self.modify_state = Some(modify_state);
-        Ok(())
-    }
-
     fn bind_scan(
         &mut self,
         context: <<P::AccessMethod as TableAccessMethod>::ModifyState as AmModifyState>::ScanContext,
     ) -> AmResult<
         ModifyScanBinding<<P::AccessMethod as TableAccessMethod>::ModifyQueryState>,
     > {
-        self.ensure_ready()?;
-        match &self.access {
-            RelationAccess::Unbound => {
-                self.access = RelationAccess::TargetRead(context);
+        debug_assert_eq!(self.phase, RelationPhase::Ready);
+        debug_assert!(self.modify_state.is_none());
+        match &self.scan_context {
+            None => {
+                self.scan_context = Some(context);
             }
-            RelationAccess::TargetRead(existing) if existing == &context => {}
-            RelationAccess::TargetRead(_) => {
+            Some(existing) if existing == &context => {}
+            Some(_) => {
                 return Err(internal_error(
                     "Modify scans for one result relation captured different contexts",
-                ));
-            }
-            RelationAccess::InsertOnly => {
-                return Err(internal_error(
-                    "Modify scan attempted to bind an insert-only relation",
                 ));
             }
         }
@@ -189,51 +154,45 @@ impl<P: LagodbCustomModifyProvider> ResultRelationState<P> {
         ))
     }
 
-    fn prepare_insert(&mut self) {
-        if matches!(self.access, RelationAccess::Unbound) {
-            self.access = RelationAccess::InsertOnly;
-        }
-    }
-
-    // The mutation entry points perform the phase check once before reaching
-    // this state-construction path. Keeping that check outside avoids a second
-    // phase read for every INSERT callback.
-    fn modify_state(
+    /// Open storage only for the first actual write, after BEFORE triggers.
+    /// Binding fixes the scan dependency; subsequent rows reuse the writer.
+    fn writer(
         &mut self,
         command_id: pg_sys::CommandId,
     ) -> AmResult<&mut <P::AccessMethod as TableAccessMethod>::ModifyState> {
-        if self.modify_state.is_none() {
-            let context = match &self.access {
-                RelationAccess::Unbound => {
-                    return Err(internal_error(
-                        "row-level mutation reached a relation before its target scan was bound",
-                    ));
-                }
-                RelationAccess::TargetRead(context) => {
-                    ModifyStateContext::target_read(
+        match self.modify_state {
+            Some(ref mut state) => Ok(state),
+            None => {
+                let context = match &self.scan_context {
+                    Some(context) => ModifyStateContext::target_read(
                         self.query_state.clone(),
                         self.command,
                         self.actions,
                         command_id,
                         context.clone(),
-                    )
-                }
-                RelationAccess::InsertOnly => ModifyStateContext::independent(
-                    self.query_state.clone(),
-                    if self.command == pg_sys::CmdType::CMD_MERGE {
-                        pg_sys::CmdType::CMD_INSERT
-                    } else {
-                        self.command
-                    },
-                    ModifyActions::INSERT,
-                    command_id,
-                ),
-            };
-            self.create_modify_state(context)?;
+                    ),
+                    None => ModifyStateContext::independent(
+                        self.query_state.clone(),
+                        if self.command == pg_sys::CmdType::CMD_MERGE {
+                            pg_sys::CmdType::CMD_INSERT
+                        } else {
+                            self.command
+                        },
+                        ModifyActions::INSERT,
+                        command_id,
+                    ),
+                };
+                // SAFETY: ModifyTable keeps the relation open. The AM retains
+                // only owned data and returns a fully usable write session.
+                let relation =
+                    unsafe { RelationHandle::from_raw(self.relation.as_ptr()) };
+                let state =
+                    <P::AccessMethod as TableAccessMethod>::ModifyState::begin_modify(
+                        &relation, context,
+                    )?;
+                Ok(self.modify_state.insert(state))
+            }
         }
-        self.modify_state
-            .as_mut()
-            .ok_or_else(|| internal_error("AM modify state construction failed"))
     }
 
     fn finish(&mut self) -> AmResult<()> {
@@ -268,10 +227,8 @@ impl<P: LagodbCustomModifyProvider> ResultRelationState<P> {
         new_slot: *mut pg_sys::TupleTableSlot,
         context: MutationWriteContext,
     ) -> AmResult<()> {
-        self.ensure_ready()?;
-        self.prepare_insert();
         let new = unsafe { TupleSlotRow::from_raw(new_slot) };
-        self.modify_state(context.cid)?.insert_slot(new, context)
+        self.writer(context.cid)?.insert_slot(new, context)
     }
 
     pub(super) unsafe fn update(
@@ -283,8 +240,7 @@ impl<P: LagodbCustomModifyProvider> ResultRelationState<P> {
     ) -> AmResult<MutationOutcome> {
         let old = unsafe { TupleSlotRow::from_raw(old_slot) };
         let new = unsafe { TupleSlotRow::from_raw(new_slot) };
-        self.ensure_ready()?;
-        self.modify_state(context.cid)?
+        self.writer(context.cid)?
             .update_slot(row_id, old, new, context)
     }
 
@@ -293,15 +249,13 @@ impl<P: LagodbCustomModifyProvider> ResultRelationState<P> {
         row_id: ItemPointer,
         context: MutationDeleteContext<'_>,
     ) -> AmResult<MutationOutcome> {
-        self.ensure_ready()?;
-        self.modify_state(context.cid)?.delete_slot(row_id, context)
+        self.writer(context.cid)?.delete_slot(row_id, context)
     }
 
     pub(super) unsafe fn preserve_trigger_row(
         &mut self,
         slot: *mut pg_sys::TupleTableSlot,
     ) -> AmResult<ItemPointer> {
-        self.ensure_ready()?;
         unsafe {
             self.query_state.preserve_trigger_row::<P::AccessMethod>(
                 self.relation_oid(),
@@ -480,7 +434,11 @@ impl<P: LagodbCustomModifyProvider> ModifyNodeState<P> {
         new_slot: *mut pg_sys::TupleTableSlot,
     ) -> AmResult<PreparedUpdateTriggerRows> {
         let source = unsafe { self.resolve_relation(source_info) }?;
-        let destination = unsafe { self.resolve_relation(destination_info) }?;
+        let destination = if source_info == destination_info {
+            source
+        } else {
+            unsafe { self.resolve_relation(destination_info) }?
+        };
 
         let old_tid = if let Some(mut source) = source {
             Some(unsafe { source.as_mut().preserve_trigger_row(old_slot) }?)
