@@ -445,7 +445,7 @@ FROM query_offload_explain_left;
 (12 rows)
 
 -- Runtime filter diagnostics must use complete binding expressions and the
--- scan's PlannerInfo scope. Reuse the JSON adapter and join fixtures above.
+-- scan's PlannerInfo scope. Reuse the join fixtures above.
 -- varchar -> text is a binary-compatible RelabelType around the generic
 -- Param. Both the display binding and execution retain that boundary.
 CREATE TABLE query_offload_explain_labels (label text COLLATE "C") USING iceberg;
@@ -453,18 +453,24 @@ INSERT INTO query_offload_explain_labels VALUES ('east'), ('west'), ('east');
 SET plan_cache_mode = force_generic_plan;
 PREPARE query_offload_explain_relabel (varchar) AS
 SELECT count(*) FROM query_offload_explain_labels WHERE label = $1;
-SELECT plan #>> '{0,Plan,Custom Plan Provider}' AS provider,
-       jsonb_path_query_first(plan,
-           '$[0].Plan.** ? (@."Node Type" == "Table Scan")')->>'Filter'
-           LIKE '%$1%' AS has_binding
-FROM query_offload_explain_json(
-    'VERBOSE, COSTS OFF',
-    'EXECUTE query_offload_explain_relabel(''east'')'
-) AS document(plan);
-       provider       | has_binding 
-----------------------+-------------
- LagoDB Query Offload | t
-(1 row)
+EXPLAIN (VERBOSE, COSTS OFF) EXECUTE query_offload_explain_relabel('east');
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Output: (count(*))
+   Engine: DataFusion
+   Maximum Batch Rows: 2
+   ->  Projection
+         Output: COUNT(*)
+         ->  Aggregate
+               Aggregates: COUNT(*)
+               ->  Table Scan on public.query_offload_explain_labels
+                     Access Method: iceberg
+                     Scan ID: 0
+                     Output: label
+                     Filter: (label = $1)
+                     Pushed Filter Conservative: (label = $1)
+(14 rows)
 
 EXECUTE query_offload_explain_relabel('east');
  count 
@@ -491,17 +497,34 @@ WHERE l.id >= $1 AND l.id NOT IN (
     SELECT scoped.id FROM query_offload_explain_left AS scoped
     WHERE scoped.id > $1
 ) ORDER BY l.id;
-SELECT (scan->>'Filter') LIKE '%id > $2%' AS scoped_filter,
-       (scan->>'Pushed Filter Conservative') LIKE '%id > $2%' AS scoped_pruning
-FROM query_offload_explain_json(
-    'VERBOSE, COSTS OFF', 'EXECUTE query_offload_explain_scoped(2)'
-) AS document(plan)
-CROSS JOIN LATERAL jsonb_path_query_first(plan,
-    '$[0].Plan.** ? (@."Node Type" == "Table Scan" && @."Alias" == "scoped")') AS scan;
- scoped_filter | scoped_pruning 
----------------+----------------
- t             | t
-(1 row)
+EXPLAIN (VERBOSE, COSTS OFF) EXECUTE query_offload_explain_scoped(2);
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Output: l.id
+   Engine: DataFusion
+   Maximum Batch Rows: 2
+   ->  Sort
+         Sort Key: l.id ASC NULLS LAST
+         ->  Projection
+               Output: l.id
+               ->  Hash Join
+                     Join Type: Left Anti
+                     Hash Cond: l.id = scoped.id
+                     Null Aware: true
+                     ->  Table Scan on public.query_offload_explain_left l
+                           Access Method: iceberg
+                           Scan ID: 0
+                           Output: l.id
+                           Filter: (id >= $1)
+                           Pushed Filter Conservative: (id >= $1)
+                     ->  Table Scan on public.query_offload_explain_left scoped
+                           Access Method: iceberg
+                           Scan ID: 1
+                           Output: scoped.id
+                           Filter: (id > $2)
+                           Pushed Filter Conservative: (id > $2)
+(24 rows)
 
 EXECUTE query_offload_explain_scoped(2);
  id 

@@ -588,13 +588,21 @@ ORDER BY case_name, ordinal;
 SET plan_cache_mode = force_generic_plan;
 PREPARE partition_read_int(integer) AS
 SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.identity_int4 WHERE part_key = $1;
-SELECT jsonb_path_exists(pg_temp.partition_query_json(
-    'EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) EXECUTE partition_read_int(-7)'),
-    '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS generic_custom_scan;
- generic_custom_scan 
----------------------
- t
-(1 row)
+EXPLAIN (VERBOSE, COSTS OFF) EXECUTE partition_read_int(-7);
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Aggregate
+   Output: jsonb_agg(id ORDER BY id)
+   ->  Sort
+         Output: id
+         Sort Key: identity_int4.id
+         ->  Custom Scan (lagodb-iceberg) on partitioned_reads.identity_int4
+               Output: id
+               Scan Purpose: Read
+               Provider: lagodb-iceberg
+               Pushed Filter Exact: (part_key = $1)
+               Recheck: (part_key = $1)
+(11 rows)
 
 EXECUTE partition_read_int(-7);
  jsonb_agg 
@@ -617,13 +625,21 @@ EXECUTE partition_read_int(NULL);
 DEALLOCATE partition_read_int;
 PREPARE partition_read_date(date) AS
 SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.range_date WHERE part_key = $1;
-SELECT jsonb_path_exists(pg_temp.partition_query_json(
-    'EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) EXECUTE partition_read_date(DATE ''1969-12-31'')'),
-    '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS generic_custom_scan;
- generic_custom_scan 
----------------------
- t
-(1 row)
+EXPLAIN (VERBOSE, COSTS OFF) EXECUTE partition_read_date(DATE '1969-12-31');
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Aggregate
+   Output: jsonb_agg(id ORDER BY id)
+   ->  Sort
+         Output: id
+         Sort Key: range_date.id
+         ->  Custom Scan (lagodb-iceberg) on partitioned_reads.range_date
+               Output: id
+               Filter: (range_date.part_key = $1)
+               Scan Purpose: Read
+               Provider: lagodb-iceberg
+               Pushed Filter Conservative: (part_key = $1)
+(11 rows)
 
 EXECUTE partition_read_date(DATE '1969-12-31');
  jsonb_agg 

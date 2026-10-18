@@ -126,11 +126,12 @@ SELECT name, pg_temp.predicate_query_json(query) AS result
 FROM representation_cases;
 
 SET lagodb.query_offload_mode = 'force';
+SELECT format('EXPLAIN (COSTS OFF) %s', query)
+FROM representation_cases ORDER BY name
+\gexec
+
 SELECT name, result AS native_result,
-       pg_temp.predicate_query_json(query) IS NOT DISTINCT FROM result AS same_results,
-       jsonb_path_exists(pg_temp.predicate_query_json(
-           'EXPLAIN (COSTS OFF, FORMAT JSON) ' || query),
-           '$[0].Plan.** ? (@."Custom Plan Provider" == "LagoDB Query Offload")') AS offloaded
+       pg_temp.predicate_query_json(query) IS NOT DISTINCT FROM result AS same_results
 FROM representation_cases JOIN representation_results USING (name)
 ORDER BY name;
 

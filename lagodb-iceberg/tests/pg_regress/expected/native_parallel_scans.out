@@ -14,13 +14,15 @@ SET max_parallel_workers_per_gather = 2;
 SET parallel_setup_cost = 0;
 SET parallel_tuple_cost = 0;
 SET parallel_leader_participation = off;
--- Inspect stable execution properties without worker-specific row splits or memory sizes.
-CREATE FUNCTION pg_temp.native_parallel_plan(query text) RETURNS jsonb
+-- Use JSON for runtime statistics whose text includes variable worker
+-- row splits and memory sizes. Check stable plan shapes with plain EXPLAIN.
+CREATE FUNCTION pg_temp.native_parallel_analyze(query text) RETURNS jsonb
 LANGUAGE plpgsql AS $$
 DECLARE
     plan jsonb;
 BEGIN
-    EXECUTE query INTO plan;
+    EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) '
+            || query INTO plan;
     RETURN plan;
 END;
 $$;
@@ -36,23 +38,33 @@ INSERT INTO native_parallel_managed VALUES (2, 'two');
 INSERT INTO native_parallel_managed VALUES (3, 'three');
 -- This projected read has no pushed predicate. With leader participation
 -- disabled, a launched worker must attach DSM and execute the CustomScan.
-SELECT (gather->>'Workers Planned')::integer = 2 AS workers_planned,
-       (gather->>'Workers Launched')::integer > 0 AS worker_launched,
+EXPLAIN (COSTS OFF)
+SELECT id, payload
+FROM native_parallel_managed
+ORDER BY id;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Custom Scan (lagodb-iceberg) on native_parallel_managed
+(5 rows)
+
+SELECT (gather->>'Workers Launched')::integer > 0 AS worker_launched,
        (gather->>'Actual Rows')::bigint = 3 AS gather_rows_ok,
-       (scan->>'Parallel Aware')::boolean AS parallel_scan,
        jsonb_path_exists(scan, '$.Workers[*] ? (@."Actual Rows" > 0)') AS worker_scanned_rows
-FROM pg_temp.native_parallel_plan(
-    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-     SELECT id, payload
+FROM pg_temp.native_parallel_analyze(
+    'SELECT id, payload
      FROM native_parallel_managed
      ORDER BY id') AS document(plan)
 CROSS JOIN LATERAL jsonb_path_query_first(plan,
     '$[0].Plan.** ? (@."Node Type" == "Gather" || @."Node Type" == "Gather Merge")') AS gathers(gather)
 CROSS JOIN LATERAL jsonb_path_query_first(plan,
     '$[0].Plan.** ? (@."Node Type" == "Custom Scan")') AS scans(scan);
- workers_planned | worker_launched | gather_rows_ok | parallel_scan | worker_scanned_rows 
------------------+-----------------+----------------+---------------+---------------------
- t               | t               | t              | t             | t
+ worker_launched | gather_rows_ok | worker_scanned_rows 
+-----------------+----------------+---------------------
+ t               | t              | t
 (1 row)
 
 SELECT id, payload
@@ -93,15 +105,16 @@ SELECT id, id, (SELECT string_agg(md5(id::text || ':' || part::text), '')
                FROM generate_series(1, 32) AS part)
 FROM generate_series(1, 64) AS id;
 ANALYZE native_parallel_root;
+-- Check the root's parallel and exact-filter contracts in the same runtime
+-- result; its planned worker count follows physical page estimates.
 SELECT coalesce((gather->>'Workers Launched')::integer, 0) >= 1 AS worker_launched,
        (gather->>'Actual Rows')::bigint IS NOT DISTINCT FROM 63 AS gather_rows_ok,
        (scan->>'Parallel Aware')::boolean IS NOT DISTINCT FROM true AS parallel_aware,
        coalesce(jsonb_path_exists(scan, '$.Workers[*] ? (@."Actual Rows" > 0)'), false) AS worker_scanned_rows,
        (scan->>'Data Files Selected')::bigint = 63 AS files_selected_ok,
        coalesce(strpos(scan #>> '{LagoDB Pushdown,Pushed Filter Exact}', 'region >= 2'), 0) > 0 AS filter_pushed
-FROM pg_temp.native_parallel_plan(
-    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-     SELECT id FROM native_parallel_root WHERE region >= 2 ORDER BY id'
+FROM pg_temp.native_parallel_analyze(
+    'SELECT id FROM native_parallel_root WHERE region >= 2 ORDER BY id'
 ) AS document(plan)
 CROSS JOIN LATERAL jsonb_path_query_first(plan,
     '$[0].Plan.** ? (@."Node Type" == "Gather" || @."Node Type" == "Gather Merge")') AS gathers(gather)
@@ -146,15 +159,26 @@ SERVER native_parallel_rest
 OPTIONS (
     table 'fdw_reads.filter_rows_v2'
 );
-SELECT (gather->>'Workers Planned')::integer = 2 AS workers_planned,
-       (gather->>'Workers Launched')::integer > 0 AS worker_launched,
+EXPLAIN (COSTS OFF)
+SELECT id, payload
+FROM native_parallel_fdw.filters
+WHERE id >= 2
+ORDER BY id;
+                  QUERY PLAN                  
+----------------------------------------------
+ Gather Merge
+   Workers Planned: 2
+   ->  Sort
+         Sort Key: id
+         ->  Parallel Foreign Scan on filters
+               Pushed Filter: id >= 2
+(6 rows)
+
+SELECT (gather->>'Workers Launched')::integer > 0 AS worker_launched,
        (gather->>'Actual Rows')::bigint = 3 AS gather_rows_ok,
-       (scan->>'Parallel Aware')::boolean AS parallel_scan,
-       jsonb_path_exists(scan, '$.Workers[*] ? (@."Actual Rows" > 0)') AS worker_scanned_rows,
-       strpos(scan #>> '{LagoDB Pushdown,Pushed Filter Exact}', 'id >= 2') > 0 AS filter_pushed
-FROM pg_temp.native_parallel_plan(
-    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-     SELECT id, payload
+       jsonb_path_exists(scan, '$.Workers[*] ? (@."Actual Rows" > 0)') AS worker_scanned_rows
+FROM pg_temp.native_parallel_analyze(
+    'SELECT id, payload
      FROM native_parallel_fdw.filters
      WHERE id >= 2
      ORDER BY id') AS document(plan)
@@ -162,9 +186,9 @@ CROSS JOIN LATERAL jsonb_path_query_first(plan,
     '$[0].Plan.** ? (@."Node Type" == "Gather" || @."Node Type" == "Gather Merge")') AS gathers(gather)
 CROSS JOIN LATERAL jsonb_path_query_first(plan,
     '$[0].Plan.** ? (@."Node Type" == "Foreign Scan")') AS scans(scan);
- workers_planned | worker_launched | gather_rows_ok | parallel_scan | worker_scanned_rows | filter_pushed 
------------------+-----------------+----------------+---------------+---------------------+---------------
- t               | t               | t              | t             | t                   | t
+ worker_launched | gather_rows_ok | worker_scanned_rows 
+-----------------+----------------+---------------------
+ t               | t              | t
 (1 row)
 
 SELECT id, payload
@@ -193,16 +217,26 @@ ORDER BY id;
 SET max_parallel_workers_per_gather = 2;
 -- A PostgreSQL-only expression remains a residual Filter on the parallel
 -- ForeignScan; no storage predicate is invented or lost in the worker.
-SELECT (gather->>'Workers Planned')::integer = 2 AS workers_planned,
-       (gather->>'Workers Launched')::integer > 0 AS worker_launched,
+EXPLAIN (COSTS OFF)
+SELECT id, payload
+FROM native_parallel_fdw.filters
+WHERE length(payload) > 0
+ORDER BY id;
+                  QUERY PLAN                  
+----------------------------------------------
+ Gather Merge
+   Workers Planned: 2
+   ->  Sort
+         Sort Key: id
+         ->  Parallel Foreign Scan on filters
+               Filter: (length(payload) > 0)
+(6 rows)
+
+SELECT (gather->>'Workers Launched')::integer > 0 AS worker_launched,
        (gather->>'Actual Rows')::bigint = 3 AS gather_rows_ok,
-       (scan->>'Parallel Aware')::boolean AS parallel_scan,
-       jsonb_path_exists(scan, '$.Workers[*] ? (@."Actual Rows" > 0)') AS worker_scanned_rows,
-       scan ? 'Filter' AS residual_filter,
-       NOT (scan ? 'LagoDB Pushdown') AS no_pushdown
-FROM pg_temp.native_parallel_plan(
-    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-     SELECT id, payload
+       jsonb_path_exists(scan, '$.Workers[*] ? (@."Actual Rows" > 0)') AS worker_scanned_rows
+FROM pg_temp.native_parallel_analyze(
+    'SELECT id, payload
      FROM native_parallel_fdw.filters
      WHERE length(payload) > 0
      ORDER BY id') AS document(plan)
@@ -210,9 +244,9 @@ CROSS JOIN LATERAL jsonb_path_query_first(plan,
     '$[0].Plan.** ? (@."Node Type" == "Gather" || @."Node Type" == "Gather Merge")') AS gathers(gather)
 CROSS JOIN LATERAL jsonb_path_query_first(plan,
     '$[0].Plan.** ? (@."Node Type" == "Foreign Scan")') AS scans(scan);
- workers_planned | worker_launched | gather_rows_ok | parallel_scan | worker_scanned_rows | residual_filter | no_pushdown 
------------------+-----------------+----------------+---------------+---------------------+-----------------+-------------
- t               | t               | t              | t             | t                   | t               | t
+ worker_launched | gather_rows_ok | worker_scanned_rows 
+-----------------+----------------+---------------------
+ t               | t              | t
 (1 row)
 
 SELECT id, payload
@@ -252,9 +286,8 @@ SET max_parallel_workers_per_gather = 2;
 -- Confirm that the worker, rather than a serial fallback, binds schema_id.
 SELECT (gather->>'Workers Launched')::integer > 0 AS worker_launched,
        jsonb_path_exists(scan, '$.Workers[*] ? (@."Actual Rows" > 0)') AS worker_scanned_rows
-FROM pg_temp.native_parallel_plan(
-    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-     SELECT id, body FROM native_parallel_fdw.historical
+FROM pg_temp.native_parallel_analyze(
+    'SELECT id, body FROM native_parallel_fdw.historical
      WHERE body >= ''one'' ORDER BY id') AS document(plan)
 CROSS JOIN LATERAL jsonb_path_query_first(plan,
     '$[0].Plan.** ? (@."Node Type" == "Gather" || @."Node Type" == "Gather Merge")') AS gathers(gather)
@@ -280,61 +313,78 @@ CREATE FOREIGN TABLE native_parallel_fdw.filters_alias ()
 SERVER native_parallel_rest
 OPTIONS (table 'fdw_reads.filter_rows_v2', schema_id '0');
 SET enable_material = off;
-SET enable_hashagg = off;
 PREPARE native_cached_gather AS
 SELECT count(*), sum(id) FROM native_parallel_fdw.filters WHERE id >= 2;
 PREPARE native_cached_merge AS
-SELECT v.n, s.id, s.copies
-FROM (SELECT id, count(*) AS copies FROM native_parallel_fdw.filters
-      WHERE id >= 2 GROUP BY id ORDER BY id) s
+SELECT v.n, s.id
+FROM (SELECT id FROM native_parallel_fdw.filters
+      WHERE id >= 2 ORDER BY id) s
 RIGHT JOIN (VALUES (1), (2)) v(n) ON true
 ORDER BY v.n, s.id;
-SELECT jsonb_path_exists(plan, '$[0].Plan.** ? (@."Node Type" == "Gather")') AS cached_gather
-FROM pg_temp.native_parallel_plan(
-    'EXPLAIN (COSTS OFF, FORMAT JSON) EXECUTE native_cached_gather') AS document(plan);
- cached_gather 
----------------
- t
-(1 row)
+EXPLAIN (COSTS OFF) EXECUTE native_cached_gather;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Finalize Aggregate
+   ->  Gather
+         Workers Planned: 2
+         ->  Partial Aggregate
+               ->  Parallel Foreign Scan on filters
+                     Pushed Filter: id >= 2
+(6 rows)
 
-SELECT jsonb_path_exists(plan, '$[0].Plan.** ? (@."Node Type" == "Gather Merge")') AS cached_merge
-FROM pg_temp.native_parallel_plan(
-    'EXPLAIN (COSTS OFF, FORMAT JSON) EXECUTE native_cached_merge') AS document(plan);
- cached_merge 
---------------
- t
-(1 row)
+EXPLAIN (COSTS OFF) EXECUTE native_cached_merge;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Sort
+   Sort Key: "*VALUES*".column1, filters.id
+   ->  Nested Loop Left Join
+         ->  Values Scan on "*VALUES*"
+         ->  Gather Merge
+               Workers Planned: 2
+               ->  Sort
+                     Sort Key: filters.id
+                     ->  Parallel Foreign Scan on filters
+                           Pushed Filter: id >= 2
+(10 rows)
 
 BEGIN;
 SAVEPOINT before_foreign_write;
 -- The schema_id alias writes the same identity observed by the cached scans.
 INSERT INTO native_parallel_fdw.filters_alias VALUES (5, 'five', DATE '2024-01-05');
 -- New plans exclude workers for both aliases, but not for an untouched table.
-SELECT NOT jsonb_path_exists(source, '$[0].Plan.** ? (@."Parallel Aware" == true)') AS source_serial,
-       NOT jsonb_path_exists(alias, '$[0].Plan.** ? (@."Parallel Aware" == true)') AS alias_serial,
-       jsonb_path_exists(other, '$[0].Plan.** ? (@."Parallel Aware" == true)') AS other_parallel
-FROM pg_temp.native_parallel_plan(
-    'EXPLAIN (COSTS OFF, FORMAT JSON) SELECT id FROM native_parallel_fdw.filters') AS a(source),
-     pg_temp.native_parallel_plan(
-    'EXPLAIN (COSTS OFF, FORMAT JSON) SELECT id FROM native_parallel_fdw.filters_alias') AS b(alias),
-     pg_temp.native_parallel_plan(
-    'EXPLAIN (COSTS OFF, FORMAT JSON) SELECT id FROM native_parallel_fdw.historical') AS c(other);
- source_serial | alias_serial | other_parallel 
----------------+--------------+----------------
- t             | t            | t
+EXPLAIN (COSTS OFF) SELECT id FROM native_parallel_fdw.filters;
+       QUERY PLAN        
+-------------------------
+ Foreign Scan on filters
 (1 row)
 
--- Cached plans retain Gather, but run on the leader with participation off.
-SELECT (gather->>'Workers Launched')::integer IS NOT DISTINCT FROM 0 AS zero_workers
-FROM pg_temp.native_parallel_plan(
-    'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-     EXECUTE native_cached_gather') AS document(plan)
-CROSS JOIN LATERAL jsonb_path_query_first(plan,
-    '$[0].Plan.** ? (@."Node Type" == "Gather")') AS nodes(gather);
- zero_workers 
---------------
- t
+EXPLAIN (COSTS OFF) SELECT id FROM native_parallel_fdw.filters_alias;
+          QUERY PLAN           
+-------------------------------
+ Foreign Scan on filters_alias
 (1 row)
+
+EXPLAIN (COSTS OFF) SELECT id FROM native_parallel_fdw.historical;
+                QUERY PLAN                 
+-------------------------------------------
+ Gather
+   Workers Planned: 2
+   ->  Parallel Foreign Scan on historical
+(3 rows)
+
+-- Cached plans retain Gather, but run on the leader with participation off.
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXECUTE native_cached_gather;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Finalize Aggregate (actual rows=1 loops=1)
+   ->  Gather (actual rows=1 loops=1)
+         Workers Planned: 2
+         Workers Launched: 0
+         ->  Partial Aggregate (actual rows=1 loops=1)
+               ->  Parallel Foreign Scan on filters (actual rows=4 loops=1)
+                     Pushed Filter: id >= 2
+(7 rows)
 
 EXECUTE native_cached_gather;
  count | sum 
@@ -345,9 +395,8 @@ EXECUTE native_cached_gather;
 -- The inner Gather Merge is initialized, shut down, and reinitialized.
 SELECT (gather->>'Workers Launched')::integer IS NOT DISTINCT FROM 0 AS zero_workers,
        (gather->>'Actual Loops')::integer IS NOT DISTINCT FROM 2 AS rescanned
-FROM pg_temp.native_parallel_plan(
-    'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-     EXECUTE native_cached_merge') AS document(plan)
+FROM pg_temp.native_parallel_analyze(
+    'EXECUTE native_cached_merge') AS document(plan)
 CROSS JOIN LATERAL jsonb_path_query_first(plan,
     '$[0].Plan.** ? (@."Node Type" == "Gather Merge")') AS nodes(gather);
  zero_workers | rescanned 
@@ -356,27 +405,27 @@ CROSS JOIN LATERAL jsonb_path_query_first(plan,
 (1 row)
 
 EXECUTE native_cached_merge;
- n | id | copies 
----+----+--------
- 1 |  2 |      1
- 1 |  3 |      1
- 1 |  4 |      1
- 1 |  5 |      1
- 2 |  2 |      1
- 2 |  3 |      1
- 2 |  4 |      1
- 2 |  5 |      1
+ n | id 
+---+----
+ 1 |  2
+ 1 |  3
+ 1 |  4
+ 1 |  5
+ 2 |  2
+ 2 |  3
+ 2 |  4
+ 2 |  5
 (8 rows)
 
 ROLLBACK TO SAVEPOINT before_foreign_write;
 -- Eligibility comes from the restored log, not a sticky modified flag.
-SELECT jsonb_path_exists(plan, '$[0].Plan.** ? (@."Parallel Aware" == true)') AS parallel_restored
-FROM pg_temp.native_parallel_plan(
-    'EXPLAIN (COSTS OFF, FORMAT JSON) SELECT id FROM native_parallel_fdw.filters_alias') AS document(plan);
- parallel_restored 
--------------------
- t
-(1 row)
+EXPLAIN (COSTS OFF) SELECT id FROM native_parallel_fdw.filters_alias;
+                  QUERY PLAN                  
+----------------------------------------------
+ Gather
+   Workers Planned: 2
+   ->  Parallel Foreign Scan on filters_alias
+(3 rows)
 
 EXECUTE native_cached_gather;
  count | sum 
@@ -387,14 +436,13 @@ EXECUTE native_cached_gather;
 ROLLBACK;
 DEALLOCATE native_cached_gather;
 DEALLOCATE native_cached_merge;
-RESET enable_hashagg;
 RESET enable_material;
 SET client_min_messages = warning;
 DROP SCHEMA native_parallel_fdw CASCADE;
 DROP SERVER native_parallel_rest CASCADE;
 RESET client_min_messages;
 DROP TABLE native_parallel_managed;
-DROP FUNCTION pg_temp.native_parallel_plan(text);
+DROP FUNCTION pg_temp.native_parallel_analyze(text);
 RESET parallel_leader_participation;
 RESET parallel_tuple_cost;
 RESET parallel_setup_cost;

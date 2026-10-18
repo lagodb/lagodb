@@ -441,17 +441,15 @@ FROM nanos_pg a FULL JOIN nanos_offload b USING (id);
 
 -- Nanosecond equality stays in PG even when some source values are aligned.
 -- Include values that decode to the same microsecond and the NULL row.
-SELECT jsonb_path_exists(pg_temp.foreign_analyze(
-    'SELECT count(DISTINCT ts), count(DISTINCT tz)
-     FROM query_offload_foreign.nanos'),
-    '$[0].Plan.** ? (@."Custom Plan Provider" == "LagoDB Query Offload")') AS count_distinct_offloaded;
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT ts), count(DISTINCT tz)
+FROM query_offload_foreign.nanos;
 
 SELECT count(DISTINCT ts) AS ts_count, count(DISTINCT tz) AS tz_count
 FROM query_offload_foreign.nanos;
 
-SELECT jsonb_path_exists(pg_temp.foreign_analyze(
-    'SELECT DISTINCT ts FROM query_offload_foreign.nanos'),
-    '$[0].Plan.** ? (@."Custom Plan Provider" == "LagoDB Query Offload")') AS distinct_offloaded;
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT ts FROM query_offload_foreign.nanos;
 
 SELECT count(*) AS distinct_rows
 FROM (SELECT DISTINCT ts FROM query_offload_foreign.nanos) AS timestamps;

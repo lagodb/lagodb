@@ -160,9 +160,7 @@ ORDER BY case_name, ordinal;
 SET plan_cache_mode = force_generic_plan;
 PREPARE partition_read_int(integer) AS
 SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.identity_int4 WHERE part_key = $1;
-SELECT jsonb_path_exists(pg_temp.partition_query_json(
-    'EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) EXECUTE partition_read_int(-7)'),
-    '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS generic_custom_scan;
+EXPLAIN (VERBOSE, COSTS OFF) EXECUTE partition_read_int(-7);
 
 EXECUTE partition_read_int(-7);
 
@@ -173,9 +171,7 @@ EXECUTE partition_read_int(NULL);
 DEALLOCATE partition_read_int;
 PREPARE partition_read_date(date) AS
 SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.range_date WHERE part_key = $1;
-SELECT jsonb_path_exists(pg_temp.partition_query_json(
-    'EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) EXECUTE partition_read_date(DATE ''1969-12-31'')'),
-    '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS generic_custom_scan;
+EXPLAIN (VERBOSE, COSTS OFF) EXECUTE partition_read_date(DATE '1969-12-31');
 
 EXECUTE partition_read_date(DATE '1969-12-31');
 

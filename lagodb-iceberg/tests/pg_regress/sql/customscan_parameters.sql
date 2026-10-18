@@ -955,25 +955,9 @@ SET lagodb.query_offload_mode = 'off';
 SET lagodb.customscan_mode = 'force';
 SET max_parallel_workers_per_gather = 0;
 
--- Expose stable EXPLAIN JSON fields as ordinary regression results.
-CREATE FUNCTION pg_temp.customscan_parameter_plan(query text) RETURNS jsonb
-LANGUAGE plpgsql AS $$
-DECLARE
-    plan jsonb;
-BEGIN
-    EXECUTE query INTO plan;
-    RETURN plan;
-END;
-$$;
-
-SELECT plan #>> '{0,Plan,Custom Plan Provider}' AS provider,
-       jsonb_path_exists(plan,
-           '$[0].Plan.** ? (@."Parent Relationship" == "InitPlan")') AS has_initplan
-FROM pg_temp.customscan_parameter_plan(
-    'EXPLAIN (COSTS OFF, FORMAT JSON)
-     SELECT id FROM customscan_null_param_lake
-     WHERE id = (SELECT max(value) FROM (VALUES (2), (3)) AS input(value))'
-) AS document(plan);
+EXPLAIN (COSTS OFF)
+SELECT id FROM customscan_null_param_lake
+WHERE id = (SELECT max(value) FROM (VALUES (2), (3)) AS input(value));
 
 SELECT id FROM customscan_null_param_lake
 WHERE id = (SELECT max(value) FROM (VALUES (2), (3)) AS input(value));
@@ -987,20 +971,13 @@ RETURNING id, payload;
 
 -- An empty outer initializes and ends the inner scan without starting it.
 TRUNCATE customscan_null_param_outer;
-SELECT scan->>'Custom Plan Provider' AS provider,
-       (scan->>'Actual Loops')::integer AS inner_loops
-FROM pg_temp.customscan_parameter_plan(
-    'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-     SELECT inner_rel.id FROM customscan_null_param_outer AS outer_rel
-     CROSS JOIN LATERAL (
-         SELECT id FROM customscan_null_param_lake
-         WHERE id = outer_rel.id OFFSET 0
-     ) AS inner_rel'
-) AS document(plan)
-CROSS JOIN LATERAL jsonb_path_query_first(plan,
-    '$[0].Plan.** ? (@."Custom Plan Provider" == "lagodb-iceberg")') AS scan;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT inner_rel.id FROM customscan_null_param_outer AS outer_rel
+CROSS JOIN LATERAL (
+    SELECT id FROM customscan_null_param_lake
+    WHERE id = outer_rel.id OFFSET 0
+) AS inner_rel;
 
-DROP FUNCTION pg_temp.customscan_parameter_plan(text);
 RESET max_parallel_workers_per_gather;
 RESET lagodb.customscan_mode;
 RESET lagodb.query_offload_mode;

@@ -352,6 +352,14 @@ CREATE TABLE ddl_child_ok (local_amount numeric) INHERITS (ddl_parent_ok) USING 
 INSERT INTO ddl_child_ok VALUES (10.5, 11.5);
 SELECT * FROM ONLY ddl_child_ok;
 
+-- Vector types expose element metadata but are not ordinary array codecs.
+CREATE TABLE ddl_int2vector (value int2vector) USING iceberg;
+CREATE DOMAIN ddl_vector_domain AS oidvector;
+CREATE TYPE ddl_vector_record AS (entries ddl_vector_domain[]);
+ALTER TABLE ddl_copied ADD COLUMN vector ddl_vector_record;
+DROP TYPE ddl_vector_record;
+DROP DOMAIN ddl_vector_domain;
+
 -- Reject a violated copied CHECK and unsupported DDL/type combinations.
 CREATE TABLE ddl_parent_numeric (amount numeric);
 CREATE DOMAIN ddl_unbounded_numeric AS numeric;

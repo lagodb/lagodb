@@ -147,26 +147,138 @@ CREATE TEMP TABLE representation_results AS
 SELECT name, pg_temp.predicate_query_json(query) AS result
 FROM representation_cases;
 SET lagodb.query_offload_mode = 'force';
+SELECT format('EXPLAIN (COSTS OFF) %s', query)
+FROM representation_cases ORDER BY name
+\gexec
+EXPLAIN (COSTS OFF) SELECT count(*) FROM query_predicates.scalars WHERE (CASE WHEN flag THEN payload ELSE fixed_payload END) IS NOT NULL
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Aggregate
+   ->  Foreign Scan on scalars
+         Filter: (CASE WHEN flag THEN payload ELSE fixed_payload END IS NOT NULL)
+(3 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM query_predicates.scalars WHERE coalesce(payload, fixed_payload) IS NOT NULL
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Aggregate
+   ->  Foreign Scan on scalars
+         Filter: (COALESCE(payload, fixed_payload) IS NOT NULL)
+(3 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM query_predicates.scalars a JOIN query_predicates.scalars b ON a.id = b.id WHERE a.fixed_payload = b.fixed_payload
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Hash Join
+               Join Type: Inner
+               Hash Cond: a.id = b.id
+               Join Filter: (a.fixed_payload = b.fixed_payload)
+               ->  Table Scan on scalars a
+                     Foreign Data Wrapper: lagodb_iceberg
+               ->  Table Scan on scalars b
+                     Foreign Data Wrapper: lagodb_iceberg
+(12 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM query_predicates.scalars WHERE fixed_payload = fixed_payload
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on scalars
+               Foreign Data Wrapper: lagodb_iceberg
+               Filter: (fixed_payload IS NOT NULL)
+               Pushed Filter: (fixed_payload IS NOT NULL)
+(8 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM query_predicates.scalars WHERE payload = fixed_payload
+                QUERY PLAN                 
+-------------------------------------------
+ Aggregate
+   ->  Foreign Scan on scalars
+         Filter: (payload = fixed_payload)
+(3 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM query_predicates.scalars a JOIN query_predicates.scalars b ON a.id = b.id WHERE a.payload = b.fixed_payload
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Aggregate
+   ->  Merge Join
+         Merge Cond: ((a.id = b.id) AND (a.payload = b.fixed_payload))
+         ->  Sort
+               Sort Key: a.id, a.payload
+               ->  Foreign Scan on scalars a
+         ->  Sort
+               Sort Key: b.id, b.fixed_payload
+               ->  Foreign Scan on scalars b
+(9 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FILTER (WHERE ts = TIMESTAMP '1970-01-01') FROM query_predicates.nanos
+         QUERY PLAN          
+-----------------------------
+ Aggregate
+   ->  Foreign Scan on nanos
+(2 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM query_predicates.nanos WHERE (CASE WHEN id = 6 THEN ts ELSE TIMESTAMP '1600-01-01' END) IS NOT NULL
+                                                        QUERY PLAN                                                         
+---------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   ->  Foreign Scan on nanos
+         Filter: (CASE WHEN (id = 6) THEN ts ELSE 'Sat Jan 01 00:00:00 1600'::timestamp without time zone END IS NOT NULL)
+(3 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM query_predicates.nanos WHERE coalesce(ts, TIMESTAMP '1600-01-01') IS NOT NULL
+                                             QUERY PLAN                                              
+-----------------------------------------------------------------------------------------------------
+ Aggregate
+   ->  Foreign Scan on nanos
+         Filter: (COALESCE(ts, 'Sat Jan 01 00:00:00 1600'::timestamp without time zone) IS NOT NULL)
+(3 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM query_predicates.nanos WHERE ts = TIMESTAMP '1970-01-01'
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Aggregate
+   ->  Foreign Scan on nanos
+         Filter: (ts = 'Thu Jan 01 00:00:00 1970'::timestamp without time zone)
+         Pushed Filter: ts = 'Thu Jan 01 00:00:00 1970'::timestamp without time zone
+(4 rows)
+
+EXPLAIN (COSTS OFF) SELECT count(*) FROM query_predicates.nanos WHERE coalesce(ts, ts) IS NULL
+                     QUERY PLAN                     
+----------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on nanos
+               Foreign Data Wrapper: lagodb_iceberg
+               Filter: (COALESCE(ts, ts) IS NULL)
+(7 rows)
+
 SELECT name, result AS native_result,
-       pg_temp.predicate_query_json(query) IS NOT DISTINCT FROM result AS same_results,
-       jsonb_path_exists(pg_temp.predicate_query_json(
-           'EXPLAIN (COSTS OFF, FORMAT JSON) ' || query),
-           '$[0].Plan.** ? (@."Custom Plan Provider" == "LagoDB Query Offload")') AS offloaded
+       pg_temp.predicate_query_json(query) IS NOT DISTINCT FROM result AS same_results
 FROM representation_cases JOIN representation_results USING (name)
 ORDER BY name;
-          name          | native_result | same_results | offloaded 
-------------------------+---------------+--------------+-----------
- binary_case            | 3             | t            | f
- binary_coalesce        | 3             | t            | f
- fixed_bytea_join       | 3             | t            | t
- fixed_columns          | 3             | t            | t
- mixed_bytea            | 2             | t            | f
- mixed_bytea_join       | 2             | t            | f
- nanos_aggregate_filter | 3             | t            | f
- nanos_case             | 9             | t            | f
- nanos_coalesce         | 9             | t            | f
- nanos_compare          | 3             | t            | f
- nanos_same_type        | 1             | t            | t
+          name          | native_result | same_results 
+------------------------+---------------+--------------
+ binary_case            | 3             | t
+ binary_coalesce        | 3             | t
+ fixed_bytea_join       | 3             | t
+ fixed_columns          | 3             | t
+ mixed_bytea            | 2             | t
+ mixed_bytea_join       | 2             | t
+ nanos_aggregate_filter | 3             | t
+ nanos_case             | 9             | t
+ nanos_coalesce         | 9             | t
+ nanos_compare          | 3             | t
+ nanos_same_type        | 1             | t
 (11 rows)
 
 DROP TABLE representation_cases, representation_results;

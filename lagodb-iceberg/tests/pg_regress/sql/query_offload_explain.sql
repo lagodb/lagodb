@@ -200,7 +200,7 @@ SELECT count(*) FILTER (WHERE random() >= 0)
 FROM query_offload_explain_left;
 
 -- Runtime filter diagnostics must use complete binding expressions and the
--- scan's PlannerInfo scope. Reuse the JSON adapter and join fixtures above.
+-- scan's PlannerInfo scope. Reuse the join fixtures above.
 
 -- varchar -> text is a binary-compatible RelabelType around the generic
 -- Param. Both the display binding and execution retain that boundary.
@@ -209,14 +209,7 @@ INSERT INTO query_offload_explain_labels VALUES ('east'), ('west'), ('east');
 SET plan_cache_mode = force_generic_plan;
 PREPARE query_offload_explain_relabel (varchar) AS
 SELECT count(*) FROM query_offload_explain_labels WHERE label = $1;
-SELECT plan #>> '{0,Plan,Custom Plan Provider}' AS provider,
-       jsonb_path_query_first(plan,
-           '$[0].Plan.** ? (@."Node Type" == "Table Scan")')->>'Filter'
-           LIKE '%$1%' AS has_binding
-FROM query_offload_explain_json(
-    'VERBOSE, COSTS OFF',
-    'EXECUTE query_offload_explain_relabel(''east'')'
-) AS document(plan);
+EXPLAIN (VERBOSE, COSTS OFF) EXECUTE query_offload_explain_relabel('east');
 EXECUTE query_offload_explain_relabel('east');
 EXECUTE query_offload_explain_relabel(NULL);
 DEALLOCATE query_offload_explain_relabel;
@@ -233,13 +226,7 @@ WHERE l.id >= $1 AND l.id NOT IN (
     SELECT scoped.id FROM query_offload_explain_left AS scoped
     WHERE scoped.id > $1
 ) ORDER BY l.id;
-SELECT (scan->>'Filter') LIKE '%id > $2%' AS scoped_filter,
-       (scan->>'Pushed Filter Conservative') LIKE '%id > $2%' AS scoped_pruning
-FROM query_offload_explain_json(
-    'VERBOSE, COSTS OFF', 'EXECUTE query_offload_explain_scoped(2)'
-) AS document(plan)
-CROSS JOIN LATERAL jsonb_path_query_first(plan,
-    '$[0].Plan.** ? (@."Node Type" == "Table Scan" && @."Alias" == "scoped")') AS scan;
+EXPLAIN (VERBOSE, COSTS OFF) EXECUTE query_offload_explain_scoped(2);
 EXECUTE query_offload_explain_scoped(2);
 EXECUTE query_offload_explain_scoped(1);
 DEALLOCATE query_offload_explain_scoped;

@@ -66,7 +66,7 @@ and isolation terminology follows the
 | Transactions and isolation | Statement-level Iceberg metadata visibility under `READ COMMITTED`, read-your-own-writes, commit, rollback, and savepoints | `SERIALIZABLE` currently strengthens Iceberg write-conflict validation but does not yet provide full PostgreSQL SSI semantics. `REPEATABLE READ` is not supported. |
 | Schema evolution | `ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN`, and `DROP NOT NULL` | Other `ALTER TABLE` schema changes are rejected. |
 | Storage & Volumes | Local filesystem and S3-compatible object storage through storage volumes | S3-compatible storage has repository end-to-end coverage. GCS and Azure providers exist but remain experimental. |
-| Partitioned tables | PostgreSQL declarative partitioning with partition-routed `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and `COPY` | Each Iceberg leaf is managed as its own relation. |
+| Partitioned tables | PostgreSQL partitioned table syntax with support for `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and `COPY` | Stored as a single partitioned Iceberg table. |
 | Scan optimization | Predicate pushdown plus Iceberg file and Parquet row-group pruning for supported expressions | PostgreSQL retains residual predicates when required for correctness; some comparisons are deliberately not pushed when semantics could differ. |
 | Maintenance | `VACUUM`, `VACUUM FULL`, and scheduled automatic Iceberg maintenance | Maintenance remains subject to operational limits while the project is under development. |
 

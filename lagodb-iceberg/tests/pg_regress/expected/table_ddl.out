@@ -444,6 +444,17 @@ SELECT * FROM ONLY ddl_child_ok;
    10.5 |         11.5
 (1 row)
 
+-- Vector types expose element metadata but are not ordinary array codecs.
+CREATE TABLE ddl_int2vector (value int2vector) USING iceberg;
+ERROR:  column 'int2vector' data type is not supported
+DETAIL:  while running utility hook 'iceberg table options' in post-success phase for T_CreateStmt
+CREATE DOMAIN ddl_vector_domain AS oidvector;
+CREATE TYPE ddl_vector_record AS (entries ddl_vector_domain[]);
+ALTER TABLE ddl_copied ADD COLUMN vector ddl_vector_record;
+ERROR:  column 'oidvector' data type is not supported
+DETAIL:  while running utility hook 'iceberg alter table DDL guard' in post-success phase for T_AlterTableStmt
+DROP TYPE ddl_vector_record;
+DROP DOMAIN ddl_vector_domain;
 -- Reject a violated copied CHECK and unsupported DDL/type combinations.
 CREATE TABLE ddl_parent_numeric (amount numeric);
 CREATE DOMAIN ddl_unbounded_numeric AS numeric;

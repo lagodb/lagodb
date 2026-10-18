@@ -396,24 +396,45 @@ SELECT value FROM storage_label_direct ORDER BY value;
 DROP TABLE storage_label_direct;
 
 -- A heap dependency alone does not restrict native enum DDL.
+-- Inspect locks before COMMIT can release them automatically.
+BEGIN;
 ALTER TYPE storage_label RENAME VALUE 'red' TO 'scarlet';
+SELECT NOT EXISTS (
+    SELECT FROM pg_locks
+    WHERE pid = pg_backend_pid()
+      AND relation = 'storage_label_heap'::regclass
+      AND mode = 'AccessShareLock'
+) AS inspection_lock_released;
+COMMIT;
 SELECT value FROM storage_label_heap;
 CREATE DOMAIN storage_label_domain AS storage_label;
 CREATE TYPE storage_label_record AS (labels storage_label_domain[]);
-CREATE TABLE storage_label_nested (records storage_label_record[]) USING iceberg;
-INSERT INTO storage_label_nested VALUES (
-    ARRAY[ROW(ARRAY['scarlet'::storage_label_domain, NULL])::storage_label_record, NULL]
-);
+CREATE DOMAIN storage_label_records AS storage_label_record[];
+ALTER TABLE storage_label_heap ADD COLUMN records storage_label_records;
+UPDATE storage_label_heap SET records =
+    ARRAY[ROW(ARRAY[value::storage_label_domain, NULL])::storage_label_record, NULL];
+CREATE TABLE storage_label_nested (records storage_label_records) USING iceberg;
+INSERT INTO storage_label_nested SELECT records FROM storage_label_heap;
+-- One case for each object-access event, through a domain over a composite array.
+\set VERBOSITY terse
+ALTER TYPE storage_label_record ADD ATTRIBUTE extra integer;
+ALTER TYPE storage_label_record DROP ATTRIBUTE labels;
+ALTER TYPE storage_label_record RENAME ATTRIBUTE labels TO renamed_labels;
+\set VERBOSITY default
 ALTER TYPE storage_label RENAME VALUE 'scarlet' TO 'crimson';
 SELECT (records[1]).labels AS labels FROM storage_label_nested;
 DROP TABLE storage_label_nested;
 
--- Unused domain/composite types do not prevent a rename either.
+-- Ordinary stored columns permit attribute DDL after managed dependencies go away.
+ALTER TYPE storage_label_record ADD ATTRIBUTE extra integer;
+ALTER TYPE storage_label_record DROP ATTRIBUTE extra;
+ALTER TYPE storage_label_record RENAME ATTRIBUTE labels TO renamed_labels;
 ALTER TYPE storage_label RENAME VALUE 'scarlet' TO 'crimson';
-SELECT value FROM storage_label_heap;
+SELECT value, (records[1]).renamed_labels AS labels FROM storage_label_heap;
+DROP TABLE storage_label_heap;
+DROP DOMAIN storage_label_records;
 DROP TYPE storage_label_record;
 DROP DOMAIN storage_label_domain;
-DROP TABLE storage_label_heap;
 DROP TYPE storage_label;
 
 DROP EXTENSION lagodb_iceberg CASCADE;
