@@ -1,5 +1,5 @@
 //! Backend tests for the read path that decodes an Arrow column batch straight
-//! into a tuple slot: `ArrowColumnDecoder` writing through `SlotColumns`, plus
+//! into a tuple slot: `ArrowColumnDecoder` writing through `SlotDatumWriter`, plus
 //! the slot-non-empty / memory-context discipline the core scan shim relies on.
 //!
 //! These need a live PostgreSQL backend because datum construction for the
@@ -26,15 +26,14 @@ mod tests {
         resolve_cell_rule,
     };
     use lagodb_core::batch::{BatchRowCursor, BatchRowDecoder};
+    use lagodb_core::datum::{BoundColumnDatumCodec, ColumnDatumTarget, PgType};
     use lagodb_core::handles::ScanDirection;
-    use lagodb_core::tuple::{
-        ColumnDatumCodec, ColumnDatumTarget, PgType, SlotColumns,
-    };
+    use lagodb_core::tuple::SlotDatumWriter;
     use pgrx::prelude::*;
     use pgrx::{FromDatum, datum::Uuid, pg_sys};
 
     /// A virtual slot whose tuple descriptor carries one column per `oids`
-    /// entry. The values/isnull arrays are PG-owned, so `SlotColumns` writes
+    /// entry. The values/isnull arrays are PG-owned, so `SlotDatumWriter` writes
     /// through the same pointers the real scan path uses.
     unsafe fn make_slot(oids: &[pg_sys::Oid]) -> *mut pg_sys::TupleTableSlot {
         unsafe {
@@ -224,7 +223,7 @@ mod tests {
         unsafe {
             let slot = make_slot(&oids);
 
-            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
+            let mut cols = SlotDatumWriter::new(slot, pg_sys::CurrentMemoryContext);
             decoder
                 .write_row(&bound, 0, &mut cols)
                 .expect("decode value row");
@@ -266,7 +265,7 @@ mod tests {
             );
 
             // The NULL row marks every mapped position SQL NULL.
-            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
+            let mut cols = SlotDatumWriter::new(slot, pg_sys::CurrentMemoryContext);
             decoder
                 .write_row(&bound, 1, &mut cols)
                 .expect("decode null row");
@@ -321,7 +320,7 @@ mod tests {
             }
 
             let bound = decoder.bind(batch).expect("bind");
-            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
+            let mut cols = SlotDatumWriter::new(slot, pg_sys::CurrentMemoryContext);
             decoder.write_row(&bound, 0, &mut cols).expect("decode");
 
             assert_eq!(read::<i32>(slot, 0), Some(10));
@@ -369,7 +368,7 @@ mod tests {
             // Mirror the shim: switch the current context to tmp_ctx so the
             // varlena palloc lands there, then decode.
             let prior = pg_sys::MemoryContextSwitchTo(tmp_ctx);
-            let mut cols = SlotColumns::new(slot, tmp_ctx);
+            let mut cols = SlotDatumWriter::new(slot, tmp_ctx);
             decoder
                 .write_row(&bound, 0, &mut cols)
                 .expect("decode first");
@@ -389,7 +388,7 @@ mod tests {
             pg_sys::MemoryContextReset(tmp_ctx);
 
             let prior = pg_sys::MemoryContextSwitchTo(tmp_ctx);
-            let mut cols = SlotColumns::new(slot, tmp_ctx);
+            let mut cols = SlotDatumWriter::new(slot, tmp_ctx);
             decoder
                 .write_row(&bound, 1, &mut cols)
                 .expect("decode after reset");
@@ -427,7 +426,7 @@ mod tests {
             // Produced row: clear, decode, store.
             pg_sys::ExecClearTuple(slot);
             assert!(is_empty(slot), "slot is empty before a row is produced");
-            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
+            let mut cols = SlotDatumWriter::new(slot, pg_sys::CurrentMemoryContext);
             assert!(
                 cursor
                     .next_into_slot(ScanDirection::Forward, &mut cols)
@@ -439,7 +438,7 @@ mod tests {
 
             // End of scan: clear, decode returns false, no store.
             pg_sys::ExecClearTuple(slot);
-            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
+            let mut cols = SlotDatumWriter::new(slot, pg_sys::CurrentMemoryContext);
             assert!(
                 !cursor
                     .next_into_slot(ScanDirection::Forward, &mut cols)
@@ -514,7 +513,7 @@ mod tests {
             let bound = decoder.bind(batch).expect("bind");
 
             // Row 0: populated lists.
-            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
+            let mut cols = SlotDatumWriter::new(slot, pg_sys::CurrentMemoryContext);
             decoder
                 .write_row(&bound, 0, &mut cols)
                 .expect("decode row 0");
@@ -528,7 +527,7 @@ mod tests {
             );
 
             // Row 1: NULL list cells.
-            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
+            let mut cols = SlotDatumWriter::new(slot, pg_sys::CurrentMemoryContext);
             decoder
                 .write_row(&bound, 1, &mut cols)
                 .expect("decode row 1");
@@ -536,7 +535,7 @@ mod tests {
             assert!(is_null(slot, 1), "NULL text[] cell");
 
             // Row 2: present-but-empty lists decode to empty arrays, not NULL.
-            let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
+            let mut cols = SlotDatumWriter::new(slot, pg_sys::CurrentMemoryContext);
             decoder
                 .write_row(&bound, 2, &mut cols)
                 .expect("decode row 2");
@@ -579,7 +578,8 @@ mod tests {
                 let bound =
                     decoder.bind(batch_of(vec![array.clone()])).expect("bind");
                 let slot = make_slot(&[array_oid]);
-                let mut cols = SlotColumns::new(slot, pg_sys::CurrentMemoryContext);
+                let mut cols =
+                    SlotDatumWriter::new(slot, pg_sys::CurrentMemoryContext);
                 decoder.write_row(&bound, 0, &mut cols).expect("write_row");
                 let direct = read::<T>(slot, 0);
 
@@ -590,9 +590,10 @@ mod tests {
                     .read_cell_unchecked(0)
                     .expect("read_cell_unchecked")
                     .expect("present cell");
-                let codec =
-                    ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(array_oid))
-                        .expect("bind cell datum codec");
+                let codec = BoundColumnDatumCodec::bind(ColumnDatumTarget::from_oid(
+                    array_oid,
+                ))
+                .expect("bind cell datum codec");
                 let via_cell = codec.cell_to_datum(cell).expect("cell to datum");
                 assert_eq!(
                     direct,
@@ -691,7 +692,7 @@ mod tests {
             // The list's element type comes from the rule's bound elem_oid;
             // the standard array codec still binds the destination array OID.
             let target =
-                ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(target_oid))
+                BoundColumnDatumCodec::bind(ColumnDatumTarget::from_oid(target_oid))
                     .expect("bind standard array datum codec");
             unsafe { reader.read_datum_unchecked(0, target) }
                 .expect("read_datum_unchecked")

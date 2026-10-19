@@ -5,6 +5,7 @@ mod boolean;
 mod codec;
 mod comparison;
 pub(crate) mod contract;
+mod decimal128;
 pub(crate) mod execution;
 pub mod explain;
 mod integer_widening;

@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use lagodb_arrow::BoundWriteBuffer;
 use lagodb_core::batch::BatchBuffer;
+use lagodb_core::datum::PgType;
 use lagodb_core::handles::RelationHandle;
-use lagodb_core::tuple::{PgType, TupleSlotRow};
+use lagodb_core::tuple::TupleSlotRow;
 
 use crate::error::ConnectorError;
 use crate::fdw::format_adapters::FormatWriteState;

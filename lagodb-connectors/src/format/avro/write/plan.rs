@@ -1,11 +1,11 @@
 //! Avro schema construction and PostgreSQL-to-Avro field binding.
 
 use apache_avro::Schema;
-use lagodb_core::handles::RelationColumn;
-use lagodb_core::tuple::{
+use lagodb_core::datum::{
     ColumnDatumTarget, DatumConversionError, Decimal128NumericCodec,
     numeric_precision_scale,
 };
+use lagodb_core::handles::RelationColumn;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

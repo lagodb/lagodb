@@ -1,7 +1,8 @@
 //! Native NDJSON Foreign Table INSERT writer.
 
+use lagodb_core::datum::BoundJsonObjectEncoder;
 use lagodb_core::handles::RelationHandle;
-use lagodb_core::tuple::{BoundJsonObjectEncoder, SlotDatumIndex, TupleSlotRow};
+use lagodb_core::tuple::{SlotDatumIndex, TupleSlotRow};
 
 use crate::error::ConnectorError;
 use crate::fdw::format_adapters::FormatWriteState;

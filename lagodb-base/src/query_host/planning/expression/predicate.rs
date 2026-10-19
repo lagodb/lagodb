@@ -1,10 +1,10 @@
 //! Exact lowering for PostgreSQL predicate leaves.
 
+use lagodb_core::datum::Utf8ServerEncoding;
 use lagodb_core::expr::pg::{PgConst, PgExprRef, PgNullTestKind, PgPredicateLeafRef};
 use lagodb_core::expr::{
     ExprType, PgComparisonOp, PgNanComparison, PgTextComparisonSemantics,
 };
-use lagodb_core::tuple::Utf8ServerEncoding;
 use lagodb_query::plan::{ExecutionExpr, ScalarFunctionKind};
 use pgrx::pg_sys;
 

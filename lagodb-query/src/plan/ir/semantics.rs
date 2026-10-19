@@ -1,14 +1,14 @@
 //! Scalar domains admitted by query planning and lowering.
 
+use lagodb_core::datum::Utf8ServerEncoding;
 use lagodb_core::expr::ExprType;
 use lagodb_core::expr::{
     PgComparisonOp, PgComparisonSignature, PgTextComparisonSemantics,
 };
-use lagodb_core::tuple::Utf8ServerEncoding;
 use pgrx::pg_sys;
 
+pub use lagodb_core::datum::Decimal128Semantics;
 pub use lagodb_core::expr::PgComparisonKind as ComparisonKind;
-pub use lagodb_core::tuple::Decimal128Semantics;
 
 /// Query-layer scalar domains with distinct representation guarantees.
 ///

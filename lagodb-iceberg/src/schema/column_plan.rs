@@ -12,7 +12,7 @@ use iceberg_lite::spec::Schema as IcebergSchema;
 use lagodb_arrow::{
     ArrowColumnDecoder, BoundDatumPlan, BoundWriteColumnPlan, DecodedColumn,
 };
-use lagodb_core::tuple::PgType;
+use lagodb_core::datum::PgType;
 use pgrx::pg_sys;
 
 use super::arrow_type::{IcebergSchemaExt, SemanticArrowType};

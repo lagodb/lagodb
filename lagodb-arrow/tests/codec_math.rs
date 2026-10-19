@@ -2,7 +2,7 @@
 //! no PostgreSQL backend required.
 
 use lagodb_arrow::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};
-use lagodb_core::tuple::{PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
+use lagodb_core::datum::{PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
 
 // --- pg_epoch_days_to_unix_days ----------------------------------------------
 

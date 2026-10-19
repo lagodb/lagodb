@@ -6,9 +6,10 @@ use core::mem::MaybeUninit;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys;
 
+use crate::datum::Cell;
 use crate::diag::PgReportError;
 use crate::handles::ValidItemPointer;
-use crate::tuple::{Cell, PgDatumRef, TupleSlotRow};
+use crate::tuple::{PgDatumRef, TupleSlotRow};
 use crate::wrapper::PgWrapper;
 
 use super::contract::{ForeignModifyOperation, ForeignModifyOutcome};
@@ -160,7 +161,7 @@ impl<'slot> ModifySlot<'slot> {
     /// `index` must identify a live, non-dropped attribute in this slot's
     /// relation layout.
     /// A widened integer cell must retain its declared PG value domain, as
-    /// required by `ColumnDatumCodec::cell_to_datum`.
+    /// required by `BoundColumnDatumCodec::cell_to_datum`.
     pub unsafe fn set_cell(
         &mut self,
         index: usize,

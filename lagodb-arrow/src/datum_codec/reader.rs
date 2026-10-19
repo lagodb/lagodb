@@ -6,7 +6,7 @@ use arrow_array::{
     Int64Array, LargeBinaryArray, LargeStringArray, StringArray,
     Time64MicrosecondArray, TimestampMicrosecondArray, TimestampNanosecondArray,
 };
-use lagodb_core::tuple::{Cell, ColumnDatumCodec, Decimal128NumericCodec};
+use lagodb_core::datum::{BoundColumnDatumCodec, Cell, Decimal128NumericCodec};
 use pgrx::{datum::Uuid, pg_sys};
 
 use super::recursive_read::RecursiveDatumReader;
@@ -28,29 +28,29 @@ use crate::{ArrowConversionError, ArrowConversionResult, CellRule, DatumCodec};
 pub(crate) enum BoundDatumReader {
     Recursive(Box<RecursiveDatumReader>),
     NestedJsonb(Box<BoundNestedJsonb>),
-    Bool(BooleanArray, ColumnDatumCodec),
-    I16(Int16Array, ColumnDatumCodec),
-    I32(Int32Array, ColumnDatumCodec),
-    I64(Int64Array, ColumnDatumCodec),
-    F32(Float32Array, ColumnDatumCodec),
-    F64(Float64Array, ColumnDatumCodec),
-    Utf8(StringArray, ColumnDatumCodec),
-    LargeUtf8(LargeStringArray, ColumnDatumCodec),
-    Binary(BinaryArray, ColumnDatumCodec),
-    LargeBinary(LargeBinaryArray, ColumnDatumCodec),
-    FixedBinary(FixedSizeBinaryArray, ColumnDatumCodec),
-    Uuid(FixedSizeBinaryArray, ColumnDatumCodec),
-    Date32(Date32Array, ColumnDatumCodec),
-    Time64Micros(Time64MicrosecondArray, ColumnDatumCodec),
+    Bool(BooleanArray, BoundColumnDatumCodec),
+    I16(Int16Array, BoundColumnDatumCodec),
+    I32(Int32Array, BoundColumnDatumCodec),
+    I64(Int64Array, BoundColumnDatumCodec),
+    F32(Float32Array, BoundColumnDatumCodec),
+    F64(Float64Array, BoundColumnDatumCodec),
+    Utf8(StringArray, BoundColumnDatumCodec),
+    LargeUtf8(LargeStringArray, BoundColumnDatumCodec),
+    Binary(BinaryArray, BoundColumnDatumCodec),
+    LargeBinary(LargeBinaryArray, BoundColumnDatumCodec),
+    FixedBinary(FixedSizeBinaryArray, BoundColumnDatumCodec),
+    Uuid(FixedSizeBinaryArray, BoundColumnDatumCodec),
+    Date32(Date32Array, BoundColumnDatumCodec),
+    Time64Micros(Time64MicrosecondArray, BoundColumnDatumCodec),
     TimestampMicros {
         arr: TimestampMicrosecondArray,
         tz: bool,
-        target: ColumnDatumCodec,
+        target: BoundColumnDatumCodec,
     },
     TimestampNanos {
         arr: TimestampNanosecondArray,
         tz: bool,
-        target: ColumnDatumCodec,
+        target: BoundColumnDatumCodec,
     },
     Decimal128 {
         arr: Decimal128Array,
@@ -143,7 +143,7 @@ impl BoundDatumReader {
 
     fn from_standard(
         reader: ReaderImpl,
-        target: ColumnDatumCodec,
+        target: BoundColumnDatumCodec,
     ) -> ArrowConversionResult<Self> {
         Ok(match reader {
             ReaderImpl::Bool(array) => Self::Bool(array, target),

@@ -7,8 +7,8 @@ use lagodb_core::copy::{
     CopyColumnLayout, CopyDatumCoercion, CopyDatumSource, CopyError, CopyInputRow,
     CopyRowOutcome,
 };
+use lagodb_core::datum::PgType;
 use lagodb_core::diag::PgReportError;
-use lagodb_core::tuple::PgType;
 use pgrx::PgTryBuilder;
 
 use crate::error::ConnectorError;

@@ -8,7 +8,7 @@
 use std::ffi::c_char;
 use std::ptr;
 
-use lagodb_core::tuple::{ColumnDatumCodec, ColumnDatumTarget};
+use lagodb_core::datum::{BoundColumnDatumCodec, ColumnDatumTarget};
 use pgrx::{AnyNumeric, IntoDatum, pg_sys};
 
 use crate::error::{ArrowConversionError, ArrowConversionResult};
@@ -21,7 +21,7 @@ pub struct DatumCodec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DatumCodecKind {
-    Standard(ColumnDatumCodec),
+    Standard(BoundColumnDatumCodec),
     PrevalidatedJsonText,
     PostgresNumericVarlena,
     NumericFromInt64,
@@ -31,7 +31,7 @@ enum DatumCodecKind {
 impl DatumCodec {
     /// Bind the framework's standard semantic conversion for a destination OID.
     pub fn standard(oid: pg_sys::Oid) -> ArrowConversionResult<Self> {
-        let target = ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(oid))
+        let target = BoundColumnDatumCodec::bind(ColumnDatumTarget::from_oid(oid))
             .map_err(ArrowConversionError::from)?;
         Ok(Self {
             kind: DatumCodecKind::Standard(target),
@@ -97,7 +97,7 @@ impl DatumCodec {
         matches!(self.kind, DatumCodecKind::NumericFromFloat64)
     }
 
-    pub(crate) fn standard_target(self) -> Option<ColumnDatumCodec> {
+    pub(crate) fn standard_target(self) -> Option<BoundColumnDatumCodec> {
         match self.kind {
             DatumCodecKind::Standard(target) => Some(target),
             DatumCodecKind::PrevalidatedJsonText

@@ -14,7 +14,7 @@ mod write_scalar;
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, FieldRef};
-use lagodb_core::tuple::JsonbBuilder;
+use lagodb_core::datum::JsonbBuilder;
 
 use crate::{ArrowConversionResult, CellRule};
 use scalar::ScalarPlan;

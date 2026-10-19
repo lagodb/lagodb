@@ -6,8 +6,8 @@ use lagodb_core::copy::{
     CopyColumnLayout, CopyDatumSource, CopyError, CopyInputRow, CopyOutputRow,
     CopyRowOutcome, CopyTupleDestination,
 };
+use lagodb_core::datum::BoundJsonObjectEncoder;
 use lagodb_core::diag::PgReportError;
-use lagodb_core::tuple::BoundJsonObjectEncoder;
 use pgrx::PgTryBuilder;
 
 use crate::error::ConnectorError;

@@ -4,9 +4,9 @@ mod value;
 
 use iceberg_lite::expr::{Predicate, PredicateOperator};
 use iceberg_lite::spec::Datum;
+use lagodb_core::datum::Decimal128ComparisonValue;
 use lagodb_core::expr::pushdown::FilterBindResult;
 use lagodb_core::expr::{RuntimeValue, RuntimeValueBindings};
-use lagodb_core::tuple::Decimal128ComparisonValue;
 
 use super::IcebergPredicateBuilder;
 use super::error::IcebergFilterError;

@@ -9,7 +9,7 @@ use crate::handles::{
     AttrWidthsHandle, BufferAccessStrategyHandle, ItemPointer, RelationHandle,
     SnapshotHandle, TupleTableSlotHandle, VacuumParamsHandle, VarlenaHandle,
 };
-use crate::tuple::{Row, RowDatumCodec, TupleSlotWriter};
+use crate::tuple::{Row, RowDatumCodec, RowSlotWriter};
 use pgrx::prelude::*;
 
 #[pg_guard]
@@ -145,7 +145,7 @@ where
         let row_codec = RowDatumCodec::from_relation(rel)
             .map_err(PgReportError::from_domain_error)
             .report_unwrap();
-        TupleSlotWriter::new(slot, (*slot).tts_mcxt, &row_codec)
+        RowSlotWriter::new(slot, (*slot).tts_mcxt, &row_codec)
             .write_row(&mut row)
             .report_unwrap();
         (*slot).tts_tid = tid.to_pg_sys();

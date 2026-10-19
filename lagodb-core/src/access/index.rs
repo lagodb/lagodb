@@ -12,7 +12,7 @@ use crate::handles::{
     SnapshotHandle, TMIndexDeleteOpHandle, TableScanDescHandle,
     ValidateIndexStateHandle,
 };
-use crate::tuple::{Row, RowDatumCodec, SlotColumns};
+use crate::tuple::{Row, RowDatumCodec, SlotDatumWriter};
 use pgrx::prelude::*;
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -62,7 +62,7 @@ impl<T> IndexFetchState<T> {
                     .report_unwrap(),
             );
         }
-        let mut columns = unsafe { SlotColumns::new(slot, self.tmp_ctx) };
+        let mut columns = unsafe { SlotDatumWriter::new(slot, self.tmp_ctx) };
         unsafe {
             columns.fill_from_row(
                 &mut self.row,

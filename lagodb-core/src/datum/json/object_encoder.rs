@@ -11,7 +11,7 @@ use pgrx::{PgMemoryContexts, PgTryBuilder};
 
 use crate::diag::PgError;
 
-use super::json::JsonValueError;
+use super::{JsonDatumKind, JsonValueError};
 
 type PgJsonTypeCategory = c_uint;
 
@@ -36,19 +36,6 @@ unsafe extern "C-unwind" {
         category: *mut PgJsonTypeCategory,
         output_function: *mut pg_sys::Oid,
     );
-}
-
-/// PostgreSQL's JSON representation class for a bound column type.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum JsonDatumKind {
-    Boolean,
-    Numeric,
-    String,
-    Json,
-    Array,
-    Composite,
-    Cast,
-    Unsupported,
 }
 
 #[derive(Clone, Copy, Debug)]

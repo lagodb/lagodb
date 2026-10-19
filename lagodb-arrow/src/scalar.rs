@@ -10,7 +10,7 @@ use arrow_array::{
     Int32Array, Int64Array, LargeStringArray, StringArray,
 };
 use arrow_schema::DataType;
-use lagodb_core::tuple::{ColumnDatumCodec, ColumnDatumTarget};
+use lagodb_core::datum::{BoundColumnDatumCodec, ColumnDatumTarget};
 use pgrx::{IntoDatum, pg_sys};
 
 use crate::datum_codec::{DatumEncoder, NativeEncoderPlan};
@@ -28,8 +28,8 @@ enum PgDatumReader {
     Float8(Float64Array),
     Text(StringArray),
     LargeText(LargeStringArray),
-    Name(StringArray, ColumnDatumCodec),
-    LargeName(LargeStringArray, ColumnDatumCodec),
+    Name(StringArray, BoundColumnDatumCodec),
+    LargeName(LargeStringArray, BoundColumnDatumCodec),
 }
 
 pub struct PgDatumArrayReader {
@@ -47,7 +47,8 @@ impl PgDatumArrayReader {
             ))
         })?;
         let rule = resolve_cell_rule(array.data_type(), pg_type)?;
-        let target = ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(type_oid))?;
+        let target =
+            BoundColumnDatumCodec::bind(ColumnDatumTarget::from_oid(type_oid))?;
         let reader = ColumnReader::bind_reader(&rule, array)?;
         let reader = match (reader, type_oid) {
             (ReaderImpl::Bool(array), pg_sys::BOOLOID) => PgDatumReader::Bool(array),
@@ -159,7 +160,7 @@ impl PgDatumArrayBuilder {
         // Utf8Encoder uses from_utf8_unchecked for PostgreSQL text-family and
         // NameData bytes. Match every other bound writer by establishing the
         // PG_UTF8 capability once before materializing the per-batch builder.
-        ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(type_oid))?;
+        BoundColumnDatumCodec::bind(ColumnDatumTarget::from_oid(type_oid))?;
         Ok(Self {
             encoder: NativeEncoderPlan::bind(rule, type_oid)?
                 .materialize(capacity)?,

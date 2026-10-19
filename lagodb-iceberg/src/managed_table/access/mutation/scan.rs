@@ -5,7 +5,7 @@ use std::rc::Rc;
 use iceberg_lite::expr::Predicate;
 use lagodb_core::access::mutation::ModifyScanBinding;
 use lagodb_core::api::AmResult;
-use lagodb_core::tuple::SlotColumns;
+use lagodb_core::tuple::SlotDatumWriter;
 use pgrx::pg_sys;
 
 use super::{
@@ -115,7 +115,7 @@ impl ManagedMutationScan {
     #[inline]
     pub(crate) fn next_into_slot(
         &mut self,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
     ) -> AmResult<bool> {
         self.cursor.next_into_slot(out)
     }

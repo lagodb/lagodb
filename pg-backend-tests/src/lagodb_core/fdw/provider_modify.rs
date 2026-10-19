@@ -1,3 +1,4 @@
+use lagodb_core::datum::Cell;
 use lagodb_core::fdw::{
     FdwModify, FdwScan, ForeignModifyBeginContext, ForeignModifyCapabilities,
     ForeignModifyError, ForeignModifyOperation, ForeignModifyOutcome,
@@ -6,7 +7,6 @@ use lagodb_core::fdw::{
     ForeignPrivateWriter, ForeignRowIdentity, ForeignUpdateTargetContext,
     ModifyPlanSlot, ModifySlot,
 };
-use lagodb_core::tuple::Cell;
 use pgrx::FromDatum;
 use pgrx::pg_sys;
 

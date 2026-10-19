@@ -2,13 +2,13 @@
 
 use std::{ffi::CStr, panic::AssertUnwindSafe, ptr};
 
+use lagodb_core::datum::PgType;
 use lagodb_core::diag::PgError;
 use lagodb_core::hooks::{
     CreateForeignTableStmtNode, HookError, PostUtilityContext, UtilityHook,
     UtilityHookError, UtilityNode,
 };
 use lagodb_core::storage::foreign::ForeignOptionView;
-use lagodb_core::tuple::PgType;
 use pgrx::{PgSqlErrorCode, PgTryBuilder, pg_sys};
 
 use super::super::error::IcebergFdwError;

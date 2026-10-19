@@ -8,7 +8,7 @@ use lagodb_arrow::{
     BoundDatumBuffer, BoundDatumColumnPlan, BoundDatumPlan, BoundWriteBuffer,
     BoundWriteColumnPlan,
 };
-use lagodb_core::tuple::PgType;
+use lagodb_core::datum::PgType;
 
 use crate::error::ConnectorError;
 use crate::format::FormatKind;

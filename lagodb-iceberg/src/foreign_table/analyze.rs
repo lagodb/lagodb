@@ -8,7 +8,7 @@ use lagodb_core::fdw::{
     ForeignSampleStatistics, ForeignTableMaintenanceError,
 };
 use lagodb_core::handles::HeapTupleGuard;
-use lagodb_core::tuple::SlotColumns;
+use lagodb_core::tuple::SlotDatumWriter;
 use pgrx::pg_sys;
 use rand::Rng;
 
@@ -73,7 +73,7 @@ impl FdwAnalyze for LagodbIceberg {
             unsafe { pg_sys::ExecClearTuple(slot.raw()) };
             let produced = row_context.with(|| {
                 let mut columns =
-                    unsafe { SlotColumns::new(slot.raw(), row_context.raw()) };
+                    unsafe { SlotDatumWriter::new(slot.raw(), row_context.raw()) };
                 cursor.next_into_slot(&mut columns)
             });
             if !produced? {

@@ -4,8 +4,8 @@ use std::{cell::RefCell, str};
 
 use pgrx::pg_sys;
 
-use super::PgType;
 use super::codec_context::CodecContext;
+use super::pg_type::PgType;
 use crate::wrapper::PgOutputCString;
 
 /// Backend-local I/O state. Function caches live in this codec's context,

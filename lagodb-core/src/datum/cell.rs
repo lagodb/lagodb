@@ -13,7 +13,7 @@ use std::fmt;
 
 use crate::wrapper::PgOutputCString;
 
-use super::datum::DatumConversionError;
+use super::error::DatumConversionError;
 use super::json::{JsonText, JsonbValue};
 
 /// A non-owning view into UTF-8 string data.
@@ -125,7 +125,8 @@ pub enum Cell {
 }
 
 impl Cell {
-    /// Checked semantic Datum conversion used by [`super::row_codec::RowDatumCodec`].
+    /// Checked semantic Datum conversion used by
+    /// [`RowDatumCodec`](crate::tuple::RowDatumCodec).
     ///
     /// The row codec validates the server encoding once before calling this
     /// method and keeps non-NULL conversion failures distinct from SQL NULL.

@@ -5,7 +5,7 @@ use std::mem::{MaybeUninit, size_of};
 
 use pgrx::pg_sys::{self, ffi::pg_guard_ffi_boundary};
 
-use super::DetoastedVarlena;
+use super::varlena::DetoastedVarlena;
 
 // LagoDB's flat-array cursor ABI, shared with csrc/tuple/lagodb_array.h.
 // This is not a mirror of PostgreSQL's private array_iter layout.

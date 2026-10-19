@@ -5,7 +5,7 @@ use std::ffi::CStr;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use lagodb_arrow::{ArrowColumnDecoder, BoundBatch, DecodedColumn};
-use lagodb_core::tuple::PgType;
+use lagodb_core::datum::PgType;
 
 use crate::error::ConnectorError;
 use crate::format::FormatKind;

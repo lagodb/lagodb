@@ -131,7 +131,7 @@ impl AnalyzeBatchCursor {
 
     pub(super) fn next_tuple(
         &mut self,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
     ) -> AmResult<AnalyzeTupleOutcome> {
         while self.expected.ordinal < self.ticket_end {
             let expected =
@@ -271,7 +271,7 @@ impl AnalyzeBatchCursor {
 
     fn write_current_row(
         &mut self,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
         sample_ordinal: u64,
     ) -> AmResult<()> {
         let batch = self

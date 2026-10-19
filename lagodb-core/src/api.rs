@@ -79,7 +79,7 @@ use crate::handles::{
     TMIndexDeleteOpHandle, TupleTableSlotHandle, VacuumParamsHandle,
     ValidateIndexStateHandle, VarlenaHandle,
 };
-use crate::tuple::{Row, SlotColumns, TupleSlotBatch, TupleSlotRow};
+use crate::tuple::{Row, SlotDatumWriter, TupleSlotBatch, TupleSlotRow};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
@@ -447,7 +447,7 @@ pub trait AmScanSession {
     fn scan_analyze_next_tuple(
         &mut self,
         oldest_xmin: pg_sys::TransactionId,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
     ) -> AmResult<AnalyzeTupleOutcome> {
         let _ = (oldest_xmin, out);
         unsupported_callback("scan_analyze_next_tuple")

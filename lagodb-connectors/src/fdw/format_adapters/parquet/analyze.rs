@@ -1,12 +1,12 @@
 //! Parquet-backed PostgreSQL ANALYZE sampling.
 
 use lagodb_arrow::BoundBatch;
+use lagodb_core::datum::PgType;
 use lagodb_core::fdw::{
     ForeignAnalyzeSupport, ForeignSampleContext, ForeignSampleStatistics,
     ForeignTableMaintenanceError,
 };
 use lagodb_core::handles::HeapTupleGuard;
-use lagodb_core::tuple::PgType;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys;
 

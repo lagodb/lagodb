@@ -15,14 +15,14 @@ use arrow_array::{
 };
 use arrow_ord::cmp;
 use arrow_schema::{ArrowError, DataType};
+use lagodb_core::datum::{
+    Decimal128ComparisonValue, Decimal128Semantics, Utf8ServerEncoding,
+};
 use lagodb_core::expr::{
     ColumnRef, PgComparisonIdentity, PgComparisonKind, PgComparisonSignature,
     PgTextComparisonSemantics, RuntimeValue, RuntimeValueSpec,
 };
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
-use lagodb_core::tuple::{
-    Decimal128ComparisonValue, Decimal128Semantics, Utf8ServerEncoding,
-};
 use pgrx::{FromDatum, PgBuiltInOids, PgOid, pg_sys};
 
 use crate::error::ConnectorError;

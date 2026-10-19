@@ -1,11 +1,11 @@
 //! PostgreSQL catalog definition to Iceberg table-definition lowering.
 
 use iceberg_lite::spec::{PartitionSpec, Schema, Transform, UnboundPartitionSpec};
+use lagodb_core::datum::numeric_precision_scale;
 use lagodb_core::expr::pg::{PgConst, PgFuncExpr, PgVar};
 use lagodb_core::handles::{
     PartitionKeyField, PartitionKeyHandle, PartitionStrategy, RelationHandle,
 };
-use lagodb_core::tuple::numeric_precision_scale;
 use pgrx::{PgBuiltInOids, pg_sys};
 
 use crate::error::{IcebergError, IcebergResult};

@@ -16,7 +16,7 @@ use arrow_array::builder::{
 use arrow_array::{ArrayRef, ListArray};
 use arrow_buffer::{NullBufferBuilder, OffsetBuffer};
 use arrow_schema::FieldRef;
-use lagodb_core::tuple::{ArrayDatumIter, ArrayDatumLayout};
+use lagodb_core::datum::{ArrayDatumIter, ArrayDatumLayout};
 use pgrx::pg_sys;
 use pgrx::varlena::text_to_rust_str_unchecked;
 

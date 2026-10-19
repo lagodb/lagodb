@@ -1,11 +1,11 @@
-//! NUMERIC typmod encoding/decoding, PG/Unix epoch constants, and a fast
-//! `Decimal128 -> AnyNumeric` codec used by columnar read paths.
+//! NUMERIC typmod encoding/decoding and a fast `Decimal128 -> AnyNumeric`
+//! codec used by columnar read paths.
 
 mod coefficient;
 mod comparison;
 mod read;
 
-use pgrx::pg_sys::{self, POSTGRES_EPOCH_JDATE, UNIX_EPOCH_JDATE};
+use pgrx::pg_sys;
 use pgrx::{AnyNumeric, IntoDatum, varlena_to_byte_slice};
 
 pub use coefficient::PostgresNumericCodec;
@@ -17,13 +17,6 @@ unsafe extern "C-unwind" {
     #[link_name = "numeric_recv"]
     fn pg_numeric_recv(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum;
 }
-
-/// PostgreSQL epoch (2000-01-01) minus Unix epoch (1970-01-01) in days.
-pub const PG_EPOCH_DAYS_DIFF: i32 = (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) as i32;
-
-/// PostgreSQL epoch (2000-01-01) minus Unix epoch (1970-01-01) in microseconds.
-pub const PG_EPOCH_USECS_DIFF: i64 =
-    (PG_EPOCH_DAYS_DIFF as i64) * pgrx::datum::USECS_PER_DAY;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NumericTypmod {

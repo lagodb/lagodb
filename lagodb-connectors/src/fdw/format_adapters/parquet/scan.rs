@@ -1,12 +1,12 @@
 //! Parquet Foreign Table planning and scan execution.
 
 use lagodb_arrow::BoundBatch;
+use lagodb_core::datum::PgType;
 use lagodb_core::fdw::{
     ForeignPathBuilder, ForeignPathContext, ForeignPathKeys, ForeignPathSpec,
     ForeignPlanContext, ForeignPlanSpec, ForeignRelSize, ForeignRelSizeContext,
     ReScanForeignScanContext, ScanSlotWriter, StartForeignScanContext,
 };
-use lagodb_core::tuple::PgType;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

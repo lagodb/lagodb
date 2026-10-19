@@ -12,7 +12,8 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
     use lagodb_arrow::{BoundDatumPlan, BoundWriteBuffer, BoundWriteColumnPlan};
     use lagodb_core::batch::BatchBuffer;
-    use lagodb_core::tuple::{PgType, TupleSlotRow};
+    use lagodb_core::datum::PgType;
+    use lagodb_core::tuple::TupleSlotRow;
     use pgrx::prelude::*;
     use pgrx::{IntoDatum, pg_sys};
 

@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 use std::ops::Range;
 
-use lagodb_core::diag::PgReportError;
-use lagodb_core::tuple::{
+use lagodb_core::datum::{
     ColumnDatumTarget, DatumConversionError, JsonDatumEncoder, JsonDatumKind,
 };
+use lagodb_core::diag::PgReportError;
 use pgrx::{PgTryBuilder, pg_sys};
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde_json::value::RawValue;

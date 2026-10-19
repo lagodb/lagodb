@@ -7,8 +7,9 @@
 
 use pgrx::pg_sys::{self, Datum};
 
-use super::cell::Cell;
-use super::datum::{ColumnDatumCodec, ColumnDatumTarget, DatumConversionError};
+use crate::datum::{
+    BoundColumnDatumCodec, Cell, ColumnDatumTarget, DatumConversionError,
+};
 
 /// A relation-bound plan for semantic row conversion.
 ///
@@ -18,7 +19,7 @@ use super::datum::{ColumnDatumCodec, ColumnDatumTarget, DatumConversionError};
 /// server encoding, while physical byte-copy paths do not use this type.
 #[derive(Debug, Clone)]
 pub struct RowDatumCodec {
-    targets: Box<[ColumnDatumCodec]>,
+    targets: Box<[BoundColumnDatumCodec]>,
 }
 
 impl RowDatumCodec {
@@ -35,7 +36,7 @@ impl RowDatumCodec {
         let targets = targets
             .iter()
             .copied()
-            .map(ColumnDatumCodec::from_validated)
+            .map(BoundColumnDatumCodec::from_validated)
             .collect();
         Ok(Self { targets })
     }
@@ -49,8 +50,7 @@ impl RowDatumCodec {
     pub unsafe fn from_relation(
         relation: pg_sys::Relation,
     ) -> Result<Self, DatumConversionError> {
-        let targets = unsafe { ColumnDatumTarget::from_relation(relation) }
-            .expect("RowDatumCodec requires a valid relation descriptor");
+        let targets = unsafe { ColumnDatumTarget::from_relation(relation) };
         Self::from_targets(&targets)
     }
 
@@ -91,11 +91,14 @@ impl RowDatumCodec {
         self.targets
             .get(index)
             .copied()
-            .map(ColumnDatumCodec::target)
+            .map(BoundColumnDatumCodec::target)
     }
 
     #[inline]
-    pub(crate) fn target_codec_at(&self, index: usize) -> Option<ColumnDatumCodec> {
+    pub(crate) fn target_codec_at(
+        &self,
+        index: usize,
+    ) -> Option<BoundColumnDatumCodec> {
         self.targets.get(index).copied()
     }
 
@@ -149,7 +152,7 @@ impl RowDatumCodec {
     /// `values`, and `nulls` must each contain exactly one item for every bound
     /// target.
     /// Cells must satisfy the producer value-domain contract documented by
-    /// `ColumnDatumCodec::cell_to_datum`.
+    /// `BoundColumnDatumCodec::cell_to_datum`.
     pub(crate) unsafe fn cells_to_datums<I>(
         &self,
         cells: I,
@@ -209,7 +212,7 @@ impl RowDatumCodec {
     /// must have selected a memory context that owns returned by-reference
     /// datums. The plan must be bound to the same destination layout.
     /// Widened integer cells must satisfy the producer value-domain contract
-    /// of `ColumnDatumCodec::cell_to_datum`.
+    /// of `BoundColumnDatumCodec::cell_to_datum`.
     pub unsafe fn cell_to_datum(
         &self,
         index: usize,

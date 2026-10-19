@@ -8,7 +8,7 @@ use arrow_array::ArrayRef;
 use arrow_array::builder::{
     ArrayBuilder, FixedSizeBinaryBuilder, LargeBinaryBuilder,
 };
-use lagodb_core::tuple::{Cell, DetoastedVarlena};
+use lagodb_core::datum::{Cell, DetoastedVarlena};
 use pgrx::datum::Uuid;
 use pgrx::{FromDatum, pg_sys};
 

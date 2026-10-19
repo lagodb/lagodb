@@ -1,14 +1,12 @@
-//! Tests for `lagodb_core::tuple::Cell` — RowDatumCodec and Display.
+//! Tests for `lagodb_core::datum::Cell` — RowDatumCodec and Display.
 //!
 //! These tests require a running PostgreSQL backend because they call PG internal
 //! functions like `date_out`, `timestamp_out`, array I/O routines, and the
 //! Datum allocation infrastructure.
 
 use bytes::Bytes;
-use lagodb_core::tuple::{
-    Cell, ColumnDatumTarget, JsonText, JsonbValue, RowDatumCodec, TupleSlotRow,
-    TupleSlotWriter,
-};
+use lagodb_core::datum::{Cell, ColumnDatumTarget, JsonText, JsonbValue};
+use lagodb_core::tuple::{RowDatumCodec, RowSlotWriter, TupleSlotRow};
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 
@@ -202,7 +200,7 @@ mod tests {
                 .expect("JSONB slot should materialize as a row");
             assert!(matches!(row.get_cell(0), Some(Cell::Jsonb(_))));
 
-            TupleSlotWriter::new(output_slot, pg_sys::CurrentMemoryContext, &codec)
+            RowSlotWriter::new(output_slot, pg_sys::CurrentMemoryContext, &codec)
                 .write_row(&mut row)
                 .expect("JSONB row should write back to the slot");
 

@@ -4,6 +4,8 @@
 //! representation.  A provider that chooses a physical encoding for JSONB
 //! must keep that encoding at its own storage boundary.
 
+mod object_encoder;
+
 use std::ffi::{CString, NulError, c_void};
 use std::fmt;
 use std::mem::size_of;
@@ -17,10 +19,24 @@ use thiserror::Error;
 use crate::diag::{PgError, SqlStateError};
 use crate::wrapper::{PgOutputCString, PgWrapper};
 
-use super::datum::{
-    ColumnDatumTarget, DatumConversionError, Utf8ServerEncodingError,
-};
-use super::json_encode::JsonDatumKind;
+use super::encoding::Utf8ServerEncoding;
+use super::error::{DatumConversionError, Utf8ServerEncodingError};
+use super::varlena::DetoastedVarlena;
+
+pub use object_encoder::{BoundJsonObjectEncoder, JsonDatumEncoder};
+
+/// PostgreSQL's JSON representation class for a bound column type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JsonDatumKind {
+    Boolean,
+    Numeric,
+    String,
+    Json,
+    Array,
+    Composite,
+    Cast,
+    Unsupported,
+}
 
 /// An owned, PostgreSQL-validated `json` value.
 ///
@@ -40,36 +56,6 @@ pub struct JsonText {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct JsonbValue {
     text: Box<str>,
-}
-
-/// Owns a detoast copy for the duration of one semantic JSONB conversion.
-struct DetoastedJsonb {
-    original: *mut pg_sys::varlena,
-    detoasted: *mut pg_sys::varlena,
-}
-
-impl DetoastedJsonb {
-    unsafe fn new(datum: Datum) -> Self {
-        let original = datum.cast_mut_ptr::<pg_sys::varlena>();
-        let detoasted = unsafe { pg_sys::pg_detoast_datum(original) };
-        Self {
-            original,
-            detoasted,
-        }
-    }
-
-    #[inline]
-    fn datum(&self) -> Datum {
-        Datum::from(self.detoasted)
-    }
-}
-
-impl Drop for DetoastedJsonb {
-    fn drop(&mut self) {
-        if self.detoasted != self.original {
-            unsafe { pg_sys::pfree(self.detoasted.cast()) };
-        }
-    }
 }
 
 /// Errors raised while converting PostgreSQL and semantic JSON values.
@@ -139,7 +125,7 @@ impl From<Utf8ServerEncodingError> for JsonValueError {
 impl JsonText {
     /// Validate and own JSON text through PostgreSQL's `json_in` function.
     pub fn parse(text: &str) -> Result<Self, JsonValueError> {
-        ColumnDatumTarget::validate_utf8_server_encoding()?;
+        Utf8ServerEncoding::resolve()?;
         let input = CString::new(text)?;
         // This standalone parser owns its Result boundary. Datum codecs let
         // the enclosing row/FFI boundary catch PG errors instead.
@@ -237,7 +223,7 @@ impl JsonbValue {
     /// Validate JSON text and normalize it through PostgreSQL's JSONB input
     /// and output functions.
     pub fn parse(text: &str) -> Result<Self, JsonValueError> {
-        ColumnDatumTarget::validate_utf8_server_encoding()?;
+        Utf8ServerEncoding::resolve()?;
         let input = CString::new(text)?;
         // Preserve the standalone parser's Result contract without putting a
         // catch in the shared input wrapper used by row decoding.
@@ -278,11 +264,11 @@ impl JsonbValue {
             return Ok(None);
         }
 
-        let detoasted = unsafe { DetoastedJsonb::new(datum) };
+        let detoasted = unsafe { DetoastedVarlena::from_datum(datum) };
         let output = unsafe {
             PgOutputCString::from_function_call(
                 pg_sys::jsonb_out,
-                &[Some(detoasted.datum())],
+                &[Some(detoasted.as_datum())],
             )
         }
         .ok_or(DatumConversionError::InvalidInput {

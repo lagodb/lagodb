@@ -18,7 +18,7 @@
 use std::borrow::Cow;
 
 use arrow_array::{Array, ArrayRef};
-use lagodb_core::tuple::Cell;
+use lagodb_core::datum::Cell;
 use pgrx::pg_sys;
 
 use crate::error::{ArrowConversionError, ArrowConversionResult};

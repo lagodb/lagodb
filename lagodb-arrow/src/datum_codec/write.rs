@@ -6,7 +6,7 @@ use arrow_array::builder::{ArrayBuilder, Int64Builder};
 use arrow_array::{ArrayRef, ListArray, StructArray};
 use arrow_buffer::{NullBufferBuilder, OffsetBuffer};
 use arrow_schema::{DataType, FieldRef, Fields};
-use lagodb_core::tuple::{ArrayDatumLayout, CompositeDatumCodec};
+use lagodb_core::datum::{ArrayDatumLayout, CompositeDatumCodec};
 use pgrx::pg_sys;
 
 use super::text::TextIoEncoder;

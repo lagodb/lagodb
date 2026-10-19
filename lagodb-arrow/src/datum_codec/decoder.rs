@@ -5,7 +5,8 @@ use std::rc::Rc;
 use arrow_array::RecordBatch;
 use lagodb_core::api::AmResult;
 use lagodb_core::batch::BatchRowDecoder;
-use lagodb_core::tuple::{ColumnDatumTarget, SlotColumns};
+use lagodb_core::datum::ColumnDatumTarget;
+use lagodb_core::tuple::SlotDatumWriter;
 use pgrx::pg_sys;
 
 use super::batch::{BoundBatch, BoundColumn};
@@ -208,7 +209,7 @@ impl ArrowColumnDecoder {
     /// unsafe method instead of being the implementation of the safe
     /// [`BatchRowDecoder::write_row`] API: the decoder stores scalar
     /// destinations, not a type-level association with a particular
-    /// `SlotColumns` descriptor.
+    /// `SlotDatumWriter` descriptor.
     ///
     /// # Safety
     ///
@@ -224,7 +225,7 @@ impl ArrowColumnDecoder {
         &self,
         bound: &BoundBatch,
         row_idx: usize,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
     ) -> AmResult<()> {
         Ok(unsafe { bound.write_row_unchecked(row_idx, out) }?)
     }
@@ -281,14 +282,14 @@ impl BatchRowDecoder for ArrowColumnDecoder {
         bound.num_rows
     }
 
-    /// Safe generic path: the destination bound is checked by `SlotColumns`.
+    /// Safe generic path: the destination bound is checked by `SlotDatumWriter`.
     /// Trusted relation-bound providers can use
     /// [`Self::write_row_unchecked`] after upholding its layout contract.
     fn write_row(
         &self,
         bound: &BoundBatch,
         row_idx: usize,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
     ) -> AmResult<()> {
         if row_idx >= bound.num_rows {
             return Err(ArrowConversionError::InvariantViolated(

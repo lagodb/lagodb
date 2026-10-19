@@ -2,7 +2,7 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use lagodb_core::tuple::{ArrayDatumBuffer, CompositeDatumCodec, PgTextIo};
+use lagodb_core::datum::{ArrayDatumBuffer, CompositeDatumCodec, PgTextIo};
 
 use super::{BoundDatumPlan, NodePlan};
 

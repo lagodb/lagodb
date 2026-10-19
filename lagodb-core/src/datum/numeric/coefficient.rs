@@ -26,7 +26,7 @@ const I256_WIRE_BYTES: usize = 8 + I256_NUMERIC_DIGITS * 2;
 /// The input is Arrow `i256`'s signed big-endian two's-complement byte form.
 /// Keeping that representation at the API boundary avoids coupling
 /// `lagodb-core` to Arrow while the conversion and PostgreSQL binary protocol
-/// remain owned by the shared tuple codec layer.
+/// remain owned by the shared Datum codec layer.
 pub struct PostgresNumericCodec;
 
 impl PostgresNumericCodec {

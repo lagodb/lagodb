@@ -20,8 +20,9 @@ mod tests {
     use lagodb_core::customscan::provider::{
         CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
     };
+    use lagodb_core::datum::Cell;
     use lagodb_core::handles::RelationHandle;
-    use lagodb_core::tuple::{Cell, Row, RowDatumCodec, SlotColumns};
+    use lagodb_core::tuple::{Row, RowDatumCodec, SlotDatumWriter};
     use pgrx::pg_sys;
     use pgrx::pg_test;
     use pgrx::{FromDatum, IntoDatum};
@@ -379,7 +380,10 @@ mod tests {
     struct EmitColumnsDriver;
 
     impl EmitColumnsDriver {
-        fn next_into_slot(&mut self, out: &mut SlotColumns<'_>) -> AmResult<bool> {
+        fn next_into_slot(
+            &mut self,
+            out: &mut SlotDatumWriter<'_>,
+        ) -> AmResult<bool> {
             out.set_datum(0, Some(pg_sys::Datum::from(7usize)));
             let text = EMIT_COLUMNS_TEXT.into_datum().expect("text datum");
             out.set_datum(1, Some(text));

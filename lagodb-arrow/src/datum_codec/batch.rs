@@ -1,6 +1,6 @@
 //! Batch-owned readers shared by slot, COPY and sampling consumers.
 
-use lagodb_core::tuple::SlotColumns;
+use lagodb_core::tuple::SlotDatumWriter;
 use pgrx::pg_sys;
 
 use super::reader::BoundDatumReader;
@@ -36,7 +36,7 @@ impl BoundBatch {
     pub unsafe fn write_row_unchecked(
         &self,
         row: usize,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
     ) -> ArrowConversionResult<()> {
         for column in &self.columns {
             let value = unsafe { column.read_datum_unchecked(row) }?;

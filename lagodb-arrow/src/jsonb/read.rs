@@ -5,7 +5,7 @@ use std::sync::Arc;
 use arrow_array::Array;
 use arrow_array::cast::AsArray;
 use arrow_buffer::{NullBuffer, OffsetBuffer};
-use lagodb_core::tuple::{JsonbBuilder, JsonbPosition};
+use lagodb_core::datum::{JsonbBuilder, JsonbPosition};
 use pgrx::pg_sys;
 
 use super::scalar::ScalarReader;

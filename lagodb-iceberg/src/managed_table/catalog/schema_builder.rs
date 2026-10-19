@@ -6,8 +6,8 @@ use iceberg_lite::spec::{
     ListType, NestedField, NestedFieldRef, PrimitiveType, SCHEMA_NAME_DELIMITER,
     Schema, StructType, Type,
 };
+use lagodb_core::datum::PgType;
 use lagodb_core::handles::RelationHandle;
-use lagodb_core::tuple::PgType;
 use pgrx::pg_sys;
 use std::sync::Arc;
 use std::{ffi::CStr, slice};

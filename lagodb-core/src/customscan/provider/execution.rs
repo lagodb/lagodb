@@ -7,7 +7,7 @@ use pgrx::pg_sys;
 use crate::api::AmResult;
 use crate::customscan::error::CustomScanError;
 use crate::handles::{RelationHandle, ScanDirection};
-use crate::tuple::{Row, RowDatumCodec, SlotColumns, TupleSlotWriter};
+use crate::tuple::{Row, RowDatumCodec, RowSlotWriter, SlotDatumWriter};
 
 use super::contract::LagodbCustomScanProvider;
 
@@ -80,7 +80,7 @@ impl<'a> NextSlotEmitter<'a> {
         advance: F,
     ) -> Result<NextSlotAttempt<'a>, CustomScanError>
     where
-        F: FnOnce(&mut SlotColumns<'_>) -> AmResult<bool>,
+        F: FnOnce(&mut SlotDatumWriter<'_>) -> AmResult<bool>,
     {
         let produced = self.emit_with(advance)?;
         Ok(if produced {
@@ -105,7 +105,7 @@ impl<'a> NextSlotEmitter<'a> {
         advance: F,
     ) -> Result<NextSlotResult<'a>, CustomScanError>
     where
-        F: FnOnce(&mut SlotColumns<'_>) -> AmResult<bool>,
+        F: FnOnce(&mut SlotDatumWriter<'_>) -> AmResult<bool>,
     {
         Ok(match self.try_emit_columns(advance)? {
             NextSlotAttempt::Produced(produced) => produced,
@@ -124,13 +124,14 @@ impl<'a> NextSlotEmitter<'a> {
 
     fn emit_with<F>(&mut self, advance: F) -> Result<bool, CustomScanError>
     where
-        F: FnOnce(&mut SlotColumns<'_>) -> AmResult<bool>,
+        F: FnOnce(&mut SlotDatumWriter<'_>) -> AmResult<bool>,
     {
         let slot = self.slot;
         let datum_context = self.per_tuple_memory_context;
         emit_into_slot(
             || {
-                let mut columns = unsafe { SlotColumns::new(slot, datum_context) };
+                let mut columns =
+                    unsafe { SlotDatumWriter::new(slot, datum_context) };
                 advance(&mut columns)
             },
             || unsafe {
@@ -200,7 +201,7 @@ impl<'a, P: LagodbCustomScanProvider> NextSlotContext<'a, P> {
         codec: &RowDatumCodec,
     ) -> Result<NextSlotResult<'a>, CustomScanError> {
         let writer = unsafe {
-            TupleSlotWriter::new(
+            RowSlotWriter::new(
                 self.emitter.slot,
                 self.emitter.per_tuple_memory_context,
                 codec,
@@ -219,7 +220,7 @@ impl<'a, P: LagodbCustomScanProvider> NextSlotContext<'a, P> {
         advance: F,
     ) -> Result<NextSlotResult<'a>, CustomScanError>
     where
-        F: FnOnce(&mut SlotColumns<'_>) -> AmResult<bool>,
+        F: FnOnce(&mut SlotDatumWriter<'_>) -> AmResult<bool>,
     {
         self.emitter.emit_columns(advance)
     }

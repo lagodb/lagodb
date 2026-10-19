@@ -6,7 +6,7 @@ use crate::access::common::FfiContainer;
 use crate::api::{AmResult, AmScanSession};
 use crate::diag::PgReportError;
 use crate::handles::OwnedScanKeys;
-use crate::tuple::{Row, RowDatumCodec, SlotColumns};
+use crate::tuple::{Row, RowDatumCodec, SlotDatumWriter};
 
 pub(crate) struct TableScanState<T> {
     pub(super) am_instance: T,
@@ -55,7 +55,7 @@ impl<T> TableScanState<T> {
                     .map_err(PgReportError::from_domain_error)?,
             );
         }
-        let mut columns = unsafe { SlotColumns::new(slot, self.tmp_ctx) };
+        let mut columns = unsafe { SlotDatumWriter::new(slot, self.tmp_ctx) };
         unsafe {
             columns.fill_from_row(
                 &mut self.row,

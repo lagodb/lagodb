@@ -8,10 +8,10 @@
 
 use pgrx::pg_sys::{self, Datum};
 
-use crate::tuple::{JsonValueError, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
+use crate::datum::{JsonValueError, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
 
 unsafe extern "C-unwind" {
-    // As in tuple/numeric.rs and wrapper/json.rs, DirectFunctionCall requires
+    // As in datum/numeric.rs and wrapper/json.rs, DirectFunctionCall requires
     // native C entry points; pg_sys exposes guarded Rust functions. PG supplies
     // the stack call frame, so do not replace this with pgrx's allocating
     // direct_function_call_as_datum or a second implementation of LOCAL_FCINFO.
@@ -27,13 +27,13 @@ unsafe extern "C-unwind" {
 
 /// A schema-bound parser. PG errors unwind to the enclosing provider/FFI boundary.
 #[derive(Clone, Copy)]
-pub enum JsonbDatetime {
+pub enum JsonbTemporalParser {
     Date,
     Time,
     Timestamp { nanos: bool, tz: bool },
 }
 
-impl JsonbDatetime {
+impl JsonbTemporalParser {
     /// Parse the canonical ISO strings emitted by JsonbBuilder. Requiring the
     /// structural ISO form prevents DateStyle, TimeZone, and relative date
     /// keywords from changing the meaning of a stored JSONB value. The gate

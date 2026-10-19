@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use pgrx::{FromDatum, pg_sys};
 
-use crate::tuple::{Decimal128NumericCodec, DecimalCodecError};
+use crate::datum::numeric::{Decimal128NumericCodec, DecimalCodecError};
 
 unsafe extern "C-unwind" {
     #[link_name = "numeric_float4"]

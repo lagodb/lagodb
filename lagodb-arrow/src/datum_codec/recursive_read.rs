@@ -6,7 +6,7 @@ use arrow_array::{
     Array, Int64Array, LargeStringArray, ListArray, StringArray, StructArray,
 };
 use arrow_buffer::NullBuffer;
-use lagodb_core::tuple::{ArrayDatumBuffer, CompositeDatumCodec, PgTextIo};
+use lagodb_core::datum::{ArrayDatumBuffer, CompositeDatumCodec, PgTextIo};
 use pgrx::pg_sys;
 
 use super::reader::BoundDatumReader;

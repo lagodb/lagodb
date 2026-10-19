@@ -9,8 +9,8 @@ use std::slice;
 
 use pgrx::pg_sys;
 
-use super::cell::Cell;
-use super::datum::DatumConversionError;
+use crate::datum::{Cell, DatumConversionError};
+
 use super::row::Row;
 use super::row_codec::RowDatumCodec;
 
@@ -133,18 +133,18 @@ impl<'slot> TupleSlotRow<'slot> {
         self.datums().datum_at(index)
     }
 
-    /// Build a [`SlotDatums`] view over the slot's deformed columns.
+    /// Build a [`SlotDatumView`] over the slot's deformed columns.
     ///
     /// The slot's `tts_values` / `tts_isnull` arrays and the descriptor's
     /// attribute list are resolved a single time here, so per-column access
-    /// through [`SlotDatums::datum_at`] is a plain bounds-checked index.
-    pub fn datums(&self) -> SlotDatums<'slot> {
+    /// through [`SlotDatumView::datum_at`] is a plain bounds-checked index.
+    pub fn datums(&self) -> SlotDatumView<'slot> {
         // SAFETY: the slot pointer and its descriptor remain valid for the
         // callback-scoped lifetime carried by `self`.
         unsafe {
             let tup_desc = (*self.slot).tts_tupleDescriptor;
             let natts = (*tup_desc).natts as usize;
-            SlotDatums {
+            SlotDatumView {
                 values: slice::from_raw_parts((*self.slot).tts_values, natts),
                 nulls: slice::from_raw_parts((*self.slot).tts_isnull, natts),
                 attrs: slice::from_raw_parts((*tup_desc).attrs.as_ptr(), natts),
@@ -173,7 +173,7 @@ impl<'slot> TupleSlotRow<'slot> {
 /// single time so each [`Self::datum_at`] is an O(1) index rather than
 /// rebuilding the slices per column.
 #[derive(Clone, Copy)]
-pub struct SlotDatums<'slot> {
+pub struct SlotDatumView<'slot> {
     values: &'slot [pg_sys::Datum],
     nulls: &'slot [bool],
     attrs: &'slot [pg_sys::FormData_pg_attribute],
@@ -194,7 +194,7 @@ impl SlotDatumIndex {
     }
 }
 
-impl<'slot> SlotDatums<'slot> {
+impl<'slot> SlotDatumView<'slot> {
     /// Number of columns (`natts`).
     pub fn len(&self) -> usize {
         self.values.len()
@@ -235,7 +235,7 @@ impl<'slot> SlotDatums<'slot> {
     /// `index` must have been validated against the tuple layout that produced
     /// `self`, and that layout must have the same `slot_width` recorded in the
     /// token. The caller must keep the returned datum within the callback
-    /// lifetime of this `SlotDatums` view.
+    /// lifetime of this `SlotDatumView`.
     pub unsafe fn datum_at_bound(
         &self,
         index: SlotDatumIndex,

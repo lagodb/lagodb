@@ -1,10 +1,10 @@
 //! PostgreSQL catalog and type adapter for the provider-neutral policy.
 
+use lagodb_core::datum::{Decimal128Semantics, Utf8ServerEncoding};
 use lagodb_core::expr::{
     ColumnRef, PgComparisonIdentity, PgIntegerWidening, PgTextComparisonSemantics,
     RuntimeValueSpec,
 };
-use lagodb_core::tuple::{Decimal128Semantics, Utf8ServerEncoding};
 use pgrx::{PgBuiltInOids, PgOid, pg_sys};
 
 use super::super::plan::PlannedValueType;

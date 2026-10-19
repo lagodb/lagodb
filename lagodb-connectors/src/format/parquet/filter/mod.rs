@@ -5,6 +5,7 @@ mod pruning;
 mod runtime;
 mod value;
 
+use lagodb_core::datum::Utf8ServerEncoding;
 use lagodb_core::diag::PgReportError;
 use lagodb_core::expr::pushdown::{
     FilterPlanningContext, PredicateExpr, PredicateFragment, ScalarExpr,
@@ -12,7 +13,6 @@ use lagodb_core::expr::pushdown::{
 use lagodb_core::expr::{ColumnRef, RuntimeValueBindings, RuntimeValueId};
 use lagodb_core::handles::RelationGuard;
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
-use lagodb_core::tuple::Utf8ServerEncoding;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

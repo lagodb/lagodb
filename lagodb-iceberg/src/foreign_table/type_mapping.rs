@@ -1,7 +1,7 @@
 //! Iceberg-first PostgreSQL declarations and the explicit foreign DDL contract.
 
 use iceberg_lite::spec::{PrimitiveType, Type};
-use lagodb_core::tuple::{PgType, numeric_precision_scale, numeric_typmod};
+use lagodb_core::datum::{PgType, numeric_precision_scale, numeric_typmod};
 use pgrx::pg_sys;
 
 use super::error::IcebergFdwError;

@@ -7,9 +7,9 @@
 use std::{ffi::CStr, ptr, slice};
 
 use lagodb_core::catalog::range_var_get_relid;
+use lagodb_core::datum::PgType;
 use lagodb_core::handles::RelationGuard;
 use lagodb_core::hooks::{HookError, UtilityHookError};
-use lagodb_core::tuple::PgType;
 use pgrx::{PgSqlErrorCode, pg_sys};
 
 use super::column_types::ManagedColumnTypes;

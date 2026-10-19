@@ -4,8 +4,8 @@
 //! provider/FFI boundary. Container iterators never descend implicitly, so their allocation can be released on
 //! early return as well as normal exhaustion. No JSON text or DOM is created.
 
-mod datetime;
 mod numeric;
+mod temporal;
 
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
@@ -15,11 +15,13 @@ use std::{slice, str};
 use pgrx::PgTryBuilder;
 use pgrx::pg_sys::{self, JsonbIteratorToken as Token, jbvType};
 
-use super::{DetoastedVarlena, JsonbValue};
+use crate::datum::varlena::DetoastedVarlena;
 use crate::diag::PgError;
 
-pub use datetime::JsonbDatetime;
+use super::JsonbValue;
+
 pub use numeric::JsonbNumeric;
+pub use temporal::JsonbTemporalParser;
 
 /// A value borrowing a detoasted JSONB document, valid only inside `read`.
 #[derive(Clone, Copy)]
@@ -28,7 +30,7 @@ pub enum JsonbRef<'a> {
     Boolean(bool),
     Numeric(JsonbNumeric<'a>),
     String(&'a str),
-    Array(JsonbContainer<'a>),
+    Array(JsonbArray<'a>),
     Object(JsonbObject<'a>),
 }
 
@@ -100,7 +102,7 @@ impl JsonbReader {
 }
 
 #[derive(Clone, Copy)]
-pub struct JsonbContainer<'a> {
+struct JsonbContainer<'a> {
     pointer: *mut pg_sys::JsonbContainer,
     borrowed: PhantomData<&'a pg_sys::JsonbContainer>,
 }
@@ -111,11 +113,11 @@ impl<'a> JsonbContainer<'a> {
         unsafe { (*self.pointer).header }
     }
 
-    pub fn len(self) -> usize {
+    fn len(self) -> usize {
         (self.header() & pg_sys::JB_CMASK) as usize
     }
 
-    pub fn is_empty(self) -> bool {
+    fn is_empty(self) -> bool {
         self.len() == 0
     }
 
@@ -126,12 +128,12 @@ impl<'a> JsonbContainer<'a> {
         if self.header() & pg_sys::JB_FOBJECT != 0 {
             JsonbRef::Object(JsonbObject(self))
         } else {
-            JsonbRef::Array(self)
+            JsonbRef::Array(JsonbArray(self))
         }
     }
 
     /// Array elements, or alternating object keys and values.
-    pub fn values(self) -> JsonbValues<'a> {
+    fn values(self) -> JsonbValues<'a> {
         // SAFETY: a valid container is live for 'a. The iterator is shallow,
         // hence has no parent allocations when dropped early.
         unsafe {
@@ -143,6 +145,27 @@ impl<'a> JsonbContainer<'a> {
                 borrowed: PhantomData,
             }
         }
+    }
+}
+
+/// Array-only access keeps PG's array-container invariant out of element loops.
+#[derive(Clone, Copy)]
+pub struct JsonbArray<'a>(JsonbContainer<'a>);
+
+impl<'a> JsonbArray<'a> {
+    #[inline]
+    pub fn len(self) -> usize {
+        self.0.len()
+    }
+
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[inline]
+    pub fn values(self) -> JsonbValues<'a> {
+        self.0.values()
     }
 }
 

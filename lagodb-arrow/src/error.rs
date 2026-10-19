@@ -2,10 +2,10 @@
 
 use std::borrow::Cow;
 
-use lagodb_core::diag::{PgError, SqlStateError};
-use lagodb_core::tuple::{
+use lagodb_core::datum::{
     DatumConversionError, DecimalCodecError, JsonValueError, Utf8ServerEncodingError,
 };
+use lagodb_core::diag::{PgError, SqlStateError};
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 

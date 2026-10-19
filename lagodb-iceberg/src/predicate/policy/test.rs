@@ -54,10 +54,10 @@ pub(crate) mod host_matrix {
 
 use std::{array, collections::HashSet};
 
+use lagodb_core::datum::Decimal128Semantics;
 use lagodb_core::expr::{ColumnRef, ExprType, RuntimeValueSource, RuntimeValueSpec};
 use lagodb_core::expr::{PgComparisonOp, PgTextComparisonSemantics};
 use lagodb_core::query_contract::ScanId;
-use lagodb_core::tuple::Decimal128Semantics;
 use pgrx::pg_sys;
 use pgrx::pg_sys::Oid;
 use proptest::prelude::*;

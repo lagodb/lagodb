@@ -13,7 +13,7 @@ use crate::handles::{
     RelationHandle, SampleScanStateHandle, ScanDirection, SnapshotHandle,
     TBMIterateResultHandle,
 };
-use crate::tuple::SlotColumns;
+use crate::tuple::SlotDatumWriter;
 pub(crate) use descriptor::TableAmScanDesc;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::prelude::*;
@@ -220,7 +220,7 @@ where
         // lands there and is freed on the next fetch's reset.
         let found = PgMemoryContexts::For(tmp_ctx)
             .switch_to(|_| {
-                let mut cols = SlotColumns::new(slot, tmp_ctx);
+                let mut cols = SlotDatumWriter::new(slot, tmp_ctx);
                 state
                     .am_instance
                     .scan_driver()
@@ -518,7 +518,7 @@ where
 
         let state = (*custom_scan).session_mut();
         state.reset_tmp_context();
-        let mut columns = SlotColumns::new(slot, state.tmp_ctx);
+        let mut columns = SlotDatumWriter::new(slot, state.tmp_ctx);
 
         let outcome = state
             .am_instance

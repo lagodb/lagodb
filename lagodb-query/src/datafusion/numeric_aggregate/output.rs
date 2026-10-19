@@ -4,8 +4,8 @@ use std::panic::AssertUnwindSafe;
 
 use arrow_buffer::i256;
 use datafusion::common::{DataFusionError, Result};
+use lagodb_core::datum::{DetoastedVarlena, PostgresNumericCodec};
 use lagodb_core::diag::PgReportError;
-use lagodb_core::tuple::{DetoastedVarlena, PostgresNumericCodec};
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{AnyNumeric, IntoDatum, PgTryBuilder, pg_sys};
 

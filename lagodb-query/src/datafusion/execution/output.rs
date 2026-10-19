@@ -6,8 +6,9 @@ use lagodb_arrow::{
     ArrowColumnDecoder, BoundBatch, BoundDatumPlan, CellRule, DatumCodec,
     DecodedColumn,
 };
+use lagodb_core::datum::PgType;
 use lagodb_core::diag::PgReportError;
-use lagodb_core::tuple::{PgType, SlotColumns};
+use lagodb_core::tuple::SlotDatumWriter;
 use pgrx::{PgMemoryContexts, pg_sys};
 
 use crate::plan::QueryTupleLayout;
@@ -119,7 +120,7 @@ impl QueryOutputDecoder {
         slot: *mut pg_sys::TupleTableSlot,
         datum_context: pg_sys::MemoryContext,
     ) -> Result<(), PgReportError> {
-        let mut columns = unsafe { SlotColumns::new(slot, datum_context) };
+        let mut columns = unsafe { SlotDatumWriter::new(slot, datum_context) };
         // SAFETY: decoder construction bound every destination to the
         // CustomScan output layout; batch iteration proves `row` exists.
         let mut write =

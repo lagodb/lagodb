@@ -3,7 +3,8 @@
 use pgrx::IntoDatum;
 use pgrx::pg_sys::{Datum, Oid};
 
-use super::{Cell, DatumConversionError};
+use crate::datum::cell::Cell;
+use crate::datum::error::DatumConversionError;
 
 impl Cell {
     /// # Safety

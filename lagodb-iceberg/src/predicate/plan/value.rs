@@ -1,8 +1,8 @@
 //! Persisted runtime-value conversions, including source timestamp precision.
 
 use iceberg_lite::spec::{PrimitiveType, Type};
+use lagodb_core::datum::Decimal128Semantics;
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
-use lagodb_core::tuple::Decimal128Semantics;
 
 use super::super::error::IcebergFilterError;
 use super::super::temporal::TimestampPrecision;

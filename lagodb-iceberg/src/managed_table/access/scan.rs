@@ -240,7 +240,7 @@ impl AmScanSession for IcebergScan {
     fn scan_analyze_next_tuple(
         &mut self,
         _oldest_xmin: pg_sys::TransactionId,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
     ) -> AmResult<AnalyzeTupleOutcome> {
         match &mut self.state {
             IcebergScanState::Analyze(state) => state.next_tuple(out),
@@ -258,7 +258,7 @@ impl ScanBatchDriver for IcebergScan {
     fn next_into_slot(
         &mut self,
         direction: ScanDirection,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
     ) -> AmResult<bool> {
         match &mut self.state {
             IcebergScanState::Regular(state) => {

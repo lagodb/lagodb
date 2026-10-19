@@ -207,7 +207,7 @@ impl AnalyzeScanState {
 
     pub(crate) fn next_tuple(
         &mut self,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
     ) -> AmResult<AnalyzeTupleOutcome> {
         match &mut self.phase {
             AnalyzeScanPhase::Ready(cursor) => cursor.next_tuple(out),

@@ -8,7 +8,7 @@ use arrow_array::{
     TimestampMicrosecondArray, TimestampNanosecondArray,
 };
 use arrow_schema::{DataType, TimeUnit};
-use lagodb_core::tuple::{Decimal128NumericCodec, JsonbBuilder, JsonbPosition};
+use lagodb_core::datum::{Decimal128NumericCodec, JsonbBuilder, JsonbPosition};
 use uuid::Uuid;
 
 use crate::column_encoder::{downcast, temporal};

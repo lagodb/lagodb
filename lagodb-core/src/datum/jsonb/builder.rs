@@ -15,7 +15,7 @@ use std::slice;
 
 use pgrx::pg_sys::{self, JsonbIteratorToken as Token, jbvType};
 
-use super::JsonValueError;
+use crate::datum::json::JsonValueError;
 use crate::wrapper::PgWrapper;
 
 /// The position of a scalar in its enclosing JSONB container.

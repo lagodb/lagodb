@@ -15,9 +15,9 @@ use arrow_array::{
 use arrow_schema::DataType;
 use lagodb_core::api::{AmError, AmResult};
 use lagodb_core::batch::AmScanBatchSource;
-use lagodb_core::tuple::{
-    ByteaView, Cell, ColumnDatumCodec, ColumnDatumTarget, Decimal128NumericCodec,
-    StringView,
+use lagodb_core::datum::{
+    BoundColumnDatumCodec, ByteaView, Cell, ColumnDatumTarget,
+    Decimal128NumericCodec, StringView,
 };
 use pgrx::datum::Uuid;
 use pgrx::pg_sys;
@@ -305,7 +305,7 @@ impl ColumnReader {
     unsafe fn read_standard_datum(
         &self,
         row_idx: usize,
-        target: ColumnDatumCodec,
+        target: BoundColumnDatumCodec,
     ) -> ArrowConversionResult<Option<pg_sys::Datum>> {
         match &self.reader {
             ReaderImpl::List(reader) => unsafe { reader.datum(row_idx) },
@@ -343,7 +343,7 @@ impl ColumnReader {
     pub unsafe fn read_datum_unchecked(
         &self,
         row_idx: usize,
-        target: ColumnDatumCodec,
+        target: BoundColumnDatumCodec,
     ) -> ArrowConversionResult<Option<pg_sys::Datum>> {
         unsafe { self.read_standard_datum(row_idx, target) }
     }

@@ -1,8 +1,8 @@
 //! Errors owned by the Iceberg planned-filter facet.
 
+use lagodb_core::datum::DecimalCodecError;
 use lagodb_core::diag::SqlStateError;
 use lagodb_core::plan_data::PlanDataError;
-use lagodb_core::tuple::DecimalCodecError;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 

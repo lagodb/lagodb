@@ -2,7 +2,7 @@
 
 use arrow_schema::{DataType, Field};
 use lagodb_arrow::{BoundDatumPlan, PgColumnType};
-use lagodb_core::tuple::{PgType, numeric_typmod};
+use lagodb_core::datum::{PgType, numeric_typmod};
 use pgrx::pg_sys;
 
 use super::ParquetTypeMapping;

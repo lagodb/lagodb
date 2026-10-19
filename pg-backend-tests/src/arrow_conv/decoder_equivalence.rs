@@ -25,7 +25,7 @@ mod tests {
     use arrow_array::types::{Int16Type, Int32Type};
     use arrow_array::{Array, ArrayRef, ListArray};
     use lagodb_arrow::{CellRule, ColumnReader, PgColumnType, resolve_cell_rule};
-    use lagodb_core::tuple::{Cell, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
+    use lagodb_core::datum::{Cell, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
     use pgrx::pg_sys;
     use pgrx::prelude::*;
     use proptest::prelude::*;

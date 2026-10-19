@@ -24,7 +24,8 @@ mod tests {
         CellRule,
     };
     use lagodb_core::batch::BatchBuffer;
-    use lagodb_core::tuple::{Cell, PgType, Row, RowDatumCodec, TupleSlotRow};
+    use lagodb_core::datum::{Cell, PgType};
+    use lagodb_core::tuple::{Row, RowDatumCodec, TupleSlotRow};
     use pgrx::prelude::*;
     use pgrx::{IntoDatum, pg_sys};
     use proptest::prelude::*;

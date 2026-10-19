@@ -2,8 +2,8 @@
 //! `DecimalCodecError` routing. Pure enum mapping, so these run as host tests.
 
 use lagodb_arrow::ArrowConversionError;
+use lagodb_core::datum::{DatumConversionError, DecimalCodecError};
 use lagodb_core::diag::SqlStateError;
-use lagodb_core::tuple::{DatumConversionError, DecimalCodecError};
 use pgrx::datum::datetime_support::DateTimeConversionError;
 use pgrx::datum::numeric_support::error::Error as PgNumericError;
 use pgrx::prelude::PgSqlErrorCode;

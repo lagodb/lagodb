@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arrow_array::{ArrayRef, ListArray, StructArray};
 use arrow_buffer::{NullBufferBuilder, OffsetBuffer};
 use arrow_schema::{DataType, FieldRef, Fields};
-use lagodb_core::tuple::{JsonbReader, JsonbRef};
+use lagodb_core::datum::{JsonbReader, JsonbRef};
 use pgrx::pg_sys;
 
 use super::write_map::MapWriter;

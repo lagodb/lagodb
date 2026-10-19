@@ -2,9 +2,9 @@
 
 use std::{ffi::CStr, panic::AssertUnwindSafe, ptr};
 
+use lagodb_core::datum::PgType;
 use lagodb_core::diag::PgError;
 use lagodb_core::hooks::{HookError, UtilityHookError};
-use lagodb_core::tuple::PgType;
 use pgrx::{PgSqlErrorCode, PgTryBuilder, notice, pg_sys};
 
 use super::column_sources::ManagedColumnSources;

@@ -1,8 +1,8 @@
 //! PostgreSQL-semantic join nodes for provider-neutral query plans.
 
+use lagodb_core::datum::Utf8ServerEncoding;
 use lagodb_core::expr::{ColumnRef, ExprType, PgComparisonKind, PgComparisonOp};
 use lagodb_core::expr::{PgComparisonSignature, PgTextComparisonSemantics};
-use lagodb_core::tuple::Utf8ServerEncoding;
 use pgrx::pg_sys;
 
 use super::{

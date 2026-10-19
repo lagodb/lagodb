@@ -3,7 +3,7 @@
 use arrow_array::RecordBatch;
 use lagodb_arrow::{ArrowColumnDecoder, BoundBatch};
 use lagodb_core::batch::{AmScanBatchSource, BatchRowDecoder};
-use lagodb_core::prelude::{AmResult, SlotColumns};
+use lagodb_core::prelude::{AmResult, SlotDatumWriter};
 
 use super::batch::ScanBatchSource;
 
@@ -37,7 +37,7 @@ where
     /// PostgreSQL direction requests before calling this cursor.
     pub(crate) fn next_into_slot(
         &mut self,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
     ) -> AmResult<bool> {
         self.next_with(|decoder, bound, row_index| {
             // SAFETY: PgReadPlan compiled the decoder from the relation

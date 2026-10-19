@@ -30,8 +30,9 @@
 
 use std::convert::Infallible;
 
+use crate::datum::DatumConversionError;
 use crate::handles::ScanDirection;
-use crate::tuple::{DatumConversionError, Row, RowDatumCodec, TupleSlotRow};
+use crate::tuple::{Row, RowDatumCodec, TupleSlotRow};
 
 /// Common lifecycle for buffering AM-specific batches.
 ///
@@ -123,7 +124,7 @@ impl RowBatchBuffer {
     }
 
     pub fn push_row(&mut self, row: Row) {
-        self.estimated_size += row.size;
+        self.estimated_size += row.estimated_size();
         self.rows.push(row);
     }
 
@@ -209,14 +210,14 @@ impl BatchBuffer for RowBatchBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tuple::Cell;
+    use crate::datum::Cell;
 
     #[test]
     fn row_batch_tracks_size_and_rows() {
         let mut row = Row::with_width(2);
         row.set_cell(0, Some(Cell::I32(7)));
         row.set_cell(1, Some(Cell::String("lagodb".to_string())));
-        let row_size = row.size;
+        let row_size = row.estimated_size();
 
         let mut buffer = RowBatchBuffer::new();
         buffer.copy_row(&row);
@@ -249,7 +250,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 use crate::api::AmResult;
-use crate::tuple::SlotColumns;
+use crate::tuple::SlotDatumWriter;
 
 /// Yields one AM-defined column batch at a time. The batch is owned by value so
 /// its lifetime is independent of any PostgreSQL memory context.
@@ -290,7 +291,7 @@ pub trait BatchRowDecoder {
         &self,
         bound: &Self::Bound,
         row_idx: usize,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
     ) -> AmResult<()>;
 }
 
@@ -306,7 +307,7 @@ pub trait ScanBatchDriver {
     fn next_into_slot(
         &mut self,
         direction: ScanDirection,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
     ) -> AmResult<bool>;
 }
 
@@ -345,7 +346,7 @@ where
     pub fn next_into_slot(
         &mut self,
         direction: ScanDirection,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
     ) -> AmResult<bool> {
         if direction != ScanDirection::Forward {
             return crate::api::unsupported_callback("non-forward batch scan");
@@ -387,7 +388,7 @@ where
     fn next_into_slot(
         &mut self,
         direction: ScanDirection,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
     ) -> AmResult<bool> {
         BatchRowCursor::next_into_slot(self, direction, out)
     }
@@ -458,7 +459,7 @@ mod read_tests {
             &self,
             bound: &LiveBatch,
             row_idx: usize,
-            out: &mut SlotColumns<'_>,
+            out: &mut SlotDatumWriter<'_>,
         ) -> AmResult<()> {
             for (col, value) in bound.rows[row_idx].iter().enumerate() {
                 out.set_datum(col, value.map(|n| pg_sys::Datum::from(n as usize)));
@@ -467,7 +468,7 @@ mod read_tests {
         }
     }
 
-    /// Owns the backing arrays a [`SlotColumns`] writes through. The `values`
+    /// Owns the backing arrays a [`SlotDatumWriter`] writes through. The `values`
     /// buffer never reallocates after construction, so the raw pointers handed
     /// to the slot stay valid for the slot's lifetime.
     struct HostSlot {
@@ -498,8 +499,8 @@ mod read_tests {
             boxed
         }
 
-        fn columns(&mut self) -> SlotColumns<'_> {
-            unsafe { SlotColumns::new(&mut self.slot, std::ptr::null_mut()) }
+        fn columns(&mut self) -> SlotDatumWriter<'_> {
+            unsafe { SlotDatumWriter::new(&mut self.slot, std::ptr::null_mut()) }
         }
     }
 
@@ -599,7 +600,7 @@ mod read_tests {
     }
 
     #[test]
-    fn slot_columns_marks_null_and_leaves_unmapped_positions_null() {
+    fn slot_datum_writer_marks_null_and_leaves_unmapped_positions_null() {
         let natts = 3;
         let mut host = HostSlot::new(natts);
         {

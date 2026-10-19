@@ -1,7 +1,7 @@
 //! One numeric policy shared by managed DDL and storage schema construction.
 
 use iceberg_lite::spec::PrimitiveType;
-use lagodb_core::tuple::numeric_precision_scale;
+use lagodb_core::datum::numeric_precision_scale;
 
 pub(crate) struct ManagedNumeric {
     decimal: Option<(u32, u32)>,

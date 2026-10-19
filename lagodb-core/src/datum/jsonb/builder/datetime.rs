@@ -8,7 +8,7 @@ use pgrx::IntoDatum;
 use pgrx::pg_sys::{self, Datum};
 
 use super::{JsonbBuilder, JsonbPosition};
-use crate::tuple::{JsonValueError, PG_EPOCH_USECS_DIFF};
+use crate::datum::{JsonValueError, PG_EPOCH_USECS_DIFF};
 
 impl JsonbBuilder<'_> {
     /// Append a PostgreSQL date/time using its ISO JSON formatter, in UTC for

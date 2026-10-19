@@ -2,8 +2,8 @@
 
 use iceberg_lite::spec::Datum;
 use lagodb_arrow::pg_epoch_days_to_unix_days;
+use lagodb_core::datum::{Decimal128ComparisonValue, DetoastedVarlena};
 use lagodb_core::expr::RuntimeValue;
-use lagodb_core::tuple::{Decimal128ComparisonValue, DetoastedVarlena};
 use pgrx::{FromDatum, datum::Uuid as PgUuid};
 use uuid::Uuid;
 

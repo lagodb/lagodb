@@ -4,6 +4,7 @@ use std::error::Error as StdError;
 
 use lagodb_arrow::ArrowConversionError;
 use lagodb_core::copy::{CopyError, CopyRowRejection};
+use lagodb_core::datum::{DatumConversionError, DecimalCodecError, JsonValueError};
 use lagodb_core::diag::{PgReportError, SqlStateError};
 use lagodb_core::fdw::{
     ForeignModifyError, ForeignScanError, ForeignTableMaintenanceError,
@@ -12,7 +13,6 @@ use lagodb_core::fdw::{
 use lagodb_core::plan_data::PlanDataError;
 use lagodb_core::storage::foreign::StorageAcquireError;
 use lagodb_core::storage::profile::StorageProfileError;
-use lagodb_core::tuple::{DatumConversionError, DecimalCodecError, JsonValueError};
 use lagodb_storage::StorageError;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
@@ -60,7 +60,7 @@ pub(crate) enum ConnectorError {
     Arrow(#[from] arrow_schema::ArrowError),
 
     #[error("PostgreSQL datum conversion failed: {0}")]
-    DatumConversion(#[from] lagodb_core::tuple::DatumConversionError),
+    DatumConversion(#[from] DatumConversionError),
 
     #[error("PostgreSQL numeric conversion failed: {0}")]
     DecimalCodec(#[from] DecimalCodecError),

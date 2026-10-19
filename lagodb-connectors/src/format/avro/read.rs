@@ -2,8 +2,8 @@
 
 use apache_avro::Schema;
 use apache_avro::types::Value;
-use lagodb_core::tuple::{
-    ByteaView, Cell, ColumnDatumCodec, ColumnDatumTarget, PG_EPOCH_DAYS_DIFF,
+use lagodb_core::datum::{
+    BoundColumnDatumCodec, ByteaView, Cell, ColumnDatumTarget, PG_EPOCH_DAYS_DIFF,
     PG_EPOCH_USECS_DIFF, StringView, numeric_precision_scale,
 };
 use pgrx::datum::{USECS_PER_DAY, Uuid as PgUuid};
@@ -19,7 +19,7 @@ use super::AvroValueKind;
 pub(crate) struct AvroReadColumn {
     source: usize,
     kind: AvroValueKind,
-    codec: ColumnDatumCodec,
+    codec: BoundColumnDatumCodec,
 }
 
 impl AvroReadColumn {
@@ -51,7 +51,9 @@ impl AvroReadColumn {
         Ok(Self {
             source,
             kind,
-            codec: ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(target_oid))?,
+            codec: BoundColumnDatumCodec::bind(ColumnDatumTarget::from_oid(
+                target_oid,
+            ))?,
         })
     }
 

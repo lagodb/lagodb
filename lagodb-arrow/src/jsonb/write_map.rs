@@ -8,7 +8,7 @@ use arrow_buffer::{NullBufferBuilder, OffsetBuffer};
 use arrow_ord::ord::make_comparator;
 use arrow_schema::{DataType, FieldRef, SortOptions};
 use arrow_select::take::take;
-use lagodb_core::tuple::JsonbRef;
+use lagodb_core::datum::JsonbRef;
 
 use super::write::ValueWriter;
 use super::{NestedJsonbDefault, NestedJsonbPlan, NodePlan};

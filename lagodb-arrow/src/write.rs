@@ -10,9 +10,8 @@ use std::sync::Arc;
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::Schema;
 use lagodb_core::batch::BatchBuffer;
-use lagodb_core::tuple::{
-    ColumnDatumTarget, SlotDatumIndex, SlotDatums, TupleSlotRow,
-};
+use lagodb_core::datum::ColumnDatumTarget;
+use lagodb_core::tuple::{SlotDatumIndex, SlotDatumView, TupleSlotRow};
 use pgrx::pg_sys;
 
 use crate::BoundDatumPlan;
@@ -72,7 +71,7 @@ struct BoundWriteColumn {
 }
 
 impl BoundWriteColumn {
-    fn append(&mut self, datums: &SlotDatums<'_>) -> ArrowConversionResult<usize> {
+    fn append(&mut self, datums: &SlotDatumView<'_>) -> ArrowConversionResult<usize> {
         // SAFETY: binding establishes the slot index and declared datum type;
         // the caller supplies that same layout for the buffer's lifetime.
         let (raw, is_null) = unsafe { datums.datum_at_bound(self.index) };

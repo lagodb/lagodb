@@ -7,8 +7,9 @@ use arrow_array::{
     Int64Array, LargeStringArray, ListArray, StringArray,
 };
 use arrow_schema::DataType;
-use lagodb_core::tuple::{
-    ArrayDatumBuffer, ArrayDatumLayout, Cell, ColumnDatumCodec, ColumnDatumTarget,
+use lagodb_core::datum::{
+    ArrayDatumBuffer, ArrayDatumLayout, BoundColumnDatumCodec, Cell,
+    ColumnDatumTarget,
 };
 use pgrx::pg_sys;
 
@@ -30,7 +31,7 @@ enum ListValues {
 pub(crate) struct ListReader {
     array: ListArray,
     values: ListValues,
-    codec: ColumnDatumCodec,
+    codec: BoundColumnDatumCodec,
     buffer: Rc<RefCell<ArrayDatumBuffer>>,
 }
 
@@ -43,7 +44,7 @@ impl ListReader {
         Self::bind_with_buffer(
             array,
             element,
-            ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(oid))?,
+            BoundColumnDatumCodec::bind(ColumnDatumTarget::from_oid(oid))?,
             Rc::new(RefCell::new(ArrayDatumBuffer::new(ArrayDatumLayout::bind(
                 oid,
             )))),
@@ -53,7 +54,7 @@ impl ListReader {
     pub(crate) fn bind_with_buffer(
         array: &dyn Array,
         element: ListElementRule,
-        codec: ColumnDatumCodec,
+        codec: BoundColumnDatumCodec,
         buffer: Rc<RefCell<ArrayDatumBuffer>>,
     ) -> ArrowConversionResult<Self> {
         let array = downcast::<ListArray>(array, "List")?;
@@ -168,7 +169,7 @@ impl ListValues {
         &self,
         start: usize,
         len: usize,
-        codec: ColumnDatumCodec,
+        codec: BoundColumnDatumCodec,
         buffer: &mut ArrayDatumBuffer,
     ) -> ArrowConversionResult<()> {
         macro_rules! value {

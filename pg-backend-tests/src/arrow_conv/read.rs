@@ -17,7 +17,7 @@ mod tests {
         DecodedColumn,
     };
     use lagodb_core::batch::AmScanBatchSource;
-    use lagodb_core::tuple::PgType;
+    use lagodb_core::datum::PgType;
     use pgrx::pg_sys;
     use pgrx::prelude::*;
 

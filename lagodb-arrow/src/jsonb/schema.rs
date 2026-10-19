@@ -27,6 +27,15 @@ impl NestedJsonbPlan {
         }
         let target = match field.data_type() {
             DataType::Struct(fields) => {
+                // No duplicate-name pass is needed here. Iceberg's Schema builder
+                // runs for both schema construction and metadata deserialization
+                // and recursively rejects duplicate field paths before a foreign
+                // Struct can be bound to JSONB. Managed Structs bind to PostgreSQL
+                // composites or intervals, while Parquet admission rejects nested
+                // container-to-JSONB mappings. Current storage-provider paths that
+                // reach this branch have therefore already established unique
+                // object keys; a new structural source must establish the same
+                // invariant at its binding boundary.
                 let children = fields
                     .iter()
                     .map(|field| {

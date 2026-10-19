@@ -5,7 +5,7 @@ use std::slice;
 
 use pgrx::pg_sys;
 
-use crate::tuple::{ColumnDatumCodec, ColumnDatumTarget};
+use crate::datum::{BoundColumnDatumCodec, ColumnDatumTarget};
 
 use super::error::ForeignModifyError;
 
@@ -20,7 +20,7 @@ pub(crate) struct ModifyRowLayout {
     relation_oid: pg_sys::Oid,
     tuple_desc: pg_sys::TupleDesc,
     attributes: Box<[ModifyAttribute]>,
-    codecs: Box<[Option<ColumnDatumCodec>]>,
+    codecs: Box<[Option<BoundColumnDatumCodec>]>,
     has_live_attributes: bool,
 }
 
@@ -110,12 +110,12 @@ impl ModifyRowLayout {
     pub(crate) unsafe fn codec_for_unchecked(
         &mut self,
         index: usize,
-    ) -> Result<ColumnDatumCodec, ForeignModifyError> {
+    ) -> Result<BoundColumnDatumCodec, ForeignModifyError> {
         if let Some(codec) = unsafe { *self.codecs.get_unchecked(index) } {
             return Ok(codec);
         }
         let attr = unsafe { self.attribute_unchecked(index) };
-        let codec = ColumnDatumCodec::bind(attr.target)
+        let codec = BoundColumnDatumCodec::bind(attr.target)
             .map_err(ForeignModifyError::provider)?;
         unsafe { *self.codecs.get_unchecked_mut(index) = Some(codec) };
         Ok(codec)

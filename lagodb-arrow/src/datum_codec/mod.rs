@@ -21,8 +21,8 @@ mod write;
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, FieldRef};
-use lagodb_core::tuple::{
-    ArrayDatumLayout, ColumnDatumCodec, ColumnDatumTarget, PgType,
+use lagodb_core::datum::{
+    ArrayDatumLayout, BoundColumnDatumCodec, ColumnDatumTarget, PgType,
 };
 use pgrx::pg_sys;
 
@@ -65,7 +65,7 @@ enum NodePlan {
     NativeList {
         rule: CellRule,
         layout: ArrayDatumLayout,
-        codec: ColumnDatumCodec,
+        codec: BoundColumnDatumCodec,
     },
     List {
         layout: ArrayDatumLayout,
@@ -150,8 +150,9 @@ impl BoundDatumPlan {
                 } else {
                     element.oid
                 };
-                let codec =
-                    ColumnDatumCodec::bind(ColumnDatumTarget::from_oid(codec_oid))?;
+                let codec = BoundColumnDatumCodec::bind(
+                    ColumnDatumTarget::from_oid(codec_oid),
+                )?;
                 NodePlan::NativeList {
                     rule,
                     layout,

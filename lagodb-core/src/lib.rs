@@ -33,7 +33,10 @@ pub mod batch;
 /// Scoped PostgreSQL FFI handles and owning guards
 pub mod handles;
 
-/// PostgreSQL tuple value abstractions (Cell, Row)
+/// PostgreSQL semantic values and Datum conversion codecs
+pub mod datum;
+
+/// PostgreSQL row and tuple-slot abstractions
 pub mod tuple;
 
 /// Table access implementation modules (scan, index, mutation, ddl, relation)
@@ -121,12 +124,16 @@ pub mod storage;
 pub mod prelude {
     pub use crate::api::*;
     pub use crate::batch::*;
+    pub use crate::datum::*;
     pub use crate::diag::{
         PgError, PgErrorReport, PgErrorSource, PgReportError, ReportableError,
         SqlStateError,
     };
     pub use crate::handles::*;
-    pub use crate::tuple::*;
+    pub use crate::tuple::{
+        PgDatumRef, Row, RowDatumCodec, RowSlotWriter, SlotDatumIndex, SlotDatumView,
+        SlotDatumWriter, TupleSlotBatch, TupleSlotRow,
+    };
     pub use crate::{pg_fdw, pg_table_am};
 }
 

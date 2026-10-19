@@ -8,8 +8,8 @@ use lagodb_core::batch::BatchBuffer;
 use lagodb_core::copy::{
     CopyColumnLayout, CopyError, CopyOutputRow, CopyTupleDestination,
 };
+use lagodb_core::datum::PgType;
 use lagodb_core::diag::PgReportError;
-use lagodb_core::tuple::PgType;
 use pgrx::PgTryBuilder;
 
 use crate::error::ConnectorError;

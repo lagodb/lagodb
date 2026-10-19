@@ -11,7 +11,7 @@ use arrow_array::builder::{
     TimestampNanosecondBuilder,
 };
 use arrow_schema::DataType;
-use lagodb_core::tuple::{Decimal128NumericCodec, JsonbDatetime, JsonbRef};
+use lagodb_core::datum::{Decimal128NumericCodec, JsonbRef, JsonbTemporalParser};
 use uuid::Uuid;
 
 use super::NestedJsonbDefault;
@@ -200,18 +200,18 @@ impl ScalarWriter {
             }
             (Self::Date(b), JsonbRef::String(v)) => {
                 // SAFETY: caller is inside JsonbReader::read.
-                b.append_value(unsafe { JsonbDatetime::Date.parse(v)? } as i32);
+                b.append_value(unsafe { JsonbTemporalParser::Date.parse(v)? } as i32);
                 Ok(4)
             }
             (Self::Time(b), JsonbRef::String(v)) => {
                 // SAFETY: the complete append runs inside JsonbReader::read.
-                b.append_value(unsafe { JsonbDatetime::Time.parse(v)? });
+                b.append_value(unsafe { JsonbTemporalParser::Time.parse(v)? });
                 Ok(8)
             }
             (Self::Timestamp(b, tz), JsonbRef::String(v)) => {
                 // SAFETY: the complete append runs inside JsonbReader::read.
                 b.append_value(unsafe {
-                    JsonbDatetime::Timestamp {
+                    JsonbTemporalParser::Timestamp {
                         nanos: false,
                         tz: *tz,
                     }
@@ -222,7 +222,7 @@ impl ScalarWriter {
             (Self::TimestampNs(b, tz), JsonbRef::String(v)) => {
                 // SAFETY: the complete append runs inside JsonbReader::read.
                 b.append_value(unsafe {
-                    JsonbDatetime::Timestamp {
+                    JsonbTemporalParser::Timestamp {
                         nanos: true,
                         tz: *tz,
                     }

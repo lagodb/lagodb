@@ -1,5 +1,6 @@
 //! Relation-scoped `PredicateFragment` to Iceberg planned-predicate conversion.
 
+use lagodb_core::datum::{Utf8ServerEncoding, numeric_typmod};
 use lagodb_core::expr::pushdown::{
     FilterPlan, FilterPlanningContext, FilterPushdownPlanner, PredicateFragment,
     PredicatePlan, PredicatePlanner, ScalarExpr,
@@ -7,7 +8,6 @@ use lagodb_core::expr::pushdown::{
 use lagodb_core::expr::{BooleanTestKind, RuntimeValueSource};
 use lagodb_core::expr::{PgComparisonOp, PushdownCosting};
 use lagodb_core::handles::RelationGuard;
-use lagodb_core::tuple::{Utf8ServerEncoding, numeric_typmod};
 use pgrx::pg_sys;
 use std::sync::Arc;
 

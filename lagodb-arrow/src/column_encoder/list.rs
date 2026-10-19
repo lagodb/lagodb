@@ -8,7 +8,7 @@ use arrow_array::builder::{
     Int32Builder, Int64Builder, ListBuilder, StringBuilder,
 };
 use arrow_schema::FieldRef;
-use lagodb_core::tuple::Cell;
+use lagodb_core::datum::Cell;
 
 use super::ColumnAppend;
 use crate::error::{ArrowConversionError, ArrowConversionResult};

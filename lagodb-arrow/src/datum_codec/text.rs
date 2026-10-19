@@ -5,7 +5,7 @@ use std::sync::Arc;
 use arrow_array::ArrayRef;
 use arrow_array::builder::{ArrayBuilder, LargeStringBuilder, StringBuilder};
 use arrow_schema::DataType;
-use lagodb_core::tuple::{PgTextIo, PgType};
+use lagodb_core::datum::{PgTextIo, PgType};
 use pgrx::pg_sys;
 
 /// Stores a datum's type-output text in an Arrow string array.

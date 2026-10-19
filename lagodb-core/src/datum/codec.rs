@@ -4,21 +4,19 @@
 //! destination-attribute conversion policy without exposing provider-specific
 //! physical encodings.
 
-use std::error::Error;
 use std::ffi::CString;
-use std::fmt;
 use std::mem;
 use std::ptr;
 use std::slice;
 
 use pgrx::IntoDatum;
 use pgrx::pg_sys::{self, Datum, Oid};
-use pgrx::prelude::PgSqlErrorCode;
 
-use crate::diag::{PgError, SqlStateError};
 use crate::wrapper::PgWrapper;
 
 use super::cell::Cell;
+use super::encoding::Utf8ServerEncoding;
+use super::error::{DatumConversionError, Utf8ServerEncodingError};
 
 mod text;
 
@@ -32,25 +30,6 @@ mod text;
 pub struct ColumnDatumTarget {
     oid: Oid,
     kind: DatumKind,
-}
-
-/// Proof that PostgreSQL text datums can be consumed by UTF-8 Arrow APIs.
-///
-/// The database encoding is fixed for a database. Predicate planners retain
-/// this zero-sized proof while constructing text plans; persisted text plans
-/// therefore authorize binders to call pgrx's UTF-8 `String::from_datum`
-/// without repeating this catalog-independent check on every bind or row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Utf8ServerEncoding(());
-
-impl Utf8ServerEncoding {
-    pub fn resolve() -> Result<Self, Utf8ServerEncodingError> {
-        let encoding = unsafe { pg_sys::GetDatabaseEncoding() };
-        if encoding != pg_sys::pg_enc::PG_UTF8 as i32 {
-            return Err(Utf8ServerEncodingError { encoding });
-        }
-        Ok(Self(()))
-    }
 }
 
 impl ColumnDatumTarget {
@@ -104,34 +83,15 @@ impl ColumnDatumTarget {
     /// descriptor for the duration of this call. The returned plans own no
     /// PostgreSQL pointers and may be retained with the relation's executor
     /// state.
-    pub(crate) unsafe fn from_relation(
-        relation: pg_sys::Relation,
-    ) -> Option<Box<[Self]>> {
-        if relation.is_null() {
-            return None;
-        }
+    pub(crate) unsafe fn from_relation(relation: pg_sys::Relation) -> Box<[Self]> {
         let tuple_desc = unsafe { (*relation).rd_att };
-        if tuple_desc.is_null() {
-            return None;
-        }
-        let natts = unsafe { (*tuple_desc).natts };
-        if natts < 0
-            || (natts > 0 && unsafe { (*tuple_desc).attrs.as_ptr().is_null() })
-        {
-            return None;
-        }
-        if natts == 0 {
-            return Some(Vec::new().into_boxed_slice());
-        }
-        let attrs = unsafe {
-            slice::from_raw_parts((*tuple_desc).attrs.as_ptr(), natts as usize)
-        };
-        Some(
-            attrs
-                .iter()
-                .map(|attr| Self::from_oid(attr.atttypid))
-                .collect(),
-        )
+        let natts = unsafe { (*tuple_desc).natts as usize };
+        let attrs =
+            unsafe { slice::from_raw_parts((*tuple_desc).attrs.as_ptr(), natts) };
+        attrs
+            .iter()
+            .map(|attr| Self::from_oid(attr.atttypid))
+            .collect()
     }
 }
 
@@ -142,11 +102,11 @@ impl ColumnDatumTarget {
 /// the public entry point for converting a semantic [`Cell`] into a Datum, so
 /// callers cannot accidentally bypass the relation/column binding check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ColumnDatumCodec {
+pub struct BoundColumnDatumCodec {
     target: ColumnDatumTarget,
 }
 
-impl ColumnDatumCodec {
+impl BoundColumnDatumCodec {
     /// Bind one destination target and validate semantic UTF-8 capability once.
     pub fn bind(target: ColumnDatumTarget) -> Result<Self, DatumConversionError> {
         if target.requires_utf8_server_encoding() {
@@ -243,152 +203,6 @@ impl ColumnDatumCodec {
     ) -> Result<Option<Cell>, DatumConversionError> {
         unsafe {
             Cell::from_polymorphic_datum_checked(datum, is_null, self.target.oid())
-        }
-    }
-}
-
-/// A conversion failure that is distinct from SQL NULL.
-#[derive(Debug)]
-pub enum DatumConversionError {
-    /// The Cell variant cannot represent the destination attribute.
-    IncompatibleType { target: Oid },
-    /// A numeric source cannot be narrowed to the target width.
-    OutOfRange { target: Oid },
-    /// Text input contains an invalid value for the destination input path.
-    InvalidInput { target: Oid },
-    /// The bound semantic conversion requires UTF-8 server encoding.
-    UnsupportedServerEncoding { encoding: i32 },
-    /// A PostgreSQL text datum was not valid UTF-8 for the semantic Cell API.
-    InvalidUtf8 { target: Oid },
-    /// PostgreSQL raised an error while parsing or constructing a datum.
-    Postgres(PgError),
-}
-
-/// The database encoding cannot satisfy a semantic UTF-8 conversion contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Utf8ServerEncodingError {
-    encoding: i32,
-}
-
-impl Utf8ServerEncodingError {
-    #[inline]
-    pub const fn encoding(self) -> i32 {
-        self.encoding
-    }
-}
-
-impl fmt::Display for Utf8ServerEncodingError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "semantic UTF-8 conversion requires UTF-8 server encoding, found encoding {}",
-            self.encoding
-        )
-    }
-}
-
-impl Error for Utf8ServerEncodingError {}
-
-impl SqlStateError for Utf8ServerEncodingError {
-    fn sql_error_code(&self) -> PgSqlErrorCode {
-        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
-    }
-}
-
-impl DatumConversionError {
-    #[inline]
-    const fn incompatible(target: Oid) -> Self {
-        Self::IncompatibleType { target }
-    }
-
-    #[inline]
-    const fn out_of_range(target: Oid) -> Self {
-        Self::OutOfRange { target }
-    }
-
-    #[inline]
-    const fn invalid_input(target: Oid) -> Self {
-        Self::InvalidInput { target }
-    }
-}
-
-impl fmt::Display for DatumConversionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::IncompatibleType { target } => write!(
-                f,
-                "Cell cannot be represented by PostgreSQL target type {}",
-                u32::from(*target)
-            ),
-            Self::OutOfRange { target } => write!(
-                f,
-                "Cell value is out of range for PostgreSQL target type {}",
-                u32::from(*target)
-            ),
-            Self::InvalidInput { target } => write!(
-                f,
-                "Cell text is invalid for PostgreSQL target type {}",
-                u32::from(*target)
-            ),
-            Self::UnsupportedServerEncoding { encoding } => write!(
-                f,
-                "semantic UTF-8 conversion requires UTF-8 server encoding, found encoding {}",
-                encoding
-            ),
-            Self::InvalidUtf8 { target } => write!(
-                f,
-                "PostgreSQL datum for target type {} is not valid UTF-8",
-                u32::from(*target)
-            ),
-            Self::Postgres(error) => error.fmt(f),
-        }
-    }
-}
-
-impl Error for DatumConversionError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Postgres(error) => Some(error),
-            _ => None,
-        }
-    }
-}
-
-impl From<PgError> for DatumConversionError {
-    #[inline]
-    fn from(error: PgError) -> Self {
-        Self::Postgres(error)
-    }
-}
-
-impl From<Utf8ServerEncodingError> for DatumConversionError {
-    #[inline]
-    fn from(error: Utf8ServerEncodingError) -> Self {
-        Self::UnsupportedServerEncoding {
-            encoding: error.encoding(),
-        }
-    }
-}
-
-impl SqlStateError for DatumConversionError {
-    fn sql_error_code(&self) -> PgSqlErrorCode {
-        match self {
-            Self::IncompatibleType { .. } => {
-                PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH
-            }
-            Self::OutOfRange { .. } => {
-                PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE
-            }
-            Self::InvalidInput { .. } => {
-                PgSqlErrorCode::ERRCODE_INVALID_TEXT_REPRESENTATION
-            }
-            Self::UnsupportedServerEncoding { .. } => {
-                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
-            }
-            Self::InvalidUtf8 { .. } => {
-                PgSqlErrorCode::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE
-            }
-            Self::Postgres(error) => error.sql_error_code(),
         }
     }
 }
@@ -665,7 +479,7 @@ impl Cell {
         };
         let target = ColumnDatumTarget::from_oid(target);
         unsafe {
-            ColumnDatumCodec::from_validated(target)
+            BoundColumnDatumCodec::from_validated(target)
                 .name_datum_from_str_unchecked(text)
         }
     }

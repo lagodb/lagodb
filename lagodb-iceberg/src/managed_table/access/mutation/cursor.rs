@@ -42,7 +42,7 @@ impl ManagedMutationCursor {
 
     pub(crate) fn next_into_slot(
         &mut self,
-        out: &mut SlotColumns<'_>,
+        out: &mut SlotDatumWriter<'_>,
     ) -> AmResult<bool> {
         self.inner.next_into_slot(out)
     }
@@ -96,7 +96,7 @@ impl MutationBatchCursor {
 
     /// Emit one modification row and encode its Iceberg row identity into the
     /// PostgreSQL `ctid` carried by the plan.
-    fn next_into_slot(&mut self, out: &mut SlotColumns<'_>) -> AmResult<bool> {
+    fn next_into_slot(&mut self, out: &mut SlotDatumWriter<'_>) -> AmResult<bool> {
         loop {
             if let Some(bound) = self.current.as_ref()
                 && self.row_index < self.decoder.num_rows(&bound.decoded)

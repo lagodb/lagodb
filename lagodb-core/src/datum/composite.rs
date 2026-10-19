@@ -3,7 +3,8 @@
 use pgrx::{PgTupleDesc, pg_sys};
 
 use super::codec_context::CodecContext;
-use super::{DetoastedVarlena, PgType};
+use super::pg_type::PgType;
+use super::varlena::DetoastedVarlena;
 
 /// Backend-local descriptor and reusable attribute buffers. Dropped attributes
 /// remain NULL; consumers bind live attributes by their physical index.

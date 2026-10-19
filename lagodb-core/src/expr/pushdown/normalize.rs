@@ -7,6 +7,7 @@ use core::ptr;
 
 use pgrx::pg_sys;
 
+use crate::datum::Decimal128Semantics;
 use crate::expr::pg::{
     PgBoolExpr, PgExprRef, PgNullTestKind, PgPredicateLeafRef, PgScalarExprRef,
 };
@@ -14,7 +15,6 @@ use crate::expr::{
     ColumnRef, ExprType, RuntimeValueExpr, RuntimeValueId, RuntimeValueSource,
     RuntimeValueSpec,
 };
-use crate::tuple::Decimal128Semantics;
 
 use super::scope::{RelationExpressionScope, VarResolution};
 use super::{PredicateExpr, PredicateFragment, QueryExpressionScope, ScalarExpr};

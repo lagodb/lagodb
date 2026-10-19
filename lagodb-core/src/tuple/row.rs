@@ -3,19 +3,18 @@
 
 use std::slice;
 
+use crate::datum::{Cell, DatumConversionError};
 use crate::diag::PgReportError;
 use pgrx::pg_sys;
 
-use super::cell::Cell;
-use super::datum::DatumConversionError;
 use super::row_codec::RowDatumCodec;
-use super::slot_columns::SlotColumns;
+use super::slot_datum_writer::SlotDatumWriter;
 use super::slot_row::TupleSlotRow;
 
 #[derive(Debug, Clone, Default)]
 pub struct Row {
     cells: Vec<Option<Cell>>,
-    pub size: usize,
+    size: usize,
 }
 
 impl Row {
@@ -38,6 +37,12 @@ impl Row {
 
     pub fn is_empty(&self) -> bool {
         self.cells.is_empty()
+    }
+
+    /// Estimated memory held by the row's cell payloads.
+    #[inline]
+    pub fn estimated_size(&self) -> usize {
+        self.size
     }
 
     pub fn get(&self, index: usize) -> Option<&Option<Cell>> {
@@ -134,42 +139,6 @@ impl Row {
     /// `slot` must be a valid, non-null pointer to an initialized
     /// `TupleTableSlot`, and `codec` must be bound to that slot's tuple
     /// descriptor.
-    pub unsafe fn update_from_slot(
-        &mut self,
-        slot: *mut pg_sys::TupleTableSlot,
-        codec: &RowDatumCodec,
-    ) -> Result<(), DatumConversionError> {
-        unsafe {
-            // Ensure slot contents are accessible (deform tuple if needed)
-            pg_sys::slot_getallattrs(slot);
-
-            let tup_desc = (*slot).tts_tupleDescriptor;
-            let natts = (*tup_desc).natts as usize;
-            if codec.len() != natts {
-                return Err(DatumConversionError::IncompatibleType {
-                    target: pg_sys::InvalidOid,
-                });
-            }
-            let values = slice::from_raw_parts((*slot).tts_values, natts);
-            let nulls = slice::from_raw_parts((*slot).tts_isnull, natts);
-            self.ensure_len(natts);
-            self.size = 0;
-
-            codec.datums_to_cells(values, nulls, &mut self.cells[..natts])?;
-            self.size = self.cells[..natts]
-                .iter()
-                .filter_map(Option::as_ref)
-                .map(Cell::mem_size)
-                .sum();
-        }
-        Ok(())
-    }
-
-    /// # Safety
-    ///
-    /// `slot` must be a valid, non-null pointer to an initialized
-    /// `TupleTableSlot`, and `codec` must be bound to that slot's tuple
-    /// descriptor.
     pub unsafe fn from_slot(
         slot: *mut pg_sys::TupleTableSlot,
         codec: &RowDatumCodec,
@@ -179,13 +148,13 @@ impl Row {
 }
 
 /// Writes a [`Row`] into a PostgreSQL virtual tuple slot.
-pub struct TupleSlotWriter<'codec> {
+pub struct RowSlotWriter<'codec> {
     slot: *mut pg_sys::TupleTableSlot,
     memory_context: pg_sys::MemoryContext,
     codec: &'codec RowDatumCodec,
 }
 
-impl<'codec> TupleSlotWriter<'codec> {
+impl<'codec> RowSlotWriter<'codec> {
     /// # Safety
     ///
     /// `slot` must point to a valid PostgreSQL tuple slot. `memory_context`
@@ -209,10 +178,10 @@ impl<'codec> TupleSlotWriter<'codec> {
     /// valid. The row is consumed in-place: written cells are taken from it.
     pub unsafe fn write_row(&self, row: &mut Row) -> Result<(), PgReportError> {
         unsafe {
-            // `SlotColumns` is the row-world substrate that owns these
+            // `SlotDatumWriter` is the row-world substrate that owns these
             // output-only `tts_values`/`tts_isnull` writes; the row world
             // funnels through it rather than re-deriving slot pointers here.
-            let mut cols = SlotColumns::new(self.slot, self.memory_context);
+            let mut cols = SlotDatumWriter::new(self.slot, self.memory_context);
             cols.fill_from_row(row, self.codec)?;
 
             // The row-world provider API marks the slot non-empty itself

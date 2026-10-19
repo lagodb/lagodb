@@ -1,8 +1,8 @@
 use iceberg_lite::spec::{
     PrimitiveType, Schema as IcebergSchema, TableMetadata, Type,
 };
+use lagodb_core::datum::PgType;
 use lagodb_core::handles::RelationHandle;
-use lagodb_core::tuple::PgType;
 use pgrx::pg_sys;
 
 use super::super::error::IcebergFdwError;

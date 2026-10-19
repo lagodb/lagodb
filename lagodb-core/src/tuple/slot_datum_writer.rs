@@ -1,4 +1,4 @@
-//! `SlotColumns`: the output-only substrate for writing a slot's datum arrays.
+//! `SlotDatumWriter`: the output-only substrate for writing a slot's datum arrays.
 
 use std::marker::PhantomData;
 use std::slice;
@@ -18,7 +18,7 @@ use super::row_codec::RowDatumCodec;
 /// the call site (the TableAM seqscan passes its per-row `tmp_ctx`; the
 /// CustomScan emit path passes the scan node's per-tuple context), never
 /// scattered into an access method.
-pub struct SlotColumns<'a> {
+pub struct SlotDatumWriter<'a> {
     /// Mutable views over the slot's `tts_values`/`tts_isnull` C arrays, built
     /// once in `new` for an output-only callback. The base pointers are stable
     /// for the slot's lifetime, so caching the slices here keeps `set_datum` a
@@ -31,7 +31,7 @@ pub struct SlotColumns<'a> {
     _marker: PhantomData<&'a mut pg_sys::TupleTableSlot>,
 }
 
-impl<'a> SlotColumns<'a> {
+impl<'a> SlotDatumWriter<'a> {
     /// # Safety
     ///
     /// `slot` must be a valid, initialized slot with a non-NULL tuple
@@ -49,7 +49,7 @@ impl<'a> SlotColumns<'a> {
         // elements. These arrays are stable for the slot's lifetime
         // (allocated at slot init, never reallocated by `ExecClearTuple` /
         // `ExecStoreVirtualTuple`), and this output callback is the sole
-        // accessor of them while `SlotColumns` is alive, so holding `&mut`
+        // accessor of them while `SlotDatumWriter` is alive, so holding `&mut`
         // views for `'a` does not alias any other live reference. This type
         // never calls a PostgreSQL slot deform API while those views live;
         // modify callbacks use `ModifySlotBuffer` for that input/output case.
@@ -70,7 +70,7 @@ impl<'a> SlotColumns<'a> {
 
     /// Set the tuple identity carried by this slot.
     pub fn set_tid(&mut self, tid: &ItemPointer) {
-        // SAFETY: `self.slot` was validated by `SlotColumns::new`; `tts_tid`
+        // SAFETY: `self.slot` was validated by `SlotDatumWriter::new`; `tts_tid`
         // is part of the same live slot and is not aliased through the cached
         // values/nulls slices.
         unsafe {

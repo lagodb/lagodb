@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use arrow_schema::extension::Uuid;
 use arrow_schema::{DataType, Field, TimeUnit};
+use lagodb_core::datum::{PgCompositeField, PgType, numeric_precision_scale};
 use lagodb_core::diag::PgReportError;
 use lagodb_core::handles::RelationGuard;
-use lagodb_core::tuple::{PgCompositeField, PgType, numeric_precision_scale};
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;

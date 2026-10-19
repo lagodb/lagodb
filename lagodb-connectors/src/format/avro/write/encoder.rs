@@ -6,7 +6,7 @@ use std::slice;
 use std::str;
 
 use apache_avro::Schema;
-use lagodb_core::tuple::{DetoastedVarlena, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
+use lagodb_core::datum::{DetoastedVarlena, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
 use pgrx::datum::USECS_PER_DAY;
 use pgrx::pg_sys;
 

@@ -4,7 +4,7 @@ use iceberg_lite::spec::{Literal, NestedField, PrimitiveLiteral, Type};
 use lagodb_arrow::{
     BoundDatumPlan, NestedJsonbDefault, NestedJsonbDefaults, NestedJsonbPlan,
 };
-use lagodb_core::tuple::PgType;
+use lagodb_core::datum::PgType;
 use pgrx::pg_sys;
 
 use super::arrow_type::SemanticArrowType;

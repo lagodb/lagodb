@@ -10,7 +10,7 @@ use super::super::row_identity::ForeignRowIdentityRequirement;
 use super::error::ForeignScanError;
 use super::projection::{ScanProjection, SlotWritePlan};
 use crate::handles::ValidItemPointer;
-use crate::tuple::SlotColumns;
+use crate::tuple::SlotDatumWriter;
 
 /// Executor layout derived once from the plan's slot-write contract.
 ///
@@ -297,7 +297,7 @@ impl<'a> ScanSlotWriter<'a> {
     /// This is the batch-decoder counterpart of [`Self::datum_writer`]. It
     /// preserves a single output representation while allowing a decoder that
     /// was validated against the Begin-time slot layout to reuse its existing
-    /// `SlotColumns` hot path.
+    /// `SlotDatumWriter` hot path.
     ///
     /// # Safety
     ///
@@ -308,9 +308,9 @@ impl<'a> ScanSlotWriter<'a> {
     /// slot. Pass-by-reference datums are allocated in PostgreSQL's current
     /// per-tuple memory context.
     #[inline]
-    pub unsafe fn datum_columns(&mut self) -> SlotColumns<'_> {
+    pub unsafe fn datum_columns(&mut self) -> SlotDatumWriter<'_> {
         unsafe { self.begin_datum_output() };
-        unsafe { SlotColumns::new(self.slot, pg_sys::CurrentMemoryContext) }
+        unsafe { SlotDatumWriter::new(self.slot, pg_sys::CurrentMemoryContext) }
     }
 
     /// Write a destination supplied by the Begin-time output layout.

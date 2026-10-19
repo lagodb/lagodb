@@ -1,8 +1,8 @@
 //! Managed admission and primitive storage mapping over core's PostgreSQL type.
 
 use iceberg_lite::spec::{PrimitiveType, Type};
+use lagodb_core::datum::PgType;
 use lagodb_core::handles::RelationGuard;
-use lagodb_core::tuple::PgType;
 use pgrx::{PgBuiltInOids, PgOid, pg_sys};
 
 use super::numeric_type::ManagedNumeric;
