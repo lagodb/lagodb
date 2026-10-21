@@ -339,11 +339,6 @@ impl IcebergMetadata {
 
     /// Insert this record. Errors if a row with the same `relid` already
     /// exists.
-    ///
-    /// Note: `IcebergMetadata::exists()` followed by `insert()` is technically
-    /// TOCTOU. We accept that today because all current callers (DDL hooks
-    /// for CREATE TABLE) hold a lock on the target relation OID, so the row
-    /// cannot be inserted between our check and our insert.
     pub fn insert(&self) -> IcebergResult<()> {
         let table_guard =
             CatalogRelation::open(Self::table_oid()?, pg_sys::RowExclusiveLock as _)
@@ -380,11 +375,6 @@ impl IcebergMetadata {
     }
 
     // -- CRUD: Read -----------------------------------------------------------
-
-    /// Look up by relid. Returns `None` if the row does not exist.
-    pub fn find_by_relid(relid: pg_sys::Oid) -> IcebergResult<Option<Self>> {
-        Self::find_with_snapshot(relid, CatalogSnapshot::Default)
-    }
 
     pub(super) fn find_with_snapshot(
         relid: pg_sys::Oid,
@@ -428,11 +418,6 @@ impl IcebergMetadata {
         Self::find_with_snapshot(relid, snapshot)?.ok_or(
             IcebergError::MetadataCatalog(MetadataCatalogError::NotFound(relid)),
         )
-    }
-
-    /// Existence probe.
-    pub fn exists(relid: pg_sys::Oid) -> IcebergResult<bool> {
-        Ok(Self::find_by_relid(relid)?.is_some())
     }
 
     pub(crate) fn maintenance_candidates(

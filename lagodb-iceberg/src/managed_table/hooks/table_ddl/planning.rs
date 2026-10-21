@@ -9,7 +9,10 @@ use lagodb_core::options::TableOptionAlterations;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
-use crate::managed_table::catalog::schema_evolution::SchemaEvolutionUpdate;
+use super::column_types::ColumnDefExt;
+use crate::managed_table::catalog::schema_evolution::{
+    ManagedSchemaEvolution, SchemaEvolutionUpdate,
+};
 use crate::managed_table::catalog::{IcebergAccessMethod, IcebergRelationExt};
 use crate::managed_table::options::ICEBERG_TABLE_OPTIONS;
 
@@ -219,7 +222,7 @@ impl SchemaEvolutionTarget {
         update: &SchemaEvolutionUpdate,
     ) -> Result<(), UtilityHookError> {
         self.for_each_physical_relation(|rel| {
-            update.preflight_existing_schema_for_relation(rel)?;
+            ManagedSchemaEvolution::new(rel).preflight(update)?;
             Ok(())
         })
     }
@@ -229,7 +232,7 @@ impl SchemaEvolutionTarget {
         update: &SchemaEvolutionUpdate,
     ) -> Result<(), UtilityHookError> {
         self.for_each_physical_relation(|rel| {
-            update.stage_for_relation(rel)?;
+            ManagedSchemaEvolution::new(rel).stage(update)?;
             Ok(())
         })
     }
@@ -481,6 +484,12 @@ impl AlterTableIcebergOperations {
         }
 
         let coldef = unsafe { &*coldef };
+        if coldef.is_serial_pseudo_type() {
+            self.reject_schema_operation(
+                "ALTER TABLE ADD COLUMN with SERIAL is not supported for Iceberg relations",
+            );
+            return None;
+        }
         if coldef.is_not_null {
             self.reject_schema_operation(
                 "ALTER TABLE ADD COLUMN with NOT NULL is not supported for Iceberg relations",

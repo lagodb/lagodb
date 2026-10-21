@@ -346,6 +346,12 @@ FROM ddl_stable_copy;
 CREATE TABLE IF NOT EXISTS ddl_copied (LIKE missing_like_source)
 INHERITS (missing_parent) USING iceberg;
 
+-- A skipped non-Iceberg CREATE has no newly-created OID or relation lock for
+-- the Iceberg post-hook to consume.
+CREATE TABLE ddl_existing_heap (id integer);
+CREATE TABLE IF NOT EXISTS ddl_existing_heap (id bigint) USING heap;
+DROP TABLE ddl_existing_heap;
+
 CREATE TABLE ddl_parent_ok (amount double precision);
 CREATE TABLE ddl_child_ok (local_amount numeric) INHERITS (ddl_parent_ok) USING iceberg;
 

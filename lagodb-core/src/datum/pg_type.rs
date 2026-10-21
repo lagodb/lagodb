@@ -24,6 +24,17 @@ impl PgType {
         Self { oid, typmod }
     }
 
+    /// PostgreSQL's display spelling, including any typmod (`numeric(8,2)`),
+    /// as core diagnostics report type mismatches.
+    pub fn display_name(self) -> String {
+        // SAFETY: the caller supplies a catalog type on the backend thread;
+        // PostgreSQL returns a current-context C string that is copied now.
+        let name = unsafe { pg_sys::format_type_with_typemod(self.oid, self.typmod) };
+        unsafe { CStr::from_ptr(name) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
     pub fn base(self) -> Self {
         let mut typmod = self.typmod;
         // SAFETY: the caller supplies a catalog type on the backend thread.

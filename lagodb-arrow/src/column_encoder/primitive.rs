@@ -122,7 +122,8 @@ impl I16Conv {
     }
 }
 
-/// `int4` column, widening an `int2` / `char` source as the row-build path does.
+/// `int4` column. Datum sources are `int4` or provider-widened `int2`;
+/// buffered rows may also carry narrower integer cells.
 pub(crate) struct I32Conv;
 impl PrimitiveConv for I32Conv {
     type Arrow = Int32Type;
@@ -171,26 +172,10 @@ impl I32Conv {
             )
         }
     }
-
-    /// Read a non-NULL PostgreSQL internal `char` datum and widen it to `int4`.
-    ///
-    /// # Safety
-    /// `datum` must be a valid, non-NULL PostgreSQL `char` Datum.
-    pub(crate) unsafe fn from_char(
-        datum: pg_sys::Datum,
-    ) -> ArrowConversionResult<i32> {
-        unsafe {
-            read_bound(
-                datum,
-                i8::from_datum,
-                "I32 encoder: present char datum read as null",
-            )
-        }
-        .map(|value| value as i32)
-    }
 }
 
-/// `int8` column, widening an `int4` / `int2` source.
+/// `int8` column. Datum sources are `int8`; buffered rows may also carry
+/// narrower integer cells.
 pub(crate) struct I64Conv;
 impl PrimitiveConv for I64Conv {
     type Arrow = Int64Type;
@@ -207,40 +192,6 @@ impl PrimitiveConv for I64Conv {
 }
 
 impl I64Conv {
-    /// Read a non-NULL PostgreSQL `int2` datum and widen it to `int8`.
-    ///
-    /// # Safety
-    /// `datum` must be a valid, non-NULL PostgreSQL `int2` Datum.
-    pub(crate) unsafe fn from_int2(
-        datum: pg_sys::Datum,
-    ) -> ArrowConversionResult<i64> {
-        unsafe {
-            read_bound(
-                datum,
-                i16::from_datum,
-                "I64 encoder: present int2 datum read as null",
-            )
-        }
-        .map(|value| value as i64)
-    }
-
-    /// Read a non-NULL PostgreSQL `int4` datum and widen it to `int8`.
-    ///
-    /// # Safety
-    /// `datum` must be a valid, non-NULL PostgreSQL `int4` Datum.
-    pub(crate) unsafe fn from_int4(
-        datum: pg_sys::Datum,
-    ) -> ArrowConversionResult<i64> {
-        unsafe {
-            read_bound(
-                datum,
-                i32::from_datum,
-                "I64 encoder: present int4 datum read as null",
-            )
-        }
-        .map(|value| value as i64)
-    }
-
     /// Read a non-NULL PostgreSQL `int8` datum.
     ///
     /// # Safety
@@ -290,7 +241,8 @@ impl F32Conv {
     }
 }
 
-/// `float8` column, widening a `float4` source.
+/// `float8` column. Datum sources are `float8`; buffered rows may also
+/// carry `float4` cells.
 pub(crate) struct F64Conv;
 impl PrimitiveConv for F64Conv {
     type Arrow = Float64Type;
@@ -306,23 +258,6 @@ impl PrimitiveConv for F64Conv {
 }
 
 impl F64Conv {
-    /// Read a non-NULL PostgreSQL `float4` datum and widen it to `float8`.
-    ///
-    /// # Safety
-    /// `datum` must be a valid, non-NULL PostgreSQL `float4` Datum.
-    pub(crate) unsafe fn from_float4(
-        datum: pg_sys::Datum,
-    ) -> ArrowConversionResult<f64> {
-        unsafe {
-            read_bound(
-                datum,
-                f32::from_datum,
-                "F64 encoder: present float4 datum read as null",
-            )
-        }
-        .map(|value| value as f64)
-    }
-
     /// Read a non-NULL PostgreSQL `float8` datum.
     ///
     /// # Safety

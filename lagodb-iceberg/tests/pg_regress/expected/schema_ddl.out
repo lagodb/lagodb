@@ -393,6 +393,8 @@ ALTER TABLE schema_evolution_t ADD COLUMN bad_required integer NOT NULL;
 ERROR:  ALTER TABLE ADD COLUMN constraints are not supported for Iceberg relations
 ALTER TABLE schema_evolution_t ADD COLUMN bad_default integer DEFAULT 1;
 ERROR:  ALTER TABLE ADD COLUMN constraints are not supported for Iceberg relations
+ALTER TABLE schema_evolution_t ADD COLUMN bad_serial serial;
+ERROR:  ALTER TABLE ADD COLUMN with SERIAL is not supported for Iceberg relations
 ALTER TABLE schema_evolution_t ADD COLUMN bad_identity integer GENERATED ALWAYS AS IDENTITY;
 ERROR:  ALTER TABLE ADD COLUMN constraints are not supported for Iceberg relations
 ALTER TABLE schema_evolution_t ADD COLUMN bad_check integer CHECK (bad_check > 0);

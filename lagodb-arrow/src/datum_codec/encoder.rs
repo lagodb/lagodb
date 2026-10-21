@@ -34,12 +34,8 @@ pub(crate) enum DatumEncoder {
     I16(PrimitiveEncoder<I16Conv>),
     I32Int2(PrimitiveEncoder<I32Conv>),
     I32Int4(PrimitiveEncoder<I32Conv>),
-    I32Char(PrimitiveEncoder<I32Conv>),
-    I64Int2(PrimitiveEncoder<I64Conv>),
-    I64Int4(PrimitiveEncoder<I64Conv>),
     I64Int8(PrimitiveEncoder<I64Conv>),
     F32(PrimitiveEncoder<F32Conv>),
-    F64Float4(PrimitiveEncoder<F64Conv>),
     F64Float8(PrimitiveEncoder<F64Conv>),
     Text(Utf8Encoder),
     Name(Utf8Encoder),
@@ -95,12 +91,8 @@ macro_rules! dispatch_bound_encoder {
             DatumEncoder::I16($e) => $body,
             DatumEncoder::I32Int2($e) => $body,
             DatumEncoder::I32Int4($e) => $body,
-            DatumEncoder::I32Char($e) => $body,
-            DatumEncoder::I64Int2($e) => $body,
-            DatumEncoder::I64Int4($e) => $body,
             DatumEncoder::I64Int8($e) => $body,
             DatumEncoder::F32($e) => $body,
-            DatumEncoder::F64Float4($e) => $body,
             DatumEncoder::F64Float8($e) => $body,
             DatumEncoder::Text($e) => $body,
             DatumEncoder::Name($e) => $body,
@@ -156,23 +148,11 @@ impl DatumEncoder {
             Self::I32Int4(encoder) => unsafe {
                 encoder.append_bound_value(I32Conv::from_int4(datum))
             },
-            Self::I32Char(encoder) => unsafe {
-                encoder.append_bound_value(I32Conv::from_char(datum))
-            },
-            Self::I64Int2(encoder) => unsafe {
-                encoder.append_bound_value(I64Conv::from_int2(datum))
-            },
-            Self::I64Int4(encoder) => unsafe {
-                encoder.append_bound_value(I64Conv::from_int4(datum))
-            },
             Self::I64Int8(encoder) => unsafe {
                 encoder.append_bound_value(I64Conv::from_int8(datum))
             },
             Self::F32(encoder) => unsafe {
                 encoder.append_bound_value(F32Conv::from_float4(datum))
-            },
-            Self::F64Float4(encoder) => unsafe {
-                encoder.append_bound_value(F64Conv::from_float4(datum))
             },
             Self::F64Float8(encoder) => unsafe {
                 encoder.append_bound_value(F64Conv::from_float8(datum))

@@ -325,6 +325,7 @@ DROP DOMAIN schema_default_child, schema_default_int;
 
 ALTER TABLE schema_evolution_t ADD COLUMN bad_required integer NOT NULL;
 ALTER TABLE schema_evolution_t ADD COLUMN bad_default integer DEFAULT 1;
+ALTER TABLE schema_evolution_t ADD COLUMN bad_serial serial;
 ALTER TABLE schema_evolution_t ADD COLUMN bad_identity integer GENERATED ALWAYS AS IDENTITY;
 ALTER TABLE schema_evolution_t ADD COLUMN bad_check integer CHECK (bad_check > 0);
 ALTER TABLE schema_evolution_t ADD COLUMN IF NOT EXISTS maybe_bad integer;

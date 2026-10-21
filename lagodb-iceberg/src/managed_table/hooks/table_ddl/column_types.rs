@@ -12,6 +12,43 @@ use crate::managed_table::catalog::numeric_type::ManagedNumeric;
 
 pub(super) struct ManagedColumnTypes;
 
+/// Inspect managed DDL declarations before PostgreSQL transforms their types.
+pub(super) trait ColumnDefExt {
+    fn is_serial_pseudo_type(&self) -> bool;
+}
+
+impl ColumnDefExt for pg_sys::ColumnDef {
+    fn is_serial_pseudo_type(&self) -> bool {
+        // SAFETY: DDL admission calls this on a ColumnDef owned by the live
+        // utility parse tree; its optional TypeName has the same lifetime.
+        let Some(type_name) = (unsafe { self.typeName.as_ref() }) else {
+            return false;
+        };
+        // SAFETY: TypeName::names is a PostgreSQL List owned by that parse tree.
+        if type_name.pct_type || unsafe { pg_sys::list_length(type_name.names) } != 1
+        {
+            return false;
+        }
+
+        // SAFETY: PostgreSQL represents every TypeName component as a String
+        // node whose NUL-terminated value is owned by the live parse tree.
+        let name = unsafe {
+            let name =
+                &*pg_sys::list_nth(type_name.names, 0).cast::<pg_sys::String>();
+            CStr::from_ptr(name.sval).to_bytes()
+        };
+        matches!(
+            name,
+            b"smallserial"
+                | b"serial2"
+                | b"serial"
+                | b"serial4"
+                | b"bigserial"
+                | b"serial8"
+        )
+    }
+}
+
 impl ManagedColumnTypes {
     pub(super) fn create(
         stmt: &mut pg_sys::CreateStmt,

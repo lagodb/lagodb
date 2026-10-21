@@ -31,12 +31,8 @@ pub(crate) enum NativeEncoderPlan {
     I16,
     I32Int2,
     I32Int4,
-    I32Char,
-    I64Int2,
-    I64Int4,
     I64Int8,
     F32,
-    F64Float4,
     F64Float8,
     Text,
     Name,
@@ -75,12 +71,8 @@ impl NativeEncoderPlan {
             (CellRule::I16, pg_sys::INT2OID) => Self::I16,
             (CellRule::I32, pg_sys::INT2OID) => Self::I32Int2,
             (CellRule::I32, pg_sys::INT4OID) => Self::I32Int4,
-            (CellRule::I32, pg_sys::CHAROID) => Self::I32Char,
-            (CellRule::I64, pg_sys::INT2OID) => Self::I64Int2,
-            (CellRule::I64, pg_sys::INT4OID) => Self::I64Int4,
             (CellRule::I64, pg_sys::INT8OID) => Self::I64Int8,
             (CellRule::F32, pg_sys::FLOAT4OID) => Self::F32,
-            (CellRule::F64, pg_sys::FLOAT4OID) => Self::F64Float4,
             (CellRule::F64, pg_sys::FLOAT8OID) => Self::F64Float8,
             (CellRule::Utf8, oid)
                 if oid == pg_sys::TEXTOID
@@ -225,22 +217,10 @@ impl NativeEncoderPlan {
             Self::I32Int4 => {
                 DatumEncoder::I32Int4(PrimitiveEncoder::with_capacity(capacity))
             }
-            Self::I32Char => {
-                DatumEncoder::I32Char(PrimitiveEncoder::with_capacity(capacity))
-            }
-            Self::I64Int2 => {
-                DatumEncoder::I64Int2(PrimitiveEncoder::with_capacity(capacity))
-            }
-            Self::I64Int4 => {
-                DatumEncoder::I64Int4(PrimitiveEncoder::with_capacity(capacity))
-            }
             Self::I64Int8 => {
                 DatumEncoder::I64Int8(PrimitiveEncoder::with_capacity(capacity))
             }
             Self::F32 => DatumEncoder::F32(PrimitiveEncoder::with_capacity(capacity)),
-            Self::F64Float4 => {
-                DatumEncoder::F64Float4(PrimitiveEncoder::with_capacity(capacity))
-            }
             Self::F64Float8 => {
                 DatumEncoder::F64Float8(PrimitiveEncoder::with_capacity(capacity))
             }

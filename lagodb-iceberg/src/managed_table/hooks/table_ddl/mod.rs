@@ -4,7 +4,7 @@ mod index;
 mod planning;
 mod topology;
 
-use crate::managed_table::catalog::metadata_table::IcebergMetadata;
+use crate::create_command::CreateCommandStack;
 use crate::managed_table::catalog::schema_evolution::SchemaEvolutionUpdate;
 use crate::managed_table::catalog::table_creation::ManagedTableCreation;
 use crate::managed_table::catalog::table_properties::ManagedTablePropertyUpdate;
@@ -12,16 +12,17 @@ use crate::managed_table::catalog::{IcebergAccessMethod, IcebergRelationExt};
 use crate::managed_table::hooks::column_drop_guard::ControlledColumnDrops;
 use crate::managed_table::options::{ICEBERG_TABLE_OPTIONS, ResolvedIcebergOptions};
 use lagodb_core::catalog::{
-    CatalogRelation, CatalogScanKey, CatalogSnapshot, get_tablespace_oid,
-    range_var_get_relid,
+    CatalogRelation, CatalogScanKey, CatalogSnapshot, RelationCatalogEntry,
+    RenameColumnTarget, get_tablespace_oid, range_var_get_relid,
 };
 use lagodb_core::diag::PgReportError;
 use lagodb_core::handles::RelationGuard;
 use lagodb_core::hooks::{
     AlterTableMoveAllStmtNode, AlterTableStmtNode, CreateStmtNode,
-    CreateTableAsStmtNode, HookError, PostUtilityContext, RenameStmtNode,
-    UtilityHook, UtilityHookError, UtilityNode, register_object_access_hook,
-    register_utility_hook,
+    CreateTableAsStmtNode, HookError, OBJECT_ACCESS_POST_CREATE, ObjectAccessEvent,
+    ObjectAccessFilter, ObjectAccessHook, ObjectAccessHookError, PostUtilityContext,
+    RenameStmtNode, UtilityHook, UtilityHookError, UtilityNode,
+    register_object_access_hook, register_utility_hook,
 };
 use lagodb_core::options::{TableOptionAlterations, TableOptions};
 use pgrx::prelude::PgSqlErrorCode;
@@ -52,6 +53,7 @@ impl UtilityHook for IcebergTableHook {
         let stmt = context
             .cast_mut::<CreateStmtNode>()
             .expect("Hook registered for T_CreateStmt");
+        CreateCommandStack::begin();
 
         if !IcebergStmtProbe::create_stmt_may_use_iceberg(stmt)? {
             return Ok(());
@@ -81,40 +83,58 @@ impl UtilityHook for IcebergTableHook {
             .original_stmt()
             .cast::<CreateStmtNode>()
             .expect("Hook registered for T_CreateStmt");
+        let Some(oid) = CreateCommandStack::finish() else {
+            return Ok(());
+        };
 
-        // NoLock is safe here because post-success CREATE TABLE already holds
-        // the relation lock; this lookup only resolves the RangeVar to an OID.
-        // SAFETY: `stmt` is a live CreateStmt from the utility hook, and its
-        // RangeVar belongs to that PostgreSQL parse tree for this callback.
-        let oid = unsafe {
-            range_var_get_relid(
-                stmt.relation,
-                pg_sys::NoLock as pg_sys::LOCKMODE,
-                false,
-            )
-        }?;
-
-        let guard = RelationGuard::open_table(
-            oid,
-            pg_sys::AccessShareLock as pg_sys::LOCKMODE,
-        )?;
+        // PostgreSQL retains the new relation's AccessExclusiveLock through
+        // this post-hook. The OAT_POST_CREATE event supplied this exact OID.
+        let guard =
+            RelationGuard::open_table(oid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
         let rel = guard.as_handle();
-
-        if !rel.is_iceberg() {
-            return Ok(());
-        }
-
-        if stmt.if_not_exists && IcebergMetadata::exists(oid)? {
-            return Ok(());
-        }
-
-        if !Self::is_managed_table_relkind(rel.relkind()) {
-            return Ok(());
-        }
 
         let table_options =
             TableOptions::read_from_stmt(stmt, ICEBERG_TABLE_OPTIONS)?;
         ManagedTableCreation::execute(&rel, table_options)?;
+        Ok(())
+    }
+}
+
+impl ObjectAccessHook for IcebergTableHook {
+    fn filter(&self) -> ObjectAccessFilter {
+        ObjectAccessFilter::new(OBJECT_ACCESS_POST_CREATE)
+            .for_class(pg_sys::RelationRelationId)
+    }
+
+    fn on_access(
+        &self,
+        event: &mut ObjectAccessEvent<'_>,
+    ) -> Result<(), ObjectAccessHookError> {
+        let ObjectAccessEvent::PostCreate {
+            object_id,
+            sub_id: 0,
+            arg,
+            ..
+        } = event
+        else {
+            return Ok(());
+        };
+        if arg.is_some_and(|arg| arg.is_internal)
+            || !CreateCommandStack::has_pending()
+        {
+            return Ok(());
+        }
+        // heap_create_with_catalog publishes the target's pg_class row before
+        // this event. SnapshotSelf identifies the relation created by this
+        // command without repeating CREATE's name lookup in the post-hook.
+        let relation =
+            RelationCatalogEntry::find(*object_id, CatalogSnapshot::SelfVisible)?
+                .expect("PostgreSQL post-create event identifies a live relation");
+        if Self::is_managed_table_relkind(relation.relkind())
+            && IcebergAccessMethod::matches_oid(relation.access_method_oid())
+        {
+            CreateCommandStack::record_created(*object_id);
+        }
         Ok(())
     }
 }
@@ -320,21 +340,12 @@ impl IcebergRenameColumnHook {
     }
 
     fn iceberg_relation_guard(
-        stmt: &pg_sys::RenameStmt,
-        lookup_lockmode: pg_sys::LOCKMODE,
+        oid: pg_sys::Oid,
     ) -> Result<Option<RelationGuard>, UtilityHookError> {
-        if stmt.renameType != pg_sys::ObjectType::OBJECT_COLUMN {
-            return Ok(None);
-        }
-
-        let oid =
-            unsafe { range_var_get_relid(stmt.relation, lookup_lockmode, true) }?;
-        if oid == pg_sys::InvalidOid {
-            return Ok(None);
-        }
-
+        // PostgreSQL also admits index and composite relations for attribute
+        // rename. Inspect their AM identity before entering table-specific work.
         let guard =
-            RelationGuard::open_table(oid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
+            RelationGuard::open_relation(oid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
         if guard.as_handle().is_iceberg() {
             Ok(Some(guard))
         } else {
@@ -355,11 +366,11 @@ impl UtilityHook for IcebergRenameColumnHook {
         let Some(update) = Self::update_from_stmt(stmt) else {
             return Ok(());
         };
-        let Some(guard) = Self::iceberg_relation_guard(
-            stmt,
-            pg_sys::AccessExclusiveLock as pg_sys::LOCKMODE,
-        )?
+        let Some(target) = (unsafe { RenameColumnTarget::resolve(stmt.relation) })?
         else {
+            return Ok(());
+        };
+        let Some(guard) = Self::iceberg_relation_guard(target.relation_oid())? else {
             return Ok(());
         };
         let rel = guard.as_handle();
@@ -382,9 +393,12 @@ impl UtilityHook for IcebergRenameColumnHook {
         let Some(update) = Self::update_from_stmt(stmt) else {
             return Ok(());
         };
-        let Some(guard) =
-            Self::iceberg_relation_guard(stmt, pg_sys::NoLock as pg_sys::LOCKMODE)?
-        else {
+        let oid =
+            unsafe { range_var_get_relid(stmt.relation, pg_sys::NoLock as _, true) }?;
+        if oid == pg_sys::InvalidOid {
+            return Ok(());
+        }
+        let Some(guard) = Self::iceberg_relation_guard(oid)? else {
             return Ok(());
         };
         let rel = guard.as_handle();
@@ -526,6 +540,7 @@ fn optional_string_from_ptr(ptr: *const std::ffi::c_char) -> Option<String> {
 }
 
 pub fn init_hook() {
+    register_object_access_hook(Box::new(IcebergTableHook));
     register_object_access_hook(Box::new(IcebergPartitionedTableIndexGuard));
     register_object_access_hook(Box::new(IcebergPartitionTopologyGuard));
     register_utility_hook(pg_sys::NodeTag::T_CreateStmt, Box::new(IcebergTableHook));

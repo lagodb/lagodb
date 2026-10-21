@@ -318,6 +318,20 @@ impl ListElementRule {
 /// rejected here at converter construction rather than surfacing as a corrupt
 /// or failed datum mid-scan.
 ///
+/// The admitted pairs serve both directions: [`BoundDatumPlan`] reads (Arrow to
+/// PostgreSQL) and writes (PostgreSQL to Arrow) resolve through this function,
+/// because a table column binding must round-trip. UPDATE reads and rewrites
+/// whole rows, and a transaction reads its own writes. Every admitted pair
+/// therefore has both a decoder and a source-bound encoder. Three pairs are
+/// lossless only when written, so providers guard the read direction:
+/// `Int32` to `int2` relies on the producer preserving the int16 domain;
+/// nanosecond timestamps truncate to microseconds (foreign UPDATE rejects
+/// them); and `Decimal128` to a typmod-constrained `numeric` is checked per
+/// value by the target typmod. Do not add a pair that holds in only one
+/// direction here; that would need a direction-specific resolver.
+///
+/// [`BoundDatumPlan`]: crate::BoundDatumPlan
+///
 /// Returns [`ArrowConversionError::IncompatibleColumnType`] when the `DataType` is
 /// recognized but paired with an incompatible PostgreSQL type, and
 /// [`ArrowConversionError::UnsupportedColumnType`] when the `DataType` is one this layer
