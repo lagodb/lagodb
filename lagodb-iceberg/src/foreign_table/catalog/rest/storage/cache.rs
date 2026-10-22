@@ -19,7 +19,7 @@ use lagodb_storage::{StorageError, StorageResult, StoreConfig};
 use pgrx::pg_sys;
 
 use super::routes::ObjectProvider;
-use crate::foreign_table::options::ServerBindingKey;
+use crate::foreign_table::catalog::CatalogAccessIdentity;
 
 thread_local! {
     static CONFIGURED_STORAGE_CACHE: RefCell<ConfiguredStorageCache> =
@@ -36,7 +36,7 @@ const CONFIGURED_STORAGE_MAX_IDLE: Duration = Duration::from_secs(15 * 60);
 /// replaces the service stored under this stable route identity.
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub(super) struct ConfiguredStorageRouteId {
-    catalog: ServerBindingKey,
+    catalog: CatalogAccessIdentity,
     profile_server_oid: Option<pg_sys::Oid>,
     socket_path: PathBuf,
     provider: ObjectProvider,
@@ -48,7 +48,7 @@ pub(super) struct ConfiguredStorageRouteId {
 
 impl ConfiguredStorageRouteId {
     pub(super) fn new(
-        catalog: &ServerBindingKey,
+        catalog: &CatalogAccessIdentity,
         endpoint: &StorageEndpoint,
         provider: ObjectProvider,
         bucket: &str,

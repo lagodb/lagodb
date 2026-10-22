@@ -19,7 +19,7 @@ use pgrx::pg_sys;
 
 use super::binding::{RouteBinding, RouteContext};
 use super::cache::{ConfiguredStorageCache, ConfiguredStorageRouteId};
-use crate::foreign_table::options::ServerBindingKey;
+use crate::foreign_table::catalog::CatalogAccessIdentity;
 use crate::storage::transaction_resources::{
     ensure_object_file_staged, mark_object_file_uploaded, register_object_file_staged,
 };
@@ -56,7 +56,7 @@ impl CatalogRoute {
         profile_server_oid: Option<pg_sys::Oid>,
         object: &ObjectUri,
         store_config: StoreConfig,
-        catalog_identity: &ServerBindingKey,
+        catalog_identity: &CatalogAccessIdentity,
         endpoint: &StorageEndpoint,
         staging_resolver: &StagingPathResolver,
     ) -> Result<Self> {
@@ -190,7 +190,7 @@ impl CatalogStorage {
         location: String,
         properties: HashMap<String, String>,
         credentials: Vec<StorageCredential>,
-        catalog_identity: &ServerBindingKey,
+        catalog_identity: &CatalogAccessIdentity,
         profiles: &StorageProfiles,
         endpoint: &StorageEndpoint,
         staging_resolver: &StagingPathResolver,

@@ -1,6 +1,6 @@
 //! Plan-scoped identity for one loaded Iceberg table generation.
 
-use iceberg_lite::table::Table;
+use iceberg_lite::spec::TableMetadata;
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 use uuid::{Uuid, fmt::Hyphenated};
 
@@ -14,10 +14,10 @@ pub(crate) struct PlanSourceIdentity {
 }
 
 impl PlanSourceIdentity {
-    pub(crate) fn from_table(table: &Table) -> Self {
+    pub(crate) fn from_metadata(metadata: &TableMetadata) -> Self {
         Self {
-            table_uuid: table.metadata().uuid(),
-            schema_id: table.metadata().current_schema().schema_id(),
+            table_uuid: metadata.uuid(),
+            schema_id: metadata.current_schema().schema_id(),
         }
     }
 

@@ -1,8 +1,10 @@
 use super::PgWrapper;
 use crate::diag::PgError;
+use pgrx::pg_sys::RVROption::RVR_MISSING_OK;
 use pgrx::{PgTryBuilder, pg_sys};
-use std::ffi::CStr;
+use std::ffi::{CStr, c_void};
 use std::panic::AssertUnwindSafe;
+use std::ptr;
 
 impl PgWrapper {
     pub(crate) fn current_database_name_bytes() -> Vec<u8> {
@@ -61,9 +63,36 @@ impl PgWrapper {
         lockmode: pg_sys::LOCKMODE,
         missing_ok: bool,
     ) -> Result<pg_sys::Oid, PgError> {
-        let relation = AssertUnwindSafe(relation);
-        const RVR_MISSING_OK: u32 = 1;
         let flags = if missing_ok { RVR_MISSING_OK } else { 0 };
+
+        unsafe {
+            Self::range_var_get_relid_extended(
+                relation,
+                lockmode,
+                flags,
+                None,
+                ptr::null_mut(),
+            )
+        }
+    }
+
+    /// Calls PostgreSQL's callback-aware `RangeVarGetRelidExtended` and
+    /// converts an unwind crossing the PostgreSQL FFI boundary into `PgError`.
+    ///
+    /// # Safety
+    ///
+    /// `relation` must remain valid for the duration of the call. If non-null,
+    /// `callback_arg` must satisfy the contract established by `callback`, and
+    /// `callback` must uphold PostgreSQL's callback contract.
+    pub(crate) unsafe fn range_var_get_relid_extended(
+        relation: *const pg_sys::RangeVar,
+        lockmode: pg_sys::LOCKMODE,
+        flags: u32,
+        callback: pg_sys::RangeVarGetRelidCallback,
+        callback_arg: *mut c_void,
+    ) -> Result<pg_sys::Oid, PgError> {
+        let relation = AssertUnwindSafe(relation);
+        let callback_arg = AssertUnwindSafe(callback_arg);
 
         unsafe {
             PgTryBuilder::new(move || {
@@ -71,11 +100,11 @@ impl PgWrapper {
                     *relation,
                     lockmode,
                     flags,
-                    None,
-                    std::ptr::null_mut(),
+                    callback,
+                    *callback_arg,
                 ))
             })
-            .catch_others(|err| Err(PgError::from_caught(err)))
+            .catch_others(|error| Err(PgError::from_caught(error)))
             .execute()
         }
     }

@@ -16,10 +16,10 @@ use lagodb_storage::{StagingPathResolver, StoreConfig};
 use self::route_cache::{FallbackRoutes, ScopedRoutes};
 use super::config::ProviderConfig;
 use super::routes::{CatalogRoute, ObjectProvider};
-use crate::foreign_table::options::ServerBindingKey;
+use crate::foreign_table::catalog::CatalogAccessIdentity;
 
 pub(super) struct RouteContext {
-    pub catalog_identity: ServerBindingKey,
+    pub catalog_identity: CatalogAccessIdentity,
     pub profiles: StorageProfiles,
     pub endpoint: StorageEndpoint,
     pub staging_resolver: StagingPathResolver,

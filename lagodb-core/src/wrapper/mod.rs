@@ -19,6 +19,7 @@ mod catalog;
 mod composite;
 mod cstring;
 mod database;
+mod foreign_server;
 mod json;
 mod namespace;
 mod relation;

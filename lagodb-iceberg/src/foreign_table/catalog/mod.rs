@@ -1,8 +1,16 @@
-//! Catalog adapters owned by the Iceberg FDW.
+//! Catalog identities, sessions, adapters and publication requests.
 
-mod binding;
+mod connection;
+mod key;
 pub mod rest;
+mod session;
 mod sqlite;
 
-pub(crate) use binding::{ForeignCatalog, PreparedCatalogCommit};
-pub(crate) use sqlite::PgSqliteCatalogBuilder;
+pub(crate) use connection::{
+    CatalogAccessIdentity, CatalogConnection, CatalogRuntimeConfig,
+};
+pub(crate) use key::RemoteTableKey;
+pub(crate) use session::{
+    BoundCatalogTable, CatalogChange, CatalogSession, CatalogSessionRequest,
+    ForeignCatalog, PreparedCatalogPublication,
+};

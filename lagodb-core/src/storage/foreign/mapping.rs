@@ -9,6 +9,7 @@ use super::catalog::ForeignOptionView;
 /// PostgreSQL-owned credentials selected for one effective user and server.
 pub struct ForeignUserMapping {
     oid: pg_sys::Oid,
+    user_oid: pg_sys::Oid,
     options: *mut pg_sys::List,
 }
 
@@ -57,13 +58,21 @@ impl ForeignUserMapping {
             };
             // SAFETY: the successful lookup owns this pin.
             unsafe { pg_sys::ReleaseSysCache(tuple) };
-            return Some(Self { oid, options });
+            return Some(Self {
+                oid,
+                user_oid,
+                options,
+            });
         }
         None
     }
 
     pub const fn oid(&self) -> pg_sys::Oid {
         self.oid
+    }
+
+    pub const fn user_oid(&self) -> pg_sys::Oid {
+        self.user_oid
     }
 
     pub fn options(&self) -> ForeignOptionView<'_> {

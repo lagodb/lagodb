@@ -1,14 +1,14 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::os::raw::c_int;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use lagodb_storage::StoreConfig;
-use pgrx::pg_sys;
 
+use crate::catalog::{
+    ForeignConfigInvalidation, register_foreign_config_invalidation_observer,
+};
 use crate::storage::service::BackendStorageService;
-use crate::wrapper::CacheRegisterSyscacheCallback;
 
 use super::identity::StorageIdentity;
 
@@ -26,14 +26,14 @@ pub(crate) struct StorageCacheEntry {
 
 pub(crate) struct StorageCache {
     entries: HashMap<StorageIdentity, Rc<StorageCacheEntry>>,
-    callbacks_registered: bool,
+    observer_registered: bool,
 }
 
 impl StorageCache {
     fn new() -> Self {
         Self {
             entries: HashMap::new(),
-            callbacks_registered: false,
+            observer_registered: false,
         }
     }
 
@@ -58,62 +58,40 @@ impl StorageCache {
         entry
     }
 
-    fn initialize_callbacks(&mut self) {
-        if self.callbacks_registered {
+    fn initialize_invalidation_observer(&mut self) {
+        if self.observer_registered {
             return;
         }
-        // SAFETY: callbacks have PostgreSQL's syscache ABI and remain loaded
-        // for the backend lifetime. The callback touches backend-local state only.
-        unsafe {
-            CacheRegisterSyscacheCallback(
-                pg_sys::SysCacheIdentifier::FOREIGNSERVEROID as i32,
-                Some(invalidate_storage_cache_callback),
-                0.into(),
-            );
-            CacheRegisterSyscacheCallback(
-                pg_sys::SysCacheIdentifier::USERMAPPINGUSERSERVER as i32,
-                Some(invalidate_storage_cache_callback),
-                0.into(),
-            );
-        }
-        self.callbacks_registered = true;
+        register_foreign_config_invalidation_observer(invalidate_storage_cache);
+        self.observer_registered = true;
     }
 
-    fn invalidate(&mut self, cache_id: i32, hashvalue: u32) {
-        let server_cache_id = pg_sys::SysCacheIdentifier::FOREIGNSERVEROID as i32;
-        let mapping_cache_id =
-            pg_sys::SysCacheIdentifier::USERMAPPINGUSERSERVER as i32;
+    fn invalidate(&mut self, invalidation: ForeignConfigInvalidation) {
         // A new per-user mapping changes PUBLIC fallback and a previously
         // unmapped identity. Evict all parsed identities on mapping changes;
         // active handles retain their existing entry through Rc.
-        if cache_id == mapping_cache_id {
+        let ForeignConfigInvalidation::Server { hashvalue } = invalidation else {
             self.entries.clear();
             return;
-        }
+        };
         self.entries.retain(|_, entry| {
-            let matches = hashvalue == 0
-                || (cache_id == server_cache_id
-                    && entry.server_hashvalue == hashvalue);
+            let matches = hashvalue == 0 || entry.server_hashvalue == hashvalue;
             !matches
         });
     }
 }
 
-unsafe extern "C" fn invalidate_storage_cache_callback(
-    _arg: pg_sys::Datum,
-    cache_id: c_int,
-    hashvalue: u32,
-) {
+fn invalidate_storage_cache(invalidation: ForeignConfigInvalidation) {
     // This callback is deliberately limited to evicting backend-local state.
     // Active scan/modify handles retain their entry through `Rc`, so eviction
     // cannot change the storage context beneath an in-flight operation.
     // It must not read catalogs, perform protocol I/O, or mutate the storage
     // worker while PostgreSQL is dispatching cache invalidations.
     STORAGE_CACHE.with(|cache| {
-        cache.borrow_mut().invalidate(cache_id, hashvalue);
+        cache.borrow_mut().invalidate(invalidation);
     });
 }
 
-pub(crate) fn initialize_callbacks() {
-    StorageCache::with_current(|cache| cache.initialize_callbacks());
+pub(crate) fn initialize_invalidation_observer() {
+    StorageCache::with_current(|cache| cache.initialize_invalidation_observer());
 }

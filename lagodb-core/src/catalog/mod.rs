@@ -2,6 +2,8 @@
 
 mod access;
 mod database;
+mod foreign_config;
+mod foreign_server;
 mod ids;
 mod relation;
 mod syscache;
@@ -12,12 +14,17 @@ pub use access::{
     CatalogSnapshot, CatalogUpdateResult, CatalogWriter,
 };
 pub use database::LockedDatabase;
+pub use foreign_config::{
+    ForeignConfigInvalidation, ForeignConfigInvalidationKeys,
+    register_foreign_config_invalidation_observer,
+};
+pub use foreign_server::ForeignServerDdlTarget;
 pub use ids::{
     LAGODB_SCHEMA, TABLE_OPTIONS_PKEY, TABLE_OPTIONS_TABLE, get_lagodb_namespace_oid,
     get_table_options_oid, get_table_options_pkey_oid,
 };
 pub(crate) use ids::{MaintenanceCatalogIds, get_maintenance_catalog_ids};
-pub use relation::RelationCatalogEntry;
+pub use relation::{RelationCatalogEntry, RenameColumnTarget};
 pub(crate) use syscache::search_syscache2;
 pub use syscache::{
     SysCacheTuple, SysCacheTupleCopy, search_syscache_copy, search_syscache1,

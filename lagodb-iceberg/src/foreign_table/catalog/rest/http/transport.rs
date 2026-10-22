@@ -27,6 +27,11 @@ const MAX_RESPONSE_READ_BYTES: u64 = MAX_RESPONSE_BODY_BYTES as u64 + 1;
 
 /// Backend-local HTTP/1.1 transport whose DNS and socket lifecycle follow
 /// PostgreSQL backend constraints.
+///
+/// TODO(rest-transport-reuse): Share one transport within a PostgreSQL backend
+/// so REST catalogs reuse its connection pool. This preserves catalog session
+/// isolation and request behavior: it avoids repeated connection setup but does
+/// not remove catalog API requests such as `/v1/config`.
 pub(crate) struct PgRestHttpTransport {
     agent: Agent,
 }

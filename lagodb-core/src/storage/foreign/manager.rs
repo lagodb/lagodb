@@ -10,7 +10,9 @@ use crate::diag::SqlStateError;
 use crate::storage::service::{BackendStorageService, StorageEndpoint};
 
 use super::access::{ObjectAccess, ObjectPrefixAccess};
-use super::cache::{StorageCache, StorageCacheEntry, initialize_callbacks};
+use super::cache::{
+    StorageCache, StorageCacheEntry, initialize_invalidation_observer,
+};
 use super::catalog::{ForeignCatalog, StorageOptions};
 use super::handle::StorageHandle;
 
@@ -143,7 +145,7 @@ impl StorageManager {
     where
         P: StorageConfigProvider,
     {
-        initialize_callbacks();
+        initialize_invalidation_observer();
 
         let identity = *catalog.identity();
         if let Some(entry) =

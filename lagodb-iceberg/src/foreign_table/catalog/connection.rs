@@ -1,3 +1,5 @@
+//! PostgreSQL configuration and connection state for an Iceberg catalog.
+
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -5,15 +7,18 @@ use std::sync::Arc;
 use lagodb_core::storage::foreign::{ForeignOptionView, ForeignUserMapping};
 use pgrx::pg_sys;
 
-use super::super::catalog::rest::PgRestCatalogBuilder;
-use super::super::catalog::{ForeignCatalog, PgSqliteCatalogBuilder};
 use super::super::error::IcebergFdwError;
-use super::catalog_type::{CatalogServerOptions, CatalogType};
-use super::schema::{OptionLayer, ParsedOptions};
+use super::super::options::{
+    CatalogServerOptions, CatalogType, OptionLayer, ParsedOptions,
+};
+use super::rest::PgRestCatalogBuilder;
+use super::session::ForeignCatalog;
+use super::sqlite::PgSqliteCatalogBuilder;
 
 /// Per-role credentials read only from the selected user mapping.
 struct UserCredentials {
     mapping_oid: Option<pg_sys::Oid>,
+    mapping_user: Option<pg_sys::Oid>,
     properties: HashMap<String, String>,
 }
 
@@ -26,6 +31,7 @@ impl UserCredentials {
         else {
             return Ok(Self {
                 mapping_oid: None,
+                mapping_user: None,
                 properties: HashMap::new(),
             });
         };
@@ -33,13 +39,14 @@ impl UserCredentials {
         let options = ParsedOptions::from_view(OptionLayer::Mapping, options, true)?;
         Ok(Self {
             mapping_oid: Some(mapping.oid()),
+            mapping_user: Some(mapping.user_oid()),
             properties: options.values,
         })
     }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct ServerBindingKey {
+pub(crate) struct CatalogAccessIdentity {
     pub(crate) server_oid: pg_sys::Oid,
     pub(crate) effective_user: pg_sys::Oid,
 }
@@ -49,6 +56,7 @@ pub(crate) struct CatalogRuntimeConfig {
     catalog_type: CatalogType,
     owner_fdw_oid: pg_sys::Oid,
     mapping_oid: Option<pg_sys::Oid>,
+    mapping_user: Option<pg_sys::Oid>,
     properties: HashMap<String, String>,
 }
 
@@ -59,8 +67,15 @@ impl fmt::Debug for CatalogRuntimeConfig {
             .field("catalog_type", &self.catalog_type)
             .field("owner_fdw_oid", &self.owner_fdw_oid)
             .field("mapping_oid", &self.mapping_oid)
+            .field("mapping_user", &self.mapping_user)
             .field("property_count", &self.properties.len())
             .finish()
+    }
+}
+
+impl CatalogRuntimeConfig {
+    pub(crate) const fn mapping_user(&self) -> Option<pg_sys::Oid> {
+        self.mapping_user
     }
 }
 
@@ -71,6 +86,7 @@ pub(crate) struct CatalogConnection {
     owner_fdw_oid: pg_sys::Oid,
     effective_user: pg_sys::Oid,
     mapping_oid: Option<pg_sys::Oid>,
+    mapping_user: Option<pg_sys::Oid>,
 }
 
 impl CatalogConnection {
@@ -89,6 +105,7 @@ impl CatalogConnection {
         let mut properties = options.into_properties();
         let UserCredentials {
             mapping_oid,
+            mapping_user,
             properties: credential_properties,
         } = UserCredentials::resolve(server_oid, effective_user)?;
         match catalog_type {
@@ -124,11 +141,12 @@ impl CatalogConnection {
             owner_fdw_oid,
             effective_user,
             mapping_oid,
+            mapping_user,
         })
     }
 
-    pub(crate) fn server_binding_key(&self) -> ServerBindingKey {
-        ServerBindingKey {
+    pub(crate) fn access_identity(&self) -> CatalogAccessIdentity {
+        CatalogAccessIdentity {
             server_oid: self.server_oid,
             effective_user: self.effective_user,
         }
@@ -139,6 +157,7 @@ impl CatalogConnection {
             catalog_type: self.catalog_type,
             owner_fdw_oid: self.owner_fdw_oid,
             mapping_oid: self.mapping_oid,
+            mapping_user: self.mapping_user,
             properties: self.properties.clone(),
         }
     }

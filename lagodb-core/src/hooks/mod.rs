@@ -36,12 +36,13 @@ pub use object_access_hook::{
 };
 pub use utility_consumer::{CopyConsumer, CopyRoute, register_copy_consumer};
 pub use utility_hook::{
-    AlterDatabaseStmtNode, AlterEnumStmtNode, AlterTableMoveAllStmtNode,
-    AlterTableSpaceOptionsStmtNode, AlterTableStmtNode, AlterUserMappingStmtNode,
-    CopyStmtNode, CreateForeignTableStmtNode, CreateStmtNode, CreateTableAsStmtNode,
-    CreateTableSpaceStmtNode, CreateUserMappingStmtNode, CreatedbStmtNode,
-    PostUtilityContext, PreUtilityContext, RenameStmtNode, UtilityHook, UtilityNode,
-    UtilityStmtNode, VacuumStmtNode, register_utility_hook,
+    AlterDatabaseStmtNode, AlterEnumStmtNode, AlterForeignServerStmtNode,
+    AlterTableMoveAllStmtNode, AlterTableSpaceOptionsStmtNode, AlterTableStmtNode,
+    AlterUserMappingStmtNode, CopyStmtNode, CreateForeignTableStmtNode,
+    CreateStmtNode, CreateTableAsStmtNode, CreateTableSpaceStmtNode,
+    CreateUserMappingStmtNode, CreatedbStmtNode, PostUtilityContext,
+    PreUtilityContext, RenameStmtNode, UtilityHook, UtilityNode, UtilityStmtNode,
+    VacuumStmtNode, register_utility_hook,
 };
 
 pub(crate) use planning::{register_modify, register_relation_scan};

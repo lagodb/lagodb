@@ -11,14 +11,14 @@ use lagodb_storage::StagingPathResolver;
 use pgrx::pg_sys;
 
 use super::routes::CatalogStorage;
-use crate::foreign_table::options::ServerBindingKey;
+use crate::foreign_table::catalog::CatalogAccessIdentity;
 
 /// Builds table-bound storage from REST response properties and credentials.
 #[derive(Clone)]
 pub(crate) struct PgStorageFactory {
     endpoint: StorageEndpoint,
     staging_resolver: StagingPathResolver,
-    catalog_identity: ServerBindingKey,
+    catalog_identity: CatalogAccessIdentity,
     owner_fdw_oid: pg_sys::Oid,
     backend_thread: PhantomData<Rc<()>>,
 }
@@ -42,7 +42,7 @@ impl PgStorageFactory {
         Self {
             endpoint,
             staging_resolver,
-            catalog_identity: ServerBindingKey {
+            catalog_identity: CatalogAccessIdentity {
                 server_oid: catalog_server_oid,
                 effective_user,
             },

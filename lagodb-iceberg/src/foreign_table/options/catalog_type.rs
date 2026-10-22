@@ -10,36 +10,62 @@ use super::super::error::IcebergFdwError;
 use super::schema::ParsedOptions;
 use crate::storage::LocalStorage;
 
-pub(super) const ENABLE_VENDED_CREDENTIALS: &str = "enable_vended_credentials";
+pub(super) const REQUEST_VENDED_CREDENTIALS: &str = "request_vended_credentials";
 const VENDED_CREDENTIALS_HEADER: &str = "header.x-iceberg-access-delegation";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CatalogType {
+pub(in crate::foreign_table) enum CatalogType {
     Rest,
     Sqlite,
 }
 
 impl CatalogType {
-    pub(super) fn from_server(
+    fn server_type(
         server: &pg_sys::ForeignServer,
-    ) -> Result<Self, IcebergFdwError> {
+    ) -> Result<Option<&str>, IcebergFdwError> {
         if server.servertype.is_null() {
-            return Err(IcebergFdwError::InvalidCatalogType {
-                actual: "<unspecified>".to_owned(),
-            });
+            return Ok(None);
         }
         // SAFETY: GetForeignServer supplies a live, terminated type string.
-        let server_type = unsafe { CStr::from_ptr(server.servertype) }
+        unsafe { CStr::from_ptr(server.servertype) }
             .to_str()
+            .map(Some)
             .map_err(|_| IcebergFdwError::InvalidUtf8 {
                 subject: "foreign server type",
-            })?;
-        match server_type {
-            "rest" => Ok(Self::Rest),
-            "sqlite" => Ok(Self::Sqlite),
-            actual => Err(IcebergFdwError::InvalidCatalogType {
-                actual: actual.to_owned(),
-            }),
+            })
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "rest" => Some(Self::Rest),
+            "sqlite" => Some(Self::Sqlite),
+            _ => None,
+        }
+    }
+
+    pub(in crate::foreign_table) fn from_server(
+        server: &pg_sys::ForeignServer,
+    ) -> Result<Self, IcebergFdwError> {
+        let server_type = Self::server_type(server)?;
+        server_type.and_then(Self::from_name).ok_or_else(|| {
+            IcebergFdwError::InvalidCatalogType {
+                actual: server_type.unwrap_or("<unspecified>").to_owned(),
+            }
+        })
+    }
+
+    pub(super) fn catalog_from_server(
+        server: &pg_sys::ForeignServer,
+    ) -> Result<Option<Self>, IcebergFdwError> {
+        Ok(Self::server_type(server)?.and_then(Self::from_name))
+    }
+
+    pub(super) fn is_identity_option(self, name: &str) -> bool {
+        match self {
+            Self::Rest => {
+                matches!(name, "uri" | "warehouse" | "prefix" | "oauth2-server-uri")
+            }
+            Self::Sqlite => matches!(name, "uri" | "warehouse" | "catalog_name"),
         }
     }
 
@@ -57,7 +83,7 @@ impl CatalogType {
                     | "scope"
                     | "audience"
                     | "resource"
-                    | ENABLE_VENDED_CREDENTIALS
+                    | REQUEST_VENDED_CREDENTIALS
             ),
             Self::Sqlite => name == "catalog_name",
         }
@@ -66,14 +92,14 @@ impl CatalogType {
 
 /// Non-secret server options shared by DDL validation and runtime binding.
 /// PostgreSQL identity and user-mapping credentials belong to CatalogConnection.
-pub(super) struct CatalogServerOptions {
+pub(in crate::foreign_table) struct CatalogServerOptions {
     catalog_type: CatalogType,
     properties: HashMap<String, String>,
 }
 
 impl CatalogServerOptions {
     /// ParsedOptions has already checked individual values and the required URI.
-    pub(super) fn from_options(
+    pub(in crate::foreign_table) fn from_options(
         options: ParsedOptions,
     ) -> Result<Self, IcebergFdwError> {
         let properties = options.values;
@@ -120,7 +146,7 @@ impl CatalogServerOptions {
 
     /// The FDW validator receives options and the PG catalog OID, not server TYPE.
     /// Runtime binding checks TYPE against the same parsed configuration.
-    pub(super) fn validate_type(
+    pub(in crate::foreign_table) fn validate_type(
         &self,
         expected: CatalogType,
     ) -> Result<(), IcebergFdwError> {
@@ -134,13 +160,15 @@ impl CatalogServerOptions {
         Ok(())
     }
 
-    pub(super) fn into_properties(mut self) -> HashMap<String, String> {
+    pub(in crate::foreign_table) fn into_properties(
+        mut self,
+    ) -> HashMap<String, String> {
         if self.catalog_type == CatalogType::Rest {
-            let enable_vended_credentials = self
+            let request_vended_credentials = self
                 .properties
-                .remove(ENABLE_VENDED_CREDENTIALS)
+                .remove(REQUEST_VENDED_CREDENTIALS)
                 .is_none_or(|value| value.eq_ignore_ascii_case("true"));
-            if enable_vended_credentials {
+            if request_vended_credentials {
                 self.properties.insert(
                     VENDED_CREDENTIALS_HEADER.to_owned(),
                     "vended-credentials".to_owned(),

@@ -105,6 +105,11 @@ impl_utility_stmt_node!(
     pg_sys::AlterUserMappingStmt,
     pg_sys::NodeTag::T_AlterUserMappingStmt
 );
+impl_utility_stmt_node!(
+    AlterForeignServerStmtNode,
+    pg_sys::AlterForeignServerStmt,
+    pg_sys::NodeTag::T_AlterForeignServerStmt
+);
 
 /// A safe wrapper around `pg_sys::Node`
 pub struct UtilityNode<'a> {

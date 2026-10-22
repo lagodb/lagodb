@@ -54,6 +54,11 @@ impl PgRestCatalogBuilder {
             owner_fdw_oid,
             effective_user,
         );
+        // TODO(rest-catalog-session-reuse): If repeated `/v1/config` requests
+        // need to be removed, reuse the complete `RestCatalog` session. Reusing
+        // only its `HttpClient` would omit the merged runtime configuration,
+        // advertised endpoints, authentication session, and storage factory
+        // that belong to the catalog session.
         let mut builder = RestCatalogBuilder::default()
             .with_http_transport(Arc::new(PgRestHttpTransport::new()?))
             .with_storage_factory(Arc::new(storage_factory));

@@ -32,7 +32,7 @@ FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (
     uri :'regress_fallback_rest_uri',
     "rest.auth.type" 'none',
-    enable_vended_credentials 'false'
+    request_vended_credentials 'false'
 );
 -- Unauthenticated REST catalogs require no empty user mappings.
 
