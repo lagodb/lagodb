@@ -6,25 +6,36 @@ use std::error::Error as StdError;
 use std::mem;
 use std::rc::Rc;
 
-use iceberg_lite::table::Table;
-use iceberg_lite::transaction::{PreparedTransaction, Transaction};
+use iceberg_lite::transaction::PreparedTransaction;
+use lagodb_core::catalog::{
+    ForeignConfigInvalidation, register_foreign_config_invalidation_observer,
+};
 use lagodb_core::diag::{PgReportError, error_source_chain_detail, report_warning};
 use lagodb_core::transaction::{self, TransactionResource, TransactionResult};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
-use super::catalog::{ForeignCatalog, PreparedCatalogCommit};
+use super::catalog::{
+    BoundCatalogTable, CatalogAccessIdentity, CatalogChange, CatalogSession,
+    PreparedCatalogPublication, RemoteTableKey,
+};
 use super::error::IcebergFdwError;
-use super::options::{CatalogRuntimeConfig, ServerBindingKey};
-use super::relation::{IcebergForeignTable, RemoteTableKey, ResolvedCatalogBinding};
+use super::source_identity::PlanSourceIdentity;
 use crate::error::{IcebergError, IcebergResult};
+use crate::storage::transaction_resources::register_canceled_files_for_commit;
 use crate::write::{
     ExclusiveTransactionAction, RelationRowRegistry, TableTransactionState,
     TxWriteBatch,
 };
 
+mod catalog_state;
+mod create;
 mod read;
-pub(crate) use read::ForeignTableView;
+mod state;
+
+use catalog_state::CatalogTransactionState;
+pub(crate) use read::ForeignTableReadView;
+use state::ForeignTableState;
 
 type ForeignTableTransaction = TableTransactionState<NoExclusiveAction, ()>;
 
@@ -42,55 +53,16 @@ impl ExclusiveTransactionAction for NoExclusiveAction {
     }
 }
 
-#[derive(Debug)]
-struct ForeignTableState {
-    base: Table,
-    transaction: ForeignTableTransaction,
-    row_registry: RelationRowRegistry,
-}
-
-impl ForeignTableState {
-    fn new(base: Table) -> Self {
-        Self {
-            base,
-            transaction: ForeignTableTransaction::new(),
-            row_registry: RelationRowRegistry::default(),
-        }
-    }
-
-    fn rollback_to_level(&mut self, level: i32) {
-        self.transaction.rollback_to_level(level);
-        self.row_registry.rollback_to_level(level);
-    }
-
-    fn promote_to_level(&mut self, level: i32) {
-        self.transaction.promote_to_level(level);
-        self.row_registry.promote_to_level(level);
-    }
-}
-
-#[derive(Debug)]
-struct CatalogBinding {
-    catalog: ForeignCatalog,
-    runtime_config: CatalogRuntimeConfig,
-    tables: HashMap<RemoteTableKey, ForeignTableState>,
-}
-
 #[derive(Debug, Default)]
 struct ForeignTransactionInner {
-    // Multiple immutable catalog bindings are deliberately supported. Each
-    // binding gets one atomic catalog transaction, but bindings publish
-    // independently after PostgreSQL commits; a later publication failure does
-    // not roll back an earlier catalog. This is part of the current best-effort
-    // post-commit contract, not cross-catalog atomicity.
-    catalogs: HashMap<ServerBindingKey, CatalogBinding>,
-    prepared: Vec<PreparedPublication>,
-}
-
-#[derive(Debug)]
-struct PreparedPublication {
-    request: PreparedCatalogCommit,
-    targets: String,
+    // Multiple immutable catalog transaction states are deliberately supported.
+    // Each catalog publishes independently after PostgreSQL commits; a later
+    // publication failure does not roll back an earlier catalog. REST staged
+    // creates use per-table commits before the catalog's atomic update batch,
+    // while SQLite publishes the catalog in one transaction. This is part of
+    // the current best-effort post-commit contract, not cross-catalog atomicity.
+    catalogs: HashMap<CatalogAccessIdentity, CatalogTransactionState>,
+    prepared: Vec<PreparedCatalogPublication>,
 }
 
 /// One top-level PostgreSQL transaction's writable Iceberg catalog state.
@@ -104,6 +76,22 @@ thread_local! {
 }
 
 impl ForeignTransaction {
+    pub(crate) fn register_invalidation_observer() {
+        register_foreign_config_invalidation_observer(Self::invalidate_catalogs);
+    }
+
+    fn invalidate_catalogs(invalidation: ForeignConfigInvalidation) {
+        CURRENT.with(|slot| {
+            let current = slot.borrow().as_ref().map(Rc::clone);
+            let Some(current) = current else {
+                return;
+            };
+            for catalog in current.inner.borrow_mut().catalogs.values_mut() {
+                catalog.invalidate_if_matches(invalidation);
+            }
+        });
+    }
+
     fn current() -> Rc<Self> {
         CURRENT.with(|slot| {
             let mut slot = slot.borrow_mut();
@@ -123,46 +111,46 @@ impl ForeignTransaction {
 
     /// Enroll a writable table before any object is produced.
     pub(crate) fn begin_write(
-        resolved: IcebergForeignTable,
+        catalog_table: BoundCatalogTable,
         read_command_id: Option<pg_sys::CommandId>,
-    ) -> Result<ForeignTableView, IcebergFdwError> {
+        expected_source: Option<&PlanSourceIdentity>,
+    ) -> Result<ForeignTableReadView, IcebergFdwError> {
         let tracker = Self::current();
-        tracker.attach_write(resolved, read_command_id)
+        tracker.attach_write(catalog_table, read_command_id, expected_source)
     }
 
     fn attach_write(
         &self,
-        resolved: IcebergForeignTable,
+        catalog_table: BoundCatalogTable,
         read_command_id: Option<pg_sys::CommandId>,
-    ) -> Result<ForeignTableView, IcebergFdwError> {
-        let (key, binding, table) = resolved.into_parts();
+        expected_source: Option<&PlanSourceIdentity>,
+    ) -> Result<ForeignTableReadView, IcebergFdwError> {
+        let (key, session, base) = catalog_table.into_parts();
+        Self::validate_catalog(&self.inner.borrow(), &session)?;
+        let view = self.scan_view_parts(key, base, read_command_id)?;
+        if expected_source.is_some_and(|expected| {
+            expected != &PlanSourceIdentity::from_metadata(view.metadata())
+        }) {
+            return Err(IcebergFdwError::PlanSourceChanged);
+        }
+        let (key, base) = view.enrollment_parts();
         let mut inner = self.inner.borrow_mut();
-        Self::validate_binding(&inner, &binding)?;
         inner
             .catalogs
-            .entry(binding.key.clone())
-            .or_insert_with(|| CatalogBinding {
-                catalog: binding.catalog.clone(),
-                runtime_config: binding.runtime_config.clone(),
-                tables: HashMap::new(),
-            })
+            .entry(session.identity.clone())
+            .or_insert_with(|| CatalogTransactionState::new(&session))
             .tables
             .entry(key.clone())
-            .or_insert_with(|| ForeignTableState::new(table.clone()));
-        drop(inner);
-        self.overlay_parts(key, table, read_command_id)
+            .or_insert_with(|| ForeignTableState::published(base.clone()));
+        Ok(view)
     }
 
-    fn validate_binding(
+    fn validate_catalog(
         inner: &ForeignTransactionInner,
-        binding: &ResolvedCatalogBinding,
+        session: &CatalogSession,
     ) -> Result<(), IcebergFdwError> {
-        if inner
-            .catalogs
-            .get(&binding.key)
-            .is_some_and(|frozen| frozen.runtime_config != binding.runtime_config)
-        {
-            return Err(IcebergFdwError::CatalogBindingChanged);
+        if let Some(catalog) = inner.catalogs.get(&session.identity) {
+            catalog.validate(session)?;
         }
         Ok(())
     }
@@ -178,9 +166,9 @@ impl ForeignTransaction {
         })?;
         inner
             .catalogs
-            .get(key.catalog_binding())
-            .and_then(|binding| binding.tables.get(key))
-            .map(|state| state.row_registry.clone())
+            .get(key.catalog_identity())
+            .and_then(|catalog| catalog.tables.get(key))
+            .map(ForeignTableState::row_registry)
             .ok_or(IcebergError::InvariantViolated(
                 "foreign table was not enrolled before row identity registration",
             ))
@@ -203,45 +191,74 @@ impl ForeignTransaction {
         let mut inner = tracker.inner.borrow_mut();
         let state = inner
             .catalogs
-            .get_mut(key.catalog_binding())
-            .and_then(|binding| binding.tables.get_mut(key))
+            .get_mut(key.catalog_identity())
+            .and_then(|catalog| catalog.tables.get_mut(key))
             .ok_or(IcebergError::InvariantViolated(
                 "foreign table mutation was staged before write enrollment",
             ))?;
         let level = unsafe { pg_sys::GetCurrentTransactionNestLevel() };
-        mutation(&mut state.transaction, level)
-    }
-
-    fn has_actions(&self) -> bool {
-        self.inner
-            .borrow()
-            .catalogs
-            .values()
-            .flat_map(|binding| binding.tables.values())
-            .any(|state| !state.transaction.actions.is_empty())
+        mutation(state.transaction_mut(), level)
     }
 
     fn prepare_publication(&self) -> Result<(), IcebergFdwError> {
+        // Configuration admission ends at this entry check. Preserve existing
+        // handles for abort cleanup if an earlier invalidation rejects it.
+        // Accepted policy: invalidations received during preparation or later
+        // do not revoke this publication's admission; it finishes with its
+        // retained catalog sessions. This is not serialization with concurrent
+        // ALTER SERVER/USER MAPPING, and PG can still abort on preparation errors.
+        // PG17 postgres_fdw likewise lets an in-use invalidated connection
+        // finish its transaction, then disconnects it (connection.c:
+        // pgfdw_inval_callback, pgfdw_xact_callback, pgfdw_reset_xact_state).
+        // LagoDB adds this entry check and publishes after local commit; do not
+        // add later invalidation rejection without changing that contract.
+        if self
+            .inner
+            .borrow()
+            .catalogs
+            .values()
+            .any(|catalog| catalog.invalidated && catalog.has_catalog_changes())
+        {
+            return Err(IcebergFdwError::CatalogConfigurationChanged);
+        }
+        let canceled_files = {
+            let inner = self.inner.borrow();
+            inner
+                .catalogs
+                .values()
+                .flat_map(|catalog| catalog.tables.values())
+                .try_fold(Vec::new(), |mut canceled, state| {
+                    canceled.extend(state.canceled_files()?);
+                    Ok::<_, IcebergError>(canceled)
+                })?
+        };
+        for (file_io, paths) in canceled_files {
+            if !paths.is_empty() {
+                register_canceled_files_for_commit(file_io, paths);
+            }
+        }
         let groups = {
             let inner = self.inner.borrow();
             inner
                 .catalogs
                 .iter()
-                .filter_map(|(binding_key, binding)| {
-                    let tables = binding
+                .filter_map(|(catalog_identity, catalog)| {
+                    let tables = catalog
                         .tables
                         .iter()
-                        .filter(|(_, state)| !state.transaction.actions.is_empty())
+                        .filter(|(_, state)| state.has_catalog_changes())
                         .map(|(key, state)| {
                             (
                                 key.clone(),
-                                state.base.clone(),
-                                Rc::clone(&state.transaction.actions),
+                                state.is_staged_create(),
+                                state.iceberg_transaction(),
+                                state.commit_base().metadata_ref(),
+                                Rc::clone(&state.transaction().actions),
                             )
                         })
                         .collect::<Vec<_>>();
                     (!tables.is_empty()).then(|| {
-                        (binding_key.clone(), binding.catalog.clone(), tables)
+                        (catalog_identity.clone(), catalog.catalog.clone(), tables)
                     })
                 })
                 .collect::<Vec<_>>()
@@ -261,44 +278,49 @@ impl ForeignTransaction {
                 ))
         });
         let mut prepared = Vec::with_capacity(groups.len());
-        for (_binding_key, catalog, mut tables) in groups {
+        for (_catalog_identity, catalog, mut tables) in groups {
             tables.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-            let targets = tables
-                .iter()
-                .map(|(key, _, _)| key.publication_name())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let mut commits = Vec::with_capacity(tables.len());
-            for (_key, base, actions) in tables {
+            let mut changes = Vec::with_capacity(tables.len());
+            for (key, staged_create, transaction, base_metadata, actions) in tables {
                 let plan = actions.commit_plan()?;
-                let transaction = plan
-                    .apply_to_transaction(Transaction::new(&base), base.metadata())?;
+                let transaction =
+                    plan.apply_to_transaction(transaction, &base_metadata)?;
                 match transaction.prepare(catalog.as_catalog())? {
                     PreparedTransaction::Noop(_) => {}
-                    PreparedTransaction::Commit(commit) => commits.push(commit),
+                    PreparedTransaction::Commit(commit) => {
+                        let target = key.publication_name();
+                        let change = if staged_create {
+                            CatalogChange::StagedCreate { target, commit }
+                        } else {
+                            CatalogChange::TableUpdate { target, commit }
+                        };
+                        changes.push(change);
+                    }
                 }
             }
-            if commits.is_empty() {
+            if changes.is_empty() {
                 continue;
             }
-            let request = catalog.prepare_transaction_commit(commits)?;
-            prepared.push(PreparedPublication { request, targets });
+            prepared.extend(catalog.prepare_publications(changes)?);
         }
         self.inner.borrow_mut().prepared = prepared;
         Ok(())
     }
 
     fn rollback_to_level(&self, level: i32) {
-        for binding in self.inner.borrow_mut().catalogs.values_mut() {
-            for state in binding.tables.values_mut() {
+        for catalog in self.inner.borrow_mut().catalogs.values_mut() {
+            catalog
+                .tables
+                .retain(|_, state| !state.staged_at_or_after(level));
+            for state in catalog.tables.values_mut() {
                 state.rollback_to_level(level);
             }
         }
     }
 
     fn promote_to_level(&self, level: i32) {
-        for binding in self.inner.borrow_mut().catalogs.values_mut() {
-            for state in binding.tables.values_mut() {
+        for catalog in self.inner.borrow_mut().catalogs.values_mut() {
+            for state in catalog.tables.values_mut() {
                 state.promote_to_level(level);
             }
         }
@@ -322,10 +344,21 @@ impl TransactionResource for ForeignTransaction {
     }
 
     fn on_pre_prepare(&self) -> TransactionResult<()> {
-        if self.has_actions() {
+        // Canceled creates and superseded generations remain backend-local
+        // state even when no catalog publication remains. Generation rollback
+        // and owned-file cleanup have no durable two-phase representation, so
+        // PREPARE rejects this state regardless of the final publication plan.
+        let has_transactional_state = self
+            .inner
+            .borrow()
+            .catalogs
+            .values()
+            .flat_map(|catalog| catalog.tables.values())
+            .any(ForeignTableState::has_transactional_state);
+        if has_transactional_state {
             return Err(PgReportError::from_message(
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                "cannot PREPARE a transaction with staged writable Iceberg foreign-table changes",
+                "cannot PREPARE a transaction with staged Iceberg foreign-table catalog changes",
             ));
         }
         Ok(())
@@ -355,18 +388,19 @@ impl TransactionResource for ForeignTransaction {
         // atomicity alone is not an implementation defect under this contract.
         let prepared = mem::take(&mut self.inner.borrow_mut().prepared);
         for publication in prepared {
-            if let Err(error) = publication.request.publish() {
+            let (request, targets) = publication.into_parts();
+            if let Err(error) = request.publish() {
                 if let Some(chain) =
                     error.source().and_then(error_source_chain_detail)
                 {
                     report_warning(format_args!(
                         "local transaction committed but Iceberg catalog publication for {} failed: {error}; {chain}; external table state is unknown",
-                        publication.targets,
+                        targets,
                     ));
                 } else {
                     report_warning(format_args!(
                         "local transaction committed but Iceberg catalog publication for {} failed: {error}; external table state is unknown",
-                        publication.targets,
+                        targets,
                     ));
                 }
             }

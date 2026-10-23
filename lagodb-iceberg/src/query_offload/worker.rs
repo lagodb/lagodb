@@ -8,7 +8,8 @@ use pgrx::pg_sys;
 use serde::{Deserialize, Serialize};
 
 use crate::foreign_table::{
-    ForeignTableIdentity, IcebergFdwError, IcebergForeignTable, PlanSourceIdentity,
+    ForeignTableIdentity, IcebergFdwError, PlanSourceIdentity,
+    ResolvedForeignTableBinding,
 };
 use crate::managed_table::StorageContext;
 use crate::scan::ScanError;
@@ -168,15 +169,19 @@ impl ReopenPlan {
                 identity,
                 generation,
             } => {
-                let resolved =
-                    IcebergForeignTable::resolve(*relation_oid, *effective_user_oid)?;
+                let resolved = ResolvedForeignTableBinding::resolve(
+                    *relation_oid,
+                    *effective_user_oid,
+                )?;
                 if resolved.identity() != identity {
                     return Err(IcebergFdwError::PlanIdentityChanged.into());
                 }
-                if &PlanSourceIdentity::from_table(resolved.table()) != generation {
+                let table = resolved.table();
+                if &PlanSourceIdentity::from_metadata(table.metadata()) != generation
+                {
                     return Err(IcebergFdwError::PlanSourceChanged.into());
                 }
-                Ok(resolved.table().file_io().clone())
+                Ok(table.file_io().clone())
             }
         }
     }

@@ -36,7 +36,7 @@ impl FilterPlanner {
     ) -> Result<Self, Error> {
         Ok(Self(IcebergFilterPlanner::from_schema(
             context,
-            source.resolved()?.table().metadata().current_schema(),
+            source.table()?.metadata().current_schema(),
         )?))
     }
 }

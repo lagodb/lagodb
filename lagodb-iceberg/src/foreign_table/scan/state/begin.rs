@@ -9,8 +9,8 @@ use pgrx::pg_sys;
 use super::{ForeignScanPhase, IcebergFdwScanState};
 use crate::foreign_table::scan::ForeignMutationScan;
 use crate::foreign_table::{
-    ForeignSchemaBinding, ForeignTransaction, IcebergFdwError, IcebergForeignTable,
-    LagodbIceberg, PlanSourceIdentity,
+    ForeignSchemaBinding, ForeignTransaction, IcebergFdwError, LagodbIceberg,
+    PlanSourceIdentity, ResolvedForeignTableBinding,
 };
 use crate::predicate::BoundIcebergPredicate;
 use crate::scan::parallel::PostgresParallelExecution;
@@ -26,7 +26,7 @@ impl IcebergFdwScanState {
     ) -> Result<Self, ForeignScanError> {
         // SAFETY: BeginForeignScan borrows the initialized owning executor.
         let executor = unsafe { ExecutorHandle::from_raw(context.estate) };
-        let resolved = IcebergForeignTable::resolve_for_execution(
+        let resolved = ResolvedForeignTableBinding::resolve_for_execution(
             context.relation.oid(),
             context.effective_user_id(),
             &executor,
@@ -34,15 +34,6 @@ impl IcebergFdwScanState {
         if resolved.identity() != context.private_data.identity() {
             return Err(IcebergFdwError::PlanIdentityChanged.into());
         }
-        let source = PlanSourceIdentity::from_table(resolved.table());
-        if context
-            .private_data
-            .source()
-            .is_some_and(|planned| planned != &source)
-        {
-            return Err(IcebergFdwError::PlanSourceChanged.into());
-        }
-
         let mutation = matches!(
             context.row_identity_requirement,
             ForeignRowIdentityRequirement::ItemPointer
@@ -58,19 +49,29 @@ impl IcebergFdwScanState {
         let parallel_workers_allowed = !context.parallel_aware
             || !ForeignTransaction::has_local_actions(resolved.key());
         let command_id = context.snapshot.command_id();
+        let catalog_table = resolved.into_catalog_table();
         let view = if mutation {
-            ForeignTransaction::begin_write(resolved, command_id)?
+            ForeignTransaction::begin_write(
+                catalog_table,
+                command_id,
+                context.private_data.source(),
+            )?
         } else {
-            ForeignTransaction::scan_view(resolved, command_id)?
+            ForeignTransaction::scan_view(catalog_table, command_id)?
         };
-        let table = view.table;
-        let mutation_table = mutation.then(|| table.clone());
+        if !mutation
+            && context.private_data.source().is_some_and(|planned| {
+                planned != &PlanSourceIdentity::from_metadata(view.metadata())
+            })
+        {
+            return Err(IcebergFdwError::PlanSourceChanged.into());
+        }
         let binding = ForeignSchemaBinding::new(&context.relation)?;
         if mutation {
-            binding.validate_write(table.metadata().current_schema())?;
+            binding.validate_write(view.metadata().current_schema())?;
         } else if context.required_columns.needs_all_columns() {
             binding.validate_read(
-                table.metadata(),
+                view.metadata(),
                 context.private_data.identity(),
                 binding
                     .layout()
@@ -80,7 +81,7 @@ impl IcebergFdwScanState {
             )?;
         } else {
             binding.validate_read(
-                table.metadata(),
+                view.metadata(),
                 context.private_data.identity(),
                 context.required_columns.user_columns(),
             )?;
@@ -102,8 +103,10 @@ impl IcebergFdwScanState {
             StablePruningPredicate::new(planning_filter.clone()),
             ReaderPredicate::new(planning_filter),
         );
+        let (key, table, delta) = view.into_parts();
+        let mutation_table = mutation.then(|| table.clone());
         let mut prepared = PreparedRowScan::projected(
-            IcebergReadSnapshot::new(table, view.delta),
+            IcebergReadSnapshot::new(table, delta),
             projection,
             predicates,
             &layout,
@@ -115,14 +118,14 @@ impl IcebergFdwScanState {
             let tasks = prepared
                 .plan_row_location_tasks()
                 .map_err(IcebergFdwError::from)?;
-            let registry = ForeignTransaction::row_registry(&view.key)?;
+            let registry = ForeignTransaction::row_registry(&key)?;
             let mutation_table =
                 mutation_table.ok_or_else(|| IcebergFdwError::InvalidPlan {
                     detail: "mutation scan did not retain its transaction table",
                 })?;
             let mutation_context = ForeignMutationScan::new(
                 context.private_data.identity().clone(),
-                view.key,
+                key,
                 mutation_table,
                 layout,
                 prepared.starting_snapshot_id(),

@@ -340,6 +340,33 @@ ROLLBACK;
 -- identity while executing every work group and reporting complete metrics.
 SET max_parallel_workers_per_gather = 2;
 SET lagodb.query_offload_parallel_min_scan_rows = 0;
+-- A transaction-staged create is visible only through the leader backend's
+-- foreign transaction. Any such source makes the complete offloaded fragment
+-- serial even when another source has enough work to launch parallel workers.
+BEGIN;
+CREATE FOREIGN TABLE query_offload_foreign.staged_source (
+    id integer,
+    payload text
+)
+SERVER query_offload_foreign_rest
+OPTIONS (
+    table 'query_offload_writes.staged_source',
+    create_remote_if_missing 'true'
+);
+INSERT INTO query_offload_foreign.staged_source VALUES (1, 'staged');
+SELECT offload->>'Execution Mode' = 'Serial' AS staged_create_serial
+FROM pg_temp.foreign_analyze(
+    'SELECT count(*)
+     FROM query_offload_foreign.staged_source s
+     JOIN query_offload_foreign.parallel_source p USING (id)') AS document(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Custom Plan Provider" == "LagoDB Query Offload")') AS nodes(offload);
+ staged_create_serial 
+----------------------
+ t
+(1 row)
+
+ROLLBACK;
 SELECT offload->>'Execution Mode' = 'Parallel' AS parallel,
        (offload->>'Maximum Launched Workers')::integer > 0 AS worker_launched,
        (offload->>'Parallel Runs')::integer = 1 AS one_run,

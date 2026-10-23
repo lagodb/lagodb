@@ -135,11 +135,11 @@ impl IcebergFdwFilterPlanner {
             IcebergFdwFilterPlannerState::Ready { .. } => None,
         };
         if let Some((context, planning_source)) = pending {
-            let table = planning_source.resolved()?;
-            let source = PlanSourceIdentity::from_table(table.table());
+            let table = planning_source.table()?;
+            let source = PlanSourceIdentity::from_metadata(table.metadata());
             let planner = IcebergFilterPlanner::from_schema(
                 &context,
-                table.table().metadata().current_schema(),
+                table.metadata().current_schema(),
             )?;
             self.state = IcebergFdwFilterPlannerState::Ready { source, planner };
         }

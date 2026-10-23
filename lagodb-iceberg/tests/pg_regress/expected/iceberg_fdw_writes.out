@@ -58,7 +58,7 @@ TYPE 'rest'
 FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (
     uri :'regress_fallback_rest_uri',
-    enable_vended_credentials 'false'
+    request_vended_credentials 'false'
 );
 CREATE SERVER bucket_a_storage
 TYPE 'storage'
@@ -443,8 +443,8 @@ SERVER iceberg_rest
 OPTIONS (
     table 'fdw_writes.rows_v2'
 );
-ERROR:  foreign table schema does not match the selected Iceberg schema: column "id" has unsupported PostgreSQL type (oid 20, typmod -1); the default Iceberg mapping is (oid 23, typmod -1)
-DETAIL:  while running utility hook 'lagodb-iceberg foreign-table DDL' in pre phase for T_CreateForeignTableStmt
+ERROR:  foreign table schema does not match the selected Iceberg schema: column "id": Iceberg type int cannot be read as PostgreSQL type bigint; the default mapping is integer
+DETAIL:  while running utility hook 'lagodb-iceberg foreign-table DDL' in post-success phase for T_CreateForeignTableStmt
 -- Inferred definitions are writable without an opt-in mode.
 INSERT INTO iceberg_fdw_regress.inferred VALUES (11, 'eleven');
 SELECT array_agg(id ORDER BY id) AS inferred_write_rows
@@ -559,8 +559,8 @@ FROM iceberg_fdw_regress.second;
  {10,11,15,20}
 (1 row)
 
--- Distinct immutable REST catalog bindings publish independently in one
--- PostgreSQL transaction.
+-- Distinct immutable REST catalog transaction states publish independently
+-- in one PostgreSQL transaction.
 CREATE FOREIGN TABLE iceberg_fdw_regress.second_server_table (
     id integer,
     payload text
@@ -588,28 +588,60 @@ FROM iceberg_fdw_regress.second_server_table WHERE id = 31;
                         1
 (1 row)
 
+-- Catalog identity is fixed when the server is created. Runtime and
+-- authentication behavior remains configurable.
+ALTER SERVER iceberg_rest OPTIONS (SET uri :'regress_failure_rest_uri');
+ERROR:  cannot change immutable Iceberg catalog identity option "uri"; create a new foreign server instead
+DETAIL:  while running utility hook 'Iceberg catalog-server identity' in pre phase for T_AlterForeignServerStmt
 -- Once a server/effective-user pair participates in a writable transaction,
--- changing its server configuration is rejected before another write or scan
--- can attach to the frozen transaction view.
+-- changing a mutable option is rejected before another write or scan can
+-- attach to the frozen transaction view.
 BEGIN;
 INSERT INTO iceberg_fdw_regress.writable VALUES (40, 'forty');
-ALTER SERVER iceberg_rest OPTIONS (SET uri :'regress_failure_rest_uri');
+ALTER SERVER iceberg_rest OPTIONS (ADD request_vended_credentials 'false');
 INSERT INTO iceberg_fdw_regress.writable VALUES (41, 'forty-one');
-ERROR:  FDW provider "lagodb_iceberg" callback BeginForeignModify failed: FDW provider modify error: foreign server or user-mapping configuration changed after this writable transaction bound it
-DETAIL:  FDW provider modify error: foreign server or user-mapping configuration changed after this writable transaction bound it
-foreign server or user-mapping configuration changed after this writable transaction bound it
+ERROR:  FDW provider "lagodb_iceberg" callback BeginForeignModify failed: FDW provider modify error: foreign server or user-mapping configuration changed while the Iceberg catalog was in use
+DETAIL:  FDW provider modify error: foreign server or user-mapping configuration changed while the Iceberg catalog was in use
+foreign server or user-mapping configuration changed while the Iceberg catalog was in use
 ROLLBACK;
-SELECT count(*) AS changed_binding_rows
+SELECT count(*) AS changed_catalog_rows
 FROM iceberg_fdw_regress.writable WHERE id IN (40, 41);
- changed_binding_rows 
+ changed_catalog_rows 
 ----------------------
                     0
+(1 row)
+
+-- A change after the final write must also block publication at pre-commit.
+BEGIN;
+INSERT INTO iceberg_fdw_regress.writable VALUES (44, 'forty-four');
+ALTER SERVER iceberg_rest OPTIONS (ADD request_vended_credentials 'false');
+COMMIT;
+ERROR:  foreign server or user-mapping configuration changed while the Iceberg catalog was in use
+SELECT count(*) AS invalidated_precommit_rows
+FROM iceberg_fdw_regress.writable WHERE id = 44;
+ invalidated_precommit_rows 
+----------------------------
+                          0
+(1 row)
+
+-- User-mapping invalidation reaches the same transaction admission boundary.
+BEGIN;
+INSERT INTO iceberg_fdw_regress.writable VALUES (45, 'forty-five');
+ALTER USER MAPPING FOR CURRENT_USER SERVER iceberg_rest
+    OPTIONS (ADD scope 'changed');
+COMMIT;
+ERROR:  foreign server or user-mapping configuration changed while the Iceberg catalog was in use
+SELECT count(*) AS invalidated_mapping_rows
+FROM iceberg_fdw_regress.writable WHERE id = 45;
+ invalidated_mapping_rows 
+--------------------------
+                        0
 (1 row)
 
 BEGIN;
 INSERT INTO iceberg_fdw_regress.writable VALUES (50, 'fifty');
 PREPARE TRANSACTION 'iceberg_fdw_must_not_prepare';
-ERROR:  cannot PREPARE a transaction with staged writable Iceberg foreign-table changes
+ERROR:  cannot PREPARE a transaction with staged Iceberg foreign-table catalog changes
 SELECT count(*) AS unprepared_remote_rows
 FROM iceberg_fdw_regress.writable WHERE id = 50;
  unprepared_remote_rows 

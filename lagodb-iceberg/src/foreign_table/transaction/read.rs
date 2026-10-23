@@ -4,27 +4,58 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use iceberg_lite::overlay::SnapshotDelta;
+use iceberg_lite::spec::TableMetadata;
 use iceberg_lite::table::Table;
 use pgrx::pg_sys;
 
 use super::{CURRENT, ForeignTransaction};
-use crate::foreign_table::catalog::ForeignCatalog;
-use crate::foreign_table::options::{CatalogRuntimeConfig, ServerBindingKey};
-use crate::foreign_table::{IcebergFdwError, IcebergForeignTable, RemoteTableKey};
+use crate::foreign_table::IcebergFdwError;
+use crate::foreign_table::catalog::{
+    BoundCatalogTable, CatalogAccessIdentity, CatalogRuntimeConfig, ForeignCatalog,
+    RemoteTableKey,
+};
 
-/// A table plus the file overlay visible to a statement in this backend.
-pub(crate) struct ForeignTableView {
-    pub(crate) key: RemoteTableKey,
-    pub(crate) table: Table,
-    pub(crate) delta: Option<Arc<SnapshotDelta>>,
+/// A resolved table and the published data batches visible to one read.
+pub(crate) struct ForeignTableReadView {
+    key: RemoteTableKey,
+    base: Table,
+    delta: Option<Arc<SnapshotDelta>>,
+}
+
+impl ForeignTableReadView {
+    fn base(key: RemoteTableKey, base: Table) -> Self {
+        Self::new(key, base, None)
+    }
+
+    fn new(
+        key: RemoteTableKey,
+        base: Table,
+        delta: Option<Arc<SnapshotDelta>>,
+    ) -> Self {
+        Self { key, base, delta }
+    }
+
+    pub(crate) fn metadata(&self) -> &TableMetadata {
+        self.base.metadata()
+    }
+
+    pub(super) fn enrollment_parts(&self) -> (&RemoteTableKey, &Table) {
+        (&self.key, &self.base)
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (RemoteTableKey, Table, Option<Arc<SnapshotDelta>>) {
+        (self.key, self.base, self.delta)
+    }
 }
 
 impl ForeignTransaction {
-    /// Validate an existing write binding before any catalog I/O and reuse its
+    /// Validate existing transaction state before any catalog I/O and reuse its
     /// SQLite connection. REST reuse belongs to the executor, not this write
     /// transaction. A read never enrolls a writer.
-    pub(crate) fn connection_from_write_binding(
-        server_key: &ServerBindingKey,
+    pub(crate) fn catalog_from_transaction(
+        catalog_identity: &CatalogAccessIdentity,
         runtime_config: &CatalogRuntimeConfig,
     ) -> Result<Option<ForeignCatalog>, IcebergFdwError> {
         CURRENT.with(|slot| {
@@ -33,17 +64,17 @@ impl ForeignTransaction {
                 return Ok(None);
             };
             let inner = tracker.inner.borrow();
-            let Some(binding) = inner.catalogs.get(server_key) else {
+            let Some(catalog) = inner.catalogs.get(catalog_identity) else {
                 return Ok(None);
             };
-            if &binding.runtime_config != runtime_config {
-                return Err(IcebergFdwError::CatalogBindingChanged);
+            if catalog.invalidated || &catalog.runtime_config != runtime_config {
+                return Err(IcebergFdwError::CatalogConfigurationChanged);
             }
-            Ok(binding.catalog.reuse_transaction_connection())
+            Ok(catalog.catalog.reuse_transaction_connection())
         })
     }
 
-    /// Inspect the current action log without enrolling a table or transaction.
+    /// Whether the table has state that a parallel worker cannot reconstruct.
     pub(crate) fn has_local_actions(key: &RemoteTableKey) -> bool {
         CURRENT.with(|slot| {
             slot.borrow().as_ref().is_some_and(|tracker| {
@@ -51,9 +82,9 @@ impl ForeignTransaction {
                     .inner
                     .borrow()
                     .catalogs
-                    .get(key.catalog_binding())
-                    .and_then(|binding| binding.tables.get(key))
-                    .is_some_and(|state| !state.transaction.actions.is_empty())
+                    .get(key.catalog_identity())
+                    .and_then(|catalog| catalog.tables.get(key))
+                    .is_some_and(|state| state.has_catalog_changes())
             })
         })
     }
@@ -62,68 +93,44 @@ impl ForeignTransaction {
     /// Maintenance passes `None` to inspect all staged actions. Active writer
     /// buffers are not readable, and a bound scan never acquires later batches.
     pub(crate) fn scan_view(
-        resolved: IcebergForeignTable,
+        catalog_table: BoundCatalogTable,
         read_command_id: Option<pg_sys::CommandId>,
-    ) -> Result<ForeignTableView, IcebergFdwError> {
+    ) -> Result<ForeignTableReadView, IcebergFdwError> {
+        let (key, session, base) = catalog_table.into_parts();
         CURRENT.with(|slot| {
             let tracker = slot.borrow().as_ref().map(Rc::clone);
             match tracker {
-                Some(tracker) => tracker.overlay(resolved, read_command_id),
-                None => {
-                    let (key, _binding, table) = resolved.into_parts();
-                    Ok(ForeignTableView {
-                        key,
-                        table,
-                        delta: None,
-                    })
+                Some(tracker) => {
+                    Self::validate_catalog(&tracker.inner.borrow(), &session)?;
+                    tracker.scan_view_parts(key, base, read_command_id)
                 }
+                None => Ok(ForeignTableReadView::base(key, base)),
             }
         })
     }
 
-    fn overlay(
-        &self,
-        resolved: IcebergForeignTable,
-        read_command_id: Option<pg_sys::CommandId>,
-    ) -> Result<ForeignTableView, IcebergFdwError> {
-        let (key, binding, table) = resolved.into_parts();
-        Self::validate_binding(&self.inner.borrow(), &binding)?;
-        self.overlay_parts(key, table, read_command_id)
-    }
-
-    pub(super) fn overlay_parts(
+    pub(super) fn scan_view_parts(
         &self,
         key: RemoteTableKey,
-        table: Table,
+        base: Table,
         read_command_id: Option<pg_sys::CommandId>,
-    ) -> Result<ForeignTableView, IcebergFdwError> {
-        let actions = self
-            .inner
-            .borrow()
+    ) -> Result<ForeignTableReadView, IcebergFdwError> {
+        let inner = self.inner.borrow();
+        let state = inner
             .catalogs
-            .get(key.catalog_binding())
-            .and_then(|binding| binding.tables.get(&key))
-            .map(|state| Rc::clone(&state.transaction.actions));
-        let Some(actions) = actions else {
-            return Ok(ForeignTableView {
-                key,
-                table,
-                delta: None,
-            });
+            .get(key.catalog_identity())
+            .and_then(|catalog| catalog.tables.get(&key));
+        let Some(state) = state else {
+            return Ok(ForeignTableReadView::base(key, base));
         };
-        let metadata = actions.overlay_metadata(table.metadata().clone())?;
-        let delta = actions.visible_delta(read_command_id)?;
-        let mut builder = Table::builder()
-            .identifier(table.identifier().clone())
-            .file_io(table.file_io().clone())
-            .metadata(metadata);
-        if let Some(location) = table.metadata_location() {
-            builder = builder.metadata_location(location.to_owned());
+        if !state.is_same_generation(&base) {
+            return Err(IcebergFdwError::TableGenerationConflict {
+                table: key.publication_name(),
+            });
         }
-        Ok(ForeignTableView {
-            key,
-            table: builder.build()?,
-            delta,
-        })
+        let actions = Rc::clone(&state.transaction().actions);
+        drop(inner);
+        let delta = actions.visible_delta(read_command_id)?;
+        Ok(ForeignTableReadView::new(key, base, delta))
     }
 }

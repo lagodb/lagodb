@@ -14,7 +14,7 @@ use pgrx::pg_sys;
 
 use super::options::ForeignTableIdentity;
 use super::provider::LagodbIceberg;
-use super::relation::IcebergForeignTable;
+use super::relation::ResolvedForeignTableBinding;
 use super::scan::ForeignMutationScan;
 use super::schema::ForeignSchemaBinding;
 use super::transaction::ForeignTransaction;
@@ -129,28 +129,28 @@ impl LagodbIceberg {
         }
 
         let resolved = match executor {
-            Some(executor) => IcebergForeignTable::resolve_for_execution(
+            Some(executor) => ResolvedForeignTableBinding::resolve_for_execution(
                 relation.oid(),
                 effective_user,
                 executor,
             )?,
             // COPY has no snapshot-bearing executor and keeps its own binding.
-            None => IcebergForeignTable::resolve(relation.oid(), effective_user)?,
+            None => {
+                ResolvedForeignTableBinding::resolve(relation.oid(), effective_user)?
+            }
         };
         if planned.is_some_and(|private| private.identity() != resolved.identity()) {
             return Err(super::error::IcebergFdwError::PlanIdentityChanged.into());
         }
-        let view = ForeignTransaction::begin_write(resolved, None)?;
-        let binding = ForeignSchemaBinding::new(relation)?;
-        binding.validate_write(view.table.metadata().current_schema())?;
-        let layout = binding.into_relation_layout();
-        IcebergFdwModifyState::new(
-            &view.key,
-            operation,
-            &view.table,
-            &layout,
+        let view = ForeignTransaction::begin_write(
+            resolved.into_catalog_table(),
             None,
-            command_id,
-        )
+            None,
+        )?;
+        let binding = ForeignSchemaBinding::new(relation)?;
+        binding.validate_write(view.metadata().current_schema())?;
+        let layout = binding.into_relation_layout();
+        let (key, table, _delta) = view.into_parts();
+        IcebergFdwModifyState::new(&key, operation, &table, &layout, None, command_id)
     }
 }

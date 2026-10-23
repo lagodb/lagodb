@@ -4,7 +4,7 @@
 //! commit. Choose each source on first bind, then keep that immutable Table
 //! until executor teardown. The next execution loads it again, including when
 //! it reuses a cached plan. This does not pin files against Iceberg expiration.
-//! REST catalog bindings are shared across tables only within this executor;
+//! REST catalog sessions are shared across tables only within this executor;
 //! keeping a client does not select another table's metadata or storage routes.
 
 use std::cell::RefCell;
@@ -14,54 +14,54 @@ use iceberg_lite::table::Table;
 use lagodb_core::handles::ExecutorHandle;
 use pgrx::pg_sys;
 
-use super::catalog::ForeignCatalog;
+use super::catalog::{
+    CatalogSession, CatalogSessionRequest, ForeignCatalog, RemoteTableKey,
+};
 use super::error::IcebergFdwError;
-use super::options::CatalogRuntimeConfig;
-use super::relation::{RemoteTableKey, ResolvedCatalogBinding};
 
 struct CachedTable {
     key: RemoteTableKey,
-    catalog: Rc<ResolvedCatalogBinding>,
-    table: Table,
+    catalog: Rc<CatalogSession>,
+    base: Table,
 }
 
-struct ActiveReadViews {
+struct ActiveExecutionCaches {
     estate: *mut pg_sys::EState,
-    views: Weak<ForeignReadViews>,
+    cache: Weak<ExecutorForeignTableCache>,
 }
 
 thread_local! {
-    static ACTIVE: RefCell<Vec<ActiveReadViews>> = const { RefCell::new(Vec::new()) };
+    static ACTIVE: RefCell<Vec<ActiveExecutionCaches>> = const { RefCell::new(Vec::new()) };
 }
 
-pub(super) struct ForeignReadViews {
-    rest_catalogs: RefCell<Vec<Rc<ResolvedCatalogBinding>>>,
+pub(super) struct ExecutorForeignTableCache {
+    rest_catalogs: RefCell<Vec<Rc<CatalogSession>>>,
     tables: RefCell<Vec<CachedTable>>,
 }
 
-impl ForeignReadViews {
+impl ExecutorForeignTableCache {
     pub(super) fn acquire(executor: &ExecutorHandle<'_>) -> Rc<Self> {
         ACTIVE.with_borrow_mut(|active| {
             // Only the executor context owns a persistent strong reference.
             // Dead entries cannot alias an EState address reused by PG.
-            active.retain(|entry| entry.views.strong_count() != 0);
-            if let Some(views) = active
+            active.retain(|entry| entry.cache.strong_count() != 0);
+            if let Some(cache) = active
                 .iter()
                 .find(|entry| entry.estate == executor.as_raw())
-                .and_then(|entry| entry.views.upgrade())
+                .and_then(|entry| entry.cache.upgrade())
             {
-                return views;
+                return cache;
             }
-            let views = Rc::new(Self {
+            let cache = Rc::new(Self {
                 rest_catalogs: RefCell::new(Vec::new()),
                 tables: RefCell::new(Vec::new()),
             });
-            executor.retain(Rc::clone(&views));
-            active.push(ActiveReadViews {
+            executor.retain(Rc::clone(&cache));
+            active.push(ActiveExecutionCaches {
                 estate: executor.as_raw(),
-                views: Rc::downgrade(&views),
+                cache: Rc::downgrade(&cache),
             });
-            views
+            cache
         })
     }
 
@@ -70,37 +70,33 @@ impl ForeignReadViews {
     pub(super) fn bind_table(
         &self,
         key: &RemoteTableKey,
-        config: CatalogRuntimeConfig,
-        connect: impl FnOnce() -> Result<ForeignCatalog, IcebergFdwError>,
-    ) -> Result<(Rc<ResolvedCatalogBinding>, Table), IcebergFdwError> {
+        request: CatalogSessionRequest,
+        transaction_catalog: Option<ForeignCatalog>,
+    ) -> Result<(Rc<CatalogSession>, Table), IcebergFdwError> {
         if let Some(cached) =
             self.tables.borrow().iter().find(|entry| &entry.key == key)
         {
-            if cached.catalog.runtime_config != config {
-                return Err(IcebergFdwError::CatalogBindingChanged);
+            if &cached.catalog.runtime_config != request.runtime_config() {
+                return Err(IcebergFdwError::CatalogConfigurationChanged);
             }
-            return Ok((Rc::clone(&cached.catalog), cached.table.clone()));
+            return Ok((Rc::clone(&cached.catalog), cached.base.clone()));
         }
         let cached_catalog = self
             .rest_catalogs
             .borrow()
             .iter()
-            .find(|binding| {
-                &binding.key == key.catalog_binding()
-                    && binding.runtime_config == config
+            .find(|session| {
+                &session.identity == request.identity()
+                    && &session.runtime_config == request.runtime_config()
             })
             .map(Rc::clone);
         let is_new = cached_catalog.is_none();
         // No cache borrow survives catalog or table-file I/O.
         let catalog = match cached_catalog {
             Some(catalog) => catalog,
-            None => Rc::new(ResolvedCatalogBinding {
-                key: key.catalog_binding().clone(),
-                runtime_config: config,
-                catalog: connect()?,
-            }),
+            None => Rc::new(request.connect(transaction_catalog)?),
         };
-        let table = catalog.catalog.as_catalog().load_table(key.table())?;
+        let base = catalog.as_catalog().load_table(key.table())?;
         // SQLite retains its existing transaction-connection reuse policy.
         // Only successful REST table loads populate the shared client bindings.
         if is_new && matches!(&catalog.catalog, ForeignCatalog::Rest(_)) {
@@ -109,8 +105,8 @@ impl ForeignReadViews {
         self.tables.borrow_mut().push(CachedTable {
             key: key.clone(),
             catalog: Rc::clone(&catalog),
-            table: table.clone(),
+            base: base.clone(),
         });
-        Ok((catalog, table))
+        Ok((catalog, base))
     }
 }

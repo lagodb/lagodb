@@ -13,7 +13,7 @@ use lagodb_core::handles::ItemPointer;
 use parquet::file::properties::WriterProperties;
 use pgrx::pg_sys;
 
-use super::super::relation::RemoteTableKey;
+use super::super::catalog::RemoteTableKey;
 use super::super::scan::ForeignMutationScan;
 use super::super::schema::ForeignSchemaBinding;
 use super::super::transaction::ForeignTransaction;

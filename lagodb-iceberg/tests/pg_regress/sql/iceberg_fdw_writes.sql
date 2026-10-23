@@ -48,7 +48,7 @@ TYPE 'rest'
 FOREIGN DATA WRAPPER lagodb_iceberg
 OPTIONS (
     uri :'regress_fallback_rest_uri',
-    enable_vended_credentials 'false'
+    request_vended_credentials 'false'
 );
 CREATE SERVER bucket_a_storage
 TYPE 'storage'
@@ -386,8 +386,8 @@ FROM iceberg_fdw_regress.writable;
 SELECT array_agg(id ORDER BY id) AS second_after_multi_table_commit
 FROM iceberg_fdw_regress.second;
 
--- Distinct immutable REST catalog bindings publish independently in one
--- PostgreSQL transaction.
+-- Distinct immutable REST catalog transaction states publish independently
+-- in one PostgreSQL transaction.
 CREATE FOREIGN TABLE iceberg_fdw_regress.second_server_table (
     id integer,
     payload text
@@ -406,16 +406,37 @@ FROM iceberg_fdw_regress.writable WHERE id = 30;
 SELECT count(*) AS second_catalog_committed
 FROM iceberg_fdw_regress.second_server_table WHERE id = 31;
 
+-- Catalog identity is fixed when the server is created. Runtime and
+-- authentication behavior remains configurable.
+ALTER SERVER iceberg_rest OPTIONS (SET uri :'regress_failure_rest_uri');
+
 -- Once a server/effective-user pair participates in a writable transaction,
--- changing its server configuration is rejected before another write or scan
--- can attach to the frozen transaction view.
+-- changing a mutable option is rejected before another write or scan can
+-- attach to the frozen transaction view.
 BEGIN;
 INSERT INTO iceberg_fdw_regress.writable VALUES (40, 'forty');
-ALTER SERVER iceberg_rest OPTIONS (SET uri :'regress_failure_rest_uri');
+ALTER SERVER iceberg_rest OPTIONS (ADD request_vended_credentials 'false');
 INSERT INTO iceberg_fdw_regress.writable VALUES (41, 'forty-one');
 ROLLBACK;
-SELECT count(*) AS changed_binding_rows
+SELECT count(*) AS changed_catalog_rows
 FROM iceberg_fdw_regress.writable WHERE id IN (40, 41);
+
+-- A change after the final write must also block publication at pre-commit.
+BEGIN;
+INSERT INTO iceberg_fdw_regress.writable VALUES (44, 'forty-four');
+ALTER SERVER iceberg_rest OPTIONS (ADD request_vended_credentials 'false');
+COMMIT;
+SELECT count(*) AS invalidated_precommit_rows
+FROM iceberg_fdw_regress.writable WHERE id = 44;
+
+-- User-mapping invalidation reaches the same transaction admission boundary.
+BEGIN;
+INSERT INTO iceberg_fdw_regress.writable VALUES (45, 'forty-five');
+ALTER USER MAPPING FOR CURRENT_USER SERVER iceberg_rest
+    OPTIONS (ADD scope 'changed');
+COMMIT;
+SELECT count(*) AS invalidated_mapping_rows
+FROM iceberg_fdw_regress.writable WHERE id = 45;
 
 BEGIN;
 INSERT INTO iceberg_fdw_regress.writable VALUES (50, 'fifty');

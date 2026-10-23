@@ -7,8 +7,9 @@ use iceberg_lite::catalog::TableIdent;
 use lagodb_core::fdw::{ForeignImportError, ForeignImportSchemaContext};
 use pgrx::{notice, pg_sys};
 
+use super::catalog::CatalogConnection;
 use super::error::IcebergFdwError;
-use super::options::{CatalogConnection, ForeignIdentifier, ForeignImportOptions};
+use super::options::{ForeignIdentifier, ForeignImportOptions};
 use super::schema::ForeignTableSchema;
 
 pub(crate) struct IcebergSchemaImporter;
@@ -57,10 +58,9 @@ impl IcebergSchemaImporter {
                 .as_catalog()
                 .load_table(&identifier)
                 .map_err(IcebergFdwError::from)?;
-            let schema = ForeignTableSchema::from_iceberg(
-                table.metadata().current_schema(),
-                options.strict,
-            )?;
+            let current = table.metadata().current_schema();
+            let schema =
+                ForeignTableSchema::from_iceberg(current, current, options.strict)?;
             if schema.is_empty() {
                 notice!(
                     "skipping Iceberg table {}: no supported columns",

@@ -2,91 +2,33 @@
 
 use std::rc::Rc;
 
-use iceberg_lite::catalog::TableIdent;
-use iceberg_lite::spec::SchemaRef;
 use iceberg_lite::table::Table;
 use lagodb_core::handles::ExecutorHandle;
 use pgrx::pg_sys;
 
-use super::catalog::ForeignCatalog;
+use super::catalog::{BoundCatalogTable, CatalogSessionRequest, RemoteTableKey};
 use super::error::IcebergFdwError;
-use super::options::{
-    CatalogConnection, CatalogRuntimeConfig, ForeignIdentifier, ForeignTableIdentity,
-    ServerBindingKey,
-};
-use super::read_view::ForeignReadViews;
+use super::executor_cache::ExecutorForeignTableCache;
+use super::options::ForeignTableIdentity;
 use super::transaction::ForeignTransaction;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct RemoteTableKey {
-    catalog: ServerBindingKey,
-    table: TableIdent,
-}
+mod target;
 
-impl PartialOrd for RemoteTableKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
+pub(super) use target::RemoteTableTarget;
 
-impl Ord for RemoteTableKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (
-            u32::from(self.catalog.server_oid),
-            u32::from(self.catalog.effective_user),
-            &self.table,
-        )
-            .cmp(&(
-                u32::from(other.catalog.server_oid),
-                u32::from(other.catalog.effective_user),
-                &other.table,
-            ))
-    }
-}
-
-impl RemoteTableKey {
-    pub(super) fn new(
-        catalog: ServerBindingKey,
-        identity: &ForeignTableIdentity,
-    ) -> Self {
-        Self {
-            catalog,
-            table: identity.table().clone(),
-        }
-    }
-
-    pub(crate) fn catalog_binding(&self) -> &ServerBindingKey {
-        &self.catalog
-    }
-
-    pub(super) fn table(&self) -> &TableIdent {
-        &self.table
-    }
-
-    pub(crate) fn publication_name(&self) -> String {
-        ForeignIdentifier::table_path(&self.table)
-    }
-}
-
-pub(crate) struct ResolvedCatalogBinding {
-    pub(crate) key: ServerBindingKey,
-    pub(crate) runtime_config: CatalogRuntimeConfig,
-    pub(crate) catalog: ForeignCatalog,
-}
-
-pub(crate) struct IcebergForeignTable {
-    key: RemoteTableKey,
+/// A resolved catalog session or staged generation. Metadata consumers use its
+/// table directly; scans bind command-visible data through [`ForeignTransaction`].
+pub(crate) struct ResolvedForeignTableBinding {
     identity: ForeignTableIdentity,
-    catalog: Rc<ResolvedCatalogBinding>,
-    table: Table,
+    catalog_table: BoundCatalogTable,
 }
 
-impl IcebergForeignTable {
+impl ResolvedForeignTableBinding {
     pub(crate) fn resolve(
         relation_oid: pg_sys::Oid,
         effective_user: pg_sys::Oid,
     ) -> Result<Self, IcebergFdwError> {
-        Self::resolve_visible(relation_oid, effective_user, None)
+        Self::resolve_binding(relation_oid, effective_user, None)
     }
 
     /// Resolve local options on every bind, but select the remote Table only
@@ -96,10 +38,10 @@ impl IcebergForeignTable {
         effective_user: pg_sys::Oid,
         executor: &ExecutorHandle<'_>,
     ) -> Result<Self, IcebergFdwError> {
-        Self::resolve_visible(relation_oid, effective_user, Some(executor))
+        Self::resolve_binding(relation_oid, effective_user, Some(executor))
     }
 
-    fn resolve_visible(
+    fn resolve_binding(
         relation_oid: pg_sys::Oid,
         effective_user: pg_sys::Oid,
         executor: Option<&ExecutorHandle<'_>>,
@@ -109,6 +51,7 @@ impl IcebergForeignTable {
         let foreign_table = unsafe { &*pg_sys::GetForeignTable(relation_oid) };
         let identity = ForeignTableIdentity::from_foreign_table(foreign_table)?;
         Self::bind_catalog_table(
+            relation_oid,
             foreign_table.serverid,
             effective_user,
             identity,
@@ -117,57 +60,65 @@ impl IcebergForeignTable {
     }
 
     pub(crate) fn load(
+        relation_oid: pg_sys::Oid,
         server_oid: pg_sys::Oid,
         effective_user: pg_sys::Oid,
         identity: ForeignTableIdentity,
     ) -> Result<Self, IcebergFdwError> {
-        Self::bind_catalog_table(server_oid, effective_user, identity, None)
+        Self::bind_catalog_table(
+            relation_oid,
+            server_oid,
+            effective_user,
+            identity,
+            None,
+        )
     }
 
     fn bind_catalog_table(
+        relation_oid: pg_sys::Oid,
         server_oid: pg_sys::Oid,
         effective_user: pg_sys::Oid,
         identity: ForeignTableIdentity,
         executor: Option<&ExecutorHandle<'_>>,
     ) -> Result<Self, IcebergFdwError> {
-        let connection = CatalogConnection::resolve(server_oid, effective_user)?;
-        let catalog_key = connection.server_binding_key();
-        let runtime_config = connection.runtime_config();
-        let reusable_catalog = ForeignTransaction::connection_from_write_binding(
-            &catalog_key,
-            &runtime_config,
+        let request = CatalogSessionRequest::resolve(server_oid, effective_user)?;
+        let key =
+            RemoteTableKey::new(request.identity().clone(), identity.table().clone());
+        if let Some((catalog, table)) = ForeignTransaction::staged_table(
+            relation_oid,
+            &key,
+            request.runtime_config(),
+        )? {
+            return Ok(Self {
+                identity,
+                catalog_table: BoundCatalogTable::new(
+                    key,
+                    Rc::new(request.connect(Some(catalog))?),
+                    table,
+                ),
+            });
+        }
+        let reusable_catalog = ForeignTransaction::catalog_from_transaction(
+            request.identity(),
+            request.runtime_config(),
         )?;
-        let key = RemoteTableKey::new(catalog_key.clone(), &identity);
-        let connect = || match reusable_catalog {
-            Some(catalog) => Ok(catalog),
-            None => connection.connect(),
-        };
         let (catalog, table) = match executor {
-            Some(executor) => ForeignReadViews::acquire(executor).bind_table(
-                &key,
-                runtime_config,
-                connect,
-            )?,
+            Some(executor) => ExecutorForeignTableCache::acquire(executor)
+                .bind_table(&key, request, reusable_catalog)?,
             None => {
-                let catalog = Rc::new(ResolvedCatalogBinding {
-                    key: catalog_key,
-                    runtime_config,
-                    catalog: connect()?,
-                });
-                let table = catalog.catalog.as_catalog().load_table(key.table())?;
+                let catalog = Rc::new(request.connect(reusable_catalog)?);
+                let table = catalog.as_catalog().load_table(key.table())?;
                 (catalog, table)
             }
         };
         Ok(Self {
-            key,
             identity,
-            catalog,
-            table,
+            catalog_table: BoundCatalogTable::new(key, catalog, table),
         })
     }
 
     pub(crate) fn key(&self) -> &RemoteTableKey {
-        &self.key
+        self.catalog_table.key()
     }
 
     pub(crate) fn identity(&self) -> &ForeignTableIdentity {
@@ -175,16 +126,10 @@ impl IcebergForeignTable {
     }
 
     pub(crate) fn table(&self) -> &Table {
-        &self.table
+        self.catalog_table.table()
     }
 
-    pub(crate) fn definition_schema(&self) -> Result<&SchemaRef, IcebergFdwError> {
-        self.identity.definition_schema(self.table.metadata())
-    }
-
-    pub(crate) fn into_parts(
-        self,
-    ) -> (RemoteTableKey, Rc<ResolvedCatalogBinding>, Table) {
-        (self.key, self.catalog, self.table)
+    pub(crate) fn into_catalog_table(self) -> BoundCatalogTable {
+        self.catalog_table
     }
 }

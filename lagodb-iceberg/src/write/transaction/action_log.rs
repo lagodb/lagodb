@@ -362,6 +362,18 @@ where
         matches!(self.actions.last(), Some(TxTableAction::Drop))
     }
 
+    pub(crate) fn created_file_paths(&self) -> IcebergResult<Vec<String>> {
+        let mut paths = HashSet::new();
+        for action in &self.actions {
+            if let TxTableAction::Data(epoch) = action {
+                paths.extend(epoch.delta()?.created_file_paths());
+            }
+        }
+        let mut paths = paths.into_iter().collect::<Vec<_>>();
+        paths.sort_unstable();
+        Ok(paths)
+    }
+
     pub(crate) fn record_batch(&mut self, batch: TxWriteBatch) {
         if !batch.is_empty() {
             self.current_data_epoch_mut().push(batch);

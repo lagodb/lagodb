@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
+use iceberg_lite::overlay::SnapshotDelta;
 use iceberg_lite::scan::FileScanTask;
+use iceberg_lite::table::Table;
 use lagodb_core::fdw::{
     FdwAnalyze, ForeignAnalyzeContext, ForeignAnalyzeSupport, ForeignSampleContext,
     ForeignSampleStatistics, ForeignTableMaintenanceError,
@@ -15,9 +17,9 @@ use rand::Rng;
 use super::error::IcebergFdwError;
 use super::options::ForeignTableIdentity;
 use super::provider::LagodbIceberg;
-use super::relation::IcebergForeignTable;
+use super::relation::ResolvedForeignTableBinding;
 use super::schema::ForeignSchemaBinding;
-use super::transaction::{ForeignTableView, ForeignTransaction};
+use super::transaction::ForeignTransaction;
 use crate::scan::{IcebergReadSnapshot, PreparedRowScan, ScanPredicates};
 
 const MAX_ANALYZE_PAGES: u64 = u32::MAX as u64 - 1;
@@ -44,10 +46,9 @@ impl FdwAnalyze for LagodbIceberg {
         context: &mut ForeignSampleContext<'_>,
     ) -> Result<ForeignSampleStatistics, ForeignTableMaintenanceError> {
         let source = AnalyzeSource::load(context.relation().oid())?;
-        let view = source.view;
         let binding = ForeignSchemaBinding::new(context.relation())?;
         binding.validate_read(
-            view.table.metadata(),
+            source.table.metadata(),
             &source.identity,
             binding
                 .layout()
@@ -57,7 +58,7 @@ impl FdwAnalyze for LagodbIceberg {
         )?;
         let layout = binding.into_relation_layout();
         let mut prepared = PreparedRowScan::full(
-            IcebergReadSnapshot::new(view.table, view.delta),
+            IcebergReadSnapshot::new(source.table, source.delta),
             ScanPredicates::unfiltered(),
             &layout,
         )?;
@@ -110,22 +111,30 @@ impl FdwAnalyze for LagodbIceberg {
 }
 
 struct AnalyzeSource {
-    view: ForeignTableView,
+    table: Table,
+    delta: Option<Arc<SnapshotDelta>>,
     identity: ForeignTableIdentity,
 }
 
 impl AnalyzeSource {
     fn load(relation_oid: pg_sys::Oid) -> Result<Self, ForeignTableMaintenanceError> {
         let effective_user = unsafe { pg_sys::GetUserId() };
-        let resolved = IcebergForeignTable::resolve(relation_oid, effective_user)?;
+        let resolved =
+            ResolvedForeignTableBinding::resolve(relation_oid, effective_user)?;
         let identity = resolved.identity().clone();
-        let view = ForeignTransaction::scan_view(resolved, None)?;
-        Ok(Self { view, identity })
+        let view =
+            ForeignTransaction::scan_view(resolved.into_catalog_table(), None)?;
+        let (_key, table, delta) = view.into_parts();
+        Ok(Self {
+            table,
+            delta,
+            identity,
+        })
     }
 
     fn plan_files(&self) -> Result<Vec<FileScanTask>, ForeignTableMaintenanceError> {
-        let mut builder = self.view.table.scan();
-        if let Some(delta) = self.view.delta.as_ref() {
+        let mut builder = self.table.scan();
+        if let Some(delta) = self.delta.as_ref() {
             builder = builder.with_delta(Arc::clone(delta));
         }
         Ok(builder

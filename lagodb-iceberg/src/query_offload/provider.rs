@@ -143,7 +143,7 @@ impl TableScanProvider for Provider {
                         (Arc::new(ArrowSchema::empty()), None)
                     }
                     PlanProjection::Columns(attnos) => {
-                        let table = source.resolved()?.table();
+                        let metadata = source.table()?.metadata();
                         let relation = RelationGuard::open_table(
                             context.relation_oid(),
                             pg_sys::NoLock as pg_sys::LOCKMODE,
@@ -151,11 +151,11 @@ impl TableScanProvider for Provider {
                         let binding =
                             ForeignSchemaBinding::new(&relation.as_handle())?;
                         binding.validate_read(
-                            table.metadata(),
+                            metadata,
                             source.identity(),
                             attnos.iter().copied(),
                         )?;
-                        let schema = table.metadata().current_schema();
+                        let schema = metadata.current_schema();
                         if !binding.supports_columnar_read(schema, attnos)? {
                             return Ok(ScanSupport::Unsupported);
                         }
@@ -169,7 +169,7 @@ impl TableScanProvider for Provider {
                         .to_arrow_schema()?;
                         (
                             Arc::new(schema),
-                            Some(PlanSourceIdentity::from_table(table)),
+                            Some(PlanSourceIdentity::from_metadata(metadata)),
                         )
                     }
                 };
@@ -281,6 +281,9 @@ impl TableScanWorkerProvider for Provider {
         bound: &Self::BoundScan,
         planned: &Self::PlannedTasks,
     ) -> Result<ScanSupport<WorkerSourcePayload>, Self::Error> {
+        let Some(worker) = &bound.worker else {
+            return Ok(ScanSupport::Unsupported);
+        };
         let grouped = bound.scan.task_grouping()?.group(planned.tasks())?;
         let work_count = u32::try_from(grouped.group_count()).map_err(|_| {
             ScanError::WorkerPayload("worker group count exceeds u32".to_owned())
@@ -290,7 +293,7 @@ impl TableScanWorkerProvider for Provider {
         }
         let mut task_metrics = planned.metrics();
         task_metrics.planned_tasks = grouped.range_count() as u64;
-        let prefix = bound.worker.encode_prefix()?;
+        let prefix = worker.encode_prefix()?;
         let bytes = WorkerSource::encode_prefixed(
             &prefix,
             planned.schema(),

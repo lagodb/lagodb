@@ -5,8 +5,8 @@ use std::rc::Rc;
 use iceberg_lite::scan::FileScanTask;
 use iceberg_lite::table::Table;
 
+use super::super::catalog::RemoteTableKey;
 use super::super::options::ForeignTableIdentity;
-use super::super::relation::RemoteTableKey;
 use crate::error::IcebergResult;
 use crate::scan::{PreparedRowScan, RowLocationScanInput};
 use crate::schema::relation::RelationLayout;

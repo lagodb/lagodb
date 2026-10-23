@@ -28,13 +28,13 @@ mod analyze;
 pub mod catalog;
 mod ddl;
 mod error;
+mod executor_cache;
 mod filter;
 mod import;
 mod modify;
 mod options;
 mod planning_source;
 mod provider;
-mod read_view;
 mod relation;
 mod scan;
 mod schema;
@@ -46,7 +46,7 @@ pub(crate) use error::IcebergFdwError;
 pub(crate) use options::ForeignTableIdentity;
 pub(crate) use planning_source::ForeignPlanningSource;
 pub(crate) use provider::LagodbIceberg;
-pub(crate) use relation::{IcebergForeignTable, RemoteTableKey};
+pub(crate) use relation::ResolvedForeignTableBinding;
 pub(crate) use schema::ForeignSchemaBinding;
 pub(crate) use source_identity::PlanSourceIdentity;
 pub(crate) use transaction::ForeignTransaction;
@@ -62,5 +62,6 @@ pub(crate) fn initialize_crypto_provider() {
 }
 
 pub(crate) fn register() {
+    ForeignTransaction::register_invalidation_observer();
     ddl::register();
 }
