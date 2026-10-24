@@ -9,6 +9,14 @@ use super::schema::{OptionLayer, ParsedOptions};
 pub(crate) struct IcebergFdwOptions;
 
 impl IcebergFdwOptions {
+    pub(crate) fn is_immutable_catalog_server_option(
+        server: &pg_sys::ForeignServer,
+        name: &str,
+    ) -> Result<bool, IcebergFdwError> {
+        Ok(CatalogType::catalog_from_server(server)?
+            .is_some_and(|catalog_type| catalog_type.is_identity_option(name)))
+    }
+
     pub(crate) fn validate_catalog(
         options: &[Option<String>],
         catalog: Option<pg_sys::Oid>,

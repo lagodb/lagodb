@@ -44,6 +44,15 @@ WHERE pid = pg_backend_pid() AND granted AND locktype = 'relation'
 (1 row)
 
 COMMIT;
+-- The Iceberg rename hook must not interfere with index attribute renames.
+ALTER TABLE iceberg_fdw_schema.renamed_index RENAME COLUMN id TO renamed_id;
+SELECT attname = 'renamed_id' AS renamed FROM pg_attribute
+WHERE attrelid = 'iceberg_fdw_schema.renamed_index'::regclass AND attnum = 1;
+ renamed 
+---------
+ t
+(1 row)
+
 DROP TABLE iceberg_fdw_schema.renamed_target, iceberg_fdw_schema.rename_partitioned;
 -- A column subset accepts PG type aliases and a different column order.
 CREATE FOREIGN TABLE iceberg_fdw_schema.evolving (id int4, body pg_catalog.text)
@@ -81,6 +90,8 @@ ERROR:  must be owner of table ddl_heap
 ALTER TABLE iceberg_fdw_schema.ddl_heap RENAME TO ddl_heap_renamed;
 ERROR:  must be owner of table ddl_heap
 ALTER FOREIGN TABLE iceberg_fdw_schema.evolving ADD COLUMN extra integer;
+ERROR:  must be owner of foreign table evolving
+ALTER FOREIGN TABLE iceberg_fdw_schema.evolving RENAME COLUMN body TO renamed_body;
 ERROR:  must be owner of foreign table evolving
 ALTER FOREIGN TABLE iceberg_fdw_schema.evolving RENAME TO evolving_renamed;
 ERROR:  must be owner of foreign table evolving
@@ -172,6 +183,44 @@ ERROR:  foreign table schema does not match the selected Iceberg schema: local c
 -- IF NOT EXISTS leaves the existing definition intact without remote I/O.
 CREATE FOREIGN TABLE IF NOT EXISTS iceberg_fdw_schema.renamed (invalid_column bigint)
 SERVER iceberg_schema_rest OPTIONS (table 'absent.remote');
+-- Remote creation requires explicit provisioning intent.
+CREATE FOREIGN TABLE iceberg_fdw_schema.created_without_definition ()
+SERVER iceberg_schema_rest OPTIONS (table 'fdw_schema.created_by_lagodb');
+ERROR:  Iceberg table "fdw_schema"."created_by_lagodb" does not exist and foreign option "create_remote_if_missing" is false
+-- A complete declaration plus explicit intent provisions the remote table.
+CREATE FOREIGN TABLE iceberg_fdw_schema.created_by_lagodb (
+    id bigint NOT NULL,
+    body text,
+    amount numeric(8,2),
+    labels text[]
+)
+SERVER iceberg_schema_rest
+OPTIONS (table 'fdw_schema.created_by_lagodb', create_remote_if_missing 'true');
+INSERT INTO iceberg_fdw_schema.created_by_lagodb
+VALUES (1, 'created', 12.34, ARRAY['one', 'two']);
+SELECT * FROM iceberg_fdw_schema.created_by_lagodb;
+ id |  body   | amount |  labels   
+----+---------+--------+-----------
+  1 | created |  12.34 | {one,two}
+(1 row)
+
+DROP FOREIGN TABLE iceberg_fdw_schema.created_by_lagodb;
+CREATE FOREIGN TABLE iceberg_fdw_schema.created_inferred ()
+SERVER iceberg_schema_rest OPTIONS (table 'fdw_schema.created_by_lagodb');
+SELECT attname, attnotnull
+FROM pg_attribute
+WHERE attrelid = 'iceberg_fdw_schema.created_inferred'::regclass
+  AND attnum > 0 AND NOT attisdropped
+ORDER BY attnum;
+ attname | attnotnull 
+---------+------------
+ id      | t
+ body    | f
+ amount  | f
+ labels  | f
+(4 rows)
+
+DROP FOREIGN TABLE iceberg_fdw_schema.created_inferred;
 -- A same-name temporary table must not intercept inferred foreign CREATE.
 SET search_path = iceberg_fdw_schema, public;
 CREATE TEMP TABLE shadowed (local_only integer) USING heap;
@@ -306,10 +355,11 @@ SELECT id FROM iceberg_fdw_schema.incomplete WHERE id = 2;
 
 INSERT INTO iceberg_fdw_schema.incomplete VALUES (5);
 ERROR:  FDW provider "lagodb_iceberg" callback BeginForeignModify failed: FDW provider modify error: foreign table schema does not match the selected Iceberg schema: local relation has 1 live columns but Iceberg schema 0 has 3 fields
+-- The planner trusts a local NOT NULL before any scan can check it, so it
+-- must name a required Iceberg field when the table is created.
 CREATE FOREIGN TABLE iceberg_fdw_schema.invalid_required (id integer NOT NULL)
 SERVER iceberg_schema_rest OPTIONS (table 'fdw_reads.filter_rows_v2');
-SELECT id FROM iceberg_fdw_schema.invalid_required;
-ERROR:  FDW "lagodb_iceberg" BeginForeignScan callback failed: FDW provider error: foreign table schema does not match the selected Iceberg schema: column "id" has local NOT NULL=true but Iceberg required=false
+ERROR:  foreign table schema does not match the selected Iceberg schema: column "id" has local NOT NULL=true but Iceberg required=false
 -- Decimal declarations may differ in precision from the selected schema;
 -- conversion uses the local numeric typmod as the remote precision evolves.
 -- The promoted integer remains unused in these successful decimal reads.
@@ -332,7 +382,7 @@ WHERE id = 1 AND amount > 10 ORDER BY amount;
 (1 row)
 
 SELECT promoted FROM iceberg_fdw_schema.decimals WHERE id = 1;
-ERROR:  FDW "lagodb_iceberg" BeginForeignScan callback failed: FDW provider error: foreign table schema does not match the selected Iceberg schema: column "promoted" has unsupported PostgreSQL type (oid 23, typmod -1); the default Iceberg mapping is (oid 20, typmod -1)
+ERROR:  FDW "lagodb_iceberg" BeginForeignScan callback failed: FDW provider error: foreign table schema does not match the selected Iceberg schema: column "promoted": Iceberg type long cannot be read as PostgreSQL type integer; the default mapping is bigint
 -- ANALYZE reads every declared column. Remove the incompatible integer
 -- before checking numeric overflow and MemoryContext cleanup in this backend.
 ALTER FOREIGN TABLE iceberg_fdw_schema.decimals DROP COLUMN promoted;
@@ -381,7 +431,7 @@ DROP FOREIGN TABLE iceberg_fdw_schema.evolving, iceberg_fdw_schema.renamed,
     iceberg_fdw_schema.writable, iceberg_fdw_schema."rows.v3",
     iceberg_fdw_schema.inferred, iceberg_fdw_schema.explicit,
     iceberg_fdw_schema.old_name, iceberg_fdw_schema.incomplete,
-    iceberg_fdw_schema.invalid_required, iceberg_fdw_schema.decimals;
+    iceberg_fdw_schema.decimals;
 DROP SERVER iceberg_schema_rest;
 DROP SCHEMA iceberg_fdw_schema;
 DROP EXTENSION dblink;

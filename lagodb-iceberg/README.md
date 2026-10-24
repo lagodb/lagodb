@@ -114,7 +114,7 @@ Transaction Boundary (COMMIT / ROLLBACK)
 | Capability | Status | Description / Boundary |
 |---|---|---|
 | Managed Tables (`USING iceberg`) | Available | Full TableAM integration, local/object storage, PostgreSQL-backed catalog |
-| Foreign Tables (`lagodb_iceberg`) | Available | REST catalog integration, read-only and read-write modes, `IMPORT FOREIGN SCHEMA` |
+| Foreign Tables (`lagodb_iceberg`) | Available | REST catalog integration, read-only column-subset mappings, writable complete mappings, `IMPORT FOREIGN SCHEMA` |
 | SQL DML Operations | Available | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and `COPY` |
 | Transactions & Isolation | Available | `READ COMMITTED` statement-level metadata visibility, savepoints, read-your-own-writes |
 | Predicate Pushdown | Available | File and row-group pruning with automatic residual qual evaluation in PostgreSQL |
@@ -169,12 +169,7 @@ CREATE FOREIGN TABLE ext_events (
     temperature double precision
 )
 SERVER iceberg_catalog
-OPTIONS (
-    catalog_name 'production',
-    catalog_namespace 'analytics',
-    catalog_table_name 'events',
-    mode 'read_only'
-);
+OPTIONS (table 'analytics.events');
 
 SELECT * FROM ext_events WHERE device_id = 101;
 ```

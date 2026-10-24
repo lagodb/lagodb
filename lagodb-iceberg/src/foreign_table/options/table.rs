@@ -6,7 +6,52 @@ use pgrx::pg_sys;
 
 use super::super::error::IcebergFdwError;
 use super::identifier::ForeignIdentifier;
-use super::schema::{OptionLayer, ParsedOptions, SCHEMA_ID, TABLE};
+use super::schema::{
+    CREATE_REMOTE_IF_MISSING, OptionLayer, ParsedOptions, SCHEMA_ID, TABLE,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ForeignTableCreateOptions {
+    identity: ForeignTableIdentity,
+    create_remote_if_missing: bool,
+}
+
+impl ForeignTableCreateOptions {
+    pub(crate) fn from_view(
+        options: ForeignOptionView<'_>,
+    ) -> Result<Self, IcebergFdwError> {
+        Self::from_options(ParsedOptions::from_view(
+            OptionLayer::Table,
+            options,
+            true,
+        )?)
+    }
+
+    pub(super) fn from_options(
+        parsed: ParsedOptions,
+    ) -> Result<Self, IcebergFdwError> {
+        let create_remote_if_missing = parsed
+            .values
+            .get(CREATE_REMOTE_IF_MISSING)
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+        Ok(Self {
+            identity: ForeignTableIdentity::from_options(parsed)?,
+            create_remote_if_missing,
+        })
+    }
+
+    pub(crate) fn identity(&self) -> &ForeignTableIdentity {
+        &self.identity
+    }
+
+    pub(crate) fn into_identity(self) -> ForeignTableIdentity {
+        self.identity
+    }
+
+    pub(crate) const fn create_remote_if_missing(&self) -> bool {
+        self.create_remote_if_missing
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ForeignTableIdentity {
@@ -67,11 +112,7 @@ impl ForeignTableIdentity {
     pub(crate) fn from_view(
         options: ForeignOptionView<'_>,
     ) -> Result<Self, IcebergFdwError> {
-        Self::from_options(ParsedOptions::from_view(
-            OptionLayer::Table,
-            options,
-            true,
-        )?)
+        ForeignTableCreateOptions::from_view(options).map(Self::from)
     }
 
     pub(super) fn from_options(
@@ -111,6 +152,12 @@ impl ForeignTableIdentity {
                 .schema_by_id(id)
                 .ok_or(IcebergFdwError::UnknownSchema { schema_id: id }),
         }
+    }
+}
+
+impl From<ForeignTableCreateOptions> for ForeignTableIdentity {
+    fn from(options: ForeignTableCreateOptions) -> Self {
+        options.identity
     }
 }
 

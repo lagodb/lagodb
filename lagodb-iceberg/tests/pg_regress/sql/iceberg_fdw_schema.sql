@@ -36,6 +36,10 @@ FROM pg_locks
 WHERE pid = pg_backend_pid() AND granted AND locktype = 'relation'
   AND relation = 'iceberg_fdw_schema.renamed_target'::regclass;
 COMMIT;
+-- The Iceberg rename hook must not interfere with index attribute renames.
+ALTER TABLE iceberg_fdw_schema.renamed_index RENAME COLUMN id TO renamed_id;
+SELECT attname = 'renamed_id' AS renamed FROM pg_attribute
+WHERE attrelid = 'iceberg_fdw_schema.renamed_index'::regclass AND attnum = 1;
 DROP TABLE iceberg_fdw_schema.renamed_target, iceberg_fdw_schema.rename_partitioned;
 
 -- A column subset accepts PG type aliases and a different column order.
@@ -58,6 +62,7 @@ SET ROLE regress_iceberg_ddl_nonowner;
 ALTER TABLE iceberg_fdw_schema.ddl_heap ADD COLUMN extra integer;
 ALTER TABLE iceberg_fdw_schema.ddl_heap RENAME TO ddl_heap_renamed;
 ALTER FOREIGN TABLE iceberg_fdw_schema.evolving ADD COLUMN extra integer;
+ALTER FOREIGN TABLE iceberg_fdw_schema.evolving RENAME COLUMN body TO renamed_body;
 ALTER FOREIGN TABLE iceberg_fdw_schema.evolving RENAME TO evolving_renamed;
 RESET ROLE;
 RESET lock_timeout;
@@ -105,6 +110,33 @@ SERVER iceberg_schema_rest OPTIONS (table 'fdw_schema.evolving');
 -- IF NOT EXISTS leaves the existing definition intact without remote I/O.
 CREATE FOREIGN TABLE IF NOT EXISTS iceberg_fdw_schema.renamed (invalid_column bigint)
 SERVER iceberg_schema_rest OPTIONS (table 'absent.remote');
+
+-- Remote creation requires explicit provisioning intent.
+CREATE FOREIGN TABLE iceberg_fdw_schema.created_without_definition ()
+SERVER iceberg_schema_rest OPTIONS (table 'fdw_schema.created_by_lagodb');
+
+-- A complete declaration plus explicit intent provisions the remote table.
+CREATE FOREIGN TABLE iceberg_fdw_schema.created_by_lagodb (
+    id bigint NOT NULL,
+    body text,
+    amount numeric(8,2),
+    labels text[]
+)
+SERVER iceberg_schema_rest
+OPTIONS (table 'fdw_schema.created_by_lagodb', create_remote_if_missing 'true');
+INSERT INTO iceberg_fdw_schema.created_by_lagodb
+VALUES (1, 'created', 12.34, ARRAY['one', 'two']);
+SELECT * FROM iceberg_fdw_schema.created_by_lagodb;
+DROP FOREIGN TABLE iceberg_fdw_schema.created_by_lagodb;
+
+CREATE FOREIGN TABLE iceberg_fdw_schema.created_inferred ()
+SERVER iceberg_schema_rest OPTIONS (table 'fdw_schema.created_by_lagodb');
+SELECT attname, attnotnull
+FROM pg_attribute
+WHERE attrelid = 'iceberg_fdw_schema.created_inferred'::regclass
+  AND attnum > 0 AND NOT attisdropped
+ORDER BY attnum;
+DROP FOREIGN TABLE iceberg_fdw_schema.created_inferred;
 
 -- A same-name temporary table must not intercept inferred foreign CREATE.
 SET search_path = iceberg_fdw_schema, public;
@@ -188,9 +220,10 @@ SERVER iceberg_schema_rest
 OPTIONS (table 'fdw_reads.filter_rows_v2');
 SELECT id FROM iceberg_fdw_schema.incomplete WHERE id = 2;
 INSERT INTO iceberg_fdw_schema.incomplete VALUES (5);
+-- The planner trusts a local NOT NULL before any scan can check it, so it
+-- must name a required Iceberg field when the table is created.
 CREATE FOREIGN TABLE iceberg_fdw_schema.invalid_required (id integer NOT NULL)
 SERVER iceberg_schema_rest OPTIONS (table 'fdw_reads.filter_rows_v2');
-SELECT id FROM iceberg_fdw_schema.invalid_required;
 
 -- Decimal declarations may differ in precision from the selected schema;
 -- conversion uses the local numeric typmod as the remote precision evolves.
@@ -235,7 +268,7 @@ DROP FOREIGN TABLE iceberg_fdw_schema.evolving, iceberg_fdw_schema.renamed,
     iceberg_fdw_schema.writable, iceberg_fdw_schema."rows.v3",
     iceberg_fdw_schema.inferred, iceberg_fdw_schema.explicit,
     iceberg_fdw_schema.old_name, iceberg_fdw_schema.incomplete,
-    iceberg_fdw_schema.invalid_required, iceberg_fdw_schema.decimals;
+    iceberg_fdw_schema.decimals;
 DROP SERVER iceberg_schema_rest;
 DROP SCHEMA iceberg_fdw_schema;
 DROP EXTENSION dblink;

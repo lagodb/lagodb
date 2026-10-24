@@ -7,14 +7,15 @@ use pgrx::pg_sys;
 use url::Url;
 
 use super::super::error::IcebergFdwError;
-use super::catalog_type::{CatalogType, ENABLE_VENDED_CREDENTIALS};
-use super::table::ForeignTableIdentity;
+use super::catalog_type::{CatalogType, REQUEST_VENDED_CREDENTIALS};
+use super::table::ForeignTableCreateOptions;
 
 pub(super) const TABLE: &str = "table";
 pub(super) const SCHEMA_ID: &str = "schema_id";
+pub(super) const CREATE_REMOTE_IF_MISSING: &str = "create_remote_if_missing";
 
 #[derive(Clone, Copy)]
-pub(super) enum OptionLayer {
+pub(in crate::foreign_table) enum OptionLayer {
     Wrapper,
     Server,
     Mapping,
@@ -55,7 +56,9 @@ impl OptionLayer {
                         | "resource"
                 ) || name.starts_with("header.")
             }
-            Self::Table => matches!(name, "table" | "schema_id"),
+            Self::Table => {
+                matches!(name, TABLE | SCHEMA_ID | CREATE_REMOTE_IF_MISSING)
+            }
         }
     }
 
@@ -65,15 +68,15 @@ impl OptionLayer {
     ) -> Result<(), IcebergFdwError> {
         let parsed = ParsedOptions::from_array(self, options)?;
         if matches!(self, Self::Table) {
-            ForeignTableIdentity::from_options(parsed)?;
+            ForeignTableCreateOptions::from_options(parsed)?;
         }
         Ok(())
     }
 }
 
 #[derive(Default)]
-pub(super) struct ParsedOptions {
-    pub(super) values: HashMap<String, String>,
+pub(in crate::foreign_table) struct ParsedOptions {
+    pub(in crate::foreign_table) values: HashMap<String, String>,
 }
 
 impl ParsedOptions {
@@ -127,7 +130,7 @@ impl ParsedOptions {
                     "must be none or oauth2",
                 ));
             }
-            ENABLE_VENDED_CREDENTIALS | "strict"
+            REQUEST_VENDED_CREDENTIALS | "strict" | CREATE_REMOTE_IF_MISSING
                 if !value.eq_ignore_ascii_case("true")
                     && !value.eq_ignore_ascii_case("false") =>
             {
@@ -163,7 +166,7 @@ impl ParsedOptions {
         Ok(())
     }
 
-    pub(super) fn from_view(
+    pub(in crate::foreign_table) fn from_view(
         layer: OptionLayer,
         options: ForeignOptionView<'_>,
         require_complete: bool,

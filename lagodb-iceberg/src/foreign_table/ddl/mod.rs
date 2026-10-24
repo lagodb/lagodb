@@ -5,7 +5,10 @@
 //! and intentional support restriction are documented in
 //! `IcebergFdwModifyState::finish`; this DDL restriction is not yet implemented.
 
+mod alter;
 mod create;
+mod drop;
+mod server;
 
 use core::ptr;
 use std::ffi::CStr;
@@ -13,14 +16,17 @@ use std::ffi::CStr;
 use lagodb_core::hooks::{
     AlterUserMappingStmtNode, CreateUserMappingStmtNode, PostUtilityContext,
     PreUtilityContext, UtilityHook, UtilityHookError, UtilityNode, VacuumStmtNode,
-    register_utility_hook,
+    register_object_access_hook, register_utility_hook,
 };
 use lagodb_core::storage::foreign::ForeignOption;
 use pgrx::pg_sys;
 
 use super::error::IcebergFdwError;
 use super::provider::LagodbIceberg;
+use alter::{IcebergStagedOptionsGuard, IcebergStagedSchemaGuard};
 use create::IcebergForeignTableDdl;
+use drop::IcebergForeignTableDropHook;
+use server::IcebergCatalogServerDdlGuard;
 
 struct IcebergForeignTableVacuumGuard;
 struct UserMappingSecretRedaction;
@@ -122,9 +128,17 @@ impl UserMappingSecretRedaction {
 }
 
 pub(super) fn register() {
+    register_object_access_hook(Box::new(IcebergForeignTableDdl));
+    register_object_access_hook(Box::new(IcebergForeignTableDropHook));
+    register_object_access_hook(Box::new(IcebergStagedSchemaGuard));
+    register_object_access_hook(Box::new(IcebergStagedOptionsGuard));
     register_utility_hook(
         pg_sys::NodeTag::T_CreateForeignTableStmt,
         Box::new(IcebergForeignTableDdl),
+    );
+    register_utility_hook(
+        pg_sys::NodeTag::T_AlterForeignServerStmt,
+        Box::new(IcebergCatalogServerDdlGuard),
     );
     register_utility_hook(
         pg_sys::NodeTag::T_VacuumStmt,

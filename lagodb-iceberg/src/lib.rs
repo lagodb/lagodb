@@ -2,6 +2,7 @@ use lagodb_core::access::mutation;
 use pgrx::prelude::*;
 
 mod config;
+mod create_command;
 pub mod error;
 pub mod foreign_table;
 mod managed_table;

@@ -10,6 +10,13 @@ use crate::schema::arrow_type::SemanticArrowType;
 
 pub(super) struct ForeignType<'a>(&'a Type);
 
+pub(super) struct PostgresForeignType(PgType);
+
+pub(super) enum CreatedForeignType {
+    Primitive(PrimitiveType),
+    List(PrimitiveType),
+}
+
 impl<'a> ForeignType<'a> {
     pub(super) fn new(source: &'a Type) -> Self {
         Self(source)
@@ -110,14 +117,20 @@ impl<'a> ForeignType<'a> {
             self.accepts_read(local.oid, local.typmod)
         };
         if !accepted {
+            let (access, requirement) = if writable {
+                ("written from", "writes require")
+            } else {
+                ("read as", "the default mapping is")
+            };
             return Err(IcebergFdwError::SchemaContractMismatch {
                 detail: format!(
-                    "column {:?} has unsupported PostgreSQL type (oid {}, typmod {}); the default Iceberg mapping is (oid {}, typmod {})",
+                    "column {:?}: Iceberg type {} cannot be {} PostgreSQL type {}; {} {}",
                     name,
-                    u32::from(local.oid),
-                    local.typmod,
-                    u32::from(canonical.oid),
-                    canonical.typmod,
+                    self.0,
+                    access,
+                    local.display_name(),
+                    requirement,
+                    canonical.display_name(),
                 ),
             });
         }
@@ -134,5 +147,82 @@ impl<'a> ForeignType<'a> {
                         .is_some_and(|target| target.scale == *scale as i32));
         }
         self.accepts(oid, typmod)
+    }
+}
+
+impl PostgresForeignType {
+    pub(super) fn new(source: PgType) -> Self {
+        Self(source)
+    }
+
+    pub(super) fn to_iceberg(
+        &self,
+        column: &str,
+    ) -> Result<CreatedForeignType, IcebergFdwError> {
+        let element_oid = match self.0.oid {
+            pg_sys::BOOLARRAYOID => Some(pg_sys::BOOLOID),
+            pg_sys::INT4ARRAYOID => Some(pg_sys::INT4OID),
+            pg_sys::INT8ARRAYOID => Some(pg_sys::INT8OID),
+            pg_sys::FLOAT4ARRAYOID => Some(pg_sys::FLOAT4OID),
+            pg_sys::FLOAT8ARRAYOID => Some(pg_sys::FLOAT8OID),
+            pg_sys::NUMERICARRAYOID => Some(pg_sys::NUMERICOID),
+            pg_sys::DATEARRAYOID => Some(pg_sys::DATEOID),
+            pg_sys::TIMEARRAYOID => Some(pg_sys::TIMEOID),
+            pg_sys::TIMESTAMPARRAYOID => Some(pg_sys::TIMESTAMPOID),
+            pg_sys::TIMESTAMPTZARRAYOID => Some(pg_sys::TIMESTAMPTZOID),
+            pg_sys::TEXTARRAYOID => Some(pg_sys::TEXTOID),
+            pg_sys::UUIDARRAYOID => Some(pg_sys::UUIDOID),
+            pg_sys::BYTEAARRAYOID => Some(pg_sys::BYTEAOID),
+            _ => None,
+        };
+        match element_oid {
+            Some(oid) => Self(PgType::new(oid, self.0.typmod))
+                .primitive(column)
+                .map(CreatedForeignType::List),
+            None => self.primitive(column).map(CreatedForeignType::Primitive),
+        }
+    }
+
+    fn primitive(&self, column: &str) -> Result<PrimitiveType, IcebergFdwError> {
+        let primitive = match (self.0.oid, self.0.typmod) {
+            (pg_sys::BOOLOID, -1) => PrimitiveType::Boolean,
+            (pg_sys::INT4OID, -1) => PrimitiveType::Int,
+            (pg_sys::INT8OID, -1) => PrimitiveType::Long,
+            (pg_sys::FLOAT4OID, -1) => PrimitiveType::Float,
+            (pg_sys::FLOAT8OID, -1) => PrimitiveType::Double,
+            (pg_sys::DATEOID, -1) => PrimitiveType::Date,
+            (pg_sys::TIMEOID, -1) => PrimitiveType::Time,
+            (pg_sys::TIMESTAMPOID, -1) => PrimitiveType::Timestamp,
+            (pg_sys::TIMESTAMPTZOID, -1) => PrimitiveType::Timestamptz,
+            (pg_sys::TEXTOID, -1) => PrimitiveType::String,
+            (pg_sys::UUIDOID, -1) => PrimitiveType::Uuid,
+            (pg_sys::BYTEAOID, -1) => PrimitiveType::Binary,
+            (pg_sys::NUMERICOID, typmod) => {
+                let Some(value) = numeric_precision_scale(typmod) else {
+                    return Err(self.unsupported(column));
+                };
+                let (Ok(precision), Ok(scale)) =
+                    (u8::try_from(value.precision), u8::try_from(value.scale))
+                else {
+                    return Err(self.unsupported(column));
+                };
+                if precision > 38 || scale > precision {
+                    return Err(self.unsupported(column));
+                }
+                PrimitiveType::Decimal {
+                    precision: u32::from(precision),
+                    scale: u32::from(scale),
+                }
+            }
+            _ => return Err(self.unsupported(column)),
+        };
+        Ok(primitive)
+    }
+
+    fn unsupported(&self, column: &str) -> IcebergFdwError {
+        IcebergFdwError::UnsupportedTableCreationType {
+            column: column.to_owned(),
+            pg_type: self.0.display_name(),
+        }
     }
 }

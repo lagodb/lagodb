@@ -1,5 +1,5 @@
 use iceberg_lite::spec::{
-    PrimitiveType, Schema as IcebergSchema, TableMetadata, Type,
+    NestedFieldRef, PrimitiveType, Schema as IcebergSchema, TableMetadata, Type,
 };
 use lagodb_core::datum::PgType;
 use lagodb_core::handles::RelationHandle;
@@ -17,6 +17,35 @@ pub(crate) struct ForeignSchemaBinding {
 }
 
 impl ForeignSchemaBinding {
+    /// CREATE FOREIGN TABLE admits a column subset, and a local nullable
+    /// column may map a required field for reads. Declared names and types are
+    /// checked against the definition schema; later remote or local schema
+    /// changes are detected when a scan or write binds the relation.
+    ///
+    /// A local NOT NULL is the exception: PostgreSQL's planner trusts
+    /// `attnotnull` before any FDW callback runs (PG17 folds `IS NULL` on such
+    /// a column to constant false and drops `IS NOT NULL`), so execution-time
+    /// binding cannot detect a wrong declaration. At creation it must name a
+    /// required field in both the definition schema and the current schema.
+    /// After creation, keeping planner-visible constraints synchronized with
+    /// independently evolving remote metadata is the user's responsibility.
+    pub(crate) fn validate_definition(
+        &self,
+        metadata: &TableMetadata,
+        identity: &ForeignTableIdentity,
+    ) -> Result<(), IcebergFdwError> {
+        let definition = identity.definition_schema(metadata)?;
+        let current = metadata.current_schema();
+        for local in self.layout.live_columns() {
+            self.validate_column(local, definition, false)?;
+            if local.required && definition.schema_id() != current.schema_id() {
+                let remote = Self::remote_field(local, current)?;
+                Self::validate_required(local, remote)?;
+            }
+        }
+        Ok(())
+    }
+
     /// UPDATE rewrites the complete PG row, including columns absent from SET.
     /// Native timestamp values lose nanoseconds when materialized in PG;
     /// structs, maps and complex lists use JSONB and preserve that precision.
@@ -116,24 +145,52 @@ impl ForeignSchemaBinding {
         schema: &IcebergSchema,
         writable: bool,
     ) -> Result<(), IcebergFdwError> {
-        let remote =
-            schema
-                .as_struct()
-                .field_by_name(&local.name)
-                .ok_or_else(|| IcebergFdwError::SchemaContractMismatch {
-                    detail: format!(
-                        "local column {:?} is absent from Iceberg schema {}",
-                        local.name,
-                        schema.schema_id()
-                    ),
-                })?;
+        let remote = Self::remote_field(local, schema)?;
         let local_type = self.layout.attr_types()[(local.attno - 1) as usize];
         ForeignType::new(&remote.field_type).validate(
             &local.name,
             PgType::new(local_type.0, local_type.1),
             writable,
         )?;
-        if (writable || local.required) && local.required != remote.required {
+        if writable {
+            Self::validate_nullability(local, remote)
+        } else {
+            Self::validate_required(local, remote)
+        }
+    }
+
+    fn remote_field<'a>(
+        local: &LiveColumn,
+        schema: &'a IcebergSchema,
+    ) -> Result<&'a NestedFieldRef, IcebergFdwError> {
+        schema
+            .as_struct()
+            .field_by_name(&local.name)
+            .ok_or_else(|| IcebergFdwError::SchemaContractMismatch {
+                detail: format!(
+                    "local column {:?} is absent from Iceberg schema {}",
+                    local.name,
+                    schema.schema_id()
+                ),
+            })
+    }
+
+    /// Reads accept a nullable local column over a required field.
+    fn validate_required(
+        local: &LiveColumn,
+        remote: &NestedFieldRef,
+    ) -> Result<(), IcebergFdwError> {
+        if local.required {
+            Self::validate_nullability(local, remote)?;
+        }
+        Ok(())
+    }
+
+    fn validate_nullability(
+        local: &LiveColumn,
+        remote: &NestedFieldRef,
+    ) -> Result<(), IcebergFdwError> {
+        if local.required != remote.required {
             return Err(IcebergFdwError::SchemaContractMismatch {
                 detail: format!(
                     "column {:?} has local NOT NULL={} but Iceberg required={}",

@@ -48,9 +48,29 @@ pub(crate) enum IcebergFdwError {
     SchemaContractMismatch { detail: String },
 
     #[error(
+        "cannot create Iceberg table: column {column:?} has unsupported PostgreSQL type {pg_type}"
+    )]
+    UnsupportedTableCreationType { column: String, pg_type: String },
+
+    #[error(
         "Iceberg schema ID {schema_id} does not exist in the selected table metadata"
     )]
     UnknownSchema { schema_id: i32 },
+
+    #[error(
+        "Iceberg table {table} does not exist and foreign option \"create_remote_if_missing\" is false"
+    )]
+    TableNotFound { table: String },
+
+    #[error(
+        "Iceberg table {table} is already being provisioned by another foreign table in this transaction; drop the provisioning relation or commit before creating another mapping"
+    )]
+    StagedTableAlreadyProvisioned { table: String },
+
+    #[error(
+        "Iceberg table {table} no longer matches the generation bound for writing by this transaction"
+    )]
+    TableGenerationConflict { table: String },
 
     #[error(
         "Iceberg FDW requires foreign server TYPE 'rest' or 'sqlite', found {actual:?}"
@@ -71,9 +91,14 @@ pub(crate) enum IcebergFdwError {
     LossyTimestampUpdate { column: String },
 
     #[error(
-        "foreign server or user-mapping configuration changed after this writable transaction bound it"
+        "foreign server or user-mapping configuration changed while the Iceberg catalog was in use"
     )]
-    CatalogBindingChanged,
+    CatalogConfigurationChanged,
+
+    #[error(
+        "cannot change immutable Iceberg catalog identity option {name:?}; create a new foreign server instead"
+    )]
+    ImmutableCatalogIdentityOption { name: String },
 
     #[error("Iceberg foreign tables do not support {operation}")]
     UnsupportedOperation { operation: &'static str },
@@ -125,10 +150,16 @@ impl SqlStateError for IcebergFdwError {
             }
             Self::PlanIdentityChanged
             | Self::PlanSourceChanged
-            | Self::CatalogBindingChanged => {
+            | Self::CatalogConfigurationChanged
+            | Self::StagedTableAlreadyProvisioned { .. }
+            | Self::TableGenerationConflict { .. } => {
                 PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
             }
-            Self::LossyTimestampUpdate { .. } | Self::UnsupportedOperation { .. } => {
+            Self::TableNotFound { .. } => PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE,
+            Self::LossyTimestampUpdate { .. }
+            | Self::ImmutableCatalogIdentityOption { .. }
+            | Self::UnsupportedOperation { .. }
+            | Self::UnsupportedTableCreationType { .. } => {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
             }
             Self::UnknownSchema { .. } | Self::SchemaContractMismatch { .. } => {

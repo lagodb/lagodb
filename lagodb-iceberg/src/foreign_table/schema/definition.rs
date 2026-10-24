@@ -24,8 +24,13 @@ struct ForeignColumn {
 }
 
 impl ForeignTableSchema {
+    /// Declare `schema`'s supported fields. A field becomes NOT NULL only when
+    /// it is also required in `current`, the schema scans read: the PostgreSQL
+    /// planner trusts NOT NULL, and `ForeignSchemaBinding::validate_definition`
+    /// rejects declarations that the current schema does not guarantee.
     pub(crate) fn from_iceberg(
         schema: &IcebergSchema,
+        current: &IcebergSchema,
         strict: bool,
     ) -> Result<Self, IcebergFdwError> {
         let mut columns = Vec::with_capacity(schema.as_struct().fields().len());
@@ -64,7 +69,11 @@ impl ForeignTableSchema {
                 name,
                 oid: postgres.oid,
                 typmod: postgres.typmod,
-                required: field.required,
+                required: field.required
+                    && current
+                        .as_struct()
+                        .field_by_name(&field.name)
+                        .is_some_and(|current_field| current_field.required),
             });
         }
         Ok(Self {
