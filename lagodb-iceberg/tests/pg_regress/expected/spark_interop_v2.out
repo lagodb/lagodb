@@ -1,0 +1,197 @@
+-- Spark/LagoDB interoperability for format-v2 position deletes.
+\setenv PGDATABASE :DBNAME
+SELECT rest_uri
+FROM lagodb_regress.object_storage_fixture
+\gset
+SET client_min_messages = warning;
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+RESET client_min_messages;
+CREATE EXTENSION lagodb_iceberg;
+\set object_tablespace regress_spark_v2
+\i include/object_tablespace.sql
+-- Caller supplies object_tablespace. This include reads the shared fixture and
+-- exports LAGODB_REGRESS_TABLESPACE_PATH for teardown by the caller.
+SELECT endpoint AS object_endpoint, bucket AS object_bucket,
+       region AS object_region,
+       access_key_id AS object_access_key,
+       secret_access_key AS object_secret_key
+FROM lagodb_regress.object_storage_fixture
+\gset
+SET client_min_messages = warning;
+DROP TABLESPACE IF EXISTS :"object_tablespace";
+RESET client_min_messages;
+\set object_tablespace_path /tmp/iceberg_ :object_tablespace
+\setenv LAGODB_REGRESS_TABLESPACE_PATH :object_tablespace_path
+\! mkdir -p "$LAGODB_REGRESS_TABLESPACE_PATH"
+\! rm -rf "$LAGODB_REGRESS_TABLESPACE_PATH"/*
+CREATE TABLESPACE :"object_tablespace" LOCATION :'object_tablespace_path';
+SELECT replace(:'object_tablespace', '_', '-') || '-' || gen_random_uuid()
+       AS object_volume
+\gset
+SELECT lagodb.create_storage_volume(
+    :'object_volume', :'object_tablespace', format('s3://%s', :'object_bucket'),
+    jsonb_build_object('type', 's3_access_key',
+                       'access_key_id', :'object_access_key',
+                       'secret_access_key', :'object_secret_key'),
+    jsonb_build_object('region', :'object_region', 'endpoint', :'object_endpoint',
+                       'allow_http', true)
+) AS object_created_volume
+\gset
+SELECT internal_volume_id AS object_volume_id
+FROM lagodb.storage_volumes WHERE storage_volume_name = :'object_volume'
+\gset
+\setenv LAGODB_REGRESS_VOLUME_ID :object_volume_id
+\setenv LAGODB_REGRESS_OBJECT_NAMESPACE :object_bucket
+\! bin/wait_for_object_store 30
+object_store_ready: true
+CREATE SCHEMA spark_interop_v2;
+CREATE TABLE spark_interop_v2.mutations (
+    id integer,
+    region text,
+    payload text
+) USING iceberg WITH ("format-version" = 2) TABLESPACE :"object_tablespace";
+INSERT INTO spark_interop_v2.mutations VALUES
+    (1, 'east', 'one'), (2, 'west', 'two'), (3, 'east', 'three'),
+    (4, 'west', 'four'), (5, 'east', 'five');
+-- The JDBC catalog must retain PostgreSQL transaction visibility. A separate
+-- Spark connection sees the committed metadata pointer until COMMIT.
+BEGIN;
+UPDATE spark_interop_v2.mutations SET payload = 'two-updated' WHERE id = 2;
+DELETE FROM spark_interop_v2.mutations WHERE id = 3;
+\set spark_run_schema spark_interop_v2
+\set spark_run_step uncommitted
+\i include/spark_run.sql
+-- Caller supplies the PG schema and a matching Spark scenario step.
+\setenv LAGODB_SPARK_RUN_SCHEMA :spark_run_schema
+\setenv LAGODB_SPARK_RUN_STEP :spark_run_step
+\! python3 ../../../scripts/pg_regress/regress_fixture.py spark-run "$LAGODB_SPARK_RUN_SCHEMA" "$LAGODB_SPARK_RUN_STEP"
+spark: rows
+spark: 1|east|one
+spark: 2|west|two
+spark: 3|east|three
+spark: 4|west|four
+spark: 5|east|five
+spark_scenario_completed: spark_interop_v2/uncommitted
+\i ../../../scripts/pg_regress/fixture_command_result.sql
+-- psql's \! records an ordinary nonzero exit in SHELL_ERROR and keeps running.
+-- Include with \i from the suite root: pg_regress feeds top-level SQL via stdin.
+-- Only failed infrastructure commands enable ON_ERROR_STOP; expected SQL errors
+-- in the actual regression cases retain their normal pg_regress behavior.
+\if :SHELL_ERROR
+\set ON_ERROR_STOP on
+DO $$ BEGIN RAISE EXCEPTION 'Regression fixture command failed'; END $$;
+\endif
+COMMIT;
+\set spark_run_step updated
+\i include/spark_run.sql
+-- Caller supplies the PG schema and a matching Spark scenario step.
+\setenv LAGODB_SPARK_RUN_SCHEMA :spark_run_schema
+\setenv LAGODB_SPARK_RUN_STEP :spark_run_step
+\! python3 ../../../scripts/pg_regress/regress_fixture.py spark-run "$LAGODB_SPARK_RUN_SCHEMA" "$LAGODB_SPARK_RUN_STEP"
+spark: rows
+spark: 1|east|one
+spark: 2|west|two-updated
+spark: 4|west|four
+spark: 5|east|five
+spark_scenario_completed: spark_interop_v2/updated
+\i ../../../scripts/pg_regress/fixture_command_result.sql
+-- psql's \! records an ordinary nonzero exit in SHELL_ERROR and keeps running.
+-- Include with \i from the suite root: pg_regress feeds top-level SQL via stdin.
+-- Only failed infrastructure commands enable ON_ERROR_STOP; expected SQL errors
+-- in the actual regression cases retain their normal pg_regress behavior.
+\if :SHELL_ERROR
+\set ON_ERROR_STOP on
+DO $$ BEGIN RAISE EXCEPTION 'Regression fixture command failed'; END $$;
+\endif
+CREATE TABLE spark_interop_v2.partitioned_mutations (
+    id integer,
+    region text,
+    payload text
+) PARTITION BY LIST (region) USING iceberg
+WITH ("format-version" = 2) TABLESPACE :"object_tablespace";
+INSERT INTO spark_interop_v2.partitioned_mutations VALUES
+    (1, 'east', 'one'), (2, 'west', 'two'),
+    (3, 'east', 'three'), (4, 'west', 'four');
+UPDATE spark_interop_v2.partitioned_mutations
+SET payload = 'two-updated' WHERE id = 2;
+DELETE FROM spark_interop_v2.partitioned_mutations WHERE id = 3;
+-- Both engines add position deletes for the same Spark data file. The final
+-- Spark read must apply their combined state.
+\set spark_run_step external_seed
+\i include/spark_run.sql
+-- Caller supplies the PG schema and a matching Spark scenario step.
+\setenv LAGODB_SPARK_RUN_SCHEMA :spark_run_schema
+\setenv LAGODB_SPARK_RUN_STEP :spark_run_step
+\! python3 ../../../scripts/pg_regress/regress_fixture.py spark-run "$LAGODB_SPARK_RUN_SCHEMA" "$LAGODB_SPARK_RUN_STEP"
+spark: external-namespace
+spark: external-drop
+spark: external-create
+spark: external-insert
+spark: external-delete
+spark: external-update
+spark_scenario_completed: spark_interop_v2/external_seed
+\i ../../../scripts/pg_regress/fixture_command_result.sql
+-- psql's \! records an ordinary nonzero exit in SHELL_ERROR and keeps running.
+-- Include with \i from the suite root: pg_regress feeds top-level SQL via stdin.
+-- Only failed infrastructure commands enable ON_ERROR_STOP; expected SQL errors
+-- in the actual regression cases retain their normal pg_regress behavior.
+\if :SHELL_ERROR
+\set ON_ERROR_STOP on
+DO $$ BEGIN RAISE EXCEPTION 'Regression fixture command failed'; END $$;
+\endif
+CREATE SERVER spark_v2_rest
+TYPE 'rest'
+FOREIGN DATA WRAPPER lagodb_iceberg
+OPTIONS (uri :'rest_uri');
+CREATE USER MAPPING FOR CURRENT_USER SERVER spark_v2_rest;
+CREATE FOREIGN TABLE spark_interop_v2.external (id integer, payload text)
+SERVER spark_v2_rest OPTIONS (table 'spark_interop_v2.external');
+SELECT * FROM spark_interop_v2.external ORDER BY id;
+ id |   payload   
+----+-------------
+  1 | one
+  3 | three-spark
+  4 | four
+(3 rows)
+
+UPDATE spark_interop_v2.external
+SET payload = 'one-lagodb' WHERE id = 1;
+DELETE FROM spark_interop_v2.external WHERE id = 4;
+INSERT INTO spark_interop_v2.external VALUES (5, 'five-lagodb');
+\set spark_run_step final
+\i include/spark_run.sql
+-- Caller supplies the PG schema and a matching Spark scenario step.
+\setenv LAGODB_SPARK_RUN_SCHEMA :spark_run_schema
+\setenv LAGODB_SPARK_RUN_STEP :spark_run_step
+\! python3 ../../../scripts/pg_regress/regress_fixture.py spark-run "$LAGODB_SPARK_RUN_SCHEMA" "$LAGODB_SPARK_RUN_STEP"
+spark: delete-files
+spark: 1|1|PARQUET|PARQUET|2
+spark: partitioned-rows
+spark: 1|east|one
+spark: 2|west|two-updated
+spark: 4|west|four
+spark: partitioned-delete-files
+spark: {"region":"east"}|1|1|PARQUET|PARQUET|1
+spark: {"region":"west"}|1|1|PARQUET|PARQUET|1
+spark: external-rows
+spark: 1|one-lagodb
+spark: 3|three-spark
+spark: 5|five-lagodb
+spark: external-delete-files
+spark: 1|1|PARQUET|PARQUET|4
+spark_scenario_completed: spark_interop_v2/final
+\i ../../../scripts/pg_regress/fixture_command_result.sql
+-- psql's \! records an ordinary nonzero exit in SHELL_ERROR and keeps running.
+-- Include with \i from the suite root: pg_regress feeds top-level SQL via stdin.
+-- Only failed infrastructure commands enable ON_ERROR_STOP; expected SQL errors
+-- in the actual regression cases retain their normal pg_regress behavior.
+\if :SHELL_ERROR
+\set ON_ERROR_STOP on
+DO $$ BEGIN RAISE EXCEPTION 'Regression fixture command failed'; END $$;
+\endif
+SET client_min_messages = warning;
+DROP SCHEMA spark_interop_v2 CASCADE;
+DROP SERVER spark_v2_rest CASCADE;
+DROP TABLESPACE :"object_tablespace";
+RESET client_min_messages;
+\! rm -rf "$LAGODB_REGRESS_TABLESPACE_PATH"/*

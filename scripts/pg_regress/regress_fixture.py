@@ -3,7 +3,8 @@
 
 Run from tests/pg_regress with PGHOST/PGPORT/PGDATABASE supplied by psql.
 Connectors require only MinIO; Iceberg setup explicitly requests --iceberg.
-Setup/teardown/provision emit fixed pg_regress markers; diagnostics go to stderr.
+Setup, teardown, provision, and spark-run emit fixed pg_regress markers;
+diagnostics go to stderr.
 Images can be prepared from the workspace root without a PostgreSQL connection.
 """
 
@@ -18,6 +19,7 @@ from pathlib import Path
 from fixture_runtime import DockerClient, FixtureConfig, FixtureError, FixtureRuntime
 from iceberg_fixture import IcebergServices
 from iceberg_provision import IcebergProvision
+from spark_scenario import SparkScenario
 from sqlite_fixture import SqliteFixture
 
 
@@ -57,12 +59,13 @@ class RegressionFixture:
             "REGRESS_FALLBACK_BUCKET": self.config.fallback_bucket,
             "REGRESS_FALLBACK_SECOND_BUCKET": self.config.second_bucket,
         }
-        endpoint = self.runtime.start_container(
+        port = self.runtime.start_container(
             "minio", self.config.images["minio"], 9000, environment, [
                 "-c", 'mkdir -p "/data/${REGRESS_BUCKET}" "/data/${REGRESS_FALLBACK_BUCKET}" '
                 '"/data/${REGRESS_FALLBACK_SECOND_BUCKET}" && exec /usr/bin/silo server /data',
             ], entrypoint="/bin/sh",
         )
+        endpoint = f"http://127.0.0.1:{port}"
         self.runtime.state["services"]["endpoint"] = endpoint
         self.runtime.save()
         self.runtime.wait_ready("MinIO", f"{endpoint}/minio/health/ready")
@@ -102,9 +105,7 @@ class RegressionFixture:
             if container not in live:
                 continue
             try:
-                self.runtime.docker.logged(
-                    ["logs", "--tail", "80", container], self.runtime.logs / f"{alias}.log",
-                )
+                self.runtime.capture_container_logs(alias)
             except (OSError, FixtureError) as error:
                 print(f"failed to collect {alias} logs: {error}", file=sys.stderr)
 
@@ -143,6 +144,10 @@ class RegressionFixture:
             IcebergServices(self.runtime).provision(selection)
         print(f"iceberg_fixture_provisioned: {selection}")
 
+    def spark_run(self, schema: str, step: str) -> None:
+        SparkScenario(self.runtime).run(schema, step)
+        print(f"spark_scenario_completed: {schema}/{step}")
+
     @staticmethod
     def interrupted(signum: int, frame: object) -> None:
         raise InterruptedError(f"fixture command interrupted by signal {signum}")
@@ -158,6 +163,9 @@ class RegressionFixture:
         commands.add_parser("provision").add_argument(
             "selection", choices=(*IcebergProvision.SELECTIONS[1:], "sqlite"),
         )
+        spark_run = commands.add_parser("spark-run")
+        spark_run.add_argument("schema")
+        spark_run.add_argument("step")
         args = parser.parse_args()
         for signum in (signal.SIGTERM, signal.SIGHUP):
             signal.signal(signum, cls.interrupted)
@@ -172,6 +180,9 @@ class RegressionFixture:
                     IcebergServices.prepare_images(
                         docker, config, Path.cwd() / "target" / "fixture-images", refresh=True,
                     )
+                    # Warm the optional Spark/JDBC capability without making
+                    # ordinary Iceberg setup depend on its tunnel image.
+                    SparkScenario.prepare_images(docker, config, refresh=True)
                 print("fixture_images_ready: true")
                 return 0
             fixture = cls(config)
@@ -183,6 +194,8 @@ class RegressionFixture:
                 fixture.teardown()
             elif args.action == "provision":
                 fixture.provision(args.selection)
+            elif args.action == "spark-run":
+                fixture.spark_run(args.schema, args.step)
             return 0
         except (OSError, ValueError, KeyError, FixtureError) as error:
             print(f"regression fixture failed: {error}", file=sys.stderr)

@@ -1,5 +1,6 @@
-"""Owned Docker resources and proxy processes for SQL regression fixtures."""
+"""Owned Docker resources and host processes for SQL regression fixtures."""
 
+import getpass
 import json
 import os
 import shlex
@@ -9,8 +10,9 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from typing import Optional
 from urllib.error import URLError
 from urllib.request import ProxyHandler, build_opener
 
@@ -40,6 +42,7 @@ class FixtureConfig:
             for name, key in (
                 ("minio", "MINIO_IMAGE"), ("rest", "ICEBERG_REST_IMAGE"),
                 ("spark-base", "SPARK_BASE_IMAGE"), ("spark", "SPARK_IMAGE"),
+                ("sshd", "SSHD_IMAGE"),
             )
         }
         self.default_spark_image = settings["DEFAULT_SPARK_IMAGE"]
@@ -57,6 +60,8 @@ class FixtureConfig:
         )
         self.timeout = float(settings.get("LAGODB_REGRESS_READY_TIMEOUT_SECONDS") or "30")
         self.pgport = settings.get("PGPORT", "")
+        self.pgdatabase = settings.get("PGDATABASE", "")
+        self.pguser = settings.get("PGUSER") or getpass.getuser()
         self.docker = settings.get("DOCKER") or next((
             str(path) for path in map(Path, (
                 "/Applications/Docker.app/Contents/Resources/bin/docker",
@@ -111,10 +116,31 @@ class DockerClient:
                 [self.program, *args], env=self.env, stdout=log,
                 stderr=subprocess.STDOUT, text=True,
             )
-        if result.returncode:
-            raise FixtureError(
-                f"Docker {args[0]} failed; log: {log_file}\n{log_file.read_text()}"
+        self._check_attached_result(args, log_file, result.returncode)
+
+    def captured(self, args: list[str], log_file: Path) -> str:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with log_file.open("w") as log:
+            result = subprocess.run(
+                [self.program, *args], env=self.env,
+                stdout=subprocess.PIPE, stderr=log, text=True,
             )
+        self._check_attached_result(
+            args, log_file, result.returncode, result.stdout,
+        )
+        return result.stdout
+
+    def _check_attached_result(
+        self, args: list[str], log_file: Path, returncode: int, stdout: str = "",
+    ) -> None:
+        if not returncode:
+            return
+        captured = stdout.strip()
+        stdout_diagnostic = f"\nstdout:\n{captured}" if captured else ""
+        raise FixtureError(
+            f"Docker {args[0]} failed; log: {log_file}\n{log_file.read_text()}"
+            f"{stdout_diagnostic}"
+        )
 
 
 class FixtureRuntime:
@@ -128,7 +154,7 @@ class FixtureRuntime:
         self.state_file = self.directory / "state.json"
         self.state = json.loads(self.state_file.read_text()) if self.state_file.exists() else {
             "docker": config.docker, "network": "", "containers": {},
-            "proxies": [], "services": {}, "logs": str(Path.cwd() / "log" / "fixture"),
+            "processes": [], "services": {}, "logs": str(Path.cwd() / "log" / "fixture"),
         }
         self.docker = DockerClient(self.state["docker"], config.env)
         self.logs = Path(self.state["logs"])
@@ -147,16 +173,31 @@ class FixtureRuntime:
         ]
 
     @contextmanager
-    def registering(self) -> Iterator[None]:
+    def registering(self) -> Iterator[set[signal.Signals]]:
         # Creation and registration form one interruptible operation. Readiness
         # waits happen afterwards, with signals enabled and ownership persisted.
         previous = signal.pthread_sigmask(signal.SIG_BLOCK, {
             signal.SIGINT, signal.SIGTERM, signal.SIGHUP,
         })
         try:
-            yield
+            yield previous
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+    @contextmanager
+    def rollback_on_error(self, description: str) -> Iterator[ExitStack]:
+        rollback = ExitStack()
+        try:
+            yield rollback
+        except BaseException as failure:
+            try:
+                rollback.close()
+            except (OSError, FixtureError) as cleanup_error:
+                raise FixtureError(
+                    f"{failure}\n{description} cleanup failed: {cleanup_error}"
+                ) from failure
+            raise
+        rollback.pop_all()
 
     def create_network(self) -> None:
         with self.registering():
@@ -169,7 +210,7 @@ class FixtureRuntime:
     def start_container(
         self, alias: str, image: str, port: int, env: dict[str, str],
         arguments: list[str], entrypoint: str = "",
-    ) -> str:
+    ) -> int:
         args = [
             "run", "--detach", "--publish", f"127.0.0.1::{port}",
             "--network", self.state["network"], "--network-alias", alias,
@@ -180,17 +221,47 @@ class FixtureRuntime:
             args.extend(["--env", f"{key}={value}"])
         if entrypoint:
             args.extend(["--entrypoint", entrypoint])
+        with self.rollback_on_error(f"{alias} container startup") as rollback:
+            with self.registering():
+                container = self.docker.run(*args, image, *arguments)
+                self.state["containers"][alias] = container
+                rollback.callback(self.release_container, alias)
+                rollback.callback(self.capture_container_logs, alias)
+                self.save()
+            try:
+                mapping = self.docker.run(
+                    "port", container, f"{port}/tcp",
+                ).splitlines()[0]
+                return int(mapping.rsplit(":", 1)[1])
+            except (IndexError, ValueError) as error:
+                raise FixtureError(f"invalid {alias} port mapping: {error}") from error
+
+    def capture_container_logs(self, alias: str) -> None:
+        container = self.state["containers"][alias]
+        self.docker.logged(
+            ["logs", "--tail", "80", container], self.logs / f"{alias}.log",
+        )
+
+    def release_container(self, alias: str) -> None:
         with self.registering():
-            container = self.docker.run(*args, image, *arguments)
-            self.state["containers"][alias] = container
+            container = self.state["containers"][alias]
+            self.docker.remove_container(container)
+            del self.state["containers"][alias]
             self.save()
-        try:
-            mapping = self.docker.run("port", container, f"{port}/tcp").splitlines()[0]
-            return f"http://127.0.0.1:{int(mapping.rsplit(':', 1)[1])}"
-        except (FixtureError, IndexError, ValueError) as error:
-            raise FixtureError(f"invalid {alias} port mapping: {error}") from error
 
     def run_job(self, name: str, arguments: list[str], log_file: Path) -> None:
+        with self._job(name, arguments) as container:
+            # docker start --attach forwards the container's exit status.
+            self.docker.logged(["start", "--attach", container], log_file)
+
+    def run_captured_job(
+        self, name: str, arguments: list[str], log_file: Path,
+    ) -> str:
+        with self._job(name, arguments) as container:
+            return self.docker.captured(["start", "--attach", container], log_file)
+
+    @contextmanager
+    def _job(self, name: str, arguments: list[str]) -> Iterator[str]:
         container = None
         failure = None
         try:
@@ -201,16 +272,12 @@ class FixtureRuntime:
                 )
                 self.state["containers"][name] = container
                 self.save()
-            # docker start --attach forwards the container's exit status.
-            self.docker.logged(["start", "--attach", container], log_file)
+            yield container
         except BaseException as error:
             failure = error
         if container is not None:
             try:
-                with self.registering():
-                    self.docker.remove_container(container)
-                    del self.state["containers"][name]
-                    self.save()
+                self.release_container(name)
             except (OSError, FixtureError) as cleanup_error:
                 if failure is not None:
                     raise FixtureError(f"{failure}\njob cleanup failed: {cleanup_error}") from failure
@@ -233,19 +300,16 @@ class FixtureRuntime:
 
     def start_proxy(self, name: str, upstream: str, options: list[str]) -> str:
         port_file = self.directory / f"{name}.port"
+        script = str(self.config.scripts / "rest_catalog_proxy.py")
+        process = self.start_process(
+            name,
+            [
+                sys.executable, script, "--upstream", upstream,
+                "--port-file", str(port_file), *options,
+            ],
+            [script, f"--port-file {port_file}"],
+        )
         log_file = self.logs / f"{name}.log"
-        self.logs.mkdir(parents=True, exist_ok=True)
-        # Persist ownership before a pending interrupt can initiate cleanup.
-        with self.registering():
-            with log_file.open("w") as log:
-                process = subprocess.Popen([
-                    sys.executable, str(self.config.scripts / "rest_catalog_proxy.py"),
-                    "--upstream", upstream, "--port-file", str(port_file), *options,
-                ], env=self.config.env, stdout=log, stderr=subprocess.STDOUT,
-                    start_new_session=True)
-            self.processes[process.pid] = process
-            self.state["proxies"].append({"pid": process.pid, "port_file": str(port_file)})
-            self.save()
         deadline = time.monotonic() + self.config.timeout
         while not port_file.exists():
             if process.poll() is not None or time.monotonic() >= deadline:
@@ -255,7 +319,45 @@ class FixtureRuntime:
         self.wait_ready(name, f"{uri}/v1/config")
         return uri
 
-    def stop_proxy(self, record: dict) -> None:
+    def start_process(
+        self, name: str, command: list[str], signature: list[str],
+        env: Optional[dict[str, str]] = None,
+    ) -> subprocess.Popen:
+        log_file = self.logs / f"{name}.log"
+        self.logs.mkdir(parents=True, exist_ok=True)
+        # Persist ownership before a pending interrupt can initiate cleanup.
+        with self.registering() as previous:
+            with log_file.open("w") as log:
+                process = subprocess.Popen(
+                    command,
+                    env=self.config.env if env is None else env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    # Do not pass the owner's registration mask through exec.
+                    preexec_fn=lambda: signal.pthread_sigmask(
+                        signal.SIG_SETMASK, previous,
+                    ),
+                )
+            self.processes[process.pid] = process
+            self.state["processes"].append({
+                "name": name, "pid": process.pid, "signature": signature,
+            })
+            self.save()
+        return process
+
+    def release_process(self, process: subprocess.Popen) -> None:
+        with self.registering():
+            record = next(
+                record for record in self.state["processes"]
+                if record["pid"] == process.pid
+            )
+            self.stop_process(record)
+            self.processes.pop(process.pid, None)
+            self.state["processes"].remove(record)
+            self.save()
+
+    def stop_process(self, record: dict) -> None:
         pid = record["pid"]
         process = self.processes.get(pid)
         if process is not None:
@@ -268,7 +370,7 @@ class FixtureRuntime:
                 process.wait()
             return
         # A later CLI invocation must establish ownership before using a stored PID.
-        if not self.proxy_is_owned(record):
+        if not self.process_is_owned(record):
             return
         try:
             os.kill(pid, signal.SIGTERM)
@@ -276,10 +378,10 @@ class FixtureRuntime:
             return
         deadline = time.monotonic() + 5
         killed = False
-        while self.proxy_is_owned(record):
+        while self.process_is_owned(record):
             if time.monotonic() >= deadline:
                 if killed:
-                    raise FixtureError(f"proxy {pid} did not terminate; state retained")
+                    raise FixtureError(f"process {pid} did not terminate; state retained")
                 try:
                     os.kill(pid, signal.SIGKILL)
                 except ProcessLookupError:
@@ -288,7 +390,7 @@ class FixtureRuntime:
                 deadline = time.monotonic() + 1
             time.sleep(0.1)
 
-    def proxy_is_owned(self, record: dict) -> bool:
+    def process_is_owned(self, record: dict) -> bool:
         result = subprocess.run(
             ["ps", "-ww", "-p", str(record["pid"]), "-o", "stat=", "-o", "args="],
             text=True, capture_output=True,
@@ -296,18 +398,19 @@ class FixtureRuntime:
         if result.returncode == 1:
             return False
         if result.returncode:
-            raise FixtureError(f"failed to inspect proxy {record['pid']}: {result.stderr.strip()}")
+            raise FixtureError(
+                f"failed to inspect process {record['pid']}: {result.stderr.strip()}"
+            )
         status, _, command = result.stdout.strip().partition(" ")
-        return not status.startswith("Z") and (
-            str(self.config.scripts / "rest_catalog_proxy.py") in command
-            and f"--port-file {record['port_file']}" in command
+        return not status.startswith("Z") and all(
+            fragment in command for fragment in record["signature"]
         )
 
     def cleanup(self) -> None:
         errors = []
-        for proxy in reversed(self.state["proxies"]):
+        for process in reversed(self.state["processes"]):
             try:
-                self.stop_proxy(proxy)
+                self.stop_process(process)
             except (OSError, FixtureError) as error:
                 errors.append(str(error))
         # Labels also cover a Docker resource created just before an interrupt.
@@ -343,5 +446,5 @@ class FixtureRuntime:
             shutil.rmtree(self.directory)
         self.state["network"] = ""
         self.state["containers"] = {}
-        self.state["proxies"] = []
+        self.state["processes"] = []
         self.state["services"] = {}

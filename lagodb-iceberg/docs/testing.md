@@ -10,7 +10,7 @@ The four testing layers below describe existing execution boundaries, not covera
 
 Follow PostgreSQL's regression style: prefer ordinary SQL and `EXPLAIN (COSTS OFF)` followed by the query when both plan selection and results matter. Extract stable JSON fields only when runtime metrics are needed or a representation matrix needs compact, named route assertions. Report each case separately instead of reducing unrelated cases to one boolean. Keep GUC changes scoped to the behavior under test; avoid unnecessary DO blocks, exception subtransactions, and psql controls.
 
-External Java/Spark fixtures only prepare source data that SQL tests consume. Keep them in `scripts/pg_regress/iceberg_fixtures`; do not introduce a second assertion framework.
+External fixture recipes in `scripts/pg_regress/iceberg_fixtures` prepare, restore, or mutate data consumed by SQL tests; they do not emit assertions. Test-scoped Spark scenarios in `tests/pg_regress/spark` execute external-engine steps (writes and reads) interleaved with their owning SQL test. Their runner only emits actual rows and root-cause diagnostics, separating columns with `|` and rendering SQL NULL as `NULL`. Scenarios explicitly cast non-scalar or representation-sensitive values to strings when stable output requires it. Expected values and assertions remain exclusively in the corresponding `pg_regress` expected files. JDBC scenarios enable their host tunnel on first use, so data-only fixture preparation remains independent of that optional capability.
 
 ```text
 +─────────────────────────────────────────────────────────────────────────────+

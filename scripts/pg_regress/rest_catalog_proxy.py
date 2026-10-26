@@ -5,7 +5,6 @@ import argparse
 import http.client
 import json
 import pathlib
-import signal
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
@@ -139,11 +138,6 @@ class RestCatalogProxy(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    # The owner blocks interruption while spawning and registering this process.
-    # An exec inherits that mask; enable termination in the independent proxy.
-    signal.pthread_sigmask(signal.SIG_UNBLOCK, {
-        signal.SIGINT, signal.SIGTERM, signal.SIGHUP,
-    })
     parser = argparse.ArgumentParser()
     parser.add_argument("--upstream", required=True)
     parser.add_argument("--port-file", required=True)

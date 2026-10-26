@@ -4,12 +4,14 @@ from pathlib import Path
 
 from fixture_runtime import DockerClient, FixtureConfig, FixtureRuntime
 from iceberg_provision import IcebergProvision, JavaFixture
+from spark_engine import SparkEngine
 
 
 class IcebergServices:
     def __init__(self, runtime: FixtureRuntime) -> None:
         self.runtime = runtime
         self.config = runtime.config
+        self._spark = SparkEngine(runtime)
 
     @staticmethod
     def prepare_images(
@@ -58,7 +60,10 @@ class IcebergServices:
             "CATALOG_S3_ACCESS__KEY__ID": self.config.user,
             "CATALOG_S3_SECRET__ACCESS__KEY": self.config.password,
         })
-        uri = self.runtime.start_container(alias, self.config.images["rest"], 8181, environment, [])
+        port = self.runtime.start_container(
+            alias, self.config.images["rest"], 8181, environment, [],
+        )
+        uri = f"http://127.0.0.1:{port}"
         service = "rest_upstream_uri" if vending else "fallback_rest_uri"
         self.runtime.state["services"][service] = uri
         self.runtime.save()
@@ -70,33 +75,10 @@ class IcebergServices:
         sql_file.write_text(provision.render_sql())
         # The Spark image runs as its own non-root user and mounts this read-only.
         sql_file.chmod(0o644)
-        args = ["--network", self.runtime.state["network"]]
-        for key, value in self.config.aws_environment().items():
-            args.extend(["--env", f"{key}={value}"])
-        args.extend([
-            "--volume", f"{sql_file}:/fixture/iceberg_provision.sql:ro",
-            "--entrypoint", "/opt/spark/bin/spark-sql", self.config.images["spark"],
-            "--hiveconf", f"fallback_second_bucket={self.config.second_bucket}",
-            "--conf", "spark.sql.session.timeZone=UTC",
-            "--conf", "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-        ])
-        for catalog, alias, bucket, prefix in (
-            ("rest", "rest-vended", self.config.bucket, "iceberg-vended"),
-            ("fallback", "rest-fallback", self.config.fallback_bucket, "iceberg-fallback"),
-        ):
-            settings = {
-                f"spark.sql.catalog.{catalog}": "org.apache.iceberg.spark.SparkCatalog",
-                f"spark.sql.catalog.{catalog}.type": "rest",
-                f"spark.sql.catalog.{catalog}.uri": f"http://{alias}:8181",
-                f"spark.sql.catalog.{catalog}.warehouse": f"s3://{bucket}/{prefix}",
-                f"spark.sql.catalog.{catalog}.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
-                f"spark.sql.catalog.{catalog}.s3.endpoint": "http://minio:9000",
-                f"spark.sql.catalog.{catalog}.s3.path-style-access": "true",
-            }
-            for key, value in settings.items():
-                args.extend(["--conf", f"{key}={value}"])
-        args.extend(["--conf", "spark.ui.enabled=false", "-f", "/fixture/iceberg_provision.sql"])
-        self.runtime.run_job(f"spark-{selection}", args, self.runtime.logs / f"spark-{selection}.log")
+        self._spark.run_sql(
+            f"spark-{selection}", sql_file,
+            {"fallback_second_bucket": self.config.second_bucket},
+        )
         for fixture in provision.java:
             self.provision_java(fixture)
 
@@ -104,15 +86,9 @@ class IcebergServices:
         # Spark SQL cannot declare every Iceberg primitive. Use the generic
         # writer from the same image to preserve those source field types.
         source = self.config.scripts / "iceberg_fixtures" / fixture.source
-        args = ["--network", self.runtime.state["network"]]
-        for key, value in self.config.aws_environment().items():
-            args.extend(["--env", f"{key}={value}"])
-        args.extend([
-            "--volume", f"{source}:/fixture/{fixture.source}:ro",
-            "--entrypoint", "java", self.config.images["spark"],
-            "--class-path", "/opt/spark/jars/*", f"/fixture/{fixture.source}",
+        arguments = [
             "http://rest-vended:8181", f"s3://{self.config.bucket}/iceberg-vended",
             fixture.namespace, fixture.name,
-        ])
+        ]
         job = f"iceberg-{fixture.namespace}-{fixture.name}"
-        self.runtime.run_job(job, args, self.runtime.logs / f"{job}.log")
+        self._spark.run_java_source(job, source, arguments)

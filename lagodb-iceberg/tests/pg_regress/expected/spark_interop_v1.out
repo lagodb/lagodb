@@ -1,0 +1,186 @@
+-- Spark/LagoDB interoperability for format-v1 managed and external tables.
+\setenv PGDATABASE :DBNAME
+SELECT rest_uri
+FROM lagodb_regress.object_storage_fixture
+\gset
+SET client_min_messages = warning;
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+RESET client_min_messages;
+CREATE EXTENSION lagodb_iceberg;
+\set object_tablespace regress_spark_v1
+\i include/object_tablespace.sql
+-- Caller supplies object_tablespace. This include reads the shared fixture and
+-- exports LAGODB_REGRESS_TABLESPACE_PATH for teardown by the caller.
+SELECT endpoint AS object_endpoint, bucket AS object_bucket,
+       region AS object_region,
+       access_key_id AS object_access_key,
+       secret_access_key AS object_secret_key
+FROM lagodb_regress.object_storage_fixture
+\gset
+SET client_min_messages = warning;
+DROP TABLESPACE IF EXISTS :"object_tablespace";
+RESET client_min_messages;
+\set object_tablespace_path /tmp/iceberg_ :object_tablespace
+\setenv LAGODB_REGRESS_TABLESPACE_PATH :object_tablespace_path
+\! mkdir -p "$LAGODB_REGRESS_TABLESPACE_PATH"
+\! rm -rf "$LAGODB_REGRESS_TABLESPACE_PATH"/*
+CREATE TABLESPACE :"object_tablespace" LOCATION :'object_tablespace_path';
+SELECT replace(:'object_tablespace', '_', '-') || '-' || gen_random_uuid()
+       AS object_volume
+\gset
+SELECT lagodb.create_storage_volume(
+    :'object_volume', :'object_tablespace', format('s3://%s', :'object_bucket'),
+    jsonb_build_object('type', 's3_access_key',
+                       'access_key_id', :'object_access_key',
+                       'secret_access_key', :'object_secret_key'),
+    jsonb_build_object('region', :'object_region', 'endpoint', :'object_endpoint',
+                       'allow_http', true)
+) AS object_created_volume
+\gset
+SELECT internal_volume_id AS object_volume_id
+FROM lagodb.storage_volumes WHERE storage_volume_name = :'object_volume'
+\gset
+\setenv LAGODB_REGRESS_VOLUME_ID :object_volume_id
+\setenv LAGODB_REGRESS_OBJECT_NAMESPACE :object_bucket
+\! bin/wait_for_object_store 30
+object_store_ready: true
+CREATE SCHEMA spark_interop_v1;
+CREATE TYPE spark_interop_v1.details AS (score integer, label text);
+CREATE TABLE spark_interop_v1.all_types (
+    id integer,
+    b boolean,
+    si smallint,
+    i integer,
+    bi bigint,
+    r real,
+    dp double precision,
+    num numeric(12, 4),
+    t text,
+    vc varchar(20),
+    c char(10),
+    n name,
+    j json,
+    jb jsonb,
+    d date,
+    ts timestamp,
+    tstz timestamptz,
+    u uuid,
+    by bytea,
+    details spark_interop_v1.details,
+    numbers integer[]
+) USING iceberg WITH ("format-version" = 1) TABLESPACE :"object_tablespace";
+INSERT INTO spark_interop_v1.all_types VALUES (
+    1, true, 32767, 2147483647, 9223372036854775807,
+    3.5, 2.25, 12345678.1250,
+    'text value', 'varchar value', 'char', 'name_value',
+    '{"json_key":"value"}', '{"jsonb_key":"value"}',
+    DATE '2024-01-02', TIMESTAMP '2024-01-02 03:04:05.123456',
+    TIMESTAMPTZ '2024-01-02 03:04:05.123456+00',
+    'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '\xdeadbeef',
+    ROW(7, 'nested'), ARRAY[1, 2, 3]
+);
+INSERT INTO spark_interop_v1.all_types (id) VALUES (2);
+CREATE TABLE spark_interop_v1.list_partitioned (
+    id integer,
+    region text
+) PARTITION BY LIST (region) USING iceberg
+WITH ("format-version" = 1) TABLESPACE :"object_tablespace";
+INSERT INTO spark_interop_v1.list_partitioned VALUES
+    (1, 'east'), (2, 'west'), (3, 'east');
+CREATE TABLE spark_interop_v1.range_partitioned (
+    id integer,
+    event_date date
+) PARTITION BY RANGE (event_date) USING iceberg
+WITH ("format-version" = 1) TABLESPACE :"object_tablespace";
+INSERT INTO spark_interop_v1.range_partitioned VALUES
+    (1, DATE '2024-01-02'), (2, DATE '2024-01-03'), (3, DATE '2024-01-02');
+-- Spark owns the initial external-table state; LagoDB must see Spark's
+-- copy-on-write changes, expose its own append back to Spark, and reject
+-- UPDATE for format v1.
+\set spark_run_schema spark_interop_v1
+\set spark_run_step external_seed
+\i include/spark_run.sql
+-- Caller supplies the PG schema and a matching Spark scenario step.
+\setenv LAGODB_SPARK_RUN_SCHEMA :spark_run_schema
+\setenv LAGODB_SPARK_RUN_STEP :spark_run_step
+\! python3 ../../../scripts/pg_regress/regress_fixture.py spark-run "$LAGODB_SPARK_RUN_SCHEMA" "$LAGODB_SPARK_RUN_STEP"
+spark: external-namespace
+spark: external-drop
+spark: external-create
+spark: external-insert
+spark: external-delete
+spark: external-update
+spark_scenario_completed: spark_interop_v1/external_seed
+\i ../../../scripts/pg_regress/fixture_command_result.sql
+-- psql's \! records an ordinary nonzero exit in SHELL_ERROR and keeps running.
+-- Include with \i from the suite root: pg_regress feeds top-level SQL via stdin.
+-- Only failed infrastructure commands enable ON_ERROR_STOP; expected SQL errors
+-- in the actual regression cases retain their normal pg_regress behavior.
+\if :SHELL_ERROR
+\set ON_ERROR_STOP on
+DO $$ BEGIN RAISE EXCEPTION 'Regression fixture command failed'; END $$;
+\endif
+CREATE SERVER spark_v1_rest
+TYPE 'rest'
+FOREIGN DATA WRAPPER lagodb_iceberg
+OPTIONS (uri :'rest_uri');
+CREATE USER MAPPING FOR CURRENT_USER SERVER spark_v1_rest;
+CREATE FOREIGN TABLE spark_interop_v1.external (id integer, payload text)
+SERVER spark_v1_rest OPTIONS (table 'spark_interop_v1.external');
+SELECT * FROM spark_interop_v1.external ORDER BY id;
+ id |   payload   
+----+-------------
+  1 | one
+  3 | three-spark
+  4 | four
+(3 rows)
+
+INSERT INTO spark_interop_v1.external VALUES (5, 'five-lagodb');
+UPDATE spark_interop_v1.external
+SET payload = 'one-lagodb' WHERE id = 1;
+ERROR:  FDW provider "lagodb_iceberg" callback BeginForeignModify failed: FDW provider modify error: feature not yet implemented: writable Iceberg foreign-table UPDATE/DELETE requires format v2 or later
+\set spark_run_step final
+\i include/spark_run.sql
+-- Caller supplies the PG schema and a matching Spark scenario step.
+\setenv LAGODB_SPARK_RUN_SCHEMA :spark_run_schema
+\setenv LAGODB_SPARK_RUN_STEP :spark_run_step
+\! python3 ../../../scripts/pg_regress/regress_fixture.py spark-run "$LAGODB_SPARK_RUN_SCHEMA" "$LAGODB_SPARK_RUN_STEP"
+spark: type-schema
+spark: int|boolean|int|int|bigint|float|double|decimal(12,4)|string|string|string|string|string|string|date|timestamp_ntz|timestamp|string|binary|struct<score:int,label:string>|array<int>
+spark: type-values
+spark: 1|true|32767|2147483647|9223372036854775807|3.5|2.25|12345678.1250|text value|varchar value|char      |name_value|value|value|2024-01-02|2024-01-02 03:04:05.123456|2024-01-02 03:04:05.123456|a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11|DEADBEEF|7|nested|[1, 2, 3]
+spark: type-nulls
+spark: NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL|NULL
+spark: list-data
+spark: east|2
+spark: west|1
+spark: list-partitions
+spark: {"region":"east"}|2
+spark: {"region":"west"}|1
+spark: range-data
+spark: 2024-01-02|2
+spark: 2024-01-03|1
+spark: range-partitions
+spark: {"event_date_day":"2024-01-02"}|2
+spark: {"event_date_day":"2024-01-03"}|1
+spark: external-rows
+spark: 1|one
+spark: 3|three-spark
+spark: 4|four
+spark: 5|five-lagodb
+spark_scenario_completed: spark_interop_v1/final
+\i ../../../scripts/pg_regress/fixture_command_result.sql
+-- psql's \! records an ordinary nonzero exit in SHELL_ERROR and keeps running.
+-- Include with \i from the suite root: pg_regress feeds top-level SQL via stdin.
+-- Only failed infrastructure commands enable ON_ERROR_STOP; expected SQL errors
+-- in the actual regression cases retain their normal pg_regress behavior.
+\if :SHELL_ERROR
+\set ON_ERROR_STOP on
+DO $$ BEGIN RAISE EXCEPTION 'Regression fixture command failed'; END $$;
+\endif
+SET client_min_messages = warning;
+DROP SCHEMA spark_interop_v1 CASCADE;
+DROP SERVER spark_v1_rest CASCADE;
+DROP TABLESPACE :"object_tablespace";
+RESET client_min_messages;
+\! rm -rf "$LAGODB_REGRESS_TABLESPACE_PATH"/*
