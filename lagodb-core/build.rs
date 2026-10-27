@@ -6,28 +6,25 @@ use pgrx_pg_config::Pgrx;
 struct PgFeature {
     environment: &'static str,
     pgrx_config: &'static str,
-    c_forks_supported: bool,
-    copy_bridge_supported: bool,
-    native_injection_points_supported: bool,
+    /// PostgreSQL 17 introduced the ReadStream that the sampler adapter wraps.
+    read_stream: bool,
 }
 
-static PG_FEATURES: [PgFeature; 2] = [
+static PG_FEATURES: [PgFeature; 3] = [
     PgFeature {
         environment: "CARGO_FEATURE_PG16",
         pgrx_config: "pg16",
-        // PG16 TableAM callbacks require a separate compatibility port.
-        c_forks_supported: false,
-        // The COPY bridge is intentionally not compiled for PG16. A future
-        // PostgreSQL port will enable it after its C ABI is audited.
-        copy_bridge_supported: false,
-        native_injection_points_supported: false,
+        read_stream: false,
     },
     PgFeature {
         environment: "CARGO_FEATURE_PG17",
         pgrx_config: "pg17",
-        c_forks_supported: true,
-        copy_bridge_supported: true,
-        native_injection_points_supported: true,
+        read_stream: true,
+    },
+    PgFeature {
+        environment: "CARGO_FEATURE_PG18",
+        pgrx_config: "pg18",
+        read_stream: true,
     },
 ];
 
@@ -53,19 +50,19 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/modify/lagodb_modify_table.c");
     println!("cargo:rerun-if-changed=csrc/modify/lagodb_modify_table.h");
     println!("cargo:rerun-if-changed=csrc/modify/lagodb_modify.c");
-    println!("cargo:rerun-if-changed=csrc/analyze/lagodb_analyze.c");
-    println!("cargo:rerun-if-changed=csrc/analyze/lagodb_analyze.h");
     println!("cargo:rerun-if-changed=csrc/analyze/lagodb_analyze_sampler.c");
     println!("cargo:rerun-if-changed=csrc/analyze/lagodb_analyze_sampler.h");
     println!("cargo:rerun-if-changed=csrc/vacuum/lagodb_vacuum.c");
     println!("cargo:rerun-if-changed=csrc/vacuum/lagodb_vacuum.h");
     println!("cargo:rerun-if-changed=csrc/vacuum/lagodb_vacuum_probe.c");
     println!("cargo:rerun-if-changed=csrc/vacuum/lagodb_vacuum_probe.h");
-    println!("cargo:rerun-if-changed=csrc/truncate/lagodb_truncate.c");
-    println!("cargo:rerun-if-changed=csrc/truncate/lagodb_truncate.h");
     println!("cargo:rerun-if-changed=csrc/compat/lagodb_pg_compat.h");
+    println!("cargo:rerun-if-changed=csrc/compat/lagodb_collation.c");
+    println!("cargo:rerun-if-changed=csrc/compat/lagodb_collation.h");
     println!("cargo:rerun-if-changed=csrc/compat/lagodb_injection_point.c");
     println!("cargo:rerun-if-changed=csrc/compat/lagodb_injection_point.h");
+    println!("cargo:rerun-if-changed=csrc/compat/lagodb_json_category.c");
+    println!("cargo:rerun-if-changed=csrc/compat/lagodb_json_category.h");
     println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy.c");
     println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy_prepare.c");
     println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy_datum.c");
@@ -73,10 +70,6 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy_to.c");
     println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy.h");
     println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy_write.h");
-    println!("cargo:rerun-if-changed=csrc/catalog/lagodb_partition_key.c");
-    println!("cargo:rerun-if-changed=csrc/catalog/lagodb_partition_key.h");
-    println!("cargo:rerun-if-changed=csrc/catalog/lagodb_relation.c");
-    println!("cargo:rerun-if-changed=csrc/catalog/lagodb_relation.h");
     println!("cargo:rerun-if-changed=csrc/tuple/lagodb_array.c");
     println!("cargo:rerun-if-changed=csrc/tuple/lagodb_array.h");
 
@@ -112,66 +105,59 @@ fn main() {
     let pg_config_header = include.join("pg_config.h");
     println!("cargo:rerun-if-changed={}", pg_config_header.display());
 
-    if pg_feature.native_injection_points_supported
-        && injection_points_enabled(&pg_config_header)
-    {
+    if injection_points_enabled(&pg_config_header) {
         println!("cargo:rustc-cfg=lagodb_pg_injection_points");
     }
 
     let mut build = cc::Build::new();
+    let cppflags = pg_config.cppflags().unwrap_or_else(|error| {
+        panic!(
+            "{} C preprocessor flags are unavailable: {error}",
+            pg_feature.pgrx_config
+        )
+    });
+    let cppflags = shlex::split(&cppflags.to_string_lossy()).unwrap_or_else(|| {
+        panic!(
+            "{} C preprocessor flags contain invalid shell quoting: {}",
+            pg_feature.pgrx_config,
+            cppflags.to_string_lossy()
+        )
+    });
+    for flag in cppflags {
+        build.flag(flag);
+    }
     // PostgreSQL headers are external runtime headers; keep the bridge's
     // warning checks without applying them to PostgreSQL inline functions.
     build.flag("-isystem").flag(include.as_os_str());
-    let mut has_sources = false;
     // The COPY bridges own command preparation, raw-field parsing, and the
-    // PostgreSQL Text/CSV row encoder. Sources are selected per PostgreSQL
-    // feature here; the C header applies the shared major-version gate and
-    // local source branches handle audited minor epochs.
-    if pg_feature.copy_bridge_supported {
-        build
-            .file("csrc/copy/lagodb_copy.c")
-            .file("csrc/copy/lagodb_copy_prepare.c")
-            .file("csrc/copy/lagodb_copy_datum.c")
-            .file("csrc/copy/lagodb_copy_from.c")
-            .file("csrc/copy/lagodb_copy_to.c")
-            .include(PathBuf::from("csrc/copy"))
-            .include(PathBuf::from("csrc/compat"))
-            .flag_if_supported("-Wno-unused-function")
-            .flag_if_supported("-Wno-unused-parameter");
-        has_sources = true;
+    // PostgreSQL Text/CSV row encoder. The shared C support gate admits only
+    // fully audited majors; local branches own actual ABI differences.
+    build
+        .file("csrc/copy/lagodb_copy.c")
+        .file("csrc/copy/lagodb_copy_prepare.c")
+        .file("csrc/copy/lagodb_copy_datum.c")
+        .file("csrc/copy/lagodb_copy_from.c")
+        .file("csrc/copy/lagodb_copy_to.c")
+        .file("csrc/compat/lagodb_collation.c")
+        .file("csrc/compat/lagodb_injection_point.c")
+        .file("csrc/compat/lagodb_json_category.c")
+        .file("csrc/modify/lagodb_modify_table.c")
+        .file("csrc/modify/lagodb_modify.c")
+        .file("csrc/vacuum/lagodb_vacuum.c")
+        .file("csrc/vacuum/lagodb_vacuum_probe.c")
+        .file("csrc/tuple/lagodb_array.c")
+        .include(PathBuf::from("csrc/modify"))
+        .include(PathBuf::from("csrc/analyze"))
+        .include(PathBuf::from("csrc/vacuum"))
+        .include(PathBuf::from("csrc/copy"))
+        .include(PathBuf::from("csrc/compat"))
+        .flag_if_supported("-Wno-unused-function")
+        .flag_if_supported("-Wno-unused-parameter");
+    if pg_feature.read_stream {
+        build.file("csrc/analyze/lagodb_analyze_sampler.c");
     }
 
-    if pg_feature.native_injection_points_supported {
-        build
-            .file("csrc/compat/lagodb_injection_point.c")
-            .include(PathBuf::from("csrc/compat"));
-        has_sources = true;
-    }
-
-    if pg_feature.c_forks_supported {
-        build
-            .file("csrc/modify/lagodb_modify_table.c")
-            .file("csrc/modify/lagodb_modify.c")
-            .file("csrc/analyze/lagodb_analyze.c")
-            .file("csrc/analyze/lagodb_analyze_sampler.c")
-            .file("csrc/vacuum/lagodb_vacuum.c")
-            .file("csrc/vacuum/lagodb_vacuum_probe.c")
-            .file("csrc/truncate/lagodb_truncate.c")
-            .file("csrc/catalog/lagodb_partition_key.c")
-            .file("csrc/catalog/lagodb_relation.c")
-            .file("csrc/tuple/lagodb_array.c")
-            .include(PathBuf::from("csrc/modify"))
-            .include(PathBuf::from("csrc/analyze"))
-            .include(PathBuf::from("csrc/vacuum"))
-            .include(PathBuf::from("csrc/truncate"))
-            .include(PathBuf::from("csrc/catalog"))
-            .include(PathBuf::from("csrc/compat"));
-        has_sources = true;
-    }
-
-    if has_sources {
-        build.compile("lagodb_pg_bridges");
-    }
+    build.compile("lagodb_pg_bridges");
 }
 
 fn injection_points_enabled(pg_config_header: &Path) -> bool {

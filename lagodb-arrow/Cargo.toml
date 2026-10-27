@@ -19,9 +19,10 @@ crate-type = ["rlib"]
 # selects a Postgres version without an explicit `--features`, matching
 # lagodb-core / lagodb-iceberg / pg-backend-tests.
 default = ["pg17"]
-# Thread pg16/pg17 through to pgrx and core, matching lagodb-iceberg.
+# Thread the supported PostgreSQL majors through to pgrx and core.
 pg16 = ["pgrx/pg16", "lagodb-core/pg16"]
 pg17 = ["pgrx/pg17", "lagodb-core/pg17"]
+pg18 = ["pgrx/pg18", "lagodb-core/pg18"]
 
 [dependencies]
 pgrx = { workspace = true }

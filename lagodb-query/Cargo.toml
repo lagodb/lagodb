@@ -19,6 +19,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [] }
 default = ["pg17"]
 pg16 = ["pgrx/pg16", "lagodb-core/pg16", "lagodb-arrow/pg16"]
 pg17 = ["pgrx/pg17", "lagodb-core/pg17", "lagodb-arrow/pg17"]
+pg18 = ["pgrx/pg18", "lagodb-core/pg18", "lagodb-arrow/pg18"]
 
 [dependencies]
 datafusion = { workspace = true }
@@ -28,6 +29,7 @@ arrow-array = { workspace = true, features = ["ffi"] }
 arrow-buffer = { workspace = true }
 arrow-schema = { workspace = true }
 async-trait = "0.1"
+bytes = "1.10"
 futures = "0.3"
 prost = { workspace = true }
 tokio = { version = "1", features = ["rt", "time", "macros", "sync"], default-features = false }

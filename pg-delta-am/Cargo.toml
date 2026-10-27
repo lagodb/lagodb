@@ -19,6 +19,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [] }
 default = ["pg17"]
 pg16 = ["pgrx/pg16", "lagodb-core/pg16"]
 pg17 = ["pgrx/pg17", "lagodb-core/pg17"]
+pg18 = ["pgrx/pg18", "lagodb-core/pg18"]
 pg_test = []
 
 [dependencies]
