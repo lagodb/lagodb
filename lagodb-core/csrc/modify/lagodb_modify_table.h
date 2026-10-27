@@ -17,30 +17,17 @@ typedef struct LagodbMutationResult
 	CommandId	modifying_cid;
 } LagodbMutationResult;
 
-typedef struct LagodbPreparedUpdateTriggerRows
-{
-	ItemPointerData old_tid;
-	ItemPointerData new_tid;
-} LagodbPreparedUpdateTriggerRows;
-
 typedef struct LagodbModifyBridge
 {
 	void	   *state;
 	bool		postgres_indexes;
-	bool		provider_owned_partitioned_table;
-	void	   *provider_owned_partitioned_table_state;
 	void	   *(*resolve_relation) (void *state, ResultRelInfo *result_rel_info);
-	AttrNumber	(*wholerow_attno) (void *state);
+	AttrNumber	wholerow_attno;
 	void		(*insert) (void *relation_state, TupleTableSlot *new_slot,
 						   CommandId cid, int options);
 	void		(*preserve_trigger_row) (
 										 void *relation_state, TupleTableSlot *slot,
 										 ItemPointerData *row_id);
-	void		(*prepare_update_trigger_rows) (
-												void *state, ResultRelInfo *source_info,
-												ResultRelInfo *destination_info, TupleTableSlot *old_slot,
-												TupleTableSlot *new_slot,
-												LagodbPreparedUpdateTriggerRows *prepared);
 	LagodbMutationResult (*update) (
 									void *relation_state,
 									const ItemPointerData *tuple_id,
@@ -49,14 +36,12 @@ typedef struct LagodbModifyBridge
 	LagodbMutationResult (*delete_) (
 									 void *relation_state,
 									 const ItemPointerData *tuple_id,
-									 CommandId cid, Snapshot snapshot, Snapshot crosscheck, bool wait,
-									 bool changing_partition);
+									 CommandId cid, Snapshot snapshot, Snapshot crosscheck, bool wait);
 } LagodbModifyBridge;
 
 /* Node-specific fork entry points, owned by the lifecycle adapter below. */
 extern ModifyTableState *lagodb_init_modify_table_state(
-														ModifyTableState *mtstate, ModifyTable *plan, EState *estate, int eflags,
-														bool provider_owns_partitioned_table);
+														ModifyTableState *mtstate, ModifyTable *plan, EState *estate, int eflags);
 extern TupleTableSlot *lagodb_exec_modify_table_with_bridge(
 															ModifyTableState *mtstate, LagodbModifyBridge *bridge);
 extern void LagodbExecEndModifyTable(ModifyTableState *mtstate);
@@ -64,8 +49,7 @@ extern void LagodbExecReScanModifyTable(ModifyTableState *mtstate);
 
 /* Complete lifecycle for nodes initialized by this adapter. */
 extern ModifyTableState *lagodb_exec_init_modify_table(
-													   ModifyTable *plan, EState *estate, int eflags,
-													   bool provider_owns_partitioned_table);
+													   ModifyTable *plan, EState *estate, int eflags);
 extern TupleTableSlot *lagodb_exec_modify_table(
 												ModifyTableState *mtstate, LagodbModifyBridge *bridge);
 extern void lagodb_exec_end_modify_table(ModifyTableState *mtstate);

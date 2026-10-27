@@ -28,17 +28,11 @@
 #include "miscadmin.h"
 #include "tcop/utility.h"
 
-#include "lagodb_relation.h"
-
-#if !LAGODB_PG17
-#error "COPY bridge has not been ported to this PostgreSQL major version"
-#endif
-
 /*
  * The row encoder owns its state and uses the source-derived text/CSV
- * serializer from the audited PG17.0-PG17.10 epoch. Keep minor-version
- * branches local to this code when a future audit finds a relevant
- * options, output-function, or serializer contract change.
+ * serializer audited across PG16.15, PG17.0-PG17.11 and PG18.6. Keep
+ * minor-version branches local to this code when a future audit finds a
+ * relevant options, output-function, or serializer contract change.
  */
 
 CopyFromState
@@ -323,7 +317,10 @@ lagodb_copy_send_char(LagodbCopyRowEncoder *state, char value)
 			lagodb_copy_send_data(state, start, ptr - start); \
 	} while (0)
 
-/* Source-derived from CopyAttributeOutText in the PG17.0-PG17.10 epoch. */
+/*
+ * Source-derived from CopyAttributeOutText in PG17.0-PG17.11 and PG18.6,
+ * audited for PG16.15.
+ */
 static void
 lagodb_copy_attribute_out_text(LagodbCopyRowEncoder *state,
 							   const char *string)
@@ -438,7 +435,10 @@ lagodb_copy_attribute_out_text(LagodbCopyRowEncoder *state,
 	LAGODB_COPY_DUMP_SO_FAR();
 }
 
-/* Source-derived from CopyAttributeOutCSV in the PG17.0-PG17.10 epoch. */
+/*
+ * Source-derived from CopyAttributeOutCSV in PG17.0-PG17.11 and PG18.6,
+ * audited for PG16.15.
+ */
 static void
 lagodb_copy_attribute_out_csv(LagodbCopyRowEncoder *state,
 							  const char *string, bool use_quote)

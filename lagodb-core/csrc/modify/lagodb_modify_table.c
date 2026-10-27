@@ -51,12 +51,13 @@
  */
 
 /*
- * PostgreSQL 17.10 nodeModifyTable.c fork.
+ * nodeModifyTable.c fork derived primarily from PostgreSQL 17.11/18.6, then
+ * audited and ported for PG16.15 control flow and API compatibility.
  *
  * Keep upstream control flow intact. Extension differences are delimited by
- * LAGODB BEGIN/END markers; PG17 minor compatibility stays in local
- * PG_VERSION_NUM branches. Audit both against PostgreSQL's
- * src/backend/executor/nodeModifyTable.c at the release tag in README.md.
+ * LAGODB BEGIN/END markers; version compatibility stays at the owning method.
+ * Audit every version against PostgreSQL's src/backend/executor/
+ * nodeModifyTable.c at the release tags recorded in README.md.
  */
 /* LAGODB BEGIN: prefix upstream global symbols linked into the extension. */
 #define ExecInitStoredGenerated LagodbExecInitStoredGenerated
@@ -84,9 +85,7 @@
 #include "optimizer/optimizer.h"
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
-#if PG_VERSION_NUM >= 170006
 #include "rewrite/rewriteManip.h"
-#endif
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
@@ -95,10 +94,6 @@
 
 #include "lagodb_pg_compat.h"
 #include "lagodb_modify_table.h"
-
-#if !LAGODB_PG17
-#error "ModifyTable fork has not been ported to this PostgreSQL major version"
-#endif
 
 typedef struct MTTargetRelLookup
 {
@@ -132,11 +127,25 @@ typedef struct ModifyTableContext
 	 */
 	TupleTableSlot *planSlot;
 
+#if LAGODB_PG17_LT
+	/* MERGE action in progress; ModifyTableState holds it from PostgreSQL 17 */
+	MergeActionState *relaction;
+#endif
+
 	/*
 	 * Information about the changes that were made concurrently to a tuple
 	 * being updated or deleted
 	 */
 	TM_FailureData tmfd;
+
+#if LAGODB_PG18_GE
+	/*
+	 * The tuple deleted when doing a cross-partition UPDATE with a RETURNING
+	 * clause that refers to OLD columns (converted to the root's tuple
+	 * descriptor).
+	 */
+	TupleTableSlot *cpDeletedSlot;
+#endif
 
 	/*
 	 * The tuple projected by the INSERT's RETURNING clause, when doing a
@@ -144,6 +153,12 @@ typedef struct ModifyTableContext
 	 */
 	TupleTableSlot *cpUpdateReturningSlot;
 } ModifyTableContext;
+
+#if LAGODB_PG17_GE
+#define LAGODB_MERGE_ACTION(context) ((context)->mtstate->mt_merge_action)
+#else
+#define LAGODB_MERGE_ACTION(context) ((context)->relaction)
+#endif
 
 /*
  * Context struct containing output data specific to UPDATE operations.
@@ -194,11 +209,7 @@ static TupleTableSlot *ExecMerge(ModifyTableContext *context,
 								 HeapTuple oldtuple,
 								 bool canSetTag);
 
-/* LAGODB BEGIN: MERGE initialization needs the precomputed root route. */
-static void ExecInitMerge(ModifyTableState *mtstate, EState *estate,
-						  bool provider_owns_partitioned_table);
-
-/* LAGODB END */
+static void ExecInitMerge(ModifyTableState *mtstate, EState *estate);
 static TupleTableSlot *ExecMergeMatched(ModifyTableContext *context,
 										ResultRelInfo *resultRelInfo,
 										ItemPointer tupleid,
@@ -219,20 +230,10 @@ LagodbRelationState(ModifyTableContext *context,
 	if (context->lagodb_result_rel_info == resultRelInfo)
 		return context->lagodb_relation_state;
 
-	if (bridge != NULL && bridge->provider_owned_partitioned_table &&
-		resultRelInfo == context->mtstate->rootResultRelInfo)
-	{
-		context->lagodb_result_rel_info = resultRelInfo;
-		context->lagodb_relation_state = bridge->provider_owned_partitioned_table_state;
-		return context->lagodb_relation_state;
-	}
-
 	context->lagodb_result_rel_info = resultRelInfo;
 	context->lagodb_relation_state =
-		bridge != NULL && bridge->resolve_relation != NULL ?
-		bridge->resolve_relation(bridge->state, resultRelInfo) : NULL;
-	if (context->lagodb_relation_state != NULL &&
-		resultRelInfo->ri_TrigOldSlot == NULL &&
+		bridge->resolve_relation(bridge->state, resultRelInfo);
+	if (resultRelInfo->ri_TrigOldSlot == NULL &&
 		resultRelInfo->ri_TrigDesc != NULL &&
 		(resultRelInfo->ri_TrigDesc->trig_update_after_row ||
 		 resultRelInfo->ri_TrigDesc->trig_delete_after_row))
@@ -250,13 +251,6 @@ LagodbRelationState(ModifyTableContext *context,
 								   &TTSOpsHeapTuple);
 	}
 	return context->lagodb_relation_state;
-}
-
-static bool
-LagodbSupportsRelation(ModifyTableContext *context,
-					   ResultRelInfo *resultRelInfo)
-{
-	return LagodbRelationState(context, resultRelInfo) != NULL;
 }
 
 /*
@@ -378,26 +372,89 @@ ExecCheckPlanOutput(Relation resultRel, List *targetList)
 /*
  * ExecProcessReturning --- evaluate a RETURNING list
  *
+ * context: context for the ModifyTable operation
  * resultRelInfo: current result rel
- * tupleSlot: slot holding tuple actually inserted/updated/deleted
+ * cmdType: operation/merge action performed (INSERT, UPDATE, or DELETE)
+ * oldSlot: slot holding old tuple deleted or updated
+ * newSlot: slot holding new tuple inserted or updated
  * planSlot: slot holding tuple returned by top subplan node
  *
- * Note: If tupleSlot is NULL, the FDW should have already provided econtext's
- * scan tuple.
+ * Note: If oldSlot and newSlot are NULL, the FDW should have already provided
+ * econtext's scan tuple and its old & new tuples are not needed (FDW direct-
+ * modify is disabled if the RETURNING list refers to any OLD/NEW values).
  *
  * Returns a slot holding the result tuple
  */
 static TupleTableSlot *
-ExecProcessReturning(ResultRelInfo *resultRelInfo,
-					 TupleTableSlot *tupleSlot,
+ExecProcessReturning(ModifyTableContext *context,
+					 ResultRelInfo *resultRelInfo,
+					 CmdType cmdType,
+					 TupleTableSlot *oldSlot,
+					 TupleTableSlot *newSlot,
 					 TupleTableSlot *planSlot)
 {
 	ProjectionInfo *projectReturning = resultRelInfo->ri_projectReturning;
 	ExprContext *econtext = projectReturning->pi_exprContext;
 
+#if LAGODB_PG18_GE
 	/* Make tuple and any needed join variables available to ExecProject */
-	if (tupleSlot)
-		econtext->ecxt_scantuple = tupleSlot;
+	switch (cmdType)
+	{
+		case CMD_INSERT:
+		case CMD_UPDATE:
+			/* return new tuple by default */
+			if (newSlot)
+				econtext->ecxt_scantuple = newSlot;
+			break;
+		case CMD_DELETE:
+			/* return old tuple by default */
+			if (oldSlot)
+				econtext->ecxt_scantuple = oldSlot;
+			break;
+		default:
+			elog(ERROR, "unrecognized commandType: %d", (int) cmdType);
+	}
+	econtext->ecxt_outertuple = planSlot;
+
+	/* Make old/new tuples available to ExecProject, if required */
+	if (oldSlot)
+		econtext->ecxt_oldtuple = oldSlot;
+	else if (projectReturning->pi_state.flags & EEO_FLAG_HAS_OLD)
+		econtext->ecxt_oldtuple = ExecGetAllNullSlot(context->estate,
+													 resultRelInfo);
+	else
+		econtext->ecxt_oldtuple = NULL; /* No references to OLD columns */
+
+	if (newSlot)
+		econtext->ecxt_newtuple = newSlot;
+	else if (projectReturning->pi_state.flags & EEO_FLAG_HAS_NEW)
+		econtext->ecxt_newtuple = ExecGetAllNullSlot(context->estate,
+													 resultRelInfo);
+	else
+		econtext->ecxt_newtuple = NULL; /* No references to NEW columns */
+
+	/*
+	 * Tell ExecProject whether or not the OLD/NEW rows actually exist.  This
+	 * information is required to evaluate ReturningExpr nodes and also in
+	 * ExecEvalSysVar() and ExecEvalWholeRowVar().
+	 */
+	if (oldSlot == NULL)
+		projectReturning->pi_state.flags |= EEO_FLAG_OLD_IS_NULL;
+	else
+		projectReturning->pi_state.flags &= ~EEO_FLAG_OLD_IS_NULL;
+	if (newSlot == NULL)
+		projectReturning->pi_state.flags |= EEO_FLAG_NEW_IS_NULL;
+	else
+		projectReturning->pi_state.flags &= ~EEO_FLAG_NEW_IS_NULL;
+#else
+	/* Make tuple and any needed join variables available to ExecProject */
+	if (cmdType == CMD_DELETE)
+	{
+		if (oldSlot)
+			econtext->ecxt_scantuple = oldSlot;
+	}
+	else if (newSlot)
+		econtext->ecxt_scantuple = newSlot;
 	econtext->ecxt_outertuple = planSlot;
 
 	/*
@@ -406,6 +463,7 @@ ExecProcessReturning(ResultRelInfo *resultRelInfo,
 	 */
 	econtext->ecxt_scantuple->tts_tableOid =
 		RelationGetRelid(resultRelInfo->ri_RelationDesc);
+#endif
 
 	/* Compute the RETURNING expressions */
 	return ExecProject(projectReturning);
@@ -472,11 +530,13 @@ ExecCheckTIDVisible(EState *estate,
 }
 
 /*
- * Initialize to compute stored generated columns for a tuple
+ * Initialize generated columns handling for a tuple
  *
  * This fills the resultRelInfo's ri_GeneratedExprsI/ri_NumGeneratedNeededI
  * or ri_GeneratedExprsU/ri_NumGeneratedNeededU fields, depending on cmdtype.
- * If cmdType == CMD_UPDATE, the ri_extraUpdatedCols field is filled too.
+ * These expression fields are used only for stored generated columns.  In
+ * PG18, ri_extraUpdatedCols is also filled for UPDATE and covers both stored
+ * and virtual generated columns.
  *
  * Note: usually, a given query would need only one of ri_GeneratedExprsI and
  * ri_GeneratedExprsU per result rel; but MERGE can need both, and so can
@@ -497,7 +557,11 @@ ExecInitStoredGenerated(ResultRelInfo *resultRelInfo,
 	MemoryContext oldContext;
 
 	/* Nothing to do if no generated columns */
-	if (!(tupdesc->constr && tupdesc->constr->has_generated_stored))
+	if (!(tupdesc->constr && (tupdesc->constr->has_generated_stored
+#if LAGODB_PG18_GE
+								 || tupdesc->constr->has_generated_virtual
+#endif
+								 )))
 		return;
 
 	/*
@@ -523,7 +587,9 @@ ExecInitStoredGenerated(ResultRelInfo *resultRelInfo,
 
 	for (int i = 0; i < natts; i++)
 	{
-		if (TupleDescAttr(tupdesc, i)->attgenerated == ATTRIBUTE_GENERATED_STORED)
+		char		attgenerated = TupleDescAttr(tupdesc, i)->attgenerated;
+
+		if (attgenerated)
 		{
 			Expr	   *expr;
 
@@ -548,8 +614,11 @@ ExecInitStoredGenerated(ResultRelInfo *resultRelInfo,
 			}
 
 			/* No luck, so prepare the expression for execution */
-			ri_GeneratedExprs[i] = ExecPrepareExpr(expr, estate);
-			ri_NumGeneratedNeeded++;
+			if (attgenerated == ATTRIBUTE_GENERATED_STORED)
+			{
+				ri_GeneratedExprs[i] = ExecPrepareExpr(expr, estate);
+				ri_NumGeneratedNeeded++;
+			}
 
 			/* If UPDATE, mark column in resultRelInfo->ri_extraUpdatedCols */
 			if (cmdtype == CMD_UPDATE)
@@ -559,6 +628,15 @@ ExecInitStoredGenerated(ResultRelInfo *resultRelInfo,
 		}
 	}
 
+#if LAGODB_PG18_GE
+	if (ri_NumGeneratedNeeded == 0)
+	{
+		/* didn't need it after all */
+		pfree(ri_GeneratedExprs);
+		ri_GeneratedExprs = NULL;
+	}
+#endif
+
 	/* Save in appropriate set of fields */
 	if (cmdtype == CMD_UPDATE)
 	{
@@ -567,6 +645,9 @@ ExecInitStoredGenerated(ResultRelInfo *resultRelInfo,
 
 		resultRelInfo->ri_GeneratedExprsU = ri_GeneratedExprs;
 		resultRelInfo->ri_NumGeneratedNeededU = ri_NumGeneratedNeeded;
+#if LAGODB_PG18_GE
+		resultRelInfo->ri_extraUpdatedCols_valid = true;
+#endif
 	}
 	else
 	{
@@ -631,14 +712,19 @@ ExecComputeStoredGenerated(ResultRelInfo *resultRelInfo,
 
 	for (int i = 0; i < natts; i++)
 	{
+#if LAGODB_PG18_GE
+		CompactAttribute *attr = TupleDescCompactAttr(tupdesc, i);
+#else
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+#endif
 
 		if (ri_GeneratedExprs[i])
 		{
 			Datum		val;
 			bool		isnull;
 
-			Assert(attr->attgenerated == ATTRIBUTE_GENERATED_STORED);
+			Assert(TupleDescAttr(tupdesc, i)->attgenerated ==
+				   ATTRIBUTE_GENERATED_STORED);
 
 			econtext->ecxt_scantuple = slot;
 
@@ -771,7 +857,11 @@ ExecInitUpdateProjection(ModifyTableState *mtstate,
 		Assert(whichrel >= 0 && whichrel < mtstate->mt_nrels);
 	}
 
+#if LAGODB_PG18_GE
+	updateColnos = (List *) list_nth(mtstate->mt_updateColnosLists, whichrel);
+#else
 	updateColnos = (List *) list_nth(node->updateColnosLists, whichrel);
+#endif
 
 	/*
 	 * For UPDATE, we use the old tuple to fill up missing values in the tuple
@@ -913,14 +1003,7 @@ ExecInsert(ModifyTableContext *context,
 	 * If the input result relation is a partitioned table, find the leaf
 	 * partition to insert the tuple into.
 	 */
-
-	/*
-	 * LAGODB BEGIN: provider-owned partitioned tables do not use PG leaf
-	 * routing.
-	 */
-	if (proute &&
-		!(context->lagodb_bridge != NULL &&
-		  context->lagodb_bridge->provider_owned_partitioned_table))
+	if (proute)
 	{
 		ResultRelInfo *partRelInfo;
 
@@ -929,7 +1012,6 @@ ExecInsert(ModifyTableContext *context,
 									   &partRelInfo);
 		resultRelInfo = partRelInfo;
 	}
-	/* LAGODB END */
 
 	ExecMaterializeSlot(slot);
 
@@ -1128,7 +1210,7 @@ ExecInsert(ModifyTableContext *context,
 		if (mtstate->operation == CMD_UPDATE)
 			wco_kind = WCO_RLS_UPDATE_CHECK;
 		else if (mtstate->operation == CMD_MERGE)
-			wco_kind = (mtstate->mt_merge_action->mas_action->commandType == CMD_UPDATE) ?
+			wco_kind = (LAGODB_MERGE_ACTION(context)->mas_action->commandType == CMD_UPDATE) ?
 				WCO_RLS_UPDATE_CHECK : WCO_RLS_INSERT_CHECK;
 		else
 			wco_kind = WCO_RLS_INSERT_CHECK;
@@ -1162,9 +1244,15 @@ ExecInsert(ModifyTableContext *context,
 			/* Perform a speculative insertion. */
 			uint32		specToken;
 			ItemPointerData conflictTid;
+#if LAGODB_PG18_GE
+			ItemPointerData invalidItemPtr;
+#endif
 			bool		specConflict;
 			List	   *arbiterIndexes;
 
+#if LAGODB_PG18_GE
+			ItemPointerSetInvalid(&invalidItemPtr);
+#endif
 			arbiterIndexes = resultRelInfo->ri_onConflictArbiterIndexes;
 
 			/*
@@ -1184,7 +1272,11 @@ ExecInsert(ModifyTableContext *context,
 			CHECK_FOR_INTERRUPTS();
 			specConflict = false;
 			if (!ExecCheckIndexConstraints(resultRelInfo, slot, estate,
-										   &conflictTid, arbiterIndexes))
+										   &conflictTid,
+#if LAGODB_PG18_GE
+										   &invalidItemPtr,
+#endif
+										   arbiterIndexes))
 			{
 				/* committed conflict tuple found */
 				if (onconflict == ONCONFLICT_UPDATE)
@@ -1280,23 +1372,13 @@ ExecInsert(ModifyTableContext *context,
 		{
 			/* insert the tuple normally */
 			/* LAGODB BEGIN: final INSERT slot mutation boundary. */
-			if (LagodbSupportsRelation(context, resultRelInfo))
-			{
-				LagodbModifyBridge *bridge = context->lagodb_bridge;
+			context->lagodb_bridge->insert(LagodbRelationState(context, resultRelInfo),
+										   slot, estate->es_output_cid, 0);
 
-				bridge->insert(LagodbRelationState(context, resultRelInfo), slot,
-							   estate->es_output_cid, 0);
-
-				/*
-				 * The bridge replaces table_tuple_insert(), including its
-				 * stats.
-				 */
-				pgstat_count_heap_insert(resultRelationDesc, 1);
-			}
-			else
-				table_tuple_insert(resultRelationDesc, slot,
-								   estate->es_output_cid,
-								   0, NULL);
+			/*
+			 * The bridge replaces table_tuple_insert(), including its stats.
+			 */
+			pgstat_count_heap_insert(resultRelationDesc, 1);
 			/* LAGODB END */
 
 			/* insert index entries for tuple */
@@ -1338,8 +1420,7 @@ ExecInsert(ModifyTableContext *context,
 	}
 
 	/* AFTER ROW INSERT Triggers */
-	if (LagodbSupportsRelation(context, resultRelInfo) &&
-		resultRelInfo->ri_TrigDesc &&
+	if (resultRelInfo->ri_TrigDesc &&
 		resultRelInfo->ri_TrigDesc->trig_insert_after_row)
 	{
 		ItemPointerData saved_tid = slot->tts_tid;
@@ -1375,7 +1456,59 @@ ExecInsert(ModifyTableContext *context,
 
 	/* Process RETURNING if present */
 	if (resultRelInfo->ri_projectReturning)
-		result = ExecProcessReturning(resultRelInfo, slot, planSlot);
+	{
+		TupleTableSlot *oldSlot = NULL;
+
+#if LAGODB_PG18_GE
+		/*
+		 * If this is part of a cross-partition UPDATE, and the RETURNING list
+		 * refers to any OLD columns, ExecDelete() will have saved the tuple
+		 * deleted from the original partition, which we must use here to
+		 * compute the OLD column values.  Otherwise, all OLD column values
+		 * will be NULL.
+		 */
+		if (context->cpDeletedSlot)
+		{
+			TupleConversionMap *tupconv_map;
+
+			oldSlot = context->cpDeletedSlot;
+			tupconv_map = ExecGetRootToChildMap(resultRelInfo, estate);
+			if (tupconv_map != NULL)
+			{
+				/*
+				 * Convert the OLD tuple to the new partition's format/slot, if
+				 * needed.  Note that ExecDelete() already converted it to the
+				 * root's partition's format/slot.
+				 */
+				oldSlot = execute_attr_map_slot(tupconv_map->attrMap, oldSlot,
+											ExecGetReturningSlot(estate,
+															 resultRelInfo));
+				oldSlot->tts_tableOid = context->cpDeletedSlot->tts_tableOid;
+				ItemPointerCopy(&context->cpDeletedSlot->tts_tid,
+								&oldSlot->tts_tid);
+			}
+		}
+#endif
+
+		result = ExecProcessReturning(context, resultRelInfo, CMD_INSERT,
+									  oldSlot, slot, planSlot);
+
+#if LAGODB_PG18_GE
+		/*
+		 * For a cross-partition UPDATE, release the old tuple, first making
+		 * sure that the result slot has a local copy of any pass-by-reference
+		 * values.
+		 */
+		if (context->cpDeletedSlot)
+		{
+			ExecMaterializeSlot(result);
+			ExecClearTuple(oldSlot);
+			if (context->cpDeletedSlot != oldSlot)
+				ExecClearTuple(context->cpDeletedSlot);
+			context->cpDeletedSlot = NULL;
+		}
+#endif
+	}
 
 	if (inserted_tuple)
 		*inserted_tuple = slot;
@@ -1498,27 +1631,26 @@ ExecDeletePrologue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	if (resultRelInfo->ri_TrigDesc &&
 		resultRelInfo->ri_TrigDesc->trig_delete_before_row)
 	{
-		if (LagodbSupportsRelation(context, resultRelInfo) && oldtuple == NULL)
+		if (oldtuple == NULL)
 			elog(ERROR, "LagoDB DELETE trigger input has no wholerow");
 
 		/* Flush any pending inserts, so rows are visible to the triggers */
 		if (context->estate->es_insert_pending_result_relations != NIL)
 			ExecPendingInserts(context->estate);
 
-#if PG_VERSION_NUM >= 170006
+#if LAGODB_PG18_GE
+		return ExecBRDeleteTriggers(context->estate, context->epqstate,
+									resultRelInfo, NULL, oldtuple,
+									epqreturnslot, result, &context->tmfd,
+									context->mtstate->operation == CMD_MERGE);
+#elif PG_VERSION_NUM >= 170006
 		return ExecBRDeleteTriggersNew(context->estate, context->epqstate,
-									   resultRelInfo,
-									   LagodbSupportsRelation(context, resultRelInfo) ?
-									   NULL : tupleid,
-									   oldtuple,
+									   resultRelInfo, NULL, oldtuple,
 									   epqreturnslot, result, &context->tmfd,
 									   context->mtstate->operation == CMD_MERGE);
 #else
 		return ExecBRDeleteTriggers(context->estate, context->epqstate,
-									resultRelInfo,
-									LagodbSupportsRelation(context, resultRelInfo) ?
-									NULL : tupleid,
-									oldtuple,
+									resultRelInfo, NULL, oldtuple,
 									epqreturnslot, result, &context->tmfd);
 #endif
 	}
@@ -1540,47 +1672,34 @@ ExecDeleteAct(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	EState	   *estate = context->estate;
 
 	/* LAGODB BEGIN: identity-only storage mutation boundary. */
-	if (LagodbSupportsRelation(context, resultRelInfo))
+	LagodbModifyBridge *bridge = context->lagodb_bridge;
+	LagodbMutationResult mutation;
+
+	Assert(tupleid != NULL);
+	mutation = bridge->delete_(LagodbRelationState(context, resultRelInfo),
+							   tupleid,
+							   estate->es_output_cid,
+							   estate->es_snapshot,
+							   estate->es_crosscheck_snapshot,
+							   true);
+	switch (mutation.outcome)
 	{
-		LagodbModifyBridge *bridge = context->lagodb_bridge;
-		LagodbMutationResult mutation;
+		case LAGODB_MUTATION_APPLIED:
 
-		if (tupleid == NULL)
-			elog(ERROR, "LagoDB DELETE has no synthetic ctid");
-		mutation = bridge->delete_(LagodbRelationState(context, resultRelInfo),
-								   tupleid,
-								   estate->es_output_cid,
-								   estate->es_snapshot,
-								   estate->es_crosscheck_snapshot,
-								   true, changingPart);
-		switch (mutation.outcome)
-		{
-			case LAGODB_MUTATION_APPLIED:
-
-				/*
-				 * The bridge replaces table_tuple_delete(), including its
-				 * statistics lifecycle.
-				 */
-				pgstat_count_heap_delete(resultRelInfo->ri_RelationDesc);
-				return TM_Ok;
-			case LAGODB_MUTATION_SELF_MODIFIED:
-				LagodbSetSelfModifiedFailureData(context,
-												 mutation.modifying_cid);
-				return TM_SelfModified;
-			case LAGODB_MUTATION_DELETED:
-				return TM_Deleted;
-		}
-		elog(ERROR, "unknown LagoDB DELETE outcome");
+			/*
+			 * The bridge replaces table_tuple_delete(), including its
+			 * statistics lifecycle.
+			 */
+			pgstat_count_heap_delete(resultRelInfo->ri_RelationDesc);
+			return TM_Ok;
+		case LAGODB_MUTATION_SELF_MODIFIED:
+			LagodbSetSelfModifiedFailureData(context, mutation.modifying_cid);
+			return TM_SelfModified;
+		case LAGODB_MUTATION_DELETED:
+			return TM_Deleted;
 	}
+	elog(ERROR, "unknown LagoDB DELETE outcome");
 	/* LAGODB END */
-
-	return table_tuple_delete(resultRelInfo->ri_RelationDesc, tupleid,
-							  estate->es_output_cid,
-							  estate->es_snapshot,
-							  estate->es_crosscheck_snapshot,
-							  true /* wait for commit */ ,
-							  &context->tmfd,
-							  changingPart);
 }
 
 /*
@@ -1605,7 +1724,7 @@ ExecDeleteEpilogue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	 * because they happen on different tables.
 	 */
 	ar_delete_trig_tcs = mtstate->mt_transition_capture;
-	if (LagodbSupportsRelation(context, resultRelInfo) && oldtuple == NULL &&
+	if (oldtuple == NULL &&
 		((resultRelInfo->ri_TrigDesc &&
 		  resultRelInfo->ri_TrigDesc->trig_delete_after_row) ||
 		 ar_delete_trig_tcs != NULL))
@@ -1627,8 +1746,7 @@ ExecDeleteEpilogue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	}
 
 	/* AFTER ROW DELETE Triggers */
-	if (LagodbSupportsRelation(context, resultRelInfo) &&
-		resultRelInfo->ri_TrigDesc &&
+	if (resultRelInfo->ri_TrigDesc &&
 		resultRelInfo->ri_TrigDesc->trig_delete_after_row)
 	{
 		ItemPointerData saved_old_tid;
@@ -1649,10 +1767,7 @@ ExecDeleteEpilogue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		oldtuple->t_self = saved_old_tid;
 	}
 	else
-		ExecARDeleteTriggers(estate, resultRelInfo,
-							 LagodbSupportsRelation(context, resultRelInfo) ?
-							 NULL : tupleid,
-							 oldtuple,
+		ExecARDeleteTriggers(estate, resultRelInfo, NULL, oldtuple,
 							 ar_delete_trig_tcs, changingPart);
 }
 
@@ -1694,6 +1809,9 @@ ExecDelete(ModifyTableContext *context,
 	Relation	resultRelationDesc = resultRelInfo->ri_RelationDesc;
 	TupleTableSlot *slot = NULL;
 	TM_Result	result;
+#if LAGODB_PG18_GE
+	bool		saveOld;
+#endif
 
 	if (tupleDeleted)
 		*tupleDeleted = false;
@@ -1928,8 +2046,21 @@ ldelete:
 
 	ExecDeleteEpilogue(context, resultRelInfo, tupleid, oldtuple, changingPart);
 
+#if LAGODB_PG18_GE
+	/*
+	 * Process RETURNING if present and if requested.
+	 *
+	 * If this is part of a cross-partition UPDATE, and the RETURNING list
+	 * refers to any OLD column values, save the old tuple here for later
+	 * processing of the RETURNING list by ExecInsert().
+	 */
+	saveOld = changingPart && resultRelInfo->ri_projectReturning &&
+		(resultRelInfo->ri_projectReturning->pi_state.flags & EEO_FLAG_HAS_OLD);
+	if (resultRelInfo->ri_projectReturning && (processReturning || saveOld))
+#else
 	/* Process RETURNING if present and if requested */
 	if (processReturning && resultRelInfo->ri_projectReturning)
+#endif
 	{
 		/*
 		 * We have to put the target tuple into a slot, which means first we
@@ -1948,18 +2079,47 @@ ldelete:
 			if (oldtuple != NULL)
 			{
 				ExecForceStoreHeapTuple(oldtuple, slot, false);
+				/* LAGODB BEGIN: virtual slots do not inherit HeapTuple table OID. */
+				slot->tts_tableOid = RelationGetRelid(resultRelationDesc);
+				/* LAGODB END */
 			}
 			else
-			{
-				if (LagodbSupportsRelation(context, resultRelInfo))
-					elog(ERROR, "LagoDB DELETE RETURNING input has no wholerow");
-				if (!table_tuple_fetch_row_version(resultRelationDesc, tupleid,
-												   SnapshotAny, slot))
-					elog(ERROR, "failed to fetch deleted tuple for DELETE RETURNING");
-			}
+				elog(ERROR, "LagoDB DELETE RETURNING input has no wholerow");
 		}
 
-		rslot = ExecProcessReturning(resultRelInfo, slot, context->planSlot);
+#if LAGODB_PG18_GE
+		/*
+		 * If required, save the old tuple for later processing of the
+		 * RETURNING list by ExecInsert().
+		 */
+		if (saveOld)
+		{
+			TupleConversionMap *tupconv_map;
+
+			/*
+			 * Convert the tuple into the root partition's format/slot, if
+			 * needed.  ExecInsert() will then convert it to the new
+			 * partition's format/slot, if necessary.
+			 */
+			tupconv_map = ExecGetChildToRootMap(resultRelInfo);
+			if (tupconv_map != NULL)
+			{
+				ResultRelInfo *rootRelInfo = context->mtstate->rootResultRelInfo;
+				TupleTableSlot *oldSlot = slot;
+
+				slot = execute_attr_map_slot(tupconv_map->attrMap, slot,
+										 ExecGetReturningSlot(estate, rootRelInfo));
+				slot->tts_tableOid = oldSlot->tts_tableOid;
+				ItemPointerCopy(&oldSlot->tts_tid, &slot->tts_tid);
+			}
+
+			context->cpDeletedSlot = slot;
+			return NULL;
+		}
+#endif
+
+		rslot = ExecProcessReturning(context, resultRelInfo, CMD_DELETE,
+									 slot, NULL, context->planSlot);
 
 		/*
 		 * Before releasing the target tuple again, make sure rslot has a
@@ -2012,6 +2172,9 @@ ExecCrossPartitionUpdate(ModifyTableContext *context,
 	bool		tuple_deleted;
 	TupleTableSlot *epqslot = NULL;
 
+#if LAGODB_PG18_GE
+	context->cpDeletedSlot = NULL;
+#endif
 	context->cpUpdateReturningSlot = NULL;
 	*retry_slot = NULL;
 
@@ -2183,20 +2346,19 @@ ExecUpdatePrologue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		if (context->estate->es_insert_pending_result_relations != NIL)
 			ExecPendingInserts(context->estate);
 
-#if PG_VERSION_NUM >= 170006
+#if LAGODB_PG18_GE
+		return ExecBRUpdateTriggers(context->estate, context->epqstate,
+									resultRelInfo, NULL, oldtuple, slot,
+									result, &context->tmfd,
+									context->mtstate->operation == CMD_MERGE);
+#elif PG_VERSION_NUM >= 170006
 		return ExecBRUpdateTriggersNew(context->estate, context->epqstate,
-									   resultRelInfo,
-									   LagodbSupportsRelation(context, resultRelInfo) ?
-									   NULL : tupleid,
-									   oldtuple, slot,
+									   resultRelInfo, NULL, oldtuple, slot,
 									   result, &context->tmfd,
 									   context->mtstate->operation == CMD_MERGE);
 #else
 		return ExecBRUpdateTriggers(context->estate, context->epqstate,
-									resultRelInfo,
-									LagodbSupportsRelation(context, resultRelInfo) ?
-									NULL : tupleid,
-									oldtuple, slot,
+									resultRelInfo, NULL, oldtuple, slot,
 									result, &context->tmfd);
 #endif
 	}
@@ -2254,6 +2416,10 @@ ExecUpdateAct(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	Relation	resultRelationDesc = resultRelInfo->ri_RelationDesc;
 	bool		partition_constraint_failed;
 	TM_Result	result;
+	/* LAGODB BEGIN: slot-first mutation bridge. */
+	LagodbModifyBridge *bridge = context->lagodb_bridge;
+	LagodbMutationResult mutation;
+	/* LAGODB END */
 
 	updateCxt->crossPartUpdate = false;
 
@@ -2380,58 +2546,39 @@ lreplace:
 	 * transactions.
 	 */
 	/* LAGODB BEGIN: identity/OLD/final-NEW slot mutation boundary. */
-	if (LagodbSupportsRelation(context, resultRelInfo))
+	Assert(context->lagodb_old_slot != NULL);
+	Assert(tupleid != NULL);
+	mutation = bridge->update(LagodbRelationState(context, resultRelInfo),
+							  tupleid,
+							  context->lagodb_old_slot, slot,
+							  estate->es_output_cid,
+							  estate->es_snapshot,
+							  estate->es_crosscheck_snapshot,
+							  true);
+	updateCxt->lockmode = LockTupleExclusive;
+	updateCxt->updateIndexes = TU_None;
+	switch (mutation.outcome)
 	{
-		LagodbModifyBridge *bridge = context->lagodb_bridge;
-		LagodbMutationResult mutation;
+		case LAGODB_MUTATION_APPLIED:
 
-		if (context->lagodb_old_slot == NULL)
-			elog(ERROR, "LagoDB UPDATE has no OLD slot");
-		if (tupleid == NULL)
-			elog(ERROR, "LagoDB UPDATE has no synthetic ctid");
-		mutation = bridge->update(LagodbRelationState(context, resultRelInfo),
-								  tupleid,
-								  context->lagodb_old_slot, slot,
-								  estate->es_output_cid,
-								  estate->es_snapshot,
-								  estate->es_crosscheck_snapshot,
-								  true);
-		updateCxt->lockmode = LockTupleExclusive;
-		updateCxt->updateIndexes = TU_None;
-		switch (mutation.outcome)
-		{
-			case LAGODB_MUTATION_APPLIED:
-
-				/*
-				 * The bridge replaces table_tuple_update(), including its
-				 * statistics lifecycle.
-				 */
-				pgstat_count_heap_update(resultRelationDesc, false, false);
-				result = TM_Ok;
-				if (bridge->postgres_indexes)
-					updateCxt->updateIndexes = TU_All;
-				break;
-			case LAGODB_MUTATION_SELF_MODIFIED:
-				LagodbSetSelfModifiedFailureData(context,
-												 mutation.modifying_cid);
-				result = TM_SelfModified;
-				break;
-			case LAGODB_MUTATION_DELETED:
-				result = TM_Deleted;
-				break;
-			default:
-				elog(ERROR, "unknown LagoDB UPDATE outcome");
-		}
-	}
-	else
-	{
-		result = table_tuple_update(resultRelationDesc, tupleid, slot,
-									estate->es_output_cid,
-									estate->es_snapshot,
-									estate->es_crosscheck_snapshot,
-									true /* wait for commit */ ,
-									&context->tmfd, &updateCxt->lockmode,
-									&updateCxt->updateIndexes);
+			/*
+			 * The bridge replaces table_tuple_update(), including its
+			 * statistics lifecycle.
+			 */
+			pgstat_count_heap_update(resultRelationDesc, false, false);
+			result = TM_Ok;
+			if (bridge->postgres_indexes)
+				updateCxt->updateIndexes = TU_All;
+			break;
+		case LAGODB_MUTATION_SELF_MODIFIED:
+			LagodbSetSelfModifiedFailureData(context, mutation.modifying_cid);
+			result = TM_SelfModified;
+			break;
+		case LAGODB_MUTATION_DELETED:
+			result = TM_Deleted;
+			break;
+		default:
+			elog(ERROR, "unknown LagoDB UPDATE outcome");
 	}
 	/* LAGODB END */
 
@@ -2461,31 +2608,28 @@ ExecUpdateEpilogue(ModifyTableContext *context, UpdateContext *updateCxt,
 											   (updateCxt->updateIndexes == TU_Summarizing));
 
 	/* AFTER ROW UPDATE Triggers */
-	if (LagodbSupportsRelation(context, resultRelInfo) &&
-		resultRelInfo->ri_TrigDesc &&
+	if (resultRelInfo->ri_TrigDesc &&
 		resultRelInfo->ri_TrigDesc->trig_update_after_row)
 	{
+		void	   *relation_state = LagodbRelationState(context, resultRelInfo);
 		ItemPointerData saved_new_tid = slot->tts_tid;
 		ItemPointerData saved_old_tid;
-		LagodbPreparedUpdateTriggerRows prepared;
+		ItemPointerData old_trigger_tid;
+		ItemPointerData new_trigger_tid;
 		TupleTableSlot *trigger_old_slot;
 
-		if (oldtuple == NULL || context->lagodb_old_slot == NULL)
-			elog(ERROR, "LagoDB AFTER UPDATE trigger has no OLD row");
-		ItemPointerSetInvalid(&prepared.old_tid);
-		ItemPointerSetInvalid(&prepared.new_tid);
+		Assert(oldtuple != NULL && context->lagodb_old_slot != NULL);
 		trigger_old_slot =
 			ExecGetTriggerOldSlot(context->estate, resultRelInfo);
 		ExecForceStoreHeapTuple(oldtuple, trigger_old_slot, false);
-		context->lagodb_bridge->prepare_update_trigger_rows(
-															context->lagodb_bridge->state, resultRelInfo, resultRelInfo,
-															trigger_old_slot, slot, &prepared);
-		if (!ItemPointerIsValid(&prepared.old_tid) ||
-			!ItemPointerIsValid(&prepared.new_tid))
-			elog(ERROR, "LagoDB UPDATE trigger rows were not preserved");
+		context->lagodb_bridge->preserve_trigger_row(relation_state,
+													 trigger_old_slot,
+													 &old_trigger_tid);
+		context->lagodb_bridge->preserve_trigger_row(relation_state, slot,
+													 &new_trigger_tid);
 		saved_old_tid = oldtuple->t_self;
-		oldtuple->t_self = prepared.old_tid;
-		slot->tts_tid = prepared.new_tid;
+		oldtuple->t_self = old_trigger_tid;
+		slot->tts_tid = new_trigger_tid;
 		ExecARUpdateTriggers(context->estate, resultRelInfo,
 							 NULL, NULL,
 							 NULL, oldtuple, slot,
@@ -2539,10 +2683,6 @@ ExecCrossPartitionUpdateForeignKey(ModifyTableContext *context,
 	ListCell   *lc;
 	ResultRelInfo *rootRelInfo;
 	List	   *ancestorRels;
-	HeapTuple	lagodb_oldtuple = NULL;
-	bool		should_free = false;
-	bool		source_is_lagodb;
-	bool		destination_is_lagodb;
 
 	rootRelInfo = sourcePartInfo->ri_RootResultRelInfo;
 	ancestorRels = ExecGetAncestorResultRels(context->estate, sourcePartInfo);
@@ -2590,67 +2730,10 @@ ExecCrossPartitionUpdateForeignKey(ModifyTableContext *context,
 							 RelationGetRelationName(rootRelInfo->ri_RelationDesc))));
 	}
 
-	/*
-	 * LAGODB BEGIN: preserve each custom-AM side under the exact leaf
-	 * relation PostgreSQL will use when the queued trigger event is fired.
-	 * Native heap sides retain their physical TIDs.
-	 */
-	source_is_lagodb = LagodbSupportsRelation(context, sourcePartInfo);
-	destination_is_lagodb = LagodbSupportsRelation(context, destPartInfo);
-	if (source_is_lagodb || destination_is_lagodb)
-	{
-		LagodbPreparedUpdateTriggerRows prepared;
-		ItemPointerData saved_new_tid = newslot->tts_tid;
-		ItemPointerData saved_old_tid;
-
-		ItemPointerSetInvalid(&prepared.old_tid);
-		ItemPointerSetInvalid(&prepared.new_tid);
-		if (source_is_lagodb)
-		{
-			if (context->lagodb_old_slot == NULL)
-				elog(ERROR, "LagoDB cross-partition UPDATE has no OLD slot");
-			lagodb_oldtuple =
-				ExecFetchSlotHeapTuple(context->lagodb_old_slot,
-									   true, &should_free);
-		}
-		context->lagodb_bridge->prepare_update_trigger_rows(
-															context->lagodb_bridge->state, sourcePartInfo, destPartInfo,
-															source_is_lagodb ? context->lagodb_old_slot : NULL,
-															newslot, &prepared);
-
-		if (source_is_lagodb)
-		{
-			if (!ItemPointerIsValid(&prepared.old_tid))
-				elog(ERROR, "LagoDB cross-partition UPDATE did not preserve OLD");
-			saved_old_tid = lagodb_oldtuple->t_self;
-			lagodb_oldtuple->t_self = prepared.old_tid;
-		}
-		if (destination_is_lagodb)
-		{
-			if (!ItemPointerIsValid(&prepared.new_tid))
-				elog(ERROR, "LagoDB cross-partition UPDATE did not preserve NEW");
-			newslot->tts_tid = prepared.new_tid;
-		}
-
-		ExecARUpdateTriggers(context->estate,
-							 rootRelInfo, sourcePartInfo, destPartInfo,
-							 lagodb_oldtuple != NULL ? NULL : tupleid,
-							 lagodb_oldtuple, newslot, NIL, NULL, true);
-		if (destination_is_lagodb)
-			newslot->tts_tid = saved_new_tid;
-		if (source_is_lagodb)
-			lagodb_oldtuple->t_self = saved_old_tid;
-	}
-	else
-	{
-		/* Perform the root table's triggers. */
-		ExecARUpdateTriggers(context->estate,
-							 rootRelInfo, sourcePartInfo, destPartInfo,
-							 tupleid, NULL, newslot, NIL, NULL, true);
-	}
-	/* LAGODB END */
-	if (should_free)
-		heap_freetuple(lagodb_oldtuple);
+	/* Perform the root table's triggers. */
+	ExecARUpdateTriggers(context->estate,
+						 rootRelInfo, sourcePartInfo, destPartInfo,
+						 tupleid, NULL, newslot, NIL, NULL, true);
 }
 
 /* ----------------------------------------------------------------
@@ -2683,8 +2766,8 @@ ExecCrossPartitionUpdateForeignKey(ModifyTableContext *context,
  */
 static TupleTableSlot *
 ExecUpdate(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
-		   ItemPointer tupleid, HeapTuple oldtuple, TupleTableSlot *slot,
-		   bool canSetTag)
+		   ItemPointer tupleid, HeapTuple oldtuple, TupleTableSlot *oldSlot,
+		   TupleTableSlot *slot, bool canSetTag)
 {
 	EState	   *estate = context->estate;
 	Relation	resultRelationDesc = resultRelInfo->ri_RelationDesc;
@@ -2701,8 +2784,20 @@ ExecUpdate(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	 * Prepare for the update.  This includes BEFORE ROW triggers, so we're
 	 * done if it says we are.
 	 */
+#if LAGODB_PG18_GE
+	context->tmfd.traversed = false;
+#endif
 	if (!ExecUpdatePrologue(context, resultRelInfo, tupleid, oldtuple, slot, NULL))
 		return NULL;
+
+#if LAGODB_PG18_GE
+	if (context->tmfd.traversed)
+	{
+		if (!table_tuple_fetch_row_version(resultRelInfo->ri_RelationDesc,
+										   tupleid, SnapshotAny, oldSlot))
+			elog(ERROR, "failed to re-fetch tuple updated during trigger execution");
+	}
+#endif
 
 	/* INSTEAD OF ROW UPDATE Triggers */
 	if (resultRelInfo->ri_TrigDesc &&
@@ -2737,7 +2832,7 @@ ExecUpdate(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	}
 	else
 	{
-#if PG_VERSION_NUM >= 170001
+#if LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE
 		ItemPointerData lockedtid;
 #endif
 
@@ -2749,7 +2844,7 @@ ExecUpdate(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		 * to do them again.)
 		 */
 redo_act:
-#if PG_VERSION_NUM >= 170001
+#if LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE
 		lockedtid = *tupleid;
 #endif
 		result = ExecUpdateAct(context, resultRelInfo, tupleid, oldtuple, slot,
@@ -2806,7 +2901,6 @@ redo_act:
 				{
 					TupleTableSlot *inputslot;
 					TupleTableSlot *epqslot;
-					TupleTableSlot *oldSlot;
 
 					if (IsolationUsesXactSnapshot())
 						ereport(ERROR,
@@ -2845,7 +2939,7 @@ redo_act:
 								ExecInitUpdateProjection(context->mtstate,
 														 resultRelInfo);
 
-#if PG_VERSION_NUM >= 170001
+#if LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE
 							if (resultRelInfo->ri_needLockTagTuple)
 							{
 								UnlockTuple(resultRelationDesc,
@@ -2923,7 +3017,8 @@ redo_act:
 
 	/* Process RETURNING if present */
 	if (resultRelInfo->ri_projectReturning)
-		return ExecProcessReturning(resultRelInfo, slot, context->planSlot);
+		return ExecProcessReturning(context, resultRelInfo, CMD_UPDATE,
+									oldSlot, slot, context->planSlot);
 
 	return NULL;
 }
@@ -2965,7 +3060,7 @@ ExecOnConflictUpdate(ModifyTableContext *context,
 	 * supporting this; we'd just need to handle LOCKTAG_TUPLE like the other
 	 * ExecUpdate() caller.
 	 */
-#if PG_VERSION_NUM >= 170001
+#if LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE
 	Assert(!resultRelInfo->ri_needLockTagTuple);
 #endif
 
@@ -3136,7 +3231,7 @@ ExecOnConflictUpdate(ModifyTableContext *context,
 
 	/* Execute UPDATE with projection */
 	*returning = ExecUpdate(context, resultRelInfo,
-							conflictTid, NULL,
+							conflictTid, NULL, existing,
 							resultRelInfo->ri_onConflict->oc_ProjSlot,
 							canSetTag);
 
@@ -3145,6 +3240,11 @@ ExecOnConflictUpdate(ModifyTableContext *context,
 	 * the next input rows. Don't want to hold resources till the end of the
 	 * query.
 	 */
+#if LAGODB_PG18_GE
+	if (*returning != NULL &&
+		resultRelInfo->ri_projectReturning->pi_state.flags & EEO_FLAG_HAS_OLD)
+		ExecMaterializeSlot(*returning);
+#endif
 	ExecClearTuple(existing);
 	return true;
 }
@@ -3244,8 +3344,10 @@ ExecMerge(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		 */
 		if (rslot == NULL)
 			rslot = ExecMergeNotMatched(context, resultRelInfo, canSetTag);
+#if LAGODB_PG17_GE
 		else
 			context->mtstate->mt_merge_pending_not_matched = context->planSlot;
+#endif
 	}
 
 	return rslot;
@@ -3284,8 +3386,10 @@ ExecMergeMatched(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 				 bool *matched)
 {
 	ModifyTableState *mtstate = context->mtstate;
+#if LAGODB_PG17_GE
 	List	  **mergeActions = resultRelInfo->ri_MergeActions;
-#if PG_VERSION_NUM >= 170001
+#endif
+#if LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE
 	ItemPointerData lockedtid;
 #endif
 	List	   *actionStates;
@@ -3304,9 +3408,14 @@ ExecMergeMatched(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	 * If there are no WHEN MATCHED or WHEN NOT MATCHED BY SOURCE actions, we
 	 * are done.
 	 */
+#if LAGODB_PG17_GE
 	if (mergeActions[MERGE_WHEN_MATCHED] == NIL &&
 		mergeActions[MERGE_WHEN_NOT_MATCHED_BY_SOURCE] == NIL)
 		return NULL;
+#else
+	if (resultRelInfo->ri_matchedMergeAction == NIL)
+		return NULL;
+#endif
 
 	/*
 	 * Make tuple and any needed join variables available to ExecQual and
@@ -3324,24 +3433,25 @@ ExecMergeMatched(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	 * target wholerow junk attr.
 	 */
 	Assert(tupleid != NULL || oldtuple != NULL);
-#if PG_VERSION_NUM >= 170001
+#if LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE
 	ItemPointerSetInvalid(&lockedtid);
 #endif
 	if (oldtuple != NULL)
 	{
-#if PG_VERSION_NUM >= 170001
+#if LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE
 		Assert(!resultRelInfo->ri_needLockTagTuple);
 #endif
 		ExecForceStoreHeapTuple(oldtuple, resultRelInfo->ri_oldTupleSlot,
 								false);
 		/* LAGODB BEGIN: expose MERGE OLD to the update bridge. */
-		if (LagodbSupportsRelation(context, resultRelInfo))
-			context->lagodb_old_slot = resultRelInfo->ri_oldTupleSlot;
+		resultRelInfo->ri_oldTupleSlot->tts_tableOid =
+			RelationGetRelid(resultRelInfo->ri_RelationDesc);
+		context->lagodb_old_slot = resultRelInfo->ri_oldTupleSlot;
 		/* LAGODB END */
 	}
 	else
 	{
-#if PG_VERSION_NUM >= 170001
+#if LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE
 		if (resultRelInfo->ri_needLockTagTuple)
 		{
 			/*
@@ -3369,10 +3479,14 @@ ExecMergeMatched(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	 * BY SOURCE actions --- see transform_MERGE_to_join().  In that case, we
 	 * need only consider MATCHED actions here.
 	 */
+#if LAGODB_PG17_GE
 	if (ExecQual(resultRelInfo->ri_MergeJoinCondition, econtext))
 		actionStates = mergeActions[MERGE_WHEN_MATCHED];
 	else
 		actionStates = mergeActions[MERGE_WHEN_NOT_MATCHED_BY_SOURCE];
+#else
+	actionStates = resultRelInfo->ri_matchedMergeAction;
+#endif
 
 lmerge_matched:
 
@@ -3427,12 +3541,10 @@ lmerge_matched:
 				 */
 				newslot = ExecProject(relaction->mas_proj);
 
-				mtstate->mt_merge_action = relaction;
+				LAGODB_MERGE_ACTION(context) = relaction;
 				if (!ExecUpdatePrologue(context, resultRelInfo,
 										tupleid,
-										LagodbSupportsRelation(context, resultRelInfo) ?
-										oldtuple : NULL,
-										newslot, &result))
+										oldtuple, newslot, &result))
 				{
 					if (result == TM_Ok)
 						goto out;	/* "do nothing" */
@@ -3450,14 +3562,8 @@ lmerge_matched:
 				}
 				else
 				{
-					/* checked ri_needLockTagTuple above */
-					Assert(oldtuple == NULL ||
-						   LagodbSupportsRelation(context, resultRelInfo));
-
 					result = ExecUpdateAct(context, resultRelInfo, tupleid,
-										   LagodbSupportsRelation(context, resultRelInfo) ?
-										   oldtuple : NULL,
-										   newslot, canSetTag,
+										   oldtuple, newslot, canSetTag,
 										   &updateCxt);
 
 					/*
@@ -3481,19 +3587,15 @@ lmerge_matched:
 				{
 					ExecUpdateEpilogue(context, &updateCxt, resultRelInfo,
 									   tupleid,
-									   LagodbSupportsRelation(context, resultRelInfo) ?
-									   oldtuple : NULL,
-									   newslot);
+									   oldtuple, newslot);
 					mtstate->mt_merge_updated += 1;
 				}
 				break;
 
 			case CMD_DELETE:
-				mtstate->mt_merge_action = relaction;
+				LAGODB_MERGE_ACTION(context) = relaction;
 				if (!ExecDeletePrologue(context, resultRelInfo, tupleid,
-										LagodbSupportsRelation(context, resultRelInfo) ?
-										oldtuple : NULL,
-										NULL, &result))
+										oldtuple, NULL, &result))
 				{
 					if (result == TM_Ok)
 						goto out;	/* "do nothing" */
@@ -3511,10 +3613,6 @@ lmerge_matched:
 				}
 				else
 				{
-					/* checked ri_needLockTagTuple above */
-					Assert(oldtuple == NULL ||
-						   LagodbSupportsRelation(context, resultRelInfo));
-
 					result = ExecDeleteAct(context, resultRelInfo, tupleid,
 										   false);
 				}
@@ -3522,9 +3620,7 @@ lmerge_matched:
 				if (result == TM_Ok)
 				{
 					ExecDeleteEpilogue(context, resultRelInfo, tupleid,
-									   LagodbSupportsRelation(context, resultRelInfo) ?
-									   oldtuple : NULL,
-									   false);
+									   oldtuple, false);
 					mtstate->mt_merge_deleted += 1;
 				}
 				break;
@@ -3622,7 +3718,11 @@ lmerge_matched:
 					 * skip this (cannot switch from NOT MATCHED BY SOURCE to
 					 * MATCHED).
 					 */
+#if LAGODB_PG17_GE
 					was_matched = relaction->mas_action->matchKind == MERGE_WHEN_MATCHED;
+#else
+					was_matched = true;
+#endif
 					resultRelationDesc = resultRelInfo->ri_RelationDesc;
 					lockmode = ExecUpdateLockMode(estate, resultRelInfo);
 
@@ -3694,7 +3794,7 @@ lmerge_matched:
 								 * we need to switch to the NOT MATCHED BY
 								 * SOURCE case.
 								 */
-#if PG_VERSION_NUM >= 170001
+#if LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE
 								if (resultRelInfo->ri_needLockTagTuple)
 								{
 									if (ItemPointerIsValid(&lockedtid))
@@ -3712,6 +3812,7 @@ lmerge_matched:
 																   resultRelInfo->ri_oldTupleSlot))
 									elog(ERROR, "failed to fetch the target tuple");
 
+#if LAGODB_PG17_GE
 								if (*matched)
 									*matched = ExecQual(resultRelInfo->ri_MergeJoinCondition,
 														econtext);
@@ -3740,6 +3841,11 @@ lmerge_matched:
 										mergeActions[MERGE_WHEN_NOT_MATCHED_BY_TARGET])
 										InstrUpdateTupleCount(outerPlanState(mtstate)->instrument, 1.0);
 								}
+#else
+								/* PostgreSQL 16 has no NOT MATCHED BY SOURCE list */
+								if (!*matched)
+									goto out;
+#endif
 							}
 
 							/*
@@ -3807,14 +3913,17 @@ lmerge_matched:
 			switch (commandType)
 			{
 				case CMD_UPDATE:
-					rslot = ExecProcessReturning(resultRelInfo, newslot,
-												 context->planSlot);
+					rslot = ExecProcessReturning(context, resultRelInfo,
+												 CMD_UPDATE,
+												 resultRelInfo->ri_oldTupleSlot,
+												 newslot, context->planSlot);
 					break;
 
 				case CMD_DELETE:
-					rslot = ExecProcessReturning(resultRelInfo,
+					rslot = ExecProcessReturning(context, resultRelInfo,
+												 CMD_DELETE,
 												 resultRelInfo->ri_oldTupleSlot,
-												 context->planSlot);
+												 NULL, context->planSlot);
 					break;
 
 				case CMD_NOTHING:
@@ -3837,7 +3946,7 @@ lmerge_matched:
 	 * Successfully executed an action or no qualifying action was found.
 	 */
 out:
-#if PG_VERSION_NUM >= 170001
+#if LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE
 	if (ItemPointerIsValid(&lockedtid))
 		UnlockTuple(resultRelInfo->ri_RelationDesc, &lockedtid,
 					InplaceUpdateTupleLock);
@@ -3867,7 +3976,11 @@ ExecMergeNotMatched(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	 * XXX does this mean that we can avoid creating copies of actionStates on
 	 * partitioned tables, for not-matched actions?
 	 */
+#if LAGODB_PG17_GE
 	actionStates = resultRelInfo->ri_MergeActions[MERGE_WHEN_NOT_MATCHED_BY_TARGET];
+#else
+	actionStates = resultRelInfo->ri_notMatchedMergeAction;
+#endif
 
 	/*
 	 * Make source tuple available to ExecQual and ExecProject. We don't need
@@ -3905,7 +4018,7 @@ ExecMergeNotMatched(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 				 * so we don't need to map the tuple here.
 				 */
 				newslot = ExecProject(action->mas_proj);
-				mtstate->mt_merge_action = action;
+				LAGODB_MERGE_ACTION(context) = action;
 
 				rslot = ExecInsert(context, mtstate->rootResultRelInfo,
 								   newslot, canSetTag, NULL, NULL);
@@ -3931,19 +4044,25 @@ ExecMergeNotMatched(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 /*
  * Initialize state for execution of MERGE.
  */
-/* LAGODB BEGIN: retain PG MERGE setup while suppressing owned-root routing. */
 static void
-ExecInitMerge(ModifyTableState *mtstate, EState *estate,
-			  bool provider_owns_partitioned_table)
+ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 {
 	ModifyTable *node = (ModifyTable *) mtstate->ps.plan;
+#if LAGODB_PG18_GE
+	List	   *mergeActionLists = mtstate->mt_mergeActionLists;
+	List	   *mergeJoinConditions = mtstate->mt_mergeJoinConditions;
+#endif
 	ResultRelInfo *rootRelInfo = mtstate->rootResultRelInfo;
 	ResultRelInfo *resultRelInfo;
 	ExprContext *econtext;
 	ListCell   *lc;
 	int			i;
 
+#if LAGODB_PG18_GE
+	if (mergeActionLists == NIL)
+#else
 	if (node->mergeActionLists == NIL)
+#endif
 		return;
 
 	mtstate->mt_merge_subcommands = 0;
@@ -3960,14 +4079,24 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate,
 	 * anything here, do so there too.
 	 */
 	i = 0;
+#if LAGODB_PG18_GE
+	foreach(lc, mergeActionLists)
+#else
 	foreach(lc, node->mergeActionLists)
+#endif
 	{
 		List	   *mergeActionList = lfirst(lc);
+#if LAGODB_PG17_GE
 		Node	   *joinCondition;
+#endif
 		TupleDesc	relationDesc;
 		ListCell   *l;
 
+#if LAGODB_PG18_GE
+		joinCondition = (Node *) list_nth(mergeJoinConditions, i);
+#elif LAGODB_PG17_GE
 		joinCondition = (Node *) list_nth(node->mergeJoinConditions, i);
+#endif
 		resultRelInfo = mtstate->resultRelInfo + i;
 		i++;
 		relationDesc = RelationGetDescr(resultRelInfo->ri_RelationDesc);
@@ -3976,9 +4105,11 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate,
 		if (unlikely(!resultRelInfo->ri_projectNewInfoValid))
 			ExecInitMergeTupleSlots(mtstate, resultRelInfo);
 
+#if LAGODB_PG17_GE
 		/* initialize state for join condition checking */
 		resultRelInfo->ri_MergeJoinCondition =
 			ExecInitQual((List *) joinCondition, &mtstate->ps);
+#endif
 
 		foreach(l, mergeActionList)
 		{
@@ -4000,9 +4131,18 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate,
 			 * We create three lists - one for each MergeMatchKind - and stick
 			 * the MergeActionState into the appropriate list.
 			 */
+#if LAGODB_PG17_GE
 			resultRelInfo->ri_MergeActions[action->matchKind] =
 				lappend(resultRelInfo->ri_MergeActions[action->matchKind],
 						action_state);
+#else
+			if (action->matched)
+				resultRelInfo->ri_matchedMergeAction =
+					lappend(resultRelInfo->ri_matchedMergeAction, action_state);
+			else
+				resultRelInfo->ri_notMatchedMergeAction =
+					lappend(resultRelInfo->ri_notMatchedMergeAction, action_state);
+#endif
 
 			switch (action->commandType)
 			{
@@ -4025,21 +4165,7 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate,
 					if (rootRelInfo->ri_RelationDesc->rd_rel->relkind ==
 						RELKIND_PARTITIONED_TABLE)
 					{
-						/*
-						 * A provider-owned partitioned table still needs the
-						 * root projection slot, but its PartitionSpec is the
-						 * routing authority.  Creating PG routing here would
-						 * make MERGE require physical leaf partitions before
-						 * ExecInsert can reach the provider mutation
-						 * boundary.
-						 */
-						if (mtstate->mt_root_tuple_slot == NULL)
-							mtstate->mt_root_tuple_slot =
-								table_slot_create(rootRelInfo->ri_RelationDesc,
-												  NULL);
-
-						if (!provider_owns_partitioned_table &&
-							mtstate->mt_partition_tuple_routing == NULL)
+						if (mtstate->mt_partition_tuple_routing == NULL)
 						{
 							/*
 							 * Initialize planstate for routing if not already
@@ -4049,6 +4175,9 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate,
 							 * slot belonging to ModifyTableState, so we pass
 							 * NULL for the 2nd argument.
 							 */
+							mtstate->mt_root_tuple_slot =
+								table_slot_create(rootRelInfo->ri_RelationDesc,
+												  NULL);
 							mtstate->mt_partition_tuple_routing =
 								ExecSetupPartitionTupleRouting(estate,
 															   rootRelInfo->ri_RelationDesc);
@@ -4120,7 +4249,7 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate,
 	 * we can use the first resultRelInfo entry as a reference to calculate
 	 * the attno's for the root table.
 	 */
-#if PG_VERSION_NUM >= 170006
+#if LAGODB_HAS_MERGE_ROOT_WITH_CHECK
 	if (rootRelInfo != mtstate->resultRelInfo &&
 		rootRelInfo->ri_RelationDesc->rd_rel->relkind != RELKIND_PARTITIONED_TABLE &&
 		(mtstate->mt_merge_subcommands & MERGE_INSERT) != 0)
@@ -4434,7 +4563,7 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 	HeapTupleData oldtupdata;
 	HeapTuple	oldtuple;
 	ItemPointer tupleid;
-#if PG_VERSION_NUM >= 170001
+#if LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE
 	bool		tuplock;
 #endif
 
@@ -4480,9 +4609,7 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 	context.estate = estate;
 	/* LAGODB BEGIN */
 	context.lagodb_bridge = bridge;
-	context.lagodb_wholerow_attno =
-		bridge != NULL && bridge->wholerow_attno != NULL ?
-		bridge->wholerow_attno(bridge->state) : InvalidAttrNumber;
+	context.lagodb_wholerow_attno = bridge->wholerow_attno;
 	context.lagodb_result_rel_info = NULL;
 	context.lagodb_relation_state = NULL;
 	context.lagodb_old_slot = NULL;
@@ -4510,6 +4637,7 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 		if (pstate->ps_ExprContext)
 			ResetExprContext(pstate->ps_ExprContext);
 
+#if LAGODB_PG17_GE
 		/*
 		 * If there is a pending MERGE ... WHEN NOT MATCHED [BY TARGET] action
 		 * to execute, do so now --- see the comments in ExecMerge().
@@ -4517,6 +4645,9 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 		if (node->mt_merge_pending_not_matched != NULL)
 		{
 			context.planSlot = node->mt_merge_pending_not_matched;
+#if LAGODB_PG18_GE
+			context.cpDeletedSlot = NULL;
+#endif
 
 			slot = ExecMergeNotMatched(&context, node->resultRelInfo,
 									   node->canSetTag);
@@ -4533,9 +4664,13 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 
 			continue;			/* continue with the next tuple */
 		}
+#endif
 
 		/* Fetch the next row from subplan */
 		context.planSlot = ExecProcNode(subplanstate);
+#if LAGODB_PG18_GE
+		context.cpDeletedSlot = NULL;
+#endif
 
 		/* No more tuples to process? */
 		if (TupIsNull(context.planSlot))
@@ -4598,6 +4733,12 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 		if (resultRelInfo->ri_usesFdwDirectModify)
 		{
 			Assert(resultRelInfo->ri_projectReturning);
+#if LAGODB_PG18_GE
+			Assert((resultRelInfo->ri_projectReturning->pi_state.flags &
+					EEO_FLAG_HAS_OLD) == 0);
+			Assert((resultRelInfo->ri_projectReturning->pi_state.flags &
+					EEO_FLAG_HAS_NEW) == 0);
+#endif
 
 			/*
 			 * A scan slot containing the data that was actually inserted,
@@ -4605,7 +4746,8 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 			 * ExecProcessReturning by IterateDirectModify, so no need to
 			 * provide it here.
 			 */
-			slot = ExecProcessReturning(resultRelInfo, NULL, context.planSlot);
+			slot = ExecProcessReturning(&context, resultRelInfo, operation,
+										NULL, NULL, context.planSlot);
 
 			return slot;
 		}
@@ -4629,189 +4771,53 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 		if (operation == CMD_UPDATE || operation == CMD_DELETE ||
 			operation == CMD_MERGE)
 		{
-			char		relkind;
 			Datum		datum;
 			bool		isNull;
 
-			relkind = resultRelInfo->ri_RelationDesc->rd_rel->relkind;
-
 			/* LAGODB BEGIN: reconstruct OLD from PostgreSQL wholerow. */
-			if (LagodbSupportsRelation(&context, resultRelInfo))
+			AttrNumber	wholerow_attno = context.lagodb_wholerow_attno;
+
+			/* Install the relation's trigger slot before any trigger runs. */
+			(void) LagodbRelationState(&context, resultRelInfo);
+
+			datum = ExecGetJunkAttribute(slot,
+										 resultRelInfo->ri_RowIdAttNo,
+										 &isNull);
+			if (isNull)
 			{
-				AttrNumber	wholerow_attno = context.lagodb_wholerow_attno;
-
-				if (!AttributeNumberIsValid(resultRelInfo->ri_RowIdAttNo))
+				if (operation == CMD_MERGE)
 				{
-					if (operation == CMD_MERGE)
-					{
-						EvalPlanQualSetSlot(&node->mt_epqstate,
-											context.planSlot);
-						slot = ExecMerge(&context, node->resultRelInfo,
-										 NULL, NULL, node->canSetTag);
-						if (slot)
-							return slot;
-						continue;
-					}
-					elog(ERROR, "LagoDB mutation input has no ctid row identity");
+					EvalPlanQualSetSlot(&node->mt_epqstate,
+										context.planSlot);
+					slot = ExecMerge(&context, node->resultRelInfo,
+									 NULL, NULL, node->canSetTag);
+					if (slot)
+						return slot;
+					continue;
 				}
-
-				datum = ExecGetJunkAttribute(slot,
-											 resultRelInfo->ri_RowIdAttNo,
-											 &isNull);
-				if (isNull)
-				{
-					if (operation == CMD_MERGE)
-					{
-						EvalPlanQualSetSlot(&node->mt_epqstate,
-											context.planSlot);
-						slot = ExecMerge(&context, node->resultRelInfo,
-										 NULL, NULL, node->canSetTag);
-						if (slot)
-							return slot;
-						continue;
-					}
-					elog(ERROR, "LagoDB matched mutation row has NULL ctid");
-				}
-
-				tupleid = DatumGetItemPointer(datum);
-				tuple_ctid = *tupleid;
-				tupleid = &tuple_ctid;
-				if (AttributeNumberIsValid(wholerow_attno))
-				{
-					datum = ExecGetJunkAttribute(slot, wholerow_attno, &isNull);
-					if (isNull)
-						elog(ERROR, "LagoDB matched mutation row has NULL wholerow");
-
-					oldtupdata.t_data = DatumGetHeapTupleHeader(datum);
-					oldtupdata.t_len =
-						HeapTupleHeaderGetDatumLength(oldtupdata.t_data);
-					oldtupdata.t_self = *tupleid;
-					oldtupdata.t_tableOid =
-						RelationGetRelid(resultRelInfo->ri_RelationDesc);
-					oldtuple = &oldtupdata;
-
-				}
-				else if (operation == CMD_UPDATE || operation == CMD_MERGE)
-					elog(ERROR, "LagoDB UPDATE/MERGE input has no wholerow");
-			}
-			/* LAGODB END */
-			else if (relkind == RELKIND_RELATION ||
-					 relkind == RELKIND_MATVIEW ||
-					 relkind == RELKIND_PARTITIONED_TABLE)
-			{
-				/*
-				 * ri_RowIdAttNo refers to a ctid attribute.  See the comment
-				 * in ExecInitModifyTable().
-				 */
-				Assert(AttributeNumberIsValid(resultRelInfo->ri_RowIdAttNo) ||
-					   relkind == RELKIND_PARTITIONED_TABLE);
-				datum = ExecGetJunkAttribute(slot,
-											 resultRelInfo->ri_RowIdAttNo,
-											 &isNull);
-
-				/*
-				 * For commands other than MERGE, any tuples having a null row
-				 * identifier are errors.  For MERGE, we may need to handle
-				 * them as WHEN NOT MATCHED clauses if any, so do that.
-				 *
-				 * Note that we use the node's toplevel resultRelInfo, not any
-				 * specific partition's.
-				 */
-				if (isNull)
-				{
-					if (operation == CMD_MERGE)
-					{
-						EvalPlanQualSetSlot(&node->mt_epqstate, context.planSlot);
-
-						slot = ExecMerge(&context, node->resultRelInfo,
-										 NULL, NULL, node->canSetTag);
-
-						/*
-						 * If we got a RETURNING result, return it to the
-						 * caller.  We'll continue the work on next call.
-						 */
-						if (slot)
-							return slot;
-
-						continue;	/* continue with the next tuple */
-					}
-
-					elog(ERROR, "ctid is NULL");
-				}
-
-				tupleid = (ItemPointer) DatumGetPointer(datum);
-				tuple_ctid = *tupleid;	/* be sure we don't free ctid!! */
-				tupleid = &tuple_ctid;
+				elog(ERROR, "LagoDB matched mutation row has NULL ctid");
 			}
 
-			/*
-			 * Use the wholerow attribute, when available, to reconstruct the
-			 * old relation tuple.  The old tuple serves one or both of two
-			 * purposes: 1) it serves as the OLD tuple for row triggers, 2) it
-			 * provides values for any unchanged columns for the NEW tuple of
-			 * an UPDATE, because the subplan does not produce all the columns
-			 * of the target table.
-			 *
-			 * Note that the wholerow attribute does not carry system columns,
-			 * so foreign table triggers miss seeing those, except that we
-			 * know enough here to set t_tableOid.  Quite separately from
-			 * this, the FDW may fetch its own junk attrs to identify the row.
-			 *
-			 * Other relevant relkinds, currently limited to views, always
-			 * have a wholerow attribute.
-			 */
-			else if (AttributeNumberIsValid(resultRelInfo->ri_RowIdAttNo))
+			tupleid = DatumGetItemPointer(datum);
+			tuple_ctid = *tupleid;
+			tupleid = &tuple_ctid;
+			if (AttributeNumberIsValid(wholerow_attno))
 			{
-				datum = ExecGetJunkAttribute(slot,
-											 resultRelInfo->ri_RowIdAttNo,
-											 &isNull);
-
-				/*
-				 * For commands other than MERGE, any tuples having a null row
-				 * identifier are errors.  For MERGE, we may need to handle
-				 * them as WHEN NOT MATCHED clauses if any, so do that.
-				 *
-				 * Note that we use the node's toplevel resultRelInfo, not any
-				 * specific partition's.
-				 */
+				datum = ExecGetJunkAttribute(slot, wholerow_attno, &isNull);
 				if (isNull)
-				{
-					if (operation == CMD_MERGE)
-					{
-						EvalPlanQualSetSlot(&node->mt_epqstate, context.planSlot);
-
-						slot = ExecMerge(&context, node->resultRelInfo,
-										 NULL, NULL, node->canSetTag);
-
-						/*
-						 * If we got a RETURNING result, return it to the
-						 * caller.  We'll continue the work on next call.
-						 */
-						if (slot)
-							return slot;
-
-						continue;	/* continue with the next tuple */
-					}
-
-					elog(ERROR, "wholerow is NULL");
-				}
+					elog(ERROR, "LagoDB matched mutation row has NULL wholerow");
 
 				oldtupdata.t_data = DatumGetHeapTupleHeader(datum);
 				oldtupdata.t_len =
 					HeapTupleHeaderGetDatumLength(oldtupdata.t_data);
-				ItemPointerSetInvalid(&(oldtupdata.t_self));
-				/* Historically, view triggers see invalid t_tableOid. */
+				oldtupdata.t_self = *tupleid;
 				oldtupdata.t_tableOid =
-					(relkind == RELKIND_VIEW) ? InvalidOid :
 					RelationGetRelid(resultRelInfo->ri_RelationDesc);
-
 				oldtuple = &oldtupdata;
 			}
 			else
-			{
-				/* Only foreign tables are allowed to omit a row-ID attr */
-				Assert(relkind == RELKIND_FOREIGN_TABLE);
-			}
+				Assert(operation == CMD_DELETE);
+			/* LAGODB END */
 		}
 
 		switch (operation)
@@ -4826,7 +4832,7 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 				break;
 
 			case CMD_UPDATE:
-#if PG_VERSION_NUM >= 170001
+#if LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE
 				tuplock = false;
 #endif
 
@@ -4841,14 +4847,15 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 				oldSlot = resultRelInfo->ri_oldTupleSlot;
 				if (oldtuple != NULL)
 				{
-#if PG_VERSION_NUM >= 170001
+#if LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE
 					Assert(!resultRelInfo->ri_needLockTagTuple);
 #endif
 					/* Use the wholerow junk attr as the old tuple. */
 					ExecForceStoreHeapTuple(oldtuple, oldSlot, false);
 					/* LAGODB BEGIN: expose OLD to the slot-first bridge. */
-					if (LagodbSupportsRelation(&context, resultRelInfo))
-						context.lagodb_old_slot = oldSlot;
+					oldSlot->tts_tableOid =
+						RelationGetRelid(resultRelInfo->ri_RelationDesc);
+					context.lagodb_old_slot = oldSlot;
 					/* LAGODB END */
 				}
 				else
@@ -4856,7 +4863,7 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 					/* Fetch the most recent version of old tuple. */
 					Relation	relation = resultRelInfo->ri_RelationDesc;
 
-#if PG_VERSION_NUM >= 170001
+#if LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE
 					if (resultRelInfo->ri_needLockTagTuple)
 					{
 						LockTuple(relation, tupleid, InplaceUpdateTupleLock);
@@ -4873,8 +4880,8 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 
 				/* Now apply the update. */
 				slot = ExecUpdate(&context, resultRelInfo, tupleid, oldtuple,
-								  slot, node->canSetTag);
-#if PG_VERSION_NUM >= 170001
+								  oldSlot, slot, node->canSetTag);
+#if LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE
 				if (tuplock)
 					UnlockTuple(resultRelInfo->ri_RelationDesc, tupleid,
 								InplaceUpdateTupleLock);
@@ -4920,13 +4927,7 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 	return NULL;
 }
 
-/* LAGODB BEGIN: standard copy-only entry plus extension entry. */
-static TupleTableSlot *
-ExecModifyTable(PlanState *pstate)
-{
-	return ExecModifyTableWithBridge(pstate, NULL);
-}
-
+/* LAGODB BEGIN: extension entry. */
 TupleTableSlot *
 lagodb_exec_modify_table_with_bridge(ModifyTableState *mtstate,
 									 LagodbModifyBridge *bridge)
@@ -5000,13 +5001,25 @@ ExecLookupResultRelByOid(ModifyTableState *node, Oid resultoid,
 /* LAGODB BEGIN: the lifecycle adapter allocates the stable extended PG node. */
 ModifyTableState *
 lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
-							   EState *estate, int eflags,
-							   bool provider_owns_partitioned_table)
+							   EState *estate, int eflags)
 /* LAGODB END */
 {
 	Plan	   *subplan = outerPlan(node);
 	CmdType		operation = node->operation;
-	int			nrels = list_length(node->resultRelations);
+	int			total_nrels = list_length(node->resultRelations);
+	int			nrels;
+	List	   *resultRelations = NIL;
+	List	   *withCheckOptionLists = NIL;
+	List	   *returningLists = NIL;
+#if LAGODB_PG18_GE
+	List	   *updateColnosLists = NIL;
+#endif
+	List	   *mergeActionLists = NIL;
+#if LAGODB_PG18_GE
+	List	   *mergeJoinConditions = NIL;
+#endif
+	List	   *fdwPrivLists = NIL;
+	Bitmapset  *fdwDirectModifyPlans = NULL;
 	ResultRelInfo *resultRelInfo;
 	List	   *arowmarks;
 	ListCell   *l;
@@ -5016,6 +5029,104 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	/* check for unsupported flags */
 	Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
 
+#if LAGODB_PG18_GE
+	/*
+	 * Only consider unpruned relations for initializing their ResultRelInfo
+	 * struct and other fields such as withCheckOptions, etc.
+	 *
+	 * Note: We must avoid pruning every result relation.  This is important
+	 * for MERGE, since even if every result relation is pruned from the
+	 * subplan, there might still be NOT MATCHED rows, for which there may be
+	 * INSERT actions to perform.  To allow these actions to be found, at
+	 * least one result relation must be kept.  Also, when inserting into a
+	 * partitioned table, ExecInitPartitionInfo() needs a ResultRelInfo struct
+	 * as a reference for building the ResultRelInfo of the target partition.
+	 * In either case, it doesn't matter which result relation is kept, so we
+	 * just keep the first one, if all others have been pruned.  See also,
+	 * ExecDoInitialPruning(), which ensures that this first result relation
+	 * has been locked.
+	 */
+	i = 0;
+	foreach(l, node->resultRelations)
+	{
+		Index		rti = lfirst_int(l);
+		bool		keep_rel;
+
+		keep_rel = bms_is_member(rti, estate->es_unpruned_relids);
+		if (!keep_rel && i == total_nrels - 1 && resultRelations == NIL)
+		{
+			/* all result relations pruned; keep the first one */
+			keep_rel = true;
+			rti = linitial_int(node->resultRelations);
+			i = 0;
+		}
+
+		if (keep_rel)
+		{
+			List	   *fdwPrivList = (List *) list_nth(node->fdwPrivLists, i);
+
+			resultRelations = lappend_int(resultRelations, rti);
+			if (node->withCheckOptionLists)
+			{
+				List	   *withCheckOptions = list_nth_node(List,
+													 node->withCheckOptionLists,
+													 i);
+
+				withCheckOptionLists = lappend(withCheckOptionLists, withCheckOptions);
+			}
+			if (node->returningLists)
+			{
+				List	   *returningList = list_nth_node(List,
+												  node->returningLists,
+												  i);
+
+				returningLists = lappend(returningLists, returningList);
+			}
+			if (node->updateColnosLists)
+			{
+				List	   *updateColnosList = list_nth(node->updateColnosLists, i);
+
+				updateColnosLists = lappend(updateColnosLists, updateColnosList);
+			}
+			if (node->mergeActionLists)
+			{
+				List	   *mergeActionList = list_nth(node->mergeActionLists, i);
+
+				mergeActionLists = lappend(mergeActionLists, mergeActionList);
+			}
+			if (node->mergeJoinConditions)
+			{
+				List	   *mergeJoinCondition = list_nth(node->mergeJoinConditions, i);
+
+				mergeJoinConditions = lappend(mergeJoinConditions, mergeJoinCondition);
+			}
+
+			/*
+			 * fdwPrivLists/fdwDirectModifyPlans are re-indexed to match
+			 * resultRelations
+			 */
+			fdwPrivLists = lappend(fdwPrivLists, fdwPrivList);
+			if (bms_is_member(i, node->fdwDirectModifyPlans))
+			{
+				int			new_index = list_length(resultRelations) - 1;
+
+				fdwDirectModifyPlans = bms_add_member(fdwDirectModifyPlans,
+													  new_index);
+			}
+		}
+		i++;
+	}
+#else
+	resultRelations = node->resultRelations;
+	withCheckOptionLists = node->withCheckOptionLists;
+	returningLists = node->returningLists;
+	mergeActionLists = node->mergeActionLists;
+	fdwPrivLists = node->fdwPrivLists;
+	fdwDirectModifyPlans = node->fdwDirectModifyPlans;
+#endif
+	nrels = list_length(resultRelations);
+	Assert(nrels > 0);
+
 	/*
 	 * create state structure
 	 */
@@ -5024,7 +5135,6 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	/* LAGODB END */
 	mtstate->ps.plan = (Plan *) node;
 	mtstate->ps.state = estate;
-	mtstate->ps.ExecProcNode = ExecModifyTable;
 
 	mtstate->operation = operation;
 	mtstate->canSetTag = node->canSetTag;
@@ -5034,10 +5144,17 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	mtstate->resultRelInfo = (ResultRelInfo *)
 		palloc(nrels * sizeof(ResultRelInfo));
 
+#if LAGODB_PG17_GE
 	mtstate->mt_merge_pending_not_matched = NULL;
+#endif
 	mtstate->mt_merge_inserted = 0;
 	mtstate->mt_merge_updated = 0;
 	mtstate->mt_merge_deleted = 0;
+#if LAGODB_PG18_GE
+	mtstate->mt_updateColnosLists = updateColnosLists;
+	mtstate->mt_mergeActionLists = mergeActionLists;
+	mtstate->mt_mergeJoinConditions = mergeJoinConditions;
+#endif
 
 	/*----------
 	 * Resolve the target relation. This is the same as:
@@ -5055,6 +5172,9 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	 */
 	if (node->rootRelation > 0)
 	{
+#if LAGODB_PG18_GE
+		Assert(bms_is_member(node->rootRelation, estate->es_unpruned_relids));
+#endif
 		mtstate->rootResultRelInfo = makeNode(ResultRelInfo);
 		ExecInitResultRelation(estate, mtstate->rootResultRelInfo,
 							   node->rootRelation);
@@ -5062,14 +5182,15 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	else
 	{
 		Assert(list_length(node->resultRelations) == 1);
+		Assert(list_length(resultRelations) == 1);
 		mtstate->rootResultRelInfo = mtstate->resultRelInfo;
 		ExecInitResultRelation(estate, mtstate->resultRelInfo,
-							   linitial_int(node->resultRelations));
+							   linitial_int(resultRelations));
 	}
 
 	/* set up epqstate with dummy subplan data for the moment */
 	EvalPlanQualInit(&mtstate->mt_epqstate, estate, NULL, NIL,
-					 node->epqParam, node->resultRelations);
+					 node->epqParam, resultRelations);
 	mtstate->fireBSTriggers = true;
 
 	/*
@@ -5087,13 +5208,13 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	 */
 	resultRelInfo = mtstate->resultRelInfo;
 	i = 0;
-	foreach(l, node->resultRelations)
+	foreach(l, resultRelations)
 	{
 		Index		resultRelation = lfirst_int(l);
 		List	   *mergeActions = NIL;
 
-		if (node->mergeActionLists)
-			mergeActions = list_nth(node->mergeActionLists, i);
+		if (mergeActionLists)
+			mergeActions = list_nth(mergeActionLists, i);
 
 		if (resultRelInfo != mtstate->rootResultRelInfo)
 		{
@@ -5110,16 +5231,21 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 
 		/* Initialize the usesFdwDirectModify flag */
 		resultRelInfo->ri_usesFdwDirectModify =
-			bms_is_member(i, node->fdwDirectModifyPlans);
+			bms_is_member(i, fdwDirectModifyPlans);
 
 		/*
 		 * Verify result relation is a valid target for the current operation
 		 */
-#if PG_VERSION_NUM >= 170007
+#if LAGODB_PG18_GE
+		CheckValidResultRel(resultRelInfo, operation,
+							node->onConflictAction, mergeActions);
+#elif LAGODB_HAS_CHECK_VALID_RESULT_REL_NEW
 		CheckValidResultRelNew(resultRelInfo, operation,
 							   node->onConflictAction, mergeActions);
-#else
+#elif LAGODB_PG17_GE
 		CheckValidResultRel(resultRelInfo, operation, mergeActions);
+#else
+		CheckValidResultRel(resultRelInfo, operation);
 #endif
 
 		resultRelInfo++;
@@ -5143,7 +5269,7 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 			resultRelInfo->ri_FdwRoutine != NULL &&
 			resultRelInfo->ri_FdwRoutine->BeginForeignModify != NULL)
 		{
-			List	   *fdw_private = (List *) list_nth(node->fdwPrivLists, i);
+			List	   *fdw_private = (List *) list_nth(fdwPrivLists, i);
 
 			resultRelInfo->ri_FdwRoutine->BeginForeignModify(mtstate,
 															 resultRelInfo,
@@ -5223,7 +5349,7 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	 */
 	mtstate->mt_resultOidAttno =
 		ExecFindJunkAttributeInTlist(subplan->targetlist, "tableoid");
-	Assert(AttributeNumberIsValid(mtstate->mt_resultOidAttno) || nrels == 1);
+	Assert(AttributeNumberIsValid(mtstate->mt_resultOidAttno) || total_nrels == 1);
 	mtstate->mt_lastResultOid = InvalidOid; /* force lookup at first tuple */
 	mtstate->mt_lastResultIndex = 0;	/* must be zero if no such attr */
 
@@ -5237,8 +5363,7 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	 * ExecCrossPartitionUpdate.
 	 */
 	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE &&
-		operation == CMD_INSERT &&
-		!provider_owns_partitioned_table)
+		operation == CMD_INSERT)
 		mtstate->mt_partition_tuple_routing =
 			ExecSetupPartitionTupleRouting(estate, rel);
 
@@ -5246,7 +5371,7 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	 * Initialize any WITH CHECK OPTION constraints if needed.
 	 */
 	resultRelInfo = mtstate->resultRelInfo;
-	foreach(l, node->withCheckOptionLists)
+	foreach(l, withCheckOptionLists)
 	{
 		List	   *wcoList = (List *) lfirst(l);
 		List	   *wcoExprs = NIL;
@@ -5269,16 +5394,25 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	/*
 	 * Initialize RETURNING projections if needed.
 	 */
-	if (node->returningLists)
+	if (returningLists)
 	{
 		TupleTableSlot *slot;
 		ExprContext *econtext;
 
+#if LAGODB_PG18_LT
 		/*
 		 * Initialize result tuple slot and assign its rowtype using the first
 		 * RETURNING list.  We assume the rest will look the same.
 		 */
-		mtstate->ps.plan->targetlist = (List *) linitial(node->returningLists);
+		mtstate->ps.plan->targetlist = (List *) linitial(returningLists);
+#else
+		/*
+		 * Initialize result tuple slot and assign its rowtype using the plan
+		 * node's declared targetlist, which the planner set up to be the same
+		 * as the first (before runtime pruning) RETURNING list.  We assume
+		 * all the result rels will produce compatible output.
+		 */
+#endif
 
 		/* Set up a slot for the output of the RETURNING projection(s) */
 		ExecInitResultTupleSlotTL(&mtstate->ps, &TTSOpsVirtual);
@@ -5293,7 +5427,7 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 		 * Build a projection for each result rel.
 		 */
 		resultRelInfo = mtstate->resultRelInfo;
-		foreach(l, node->returningLists)
+		foreach(l, returningLists)
 		{
 			List	   *rlist = (List *) lfirst(l);
 
@@ -5310,7 +5444,9 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 		 * We still must construct a dummy result tuple type, because InitPlan
 		 * expects one (maybe should change that?).
 		 */
+#if LAGODB_PG18_LT
 		mtstate->ps.plan->targetlist = NIL;
+#endif
 		ExecInitResultTypeTL(&mtstate->ps);
 
 		mtstate->ps.ps_ExprContext = NULL;
@@ -5321,7 +5457,7 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	if (node->onConflictAction != ONCONFLICT_NONE)
 	{
 		/* insert may only have one relation, inheritance is not expanded */
-		Assert(nrels == 1);
+		Assert(total_nrels == 1);
 		resultRelInfo->ri_onConflictArbiterIndexes = node->arbiterIndexes;
 	}
 
@@ -5391,12 +5527,21 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	foreach(l, node->rowMarks)
 	{
 		PlanRowMark *rc = lfirst_node(PlanRowMark, l);
+#if LAGODB_PG18_GE
+		RangeTblEntry *rte = exec_rt_fetch(rc->rti, estate);
+#endif
 		ExecRowMark *erm;
 		ExecAuxRowMark *aerm;
 
 		/* ignore "parent" rowmarks; they are irrelevant at runtime */
 		if (rc->isParent)
 			continue;
+
+#if LAGODB_PG18_GE
+		if (rte->rtekind == RTE_RELATION &&
+			!bms_is_member(rc->rti, estate->es_unpruned_relids))
+			continue;
+#endif
 
 		/* Find ExecRowMark and build ExecAuxRowMark */
 		erm = ExecFindRowMark(estate, rc->rti, false);
@@ -5405,11 +5550,8 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	}
 
 	/* For a MERGE command, initialize its state */
-	/* LAGODB BEGIN: pass the init-time partitioned table route. */
 	if (mtstate->operation == CMD_MERGE)
-		ExecInitMerge(mtstate, estate,
-					  provider_owns_partitioned_table);
-	/* LAGODB END */
+		ExecInitMerge(mtstate, estate);
 
 	EvalPlanQualSetPlan(&mtstate->mt_epqstate, subplan, arowmarks);
 
@@ -5466,7 +5608,7 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	if (operation == CMD_INSERT)
 	{
 		/* insert may only have one relation, inheritance is not expanded */
-		Assert(nrels == 1);
+		Assert(total_nrels == 1);
 		resultRelInfo = mtstate->resultRelInfo;
 		if (!resultRelInfo->ri_usesFdwDirectModify &&
 			resultRelInfo->ri_FdwRoutine != NULL &&
@@ -5543,9 +5685,10 @@ ExecEndModifyTable(ModifyTableState *node)
 	if (node->mt_partition_tuple_routing)
 	{
 		ExecCleanupTupleRouting(node, node->mt_partition_tuple_routing);
+
+		if (node->mt_root_tuple_slot)
+			ExecDropSingleTupleTableSlot(node->mt_root_tuple_slot);
 	}
-	if (node->mt_root_tuple_slot)
-		ExecDropSingleTupleTableSlot(node->mt_root_tuple_slot);
 
 	/*
 	 * Terminate EPQ execution if active

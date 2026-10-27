@@ -31,10 +31,6 @@
 #include "utils/rel.h"
 #include "utils/rls.h"
 
-#if !LAGODB_PG17
-#error "COPY preparation has not been ported to this PostgreSQL major version"
-#endif
-
 static void
 lagodb_prepare_copy_command(const CopyStmt *stmt, LagodbCopyEndpoint endpoint)
 {
@@ -60,8 +56,8 @@ lagodb_prepare_copy_command(const CopyStmt *stmt, LagodbCopyEndpoint endpoint)
 	 * I/O. External URI consumers supply their own callbacks and never open
 	 * the URI as a server filename. PROGRAM classification takes precedence
 	 * over URI recognition, so a URI in a shell command cannot bypass this
-	 * check. Role checks and diagnostics below follow PostgreSQL 17.10
-	 * copy.c.
+	 * check. Role checks and diagnostics below follow PostgreSQL 17.11
+	 * copy.c, audited for PG16.15.
 	 */
 	if (endpoint == LAGODB_COPY_SERVER_PROGRAM)
 	{
@@ -102,7 +98,7 @@ lagodb_prepare_where_clause(ParseState *pstate,
 							Relation rel)
 {
 	Node	   *where_clause;
-#if PG_VERSION_NUM >= 170007
+#if LAGODB_HAS_COPY_WHERE_GENERATED_CHECK
 	Bitmapset  *expr_attrs = NULL;
 	int			i;
 #endif
@@ -116,8 +112,8 @@ lagodb_prepare_where_clause(ParseState *pstate,
 	where_clause = coerce_to_boolean(pstate, where_clause, "WHERE");
 	assign_expr_collations(pstate, where_clause);
 
-#if PG_VERSION_NUM >= 170007
-	/* PG17.7 introduced generated-column validation for COPY FROM WHERE. */
+#if LAGODB_HAS_COPY_WHERE_GENERATED_CHECK
+	/* PG16.11 and PG17.7 added generated-column validation here. */
 	pull_varattnos(where_clause, 1, &expr_attrs);
 	if (bms_is_member(0 - FirstLowInvalidHeapAttributeNumber, expr_attrs))
 	{
@@ -135,7 +131,7 @@ lagodb_prepare_where_clause(ParseState *pstate,
 		AttrNumber	attno = i + FirstLowInvalidHeapAttributeNumber;
 
 		Assert(attno != 0);
-		/* The attno guard is also required on PG17.7-17.9. */
+		/* The attno guard is also required on PG16.11-16.13 and PG17.7-17.9. */
 		if (attno > 0 &&
 			TupleDescAttr(RelationGetDescr(rel), attno - 1)->attgenerated)
 			ereport(ERROR,

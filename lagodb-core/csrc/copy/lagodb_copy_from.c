@@ -19,12 +19,13 @@
  *-------------------------------------------------------------------------
  */
 /*
- * PostgreSQL 17.10 derived COPY FROM executor.
+ * COPY FROM executor derived primarily from PostgreSQL 17.11/18.6, then
+ * audited and ported for PG16.15 control flow and API compatibility.
  *
  * Rename every upstream external symbol before PostgreSQL headers declare it;
  * this fork coexists with the backend implementation and is selected only by
  * LagoDB's utility driver.  Keep provider policy out of this file: callers
- * pass the two precomputed route decisions (typed input and provider-owned partitioned table).
+ * pass the precomputed typed-input route decision.
  */
 #define CopyFromErrorCallback lagodb_derived_CopyFromErrorCallback
 #define CopyFromGetCurrentLine lagodb_derived_CopyFromGetCurrentLine
@@ -42,7 +43,12 @@
 #include "access/tableam.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
+#include "lagodb_pg_compat.h"
+#if LAGODB_PG18_GE
+#include "commands/copyapi.h"
+#else
 #include "commands/copy.h"
+#endif
 #include "commands/copyfrom_internal.h"
 #include "commands/progress.h"
 #include "commands/trigger.h"
@@ -67,8 +73,9 @@
 
 #include "lagodb_copy.h"
 
-#if !LAGODB_PG17
-#error "routed COPY FROM executor has not been ported to this PostgreSQL major version"
+#if LAGODB_PG17_LT
+/* commands/copy.h declares this only from PostgreSQL 17. */
+extern char *CopyLimitPrintoutLength(const char *str);
 #endif
 
 /*
@@ -121,14 +128,7 @@ typedef struct CopyMultiInsertInfo
 	CommandId	mycid;			/* Command Id used for COPY */
 	int			ti_options;		/* table insert options */
 
-	/*
-	 * LAGODB BEGIN: a provider-owned partitioned table has a catalog relam
-	 * but PG17 deliberately leaves Relation.rd_tableam NULL.  Retain the
-	 * routine that was resolved once for this COPY so buffered rows can enter
-	 * the existing table-AM/AmCopySession callbacks without mutating the
-	 * relcache object.
-	 */
-	const TableAmRoutine *partitioned_table_tableam;
+	/* LAGODB BEGIN: provider COPY session callbacks. */
 	const LagodbCopyWriteBridge *write_bridge;
 	/* LAGODB END */
 } CopyMultiInsertInfo;
@@ -137,76 +137,128 @@ typedef struct CopyMultiInsertInfo
 /* non-export function prototypes */
 static void ClosePipeFromProgram(CopyFromState cstate);
 
-/* LAGODB BEGIN: partitioned table table-AM dispatch. */
+#if LAGODB_PG18_GE
+static void
+LagodbCopyFromTextLikeInFunc(CopyFromState cstate, Oid atttypid,
+							FmgrInfo *finfo, Oid *typioparam)
+{
+	Oid			func_oid;
+
+	getTypeInputInfo(atttypid, &func_oid, typioparam);
+	fmgr_info(func_oid, finfo);
+}
+
+static void
+LagodbCopyFromTextLikeStart(CopyFromState cstate, TupleDesc tupdesc)
+{
+	AttrNumber attr_count;
+
+	if (cstate->need_transcoding)
+	{
+		cstate->input_buf = palloc(INPUT_BUF_SIZE + 1);
+		cstate->input_buf_index = cstate->input_buf_len = 0;
+	}
+	else
+		cstate->input_buf = cstate->raw_buf;
+	cstate->input_reached_eof = false;
+	initStringInfo(&cstate->line_buf);
+
+	attr_count = list_length(cstate->attnumlist);
+	cstate->max_fields = attr_count;
+	cstate->raw_fields = palloc(attr_count * sizeof(char *));
+}
+
+static void
+LagodbCopyFromTextLikeEnd(CopyFromState cstate)
+{
+}
+
+static void
+LagodbCopyFromBinaryInFunc(CopyFromState cstate, Oid atttypid,
+						  FmgrInfo *finfo, Oid *typioparam)
+{
+	Oid			func_oid;
+
+	getTypeBinaryInputInfo(atttypid, &func_oid, typioparam);
+	fmgr_info(func_oid, finfo);
+}
+
+static void
+LagodbCopyFromBinaryStart(CopyFromState cstate, TupleDesc tupdesc)
+{
+	ReceiveCopyBinaryHeader(cstate);
+}
+
+static void
+LagodbCopyFromBinaryEnd(CopyFromState cstate)
+{
+}
+
+static const CopyFromRoutine LagodbCopyFromRoutineText = {
+	.CopyFromInFunc = LagodbCopyFromTextLikeInFunc,
+	.CopyFromStart = LagodbCopyFromTextLikeStart,
+	.CopyFromOneRow = CopyFromTextOneRow,
+	.CopyFromEnd = LagodbCopyFromTextLikeEnd,
+};
+
+static const CopyFromRoutine LagodbCopyFromRoutineCSV = {
+	.CopyFromInFunc = LagodbCopyFromTextLikeInFunc,
+	.CopyFromStart = LagodbCopyFromTextLikeStart,
+	.CopyFromOneRow = CopyFromCSVOneRow,
+	.CopyFromEnd = LagodbCopyFromTextLikeEnd,
+};
+
+static const CopyFromRoutine LagodbCopyFromRoutineBinary = {
+	.CopyFromInFunc = LagodbCopyFromBinaryInFunc,
+	.CopyFromStart = LagodbCopyFromBinaryStart,
+	.CopyFromOneRow = CopyFromBinaryOneRow,
+	.CopyFromEnd = LagodbCopyFromBinaryEnd,
+};
+
+static const CopyFromRoutine *
+LagodbCopyFromGetRoutine(const CopyFormatOptions *opts)
+{
+	if (opts->csv_mode)
+		return &LagodbCopyFromRoutineCSV;
+	if (opts->binary)
+		return &LagodbCopyFromRoutineBinary;
+	return &LagodbCopyFromRoutineText;
+}
+#endif
+
+/* LAGODB BEGIN: provider write-bridge dispatch. */
 static inline void
-LagodbTableTupleInsert(const TableAmRoutine *partitioned_table_tableam,
-                           const LagodbCopyWriteBridge *write_bridge, void *write_binding,
+LagodbTableTupleInsert(const LagodbCopyWriteBridge *write_bridge, void *write_binding,
 					   Relation relation, TupleTableSlot *slot,
 					   CommandId cid, int options,
 					   BulkInsertState bistate)
 {
 	if (write_binding != NULL)
 		write_bridge->insert(write_binding, slot, options);
-	else if (partitioned_table_tableam != NULL)
-		partitioned_table_tableam->tuple_insert(relation, slot, cid, options,
-												bistate);
 	else
 		table_tuple_insert(relation, slot, cid, options, bistate);
 }
 
 static inline void
-LagodbTableMultiInsert(const TableAmRoutine *partitioned_table_tableam,
-                           const LagodbCopyWriteBridge *write_bridge, void *write_binding,
+LagodbTableMultiInsert(const LagodbCopyWriteBridge *write_bridge, void *write_binding,
 					   Relation relation, TupleTableSlot **slots,
 					   int nslots, CommandId cid, int options,
 					   BulkInsertState bistate)
 {
 	if (write_binding != NULL)
 		write_bridge->insert_batch(write_binding, slots, nslots, options);
-	else if (partitioned_table_tableam != NULL)
-		partitioned_table_tableam->multi_insert(relation, slots, nslots, cid,
-												options, bistate);
 	else
 		table_multi_insert(relation, slots, nslots, cid, options, bistate);
 }
 
 static inline void
-LagodbTableFinishBulkInsert(const TableAmRoutine *partitioned_table_tableam,
-                           const LagodbCopyWriteBridge *write_bridge, void *write_binding,
+LagodbTableFinishBulkInsert(const LagodbCopyWriteBridge *write_bridge, void *write_binding,
 							Relation relation, int options)
 {
 	if (write_binding != NULL)
 		write_bridge->finish_bulk(write_binding, options);
-	else if (partitioned_table_tableam != NULL)
-	{
-		if (partitioned_table_tableam->finish_bulk_insert != NULL)
-			partitioned_table_tableam->finish_bulk_insert(relation, options);
-	}
 	else
 		table_finish_bulk_insert(relation, options);
-}
-
-static inline TupleTableSlot *
-LagodbTableSlotCreate(const TableAmRoutine *partitioned_table_tableam,
-					  Relation relation, List **reglist)
-{
-	TupleTableSlot *slot;
-
-	if (partitioned_table_tableam == NULL)
-		return table_slot_create(relation, reglist);
-
-	/*
-	 * table_slot_create() dispatches through Relation.rd_tableam, which PG17
-	 * deliberately leaves NULL for a partitioned table.  Use the
-	 * already-bound provider routine without mutating the relcache Relation;
-	 * registration in the executor tuple table remains identical to
-	 * table_slot_create().
-	 */
-	slot = MakeSingleTupleTableSlot(RelationGetDescr(relation),
-									partitioned_table_tableam->slot_callbacks(relation));
-	if (reglist != NULL)
-		*reglist = lappend(*reglist, slot);
-	return slot;
 }
 
 /* LAGODB END */
@@ -372,7 +424,6 @@ static void
 CopyMultiInsertInfoInit(CopyMultiInsertInfo *miinfo, ResultRelInfo *rri,
 						CopyFromState cstate, EState *estate, CommandId mycid,
 						int ti_options,
-						const TableAmRoutine *partitioned_table_tableam,
                         const LagodbCopyWriteBridge *write_bridge)
 {
 	miinfo->multiInsertBuffers = NIL;
@@ -382,7 +433,6 @@ CopyMultiInsertInfoInit(CopyMultiInsertInfo *miinfo, ResultRelInfo *rri,
 	miinfo->estate = estate;
 	miinfo->mycid = mycid;
 	miinfo->ti_options = ti_options;
-	miinfo->partitioned_table_tableam = partitioned_table_tableam;
 	miinfo->write_bridge = write_bridge;
 
 	/*
@@ -390,8 +440,7 @@ CopyMultiInsertInfoInit(CopyMultiInsertInfo *miinfo, ResultRelInfo *rri,
 	 * Buffers for partitioned tables will just be setup when we need to send
 	 * tuples their way for the first time.
 	 */
-	if (rri->ri_RelationDesc->rd_rel->relkind != RELKIND_PARTITIONED_TABLE ||
-		partitioned_table_tableam != NULL)
+	if (rri->ri_RelationDesc->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
 		CopyMultiInsertInfoSetupBuffer(miinfo, rri);
 }
 
@@ -528,8 +577,7 @@ CopyMultiInsertBufferFlush(CopyMultiInsertInfo *miinfo,
 		 * context before calling it.
 		 */
 		oldcontext = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
-		LagodbTableMultiInsert(miinfo->partitioned_table_tableam,
-                               miinfo->write_bridge, buffer->write_binding,
+		LagodbTableMultiInsert(miinfo->write_bridge, buffer->write_binding,
 							   resultRelInfo->ri_RelationDesc,
 							   slots,
 							   nused,
@@ -621,8 +669,7 @@ CopyMultiInsertBufferCleanup(CopyMultiInsertInfo *miinfo,
 		ExecDropSingleTupleTableSlot(buffer->slots[i]);
 
 	if (resultRelInfo->ri_FdwRoutine == NULL)
-		LagodbTableFinishBulkInsert(miinfo->partitioned_table_tableam,
-                                     miinfo->write_bridge, buffer->write_binding,
+		LagodbTableFinishBulkInsert(miinfo->write_bridge, buffer->write_binding,
 									resultRelInfo->ri_RelationDesc,
 									miinfo->ti_options);
 
@@ -716,9 +763,7 @@ CopyMultiInsertInfoNextFreeSlot(CopyMultiInsertInfo *miinfo,
 	Assert(nused < MAX_BUFFERED_TUPLES);
 
 	if (buffer->slots[nused] == NULL)
-		buffer->slots[nused] =
-			LagodbTableSlotCreate(miinfo->partitioned_table_tableam,
-								  rri->ri_RelationDesc, NULL);
+		buffer->slots[nused] = table_slot_create(rri->ri_RelationDesc, NULL);
 	return buffer->slots[nused];
 }
 
@@ -753,7 +798,6 @@ static uint64
 LagodbCopyFromExecutor(CopyFromState cstate,
 					   lagodb_typed_copy_source_cb typed_source,
 					   void *typed_source_context,
-					   bool provider_owned_partitioned_table,
                        const LagodbCopyWriteBridge *write_bridge)
 {
 	ResultRelInfo *resultRelInfo;
@@ -773,10 +817,11 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 	BulkInsertState bistate = NULL;
 	CopyInsertMethod insertMethod;
 	CopyMultiInsertInfo multiInsertInfo = {0};	/* pacify compiler */
-	const TableAmRoutine *partitioned_table_tableam = NULL;
 	int64		processed = 0;
 	int64		excluded = 0;
+#if LAGODB_PG17_GE
 	int64		skipped = 0;
+#endif
 	int			typed_relation_natts = 0;
 	bool		has_before_insert_row_trig;
 	bool		has_instead_insert_row_trig;
@@ -786,11 +831,11 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 	Assert(list_length(cstate->range_table) == 1);
 	if (typed_source != NULL)
 		typed_relation_natts = RelationGetDescr(cstate->rel)->natts;
-	if (provider_owned_partitioned_table)
-		partitioned_table_tableam = lagodb_partitioned_table_tableam(cstate->rel);
 
+#if LAGODB_PG17_GE
 	if (cstate->opts.on_error != COPY_ON_ERROR_STOP)
 		Assert(cstate->escontext);
+#endif
 
 	/*
 	 * The target must be a plain, foreign, or partitioned relation, or have
@@ -865,6 +910,13 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 					 errmsg("cannot perform COPY FREEZE on a partitioned table")));
 		}
 
+#if LAGODB_PG18_GE
+		if (cstate->rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot perform COPY FREEZE on a foreign table")));
+#endif
+
 		/*
 		 * Tolerate one registration for the benefit of FirstXactSnapshot.
 		 * Scan-bearing queries generally create at least two registrations,
@@ -893,12 +945,23 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 	 * index-entry-making machinery.  (There used to be a huge amount of code
 	 * here that basically duplicated execUtils.c ...)
 	 */
+#if LAGODB_PG18_GE
+	ExecInitRangeTable(estate, cstate->range_table, cstate->rteperminfos,
+					   bms_make_singleton(1));
+#else
 	ExecInitRangeTable(estate, cstate->range_table, cstate->rteperminfos);
+#endif
 	resultRelInfo = target_resultRelInfo = makeNode(ResultRelInfo);
 	ExecInitResultRelation(estate, resultRelInfo, 1);
 
 	/* Verify the named relation is a valid target for INSERT */
+#if LAGODB_PG18_GE
+	CheckValidResultRel(resultRelInfo, CMD_INSERT, ONCONFLICT_NONE, NIL);
+#elif LAGODB_PG17_GE
 	CheckValidResultRel(resultRelInfo, CMD_INSERT, NIL);
+#else
+	CheckValidResultRel(resultRelInfo, CMD_INSERT);
+#endif
 
 	ExecOpenIndices(resultRelInfo, false);
 
@@ -956,15 +1019,8 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 	 * If the named relation is a partitioned table, initialize state for
 	 * CopyFrom tuple routing.
 	 */
-
-	/*
-	 * LAGODB BEGIN: a provider-owned partitioned table is itself the physical
-	 * target.
-	 */
-	if (cstate->rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE &&
-		!provider_owned_partitioned_table)
+	if (cstate->rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 		proute = ExecSetupPartitionTupleRouting(estate, cstate->rel);
-	/* LAGODB END */
 
 	if (cstate->whereClause)
 		cstate->qualexpr = ExecInitQual(castNode(List, cstate->whereClause),
@@ -1057,8 +1113,7 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 			insertMethod = CIM_MULTI;
 
 		CopyMultiInsertInfoInit(&multiInsertInfo, resultRelInfo, cstate,
-								estate, mycid, ti_options,
-								partitioned_table_tableam, write_bridge);
+								estate, mycid, ti_options, write_bridge);
 	}
 
 	/* LAGODB BEGIN: bind once for the non-partitioned single-row path. */
@@ -1076,9 +1131,8 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 	 */
 	if (insertMethod == CIM_SINGLE || insertMethod == CIM_MULTI_CONDITIONAL)
 	{
-		singleslot = LagodbTableSlotCreate(partitioned_table_tableam,
-										   resultRelInfo->ri_RelationDesc,
-										   &estate->es_tupleTable);
+		singleslot = table_slot_create(resultRelInfo->ri_RelationDesc,
+									   &estate->es_tupleTable);
 		bistate = GetBulkInsertState();
 	}
 
@@ -1195,7 +1249,9 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 			{
 				if (rejection_message == NULL)
 					rejection_message = "typed COPY input rejected a row";
+#if LAGODB_PG17_GE
 				if (cstate->opts.on_error == COPY_ON_ERROR_STOP)
+#endif
 					ereport(ERROR,
 							(errcode(rejection_sql_error_code),
 							 errmsg("%s", rejection_message),
@@ -1203,7 +1259,9 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 							 errdetail("input location: %s", rejection_location) : 0,
 							 rejection_column >= 0 ?
 							 errdetail_log("input column index: %d", rejection_column) : 0,
-							 errhint("use ON_ERROR IGNORE to skip format conversion errors")));
+							 LAGODB_PG17_GE ?
+							 errhint("use ON_ERROR IGNORE to skip format conversion errors") : 0));
+#if LAGODB_PG17_GE
 				cstate->num_errors++;
 				if (cstate->opts.log_verbosity == COPY_LOG_VERBOSITY_VERBOSE)
 					ereport(NOTICE,
@@ -1212,7 +1270,16 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 							 errdetail("input location: %s", rejection_location) : 0));
 				pgstat_progress_update_param(PROGRESS_COPY_TUPLES_SKIPPED,
 											 ++skipped);
+#if LAGODB_PG18_GE
+				if (cstate->opts.reject_limit > 0 &&
+					cstate->num_errors > (uint64) cstate->opts.reject_limit)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+							 errmsg("skipped more than REJECT_LIMIT (%" PRId64 ") rows due to data type incompatibility",
+									cstate->opts.reject_limit)));
+#endif
 				continue;
+#endif
 			}
 			if (input_result != LAGODB_TYPED_COPY_ROW)
 				elog(ERROR, "typed COPY input returned an invalid row result");
@@ -1240,6 +1307,7 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 		}
 		/* LAGODB END */
 
+#if LAGODB_PG17_GE
 		if (cstate->opts.on_error != COPY_ON_ERROR_STOP &&
 			cstate->escontext->error_occurred)
 		{
@@ -1260,8 +1328,18 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 			pgstat_progress_update_param(PROGRESS_COPY_TUPLES_SKIPPED,
 										 ++skipped);
 
+#if LAGODB_PG18_GE
+			if (cstate->opts.reject_limit > 0 &&
+				cstate->num_errors > (uint64) cstate->opts.reject_limit)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+						 errmsg("skipped more than REJECT_LIMIT (%" PRId64 ") rows due to data type incompatibility",
+								cstate->opts.reject_limit)));
+#endif
+
 			continue;
 		}
+#endif
 
 		ExecStoreVirtualTuple(myslot);
 
@@ -1520,8 +1598,7 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 					else
 					{
 						/* OK, store the tuple and create index entries for it */
-						LagodbTableTupleInsert(partitioned_table_tableam,
-                                               write_bridge, write_binding,
+						LagodbTableTupleInsert(write_bridge, write_binding,
 											   resultRelInfo->ri_RelationDesc,
 											   myslot, mycid, ti_options, bistate);
 
@@ -1565,13 +1642,19 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 	/* Done, clean up */
 	error_context_stack = errcallback.previous;
 
+#if LAGODB_PG17_GE
 	if (cstate->opts.on_error != COPY_ON_ERROR_STOP &&
-		cstate->num_errors > 0)
+		cstate->num_errors > 0
+#if LAGODB_PG18_GE
+		&& cstate->opts.log_verbosity >= COPY_LOG_VERBOSITY_DEFAULT
+#endif
+		)
 		ereport(NOTICE,
 				errmsg_plural("%llu row was skipped due to data type incompatibility",
 							  "%llu rows were skipped due to data type incompatibility",
 							  (unsigned long long) cstate->num_errors,
 							  (unsigned long long) cstate->num_errors));
+#endif
 
 	if (bistate != NULL)
 		FreeBulkInsertState(bistate);
@@ -1643,7 +1726,9 @@ LagodbBeginCopyFrom(ParseState *pstate,
 				num_defaults;
 	FmgrInfo   *in_functions;
 	Oid		   *typioparams;
+#if LAGODB_PG18_LT
 	Oid			in_func_oid;
+#endif
 	int		   *defmap;
 	ExprState **defexprs;
 	MemoryContext oldcontext;
@@ -1674,6 +1759,9 @@ LagodbBeginCopyFrom(ParseState *pstate,
 
 	/* Extract options from the statement node tree */
 	ProcessCopyOptions(pstate, &cstate->opts, true /* is_from */ , options);
+#if LAGODB_PG18_GE
+	cstate->routine = LagodbCopyFromGetRoutine(&cstate->opts);
+#endif
 
 	/* Process the target relation */
 	cstate->rel = rel;
@@ -1689,9 +1777,12 @@ LagodbBeginCopyFrom(ParseState *pstate,
 
 	/* Convert FORCE_NOT_NULL name list to per-column flags, check validity */
 	cstate->opts.force_notnull_flags = (bool *) palloc0(num_phys_attrs * sizeof(bool));
+#if LAGODB_PG17_GE
 	if (cstate->opts.force_notnull_all)
 		MemSet(cstate->opts.force_notnull_flags, true, num_phys_attrs * sizeof(bool));
-	else if (cstate->opts.force_notnull)
+	else
+#endif
+	if (cstate->opts.force_notnull)
 	{
 		List	   *attnums;
 		ListCell   *cur;
@@ -1713,6 +1804,7 @@ LagodbBeginCopyFrom(ParseState *pstate,
 		}
 	}
 
+#if LAGODB_PG17_GE
 	/* Set up soft error handler for ON_ERROR */
 	if (cstate->opts.on_error != COPY_ON_ERROR_STOP)
 	{
@@ -1729,12 +1821,16 @@ LagodbBeginCopyFrom(ParseState *pstate,
 	}
 	else
 		cstate->escontext = NULL;
+#endif
 
 	/* Convert FORCE_NULL name list to per-column flags, check validity */
 	cstate->opts.force_null_flags = (bool *) palloc0(num_phys_attrs * sizeof(bool));
+#if LAGODB_PG17_GE
 	if (cstate->opts.force_null_all)
 		MemSet(cstate->opts.force_null_flags, true, num_phys_attrs * sizeof(bool));
-	else if (cstate->opts.force_null)
+	else
+#endif
+	if (cstate->opts.force_null)
 	{
 		List	   *attnums;
 		ListCell   *cur;
@@ -1830,6 +1926,7 @@ LagodbBeginCopyFrom(ParseState *pstate,
 	cstate->raw_buf_index = cstate->raw_buf_len = 0;
 	cstate->raw_reached_eof = false;
 
+#if LAGODB_PG18_LT
 	if (!cstate->opts.binary)
 	{
 		/*
@@ -1848,6 +1945,7 @@ LagodbBeginCopyFrom(ParseState *pstate,
 
 		initStringInfo(&cstate->line_buf);
 	}
+#endif
 
 	initStringInfo(&cstate->attribute_buf);
 
@@ -1881,6 +1979,11 @@ LagodbBeginCopyFrom(ParseState *pstate,
 			continue;
 
 		/* Fetch the input function and typioparam info */
+#if LAGODB_PG18_GE
+		cstate->routine->CopyFromInFunc(cstate, att->atttypid,
+										 &in_functions[attnum - 1],
+										 &typioparams[attnum - 1]);
+#else
 		if (cstate->opts.binary)
 			getTypeBinaryInputInfo(att->atttypid,
 								   &in_func_oid, &typioparams[attnum - 1]);
@@ -1888,6 +1991,7 @@ LagodbBeginCopyFrom(ParseState *pstate,
 			getTypeInputInfo(att->atttypid,
 							 &in_func_oid, &typioparams[attnum - 1]);
 		fmgr_info(in_func_oid, &in_functions[attnum - 1]);
+#endif
 
 		/* Get default info if available */
 		defexprs[attnum - 1] = NULL;
@@ -2028,6 +2132,10 @@ LagodbBeginCopyFrom(ParseState *pstate,
 	pgstat_progress_update_multi_param(3, progress_cols, progress_vals);
 
 	/* Callback input is opened by Rust after this state is prepared. */
+#if LAGODB_PG18_GE
+	if (!cstate->opts.binary || (!typed_input && !data_source_cb))
+		cstate->routine->CopyFromStart(cstate, tupDesc);
+#else
 	if (!typed_input && !data_source_cb && cstate->opts.binary)
 	{
 		/* Read and verify binary header */
@@ -2042,6 +2150,7 @@ LagodbBeginCopyFrom(ParseState *pstate,
 		cstate->max_fields = attr_count;
 		cstate->raw_fields = (char **) palloc(attr_count * sizeof(char *));
 	}
+#endif
 
 	MemoryContextSwitchTo(oldcontext);
 
@@ -2054,6 +2163,9 @@ LagodbBeginCopyFrom(ParseState *pstate,
 void
 EndCopyFrom(CopyFromState cstate)
 {
+#if LAGODB_PG18_GE
+	cstate->routine->CopyFromEnd(cstate);
+#endif
 	/* No COPY FROM related resources except memory. */
 	if (cstate->is_program)
 	{
@@ -2094,7 +2206,6 @@ uint64
 lagodb_execute_routed_copy_from(CopyFromState state,
 								lagodb_typed_copy_source_cb typed_source,
 								void *typed_source_context,
-								bool provider_owned_partitioned_table,
                        const LagodbCopyWriteBridge *write_bridge)
 {
 	/*
@@ -2106,12 +2217,16 @@ lagodb_execute_routed_copy_from(CopyFromState state,
 	{
 		MemoryContext oldcontext = MemoryContextSwitchTo(state->copycontext);
 
+#if LAGODB_PG18_GE
+		state->routine->CopyFromStart(state, RelationGetDescr(state->rel));
+#else
 		ReceiveCopyBinaryHeader(state);
+#endif
 		MemoryContextSwitchTo(oldcontext);
 	}
 
 	return LagodbCopyFromExecutor(state, typed_source, typed_source_context,
-								  provider_owned_partitioned_table, write_bridge);
+								  write_bridge);
 }
 
 void

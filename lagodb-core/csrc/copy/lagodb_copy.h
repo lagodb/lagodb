@@ -4,7 +4,6 @@
 #include "lagodb_pg_compat.h"
 
 #include "commands/copy.h"
-#include "lagodb_relation.h"
 #include "lagodb_copy_write.h"
 
 /* Exact-build counterpart of Rust's CopyEndpoint. */
@@ -108,7 +107,6 @@ uint64		lagodb_execute_routed_copy_from(
 											CopyFromState state,
 											lagodb_typed_copy_source_cb typed_source,
 											void *typed_source_context,
-											bool provider_owned_partitioned_table,
                                             const LagodbCopyWriteBridge *write_bridge);
 void		lagodb_end_routed_copy_from(CopyFromState state);
 TupleDesc	lagodb_routed_copy_from_tuple_desc(CopyFromState state);
@@ -143,7 +141,6 @@ CopyToState lagodb_begin_routed_copy_to(
 										copy_data_dest_cb data_dest_cb,
 										List *attnamelist,
 										List *options,
-										bool provider_owned_partitioned_table,
 										bool typed_output);
 uint64		lagodb_execute_routed_copy_to(
 										  CopyToState state,

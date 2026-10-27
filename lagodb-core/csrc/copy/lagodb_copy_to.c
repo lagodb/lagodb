@@ -13,8 +13,10 @@
  *-------------------------------------------------------------------------
  */
 /*
- * PostgreSQL 17.10 derived COPY TO executor.  External upstream symbols are
- * renamed so this opt-in fork can coexist with the backend implementation.
+ * COPY TO executor derived primarily from PostgreSQL 17.11/18.6, then audited
+ * and ported for PG16.15 control flow and API compatibility. External upstream
+ * symbols are renamed so this opt-in fork can coexist with the backend
+ * implementation.
  * The typed destination is a provider-neutral slot callback selected once by
  * the Rust driver; format and storage policy remain outside this file.
  */
@@ -49,8 +51,11 @@
 
 #include "lagodb_copy.h"
 
-#if !LAGODB_PG17
-#error "routed COPY TO executor has not been ported to this PostgreSQL major version"
+#if LAGODB_PG17_LT
+/* PostgreSQL 16 predates libpq/protocol.h and spells these bytes inline. */
+#define PqMsg_CopyOutResponse 'H'
+#define PqMsg_CopyDone 'c'
+#define PqMsg_CopyData 'd'
 #endif
 
 /*
@@ -99,14 +104,6 @@ typedef struct CopyToStateData
 	copy_data_dest_cb data_dest_cb; /* function for writing data */
 	lagodb_typed_copy_dest_cb typed_destination;	/* LagoDB slot destination */
 	void	   *typed_destination_context;	/* Rust-owned callback state */
-
-	/*
-	 * Relation COPY uses one resolved AM for the whole scan.  For an ordinary
-	 * table this is rd_tableam; for a provider-owned partitioned table it is
-	 * the routine named by pg_class.relam, since PG17 keeps rd_tableam NULL
-	 * there.
-	 */
-	const TableAmRoutine *scan_tableam;
 
 	CopyFormatOptions opts;
 	Node	   *whereClause;	/* WHERE condition (or NULL) */
@@ -386,7 +383,6 @@ LagodbBeginCopyTo(ParseState *pstate,
 				  copy_data_dest_cb data_dest_cb,
 				  List *attnamelist,
 				  List *options,
-				  bool provider_owned_partitioned_table,
 				  bool typed_output)
 {
 	CopyToState cstate;
@@ -403,15 +399,11 @@ LagodbBeginCopyTo(ParseState *pstate,
 		0
 	};
 
-	/*
-	 * PostgreSQL normally rejects every partitioned relation here because its
-	 * data lives in leaves.  A provider-owned partitioned table is the
-	 * physical table; admit only that preclassified case and retain the
-	 * native error chain for every other non-plain relkind.
-	 */
-	if (rel != NULL && rel->rd_rel->relkind != RELKIND_RELATION &&
-		!(provider_owned_partitioned_table &&
-		  rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE))
+	if (rel != NULL && rel->rd_rel->relkind != RELKIND_RELATION
+#if LAGODB_PG18_GE
+		&& rel->rd_rel->relkind != RELKIND_MATVIEW
+#endif
+		)
 	{
 		if (rel->rd_rel->relkind == RELKIND_VIEW)
 			ereport(ERROR,
@@ -448,6 +440,15 @@ LagodbBeginCopyTo(ParseState *pstate,
 					 errmsg("cannot copy from non-table relation \"%s\"",
 							RelationGetRelationName(rel))));
 	}
+#if LAGODB_PG18_GE
+	else if (rel != NULL && rel->rd_rel->relkind == RELKIND_MATVIEW &&
+			 !RelationIsPopulated(rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot copy from unpopulated materialized view \"%s\"",
+						RelationGetRelationName(rel)),
+				 errhint("Use the REFRESH MATERIALIZED VIEW command.")));
+#endif
 
 
 	/* Allocate workspace and zero all fields */
@@ -472,9 +473,6 @@ LagodbBeginCopyTo(ParseState *pstate,
 		Assert(!raw_query);
 
 		cstate->rel = rel;
-		cstate->scan_tableam = provider_owned_partitioned_table ?
-			lagodb_partitioned_table_tableam(rel) : rel->rd_tableam;
-		Assert(cstate->scan_tableam != NULL);
 
 		tupDesc = RelationGetDescr(cstate->rel);
 	}
@@ -932,25 +930,14 @@ LagodbDoCopyToExecutor(CopyToState cstate,
 
 	if (cstate->rel)
 	{
-		const TableAmRoutine *tableam = cstate->scan_tableam;
 		TupleTableSlot *slot;
 		TableScanDesc scandesc;
-		uint32		scan_flags = SO_TYPE_SEQSCAN |
-			SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
 
-		/*
-		 * LAGODB BEGIN: call the begin-time AM directly.  This is equivalent
-		 * to table_beginscan/table_scan_getnextslot/table_endscan for
-		 * ordinary relations and also works for a provider-owned partitioned
-		 * table whose rd_tableam is NULL.
-		 */
-		scandesc = tableam->scan_begin(cstate->rel, GetActiveSnapshot(), 0,
-									   NULL, NULL, scan_flags);
-		slot = MakeSingleTupleTableSlot(RelationGetDescr(cstate->rel),
-										tableam->slot_callbacks(cstate->rel));
+		scandesc = table_beginscan(cstate->rel, GetActiveSnapshot(), 0, NULL);
+		slot = table_slot_create(cstate->rel, NULL);
 
 		processed = 0;
-		while (tableam->scan_getnextslot(scandesc, ForwardScanDirection, slot))
+		while (table_scan_getnextslot(scandesc, ForwardScanDirection, slot))
 		{
 			CHECK_FOR_INTERRUPTS();
 
@@ -971,13 +958,16 @@ LagodbDoCopyToExecutor(CopyToState cstate,
 		}
 
 		ExecDropSingleTupleTableSlot(slot);
-		tableam->scan_end(scandesc);
-		/* LAGODB END */
+		table_endscan(scandesc);
 	}
 	else
 	{
 		/* run the plan --- the dest receiver will send tuples */
+#if LAGODB_PG18_GE
+		ExecutorRun(cstate->queryDesc, ForwardScanDirection, 0);
+#else
 		ExecutorRun(cstate->queryDesc, ForwardScanDirection, 0, true);
+#endif
 		processed = ((DR_copy *) cstate->queryDesc->dest)->processed;
 	}
 
@@ -1411,12 +1401,11 @@ lagodb_begin_routed_copy_to(ParseState *pstate,
 							copy_data_dest_cb data_dest_cb,
 							List *attnamelist,
 							List *options,
-							bool provider_owned_partitioned_table,
 							bool typed_output)
 {
 	return LagodbBeginCopyTo(pstate, rel, raw_query, query_rel_id, filename,
 							 is_program, data_dest_cb, attnamelist, options,
-							 provider_owned_partitioned_table, typed_output);
+							 typed_output);
 }
 
 uint64

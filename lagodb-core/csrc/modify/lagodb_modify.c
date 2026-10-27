@@ -3,8 +3,9 @@
  *
  * ExecInitNode/ExecEndNode dispatch ModifyTable to the server's implementation.
  * Keep their common contracts here while selecting the extension's fork.
- * Initialization and teardown follow execProcnode.c from PostgreSQL 17.10;
- * execution uses the backend's ExecSetExecProcNode/ExecProcNode wrappers.
+ * Initialization and teardown follow execProcnode.c from PostgreSQL 17.11
+ * and 18.6, audited for PG16.15; execution uses the backend's
+ * ExecSetExecProcNode/ExecProcNode wrappers.
  */
 #include "postgres.h"
 
@@ -33,8 +34,7 @@ LagodbModifyTableNext(PlanState *state)
 }
 
 ModifyTableState *
-lagodb_exec_init_modify_table(ModifyTable *plan, EState *estate, int eflags,
-							  bool provider_owns_partitioned_table)
+lagodb_exec_init_modify_table(ModifyTable *plan, EState *estate, int eflags)
 {
 	LagodbModifyTableExecutor *executor;
 	PlanState  *state;
@@ -44,8 +44,7 @@ lagodb_exec_init_modify_table(ModifyTable *plan, EState *estate, int eflags,
 	check_stack_depth();
 	executor = palloc0(sizeof(LagodbModifyTableExecutor));
 	NodeSetTag(&executor->state, T_ModifyTableState);
-	lagodb_init_modify_table_state(&executor->state, plan, estate, eflags,
-								   provider_owns_partitioned_table);
+	lagodb_init_modify_table_state(&executor->state, plan, estate, eflags);
 	state = &executor->state.ps;
 
 	/*
