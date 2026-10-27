@@ -10,6 +10,7 @@ use std::slice;
 use pgrx::pg_sys;
 
 use crate::datum::{Cell, DatumConversionError};
+use crate::handles::TupleDescHandle;
 
 use super::row::Row;
 use super::row_codec::RowDatumCodec;
@@ -143,11 +144,12 @@ impl<'slot> TupleSlotRow<'slot> {
         // callback-scoped lifetime carried by `self`.
         unsafe {
             let tup_desc = (*self.slot).tts_tupleDescriptor;
-            let natts = (*tup_desc).natts as usize;
+            let tuple_desc = TupleDescHandle::from_raw(tup_desc);
+            let natts = tuple_desc.len();
             SlotDatumView {
                 values: slice::from_raw_parts((*self.slot).tts_values, natts),
                 nulls: slice::from_raw_parts((*self.slot).tts_isnull, natts),
-                attrs: slice::from_raw_parts((*tup_desc).attrs.as_ptr(), natts),
+                attrs: tuple_desc.attributes(),
             }
         }
     }

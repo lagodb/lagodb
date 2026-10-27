@@ -22,6 +22,7 @@ mod database;
 mod foreign_server;
 mod json;
 mod namespace;
+mod process;
 mod relation;
 mod relation_storage;
 mod syscache;

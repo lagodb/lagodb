@@ -9,6 +9,11 @@ unsafe extern "C-unwind" {
         lock_mode: i32,
         numparents: *mut *mut pg_sys::List,
     ) -> *mut pg_sys::List;
+    fn find_inheritance_children(
+        parent_rel_id: pg_sys::Oid,
+        lock_mode: i32,
+    ) -> *mut pg_sys::List;
+    fn has_superclass(relation_id: pg_sys::Oid) -> bool;
 }
 
 impl PgWrapper {
@@ -84,6 +89,50 @@ impl PgWrapper {
         }
     }
 
+    pub(crate) unsafe fn alter_table_lookup_relation(
+        stmt: *mut pg_sys::AlterTableStmt,
+        lockmode: pg_sys::LOCKMODE,
+    ) -> Result<pg_sys::Oid, PgError> {
+        unsafe {
+            PgTryBuilder::new(AssertUnwindSafe(|| {
+                Ok(pg_sys::AlterTableLookupRelation(stmt, lockmode))
+            }))
+            .catch_others(|error| Err(PgError::from_caught(error)))
+            .execute()
+        }
+    }
+
+    pub(crate) fn has_inheritance_children(
+        parent_rel_id: pg_sys::Oid,
+    ) -> Result<bool, PgError> {
+        unsafe {
+            PgTryBuilder::new(move || {
+                let children = pg_sys::ffi::pg_guard_ffi_boundary(|| {
+                    find_inheritance_children(parent_rel_id, pg_sys::NoLock as _)
+                });
+                let has_children = !children.is_null();
+                pg_sys::list_free(children);
+                Ok(has_children)
+            })
+            .catch_others(|err| Err(PgError::from_caught(err)))
+            .execute()
+        }
+    }
+
+    pub(crate) fn has_inheritance_parents(
+        relation_id: pg_sys::Oid,
+    ) -> Result<bool, PgError> {
+        unsafe {
+            PgTryBuilder::new(move || {
+                Ok(pg_sys::ffi::pg_guard_ffi_boundary(|| {
+                    has_superclass(relation_id)
+                }))
+            })
+            .catch_others(|err| Err(PgError::from_caught(err)))
+            .execute()
+        }
+    }
+
     pub(crate) fn find_all_inheritors(
         parent_rel_id: pg_sys::Oid,
         lockmode: pg_sys::LOCKMODE,
@@ -111,6 +160,7 @@ impl PgWrapper {
     /// # Safety
     ///
     /// `relation` must remain valid for the duration of the call.
+    #[cfg(feature = "pg16")]
     pub(crate) unsafe fn relation_stat_ext_oids(
         relation: pg_sys::Relation,
     ) -> Result<Vec<pg_sys::Oid>, PgError> {

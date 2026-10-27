@@ -177,6 +177,16 @@ impl RelationCatalogEntry {
         Some(Self::from_class(class))
     }
 
+    /// Read `pg_class.relam` for a relation the caller keeps locked.
+    ///
+    /// The lock guarantees a catalog row, so PostgreSQL's cache-lookup failure
+    /// is the only way this can fail.
+    pub fn access_method_of_locked(oid: pg_sys::Oid) -> pg_sys::Oid {
+        Self::find_cached(oid)
+            .expect("a locked relation has a pg_class row")
+            .access_method_oid()
+    }
+
     /// Find a relation's `pg_class` row using the requested catalog snapshot.
     ///
     /// [`CatalogSnapshot::SelfVisible`] must be used when an object-access hook

@@ -2,7 +2,6 @@
 
 use std::collections::HashSet;
 use std::ffi::c_char;
-use std::slice;
 
 use pgrx::pg_sys;
 
@@ -65,16 +64,11 @@ impl TypeDependencies {
                         pg_sys::AccessShareLock as pg_sys::LOCKMODE,
                     )?;
                     let handle = relation.as_handle();
-                    let desc = handle.tuple_desc();
                     // Like PG, ignore view/expression dependencies without a
                     // stored attribute of this type. Attribute positions are
                     // descriptor indices, not a separate map.
-                    let attrs = unsafe {
-                        slice::from_raw_parts(
-                            (*desc).attrs.as_ptr(),
-                            (*desc).natts as usize,
-                        )
-                    };
+                    let tuple_desc = handle.tuple_desc_handle();
+                    let attrs = tuple_desc.attributes();
                     let stored = if dependency.objsubid > 0
                         && dependency.objsubid as usize <= attrs.len()
                     {

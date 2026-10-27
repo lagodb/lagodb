@@ -7,11 +7,11 @@
 use std::ffi::CString;
 use std::mem;
 use std::ptr;
-use std::slice;
 
 use pgrx::IntoDatum;
 use pgrx::pg_sys::{self, Datum, Oid};
 
+use crate::handles::TupleDescHandle;
 use crate::wrapper::PgWrapper;
 
 use super::cell::Cell;
@@ -85,10 +85,9 @@ impl ColumnDatumTarget {
     /// state.
     pub(crate) unsafe fn from_relation(relation: pg_sys::Relation) -> Box<[Self]> {
         let tuple_desc = unsafe { (*relation).rd_att };
-        let natts = unsafe { (*tuple_desc).natts as usize };
-        let attrs =
-            unsafe { slice::from_raw_parts((*tuple_desc).attrs.as_ptr(), natts) };
-        attrs
+        // SAFETY: guaranteed by this method's contract.
+        unsafe { TupleDescHandle::from_raw(tuple_desc) }
+            .attributes()
             .iter()
             .map(|attr| Self::from_oid(attr.atttypid))
             .collect()

@@ -25,13 +25,12 @@ pub use ids::{
 };
 pub(crate) use ids::{MaintenanceCatalogIds, get_maintenance_catalog_ids};
 pub use relation::{RelationCatalogEntry, RenameColumnTarget};
-pub(crate) use syscache::search_syscache2;
 pub use syscache::{
     SysCacheTuple, SysCacheTupleCopy, search_syscache_copy, search_syscache1,
 };
 pub use type_dependencies::TypeDependencies;
 
-use crate::diag::PgError;
+use crate::diag::{PgError, PgReportError};
 use crate::wrapper::PgWrapper;
 use pgrx::pg_sys;
 use std::ffi::CStr;
@@ -62,19 +61,6 @@ pub fn get_relation_oid(relname: &CStr, relnamespace: pg_sys::Oid) -> pg_sys::Oi
     PgWrapper::get_relname_relid(relname, relnamespace)
 }
 
-/// Record that a catalog object depends on a tablespace even though it has no
-/// PostgreSQL-managed physical file there.
-///
-/// The caller must establish that PostgreSQL has not already recorded the
-/// same object's tablespace dependency.
-pub fn record_tablespace_dependency(
-    class_id: pg_sys::Oid,
-    object_id: pg_sys::Oid,
-    tablespace_id: pg_sys::Oid,
-) -> Result<(), PgError> {
-    PgWrapper::record_tablespace_dependency(class_id, object_id, tablespace_id)
-}
-
 /// Resolves a `RangeVar` to a relation OID.
 ///
 /// # Safety
@@ -87,6 +73,38 @@ pub unsafe fn range_var_get_relid(
     missing_ok: bool,
 ) -> Result<pg_sys::Oid, PgError> {
     unsafe { PgWrapper::range_var_get_relid(relation, lockmode, missing_ok) }
+}
+
+/// Resolve and lock an ALTER TABLE target with PostgreSQL's own permission
+/// callback. `InvalidOid` means an `IF EXISTS` target is missing. Admission
+/// errors keep PostgreSQL's SQLSTATE, message, DETAIL and HINT; an outer hook
+/// may add its own context.
+///
+/// # Safety
+///
+/// `stmt` must be a live ALTER TABLE statement.
+pub unsafe fn alter_table_lookup_relation(
+    stmt: *mut pg_sys::AlterTableStmt,
+    lockmode: pg_sys::LOCKMODE,
+) -> Result<pg_sys::Oid, PgReportError> {
+    unsafe { PgWrapper::alter_table_lookup_relation(stmt, lockmode) }
+        .map_err(PgReportError::from_pg_error)
+}
+
+/// Whether a relation has inheritance children, without locking any of them.
+///
+/// This is tablecmds.c's own existence check. Unlike `relhassubclass` it does
+/// not outlive the last child. The caller must hold a lock on the parent that
+/// keeps new children out.
+pub fn has_inheritance_children(parent_rel_id: pg_sys::Oid) -> Result<bool, PgError> {
+    PgWrapper::has_inheritance_children(parent_rel_id)
+}
+
+/// Whether a relation inherits from another, without locking its parents.
+///
+/// The caller must hold a lock on the relation that keeps new parents out.
+pub fn has_inheritance_parents(relation_id: pg_sys::Oid) -> Result<bool, PgError> {
+    PgWrapper::has_inheritance_parents(relation_id)
 }
 
 pub fn find_all_inheritors(

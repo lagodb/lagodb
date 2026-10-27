@@ -25,25 +25,36 @@
 //! - Owning guards manage resources this crate must close or free, such as
 //!   `RelationGuard` and `HeapTupleGuard`.
 
+#[cfg(feature = "pg18")]
+mod bitmap;
 mod borrowed;
 mod executor;
 mod index;
 mod mutation;
 mod partition_key;
 mod relation;
+#[cfg(feature = "pg16")]
+mod relation_analyze;
 mod relation_column;
 mod relation_name;
 mod relation_storage;
 mod relation_tablespace;
 mod scan;
 mod tuple;
+mod tuple_desc;
 
+#[cfg(feature = "pg18")]
+pub use bitmap::{
+    BitmapPage, BitmapPageOffsets, BitmapScanOutputHandle, TBMIteratorHandle,
+};
 pub use executor::ExecutorHandle;
 pub use index::{
     IndexBuildCallbackHandle, IndexInfoHandle, ValidateIndexStateHandle,
 };
 pub use mutation::{TM_FailureData, TMIndexDeleteOpHandle};
-pub use partition_key::{PartitionKeyField, PartitionKeyHandle, PartitionStrategy};
+pub use partition_key::{
+    PartitionKey, PartitionKeyField, PartitionKeySource, PartitionStrategy,
+};
 pub use relation::{
     AttrWidthsHandle, BufferAccessStrategyHandle, RelFileLocator, RelationGuard,
     RelationHandle, SnapshotHandle, VacuumParamsHandle, VarlenaHandle,
@@ -51,12 +62,13 @@ pub use relation::{
 pub use relation_column::RelationColumn;
 pub use relation_name::RelationName;
 pub use relation_tablespace::RelationTablespace;
-pub use scan::AnalyzeSamplerState;
+#[cfg(any(feature = "pg17", feature = "pg18"))]
+pub use scan::{AnalyzeReadStreamHandle, AnalyzeSamplerState};
 pub use scan::{
-    AnalyzeReadStreamHandle, OwnedScanKeys, ParallelTableScanDescHandle,
-    SampleScanStateHandle, ScanDirection, ScanKeyEntry, ScanKeyIter,
-    TBMIterateResultHandle, TableScanDescHandle,
+    OwnedScanKeys, ParallelTableScanDescHandle, SampleScanStateHandle, ScanDirection,
+    ScanKeyEntry, ScanKeyIter, TBMIterateResultHandle, TableScanDescHandle,
 };
 pub use tuple::{
     HeapTupleGuard, HeapTupleRef, ItemPointer, TupleTableSlotHandle, ValidItemPointer,
 };
+pub use tuple_desc::TupleDescHandle;

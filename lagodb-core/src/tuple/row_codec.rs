@@ -10,6 +10,7 @@ use pgrx::pg_sys::{self, Datum};
 use crate::datum::{
     BoundColumnDatumCodec, Cell, ColumnDatumTarget, DatumConversionError,
 };
+use crate::handles::TupleDescHandle;
 
 /// A relation-bound plan for semantic row conversion.
 ///
@@ -65,11 +66,9 @@ impl RowDatumCodec {
         slot: *mut pg_sys::TupleTableSlot,
     ) -> Result<Self, DatumConversionError> {
         let tuple_desc = unsafe { (*slot).tts_tupleDescriptor };
-        let natts = unsafe { (*tuple_desc).natts as usize };
-        let attrs = unsafe {
-            core::slice::from_raw_parts((*tuple_desc).attrs.as_ptr(), natts)
-        };
-        let targets = attrs
+        // SAFETY: guaranteed by this method's contract.
+        let targets = unsafe { TupleDescHandle::from_raw(tuple_desc) }
+            .attributes()
             .iter()
             .map(|attr| ColumnDatumTarget::from_oid(attr.atttypid))
             .collect::<Vec<_>>();

@@ -35,7 +35,6 @@ pub enum JsonDatumKind {
     Array,
     Composite,
     Cast,
-    Unsupported,
 }
 
 /// An owned, PostgreSQL-validated `json` value.

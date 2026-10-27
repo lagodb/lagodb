@@ -25,7 +25,7 @@ pub use cell::{ByteaView, Cell, StringView};
 pub use codec::{BoundColumnDatumCodec, ColumnDatumTarget};
 pub use composite::CompositeDatumCodec;
 pub use decimal128::Decimal128Semantics;
-pub use encoding::Utf8ServerEncoding;
+pub use encoding::{PgEncodingNames, Utf8ServerEncoding};
 pub use error::{DatumConversionError, Utf8ServerEncodingError};
 pub use json::{
     BoundJsonObjectEncoder, JsonDatumEncoder, JsonDatumKind, JsonText, JsonValueError,

@@ -5,6 +5,7 @@ use pgrx::prelude::PgSqlErrorCode;
 use std::fmt;
 use std::ptr::NonNull;
 
+#[cfg(any(feature = "pg17", feature = "pg18"))]
 #[repr(C)]
 #[derive(Debug, Default)]
 struct RawAnalyzeSamplerState {
@@ -14,6 +15,7 @@ struct RawAnalyzeSamplerState {
     selected_blocks: core::ffi::c_int,
 }
 
+#[cfg(any(feature = "pg17", feature = "pg18"))]
 unsafe extern "C" {
     fn lagodb_read_stream_analyze_sampler_state(
         stream: *mut pg_sys::ReadStream,
@@ -26,6 +28,7 @@ unsafe extern "C" {
 /// `target_rows` is the `targrows` passed to `acquire_sample_rows()`. During
 /// inherited ANALYZE PostgreSQL has already replaced it with this relation's
 /// proportional `childtargrows` before constructing the `ReadStream`.
+#[cfg(any(feature = "pg17", feature = "pg18"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnalyzeSamplerState {
     population_blocks: u64,
@@ -34,6 +37,7 @@ pub struct AnalyzeSamplerState {
     selected_blocks: u64,
 }
 
+#[cfg(any(feature = "pg17", feature = "pg18"))]
 impl AnalyzeSamplerState {
     #[inline]
     pub fn population_blocks(self) -> u64 {
@@ -364,15 +368,17 @@ impl<'a> SampleScanStateHandle<'a> {
 /// `BlockSamplerData` callback-private pointer. Keeping that precondition in a
 /// dedicated type prevents the private-layout bridge from being called on an
 /// arbitrary ReadStream.
+#[cfg(any(feature = "pg17", feature = "pg18"))]
 #[derive(Debug)]
 pub struct AnalyzeReadStreamHandle<'a> {
     inner: PgBorrowed<'a, pg_sys::ReadStream>,
 }
 
+#[cfg(any(feature = "pg17", feature = "pg18"))]
 impl<'a> AnalyzeReadStreamHandle<'a> {
     /// # Safety
     ///
-    /// `ptr` must be non-null and valid for `'a`. It must be the PG17
+    /// `ptr` must be non-null and valid for `'a`. It must be the PostgreSQL
     /// ReadStream created by `acquire_sample_rows()` for the active
     /// `scan_analyze_next_block` callback, with callback-private data pointing
     /// to that stack frame's live `BlockSamplerData`.
@@ -390,15 +396,15 @@ impl<'a> AnalyzeReadStreamHandle<'a> {
     /// invalid sampler fields. Callers must additionally compare snapshots
     /// before and after consuming the stream so inconsistent sampler semantics
     /// cannot silently change the sample size. The C bridge selects the known
-    /// PG17 minor layout epoch; its private ABI must be audited when PostgreSQL
-    /// is upgraded.
+    /// PG17 or PG18 layout epoch selected at build time; its private ABI must
+    /// be audited when PostgreSQL is upgraded.
     pub fn analyze_sampler_state(&self) -> Option<AnalyzeSamplerState> {
         let mut raw = RawAnalyzeSamplerState::default();
         // SAFETY: the handle owns a non-null PostgreSQL ReadStream borrow for
         // this callback, and `raw` is writable for the duration of the call.
         // The version-gated C bridge owns the private-layout dereference and
-        // selects the PG17 minor layout epoch. It returns false unless its
-        // copied BlockSamplerData fields are valid.
+        // selects the supported major/minor layout epoch. It returns false
+        // unless its copied BlockSamplerData fields are valid.
         let valid = unsafe {
             lagodb_read_stream_analyze_sampler_state(self.inner.as_ptr(), &mut raw)
         };
@@ -416,7 +422,10 @@ impl<'a> AnalyzeReadStreamHandle<'a> {
     /// Consume the next block chosen by PostgreSQL's sampling stream.
     ///
     /// The block identity is intentionally opaque to non-block storage
-    /// engines; receiving `Some` means one sampling ticket was selected.
+    /// engines; receiving `Some` means one sampling ticket was selected. On
+    /// PG18 this calls `read_stream_next_block()` directly, so the stream's
+    /// batching flag does not enter relation-I/O look-ahead or change ticket
+    /// consumption.
     #[inline]
     pub fn next_block(&self) -> Option<pg_sys::BlockNumber> {
         let mut strategy: pg_sys::BufferAccessStrategy = std::ptr::null_mut();

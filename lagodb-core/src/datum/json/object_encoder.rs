@@ -1,7 +1,6 @@
 //! Relation-bound PostgreSQL Datum-to-JSON object encoding.
 
 use std::ffi::{CString, c_char};
-use std::os::raw::c_uint;
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 
@@ -13,29 +12,25 @@ use crate::diag::PgError;
 
 use super::{JsonDatumKind, JsonValueError};
 
-type PgJsonTypeCategory = c_uint;
+// Mirrors `LagodbJsonCategory` in `csrc/compat/lagodb_json_category.h`.
+type LagodbJsonCategory = u32;
 
-const JSONTYPE_NULL: PgJsonTypeCategory = 0;
-const JSONTYPE_BOOL: PgJsonTypeCategory = 1;
-const JSONTYPE_NUMERIC: PgJsonTypeCategory = 2;
-const JSONTYPE_DATE: PgJsonTypeCategory = 3;
-const JSONTYPE_TIMESTAMP: PgJsonTypeCategory = 4;
-const JSONTYPE_TIMESTAMPTZ: PgJsonTypeCategory = 5;
-const JSONTYPE_JSON: PgJsonTypeCategory = 6;
-const JSONTYPE_JSONB: PgJsonTypeCategory = 7;
-const JSONTYPE_ARRAY: PgJsonTypeCategory = 8;
-const JSONTYPE_COMPOSITE: PgJsonTypeCategory = 9;
-const JSONTYPE_CAST: PgJsonTypeCategory = 10;
-const JSONTYPE_OTHER: PgJsonTypeCategory = 11;
+const LAGODB_JSON_CATEGORY_BOOL: LagodbJsonCategory = 0;
+const LAGODB_JSON_CATEGORY_NUMERIC: LagodbJsonCategory = 1;
+const LAGODB_JSON_CATEGORY_DATE: LagodbJsonCategory = 2;
+const LAGODB_JSON_CATEGORY_TIMESTAMP: LagodbJsonCategory = 3;
+const LAGODB_JSON_CATEGORY_TIMESTAMPTZ: LagodbJsonCategory = 4;
+const LAGODB_JSON_CATEGORY_JSON: LagodbJsonCategory = 5;
+const LAGODB_JSON_CATEGORY_ARRAY: LagodbJsonCategory = 6;
+const LAGODB_JSON_CATEGORY_COMPOSITE: LagodbJsonCategory = 7;
+const LAGODB_JSON_CATEGORY_CAST: LagodbJsonCategory = 8;
+const LAGODB_JSON_CATEGORY_OTHER: LagodbJsonCategory = 9;
 
 unsafe extern "C-unwind" {
-    #[link_name = "json_categorize_type"]
-    fn pg_json_categorize_type(
+    fn lagodb_json_categorize_type(
         type_oid: pg_sys::Oid,
-        is_jsonb: bool,
-        category: *mut PgJsonTypeCategory,
         output_function: *mut pg_sys::Oid,
-    );
+    ) -> LagodbJsonCategory;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -48,7 +43,6 @@ enum JsonDatumCategory {
     Array,
     Composite,
     Cast,
-    Unsupported,
 }
 
 /// Begin-time PostgreSQL Datum-to-JSON conversion plan.
@@ -93,19 +87,13 @@ impl JsonDatumEncoder {
     pub fn bind(type_oid: pg_sys::Oid) -> Result<Self, JsonValueError> {
         let (category, output_function) = unsafe {
             PgTryBuilder::new(|| {
-                let mut category = JSONTYPE_NULL;
                 let mut output_function = pg_sys::InvalidOid;
                 // Even valid type OIDs require syscache lookups whose cache
                 // entries/resource-owner bookkeeping can allocate and ERROR.
                 // This hand-declared C call needs a guard to turn longjmp into
                 // Rust unwind before PgTryBuilder can capture it as a Result.
-                pg_guard_ffi_boundary(|| {
-                    pg_json_categorize_type(
-                        type_oid,
-                        false,
-                        &mut category,
-                        &mut output_function,
-                    );
+                let category = pg_guard_ffi_boundary(|| {
+                    lagodb_json_categorize_type(type_oid, &mut output_function)
                 });
                 Ok((category, output_function))
             })
@@ -113,17 +101,21 @@ impl JsonDatumEncoder {
             .execute()
         }?;
         let category = match category {
-            JSONTYPE_BOOL => JsonDatumCategory::Boolean,
-            JSONTYPE_NUMERIC => JsonDatumCategory::Numeric,
-            JSONTYPE_DATE => JsonDatumCategory::Date(pg_sys::DATEOID),
-            JSONTYPE_TIMESTAMP => JsonDatumCategory::Date(pg_sys::TIMESTAMPOID),
-            JSONTYPE_TIMESTAMPTZ => JsonDatumCategory::Date(pg_sys::TIMESTAMPTZOID),
-            JSONTYPE_JSON | JSONTYPE_JSONB => JsonDatumCategory::Json,
-            JSONTYPE_OTHER => JsonDatumCategory::String,
-            JSONTYPE_ARRAY => JsonDatumCategory::Array,
-            JSONTYPE_COMPOSITE => JsonDatumCategory::Composite,
-            JSONTYPE_CAST => JsonDatumCategory::Cast,
-            _ => JsonDatumCategory::Unsupported,
+            LAGODB_JSON_CATEGORY_BOOL => JsonDatumCategory::Boolean,
+            LAGODB_JSON_CATEGORY_NUMERIC => JsonDatumCategory::Numeric,
+            LAGODB_JSON_CATEGORY_DATE => JsonDatumCategory::Date(pg_sys::DATEOID),
+            LAGODB_JSON_CATEGORY_TIMESTAMP => {
+                JsonDatumCategory::Date(pg_sys::TIMESTAMPOID)
+            }
+            LAGODB_JSON_CATEGORY_TIMESTAMPTZ => {
+                JsonDatumCategory::Date(pg_sys::TIMESTAMPTZOID)
+            }
+            LAGODB_JSON_CATEGORY_JSON => JsonDatumCategory::Json,
+            LAGODB_JSON_CATEGORY_OTHER => JsonDatumCategory::String,
+            LAGODB_JSON_CATEGORY_ARRAY => JsonDatumCategory::Array,
+            LAGODB_JSON_CATEGORY_COMPOSITE => JsonDatumCategory::Composite,
+            LAGODB_JSON_CATEGORY_CAST => JsonDatumCategory::Cast,
+            other => unreachable!("unknown LagoDB JSON category {other}"),
         };
         Ok(Self {
             category,
@@ -143,7 +135,6 @@ impl JsonDatumEncoder {
             JsonDatumCategory::Array => JsonDatumKind::Array,
             JsonDatumCategory::Composite => JsonDatumKind::Composite,
             JsonDatumCategory::Cast => JsonDatumKind::Cast,
-            JsonDatumCategory::Unsupported => JsonDatumKind::Unsupported,
         }
     }
 
@@ -164,8 +155,7 @@ impl JsonDatumEncoder {
             },
             JsonDatumCategory::Array
             | JsonDatumCategory::Composite
-            | JsonDatumCategory::Cast
-            | JsonDatumCategory::Unsupported => {
+            | JsonDatumCategory::Cast => {
                 return Err(JsonValueError::UnsupportedOutputKind(self.kind()));
             }
         };

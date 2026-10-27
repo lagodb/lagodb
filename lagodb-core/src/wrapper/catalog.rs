@@ -62,25 +62,6 @@ impl PgWrapper {
         }
     }
 
-    pub(crate) fn record_tablespace_dependency(
-        class_id: pg_sys::Oid,
-        object_id: pg_sys::Oid,
-        tablespace_id: pg_sys::Oid,
-    ) -> Result<(), PgError> {
-        unsafe {
-            PgTryBuilder::new(move || {
-                pg_sys::recordDependencyOnTablespace(
-                    class_id,
-                    object_id,
-                    tablespace_id,
-                );
-                Ok(())
-            })
-            .catch_others(|err| Err(PgError::from_caught(err)))
-            .execute()
-        }
-    }
-
     /// Open all indexes belonging to a catalog relation for reuse across a
     /// bounded sequence of tuple writes.
     ///

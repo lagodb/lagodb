@@ -1,3 +1,4 @@
+use std::fmt;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
@@ -6,10 +7,27 @@ use std::ptr::NonNull;
 /// This is intentionally crate-private. Public handle constructors decide which
 /// PostgreSQL pointers are allowed to be null and which represent a required
 /// borrowed object.
-#[derive(Debug, Clone, Copy)]
 pub(crate) struct PgBorrowed<'a, T> {
     ptr: NonNull<T>,
     _marker: PhantomData<&'a T>,
+}
+
+impl<T> Clone for PgBorrowed<'_, T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for PgBorrowed<'_, T> {}
+
+impl<T> fmt::Debug for PgBorrowed<'_, T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("PgBorrowed")
+            .field(&self.ptr)
+            .finish()
+    }
 }
 
 impl<'a, T> PgBorrowed<'a, T> {
@@ -55,10 +73,27 @@ impl<'a, T> PgBorrowed<'a, T> {
 }
 
 /// Borrowed pointer to a PostgreSQL-owned object where null is a valid value.
-#[derive(Debug, Clone, Copy)]
 pub(crate) struct PgNullable<'a, T> {
     ptr: *mut T,
     _marker: PhantomData<&'a T>,
+}
+
+impl<T> Clone for PgNullable<'_, T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for PgNullable<'_, T> {}
+
+impl<T> fmt::Debug for PgNullable<'_, T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("PgNullable")
+            .field(&self.ptr)
+            .finish()
+    }
 }
 
 impl<'a, T> PgNullable<'a, T> {

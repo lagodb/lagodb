@@ -25,17 +25,6 @@ impl PgWrapper {
         }
     }
 
-    pub(crate) fn search_sys_cache2_raw(
-        cache_id: i32,
-        key1: pg_sys::Datum,
-        key2: pg_sys::Datum,
-    ) -> Option<pg_sys::HeapTuple> {
-        unsafe {
-            let tuple = pg_sys::SearchSysCache2(cache_id, key1, key2);
-            (!tuple.is_null()).then_some(tuple)
-        }
-    }
-
     /// # Safety
     ///
     /// `tuple` must be a valid tuple for `cache_id`, and `attribute_number`

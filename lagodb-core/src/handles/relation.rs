@@ -1,12 +1,11 @@
 use std::{ptr::addr_of, slice};
 
 use super::borrowed::{PgBorrowed, PgNullable};
-use crate::catalog::{search_syscache1, search_syscache2};
 use crate::diag::PgError;
 use crate::wrapper::PgWrapper;
 use pgrx::pg_sys;
 
-use super::{RelationColumn, RelationName, RelationTablespace};
+use super::{RelationColumn, RelationName, RelationTablespace, TupleDescHandle};
 
 #[derive(Debug)]
 pub struct RelationHandle<'a> {
@@ -111,6 +110,44 @@ impl<'a> RelationHandle<'a> {
         unsafe { (*self.rd_rel()).reltuples }
     }
 
+    /// Run a table AM's VACUUM and report it as `heap_vacuum_rel()` does.
+    ///
+    /// Autovacuum schedules from the dead-tuple and insert counters this report
+    /// resets, so a pass that does no work must still go through here.
+    pub fn with_vacuum_report<E>(
+        &self,
+        vacuum: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        #[cfg(feature = "pg18")]
+        let start_time = unsafe { pg_sys::GetCurrentTimestamp() };
+        vacuum()?;
+
+        // pgstat_report_vacuum() always overwrites n_live_tup, but this pass
+        // counts no rows. Republish the counter DML and ANALYZE maintain. Stats
+        // lost in a crash have no entry, so the last ANALYZE estimate seeds it.
+        // SAFETY: PostgreSQL returns a backend-local copy of the stats entry.
+        let entry = unsafe { pg_sys::pgstat_fetch_stat_tabentry(self.oid()) };
+        let live_tuples = unsafe { entry.as_ref() }.map_or_else(
+            || self.reltuples().max(0.0) as pg_sys::PgStat_Counter,
+            |entry| entry.live_tuples,
+        );
+        // SAFETY: the open relation identifies a local table, and the caller
+        // runs inside PostgreSQL's VACUUM of that relation.
+        unsafe {
+            #[cfg(any(feature = "pg16", feature = "pg17"))]
+            pg_sys::pgstat_report_vacuum(self.oid(), false, live_tuples, 0);
+            #[cfg(feature = "pg18")]
+            pg_sys::pgstat_report_vacuum(
+                self.oid(),
+                false,
+                live_tuples,
+                0,
+                start_time,
+            );
+        }
+        Ok(())
+    }
+
     #[inline]
     pub fn toast_relation_oid(&self) -> Option<pg_sys::Oid> {
         let oid = unsafe { (*self.rd_rel()).reltoastrelid };
@@ -134,15 +171,21 @@ impl<'a> RelationHandle<'a> {
         unsafe { self.inner.as_ref().rd_att }
     }
 
+    /// Borrow the relation's tuple descriptor with its lifetime attached to
+    /// this open relation.
+    #[inline]
+    pub fn tuple_desc_handle(&self) -> TupleDescHandle<'a> {
+        // SAFETY: PostgreSQL keeps rd_att live while the relation is open.
+        unsafe { TupleDescHandle::from_raw(self.tuple_desc()) }
+    }
+
     /// Number of attributes in the relation's tuple descriptor (`rd_att->natts`).
     ///
     /// Lets providers size row buffers without dereferencing the raw `rd_att`
     /// pointer themselves.
     #[inline]
     pub fn natts(&self) -> usize {
-        let tup_desc = self.tuple_desc();
-        debug_assert!(!tup_desc.is_null(), "RelationHandle::natts: rd_att is NULL");
-        unsafe { (*tup_desc).natts as usize }
+        self.tuple_desc_handle().len()
     }
 
     /// Live (non-dropped) columns of the relation, in ascending attno order.
@@ -151,10 +194,6 @@ impl<'a> RelationHandle<'a> {
     /// UTF-8 must validate them once while binding their schema.
     pub fn live_columns(&self) -> Box<[RelationColumn]> {
         let tup_desc = self.tuple_desc();
-        debug_assert!(
-            !tup_desc.is_null(),
-            "RelationHandle::live_columns: rd_att is NULL"
-        );
         // SAFETY: the live relation owns this valid descriptor for the handle's
         // lifetime. The returned metadata copies every borrowed field.
         unsafe { RelationColumn::live_from_tuple_desc(tup_desc) }
@@ -165,87 +204,11 @@ impl<'a> RelationHandle<'a> {
     /// Unlike [`Self::live_columns`], this preserves dropped-column positions
     /// for consumers whose physical tuple layout includes them.
     pub fn attr_types(&self) -> Vec<(pg_sys::Oid, i32)> {
-        let tuple_desc = self.tuple_desc();
-        debug_assert!(
-            !tuple_desc.is_null(),
-            "RelationHandle::attr_types: rd_att is NULL"
-        );
-        // SAFETY: a live relation owns a contiguous `natts` attribute array for
-        // the lifetime of this handle.
-        let attrs = unsafe {
-            slice::from_raw_parts(
-                (*tuple_desc).attrs.as_ptr(),
-                (*tuple_desc).natts as usize,
-            )
-        };
-        attrs
+        self.tuple_desc_handle()
+            .attributes()
             .iter()
             .map(|attribute| (attribute.atttypid, attribute.atttypmod))
             .collect()
-    }
-
-    /// Largest effective column or explicitly configured extended-statistics
-    /// target for this relation.
-    ///
-    /// PostgreSQL stores an inherited column target as SQL NULL in
-    /// `pg_attribute.attstattarget`; `examine_attribute()` converts that NULL
-    /// to its internal `-1` sentinel before typanalyze resolves it against
-    /// `default_statistics_target`. Dropped columns are excluded. This is a
-    /// relation-wide catalog summary, not PostgreSQL's actual per-scan
-    /// `targrows` or inherited `childtargrows`.
-    pub fn max_statistics_target(&self) -> Result<i32, PgError> {
-        let tup_desc = self.tuple_desc();
-        debug_assert!(
-            !tup_desc.is_null(),
-            "RelationHandle::max_statistics_target: rd_att is NULL"
-        );
-        // SAFETY: a live RelationHandle owns a valid TupleDesc and PostgreSQL's
-        // backend-local GUC value is readable for the duration of this call.
-        let (attrs, default_target) = unsafe {
-            (
-                slice::from_raw_parts(
-                    (*tup_desc).attrs.as_ptr(),
-                    (*tup_desc).natts as usize,
-                ),
-                pg_sys::default_statistics_target,
-            )
-        };
-
-        let mut max_target = None;
-        for attr in attrs.iter().filter(|attr| !attr.attisdropped) {
-            let Some(tuple) = search_syscache2(
-                pg_sys::SysCacheIdentifier::ATTNUM as i32,
-                pg_sys::Datum::from(self.oid()),
-                pg_sys::Datum::from(attr.attnum),
-            ) else {
-                continue;
-            };
-            let target = tuple
-                .get_attr(pg_sys::Anum_pg_attribute_attstattarget as i16)
-                .map_or(default_target, |datum| datum.value() as i16 as i32);
-            max_target =
-                Some(max_target.map_or(target, |current: i32| current.max(target)));
-        }
-
-        for statistics_oid in
-            unsafe { PgWrapper::relation_stat_ext_oids(self.as_raw())? }
-        {
-            let Some(tuple) = search_syscache1(
-                pg_sys::SysCacheIdentifier::STATEXTOID as i32,
-                pg_sys::Datum::from(statistics_oid),
-            ) else {
-                continue;
-            };
-            let Some(datum) =
-                tuple.get_attr(pg_sys::Anum_pg_statistic_ext_stxstattarget as i16)
-            else {
-                continue;
-            };
-            let target = datum.value() as i16 as i32;
-            max_target =
-                Some(max_target.map_or(target, |current: i32| current.max(target)));
-        }
-        Ok(max_target.unwrap_or(0))
     }
 
     #[inline]
@@ -394,6 +357,22 @@ impl<'a> SnapshotHandle<'a> {
         Self {
             inner: unsafe { PgBorrowed::from_raw(ptr) },
         }
+    }
+
+    /// Lend PostgreSQL's active snapshot to `f`, or `None` when none is active.
+    ///
+    /// The higher-ranked borrow stops the handle from escaping `f`. This method
+    /// only reads the active-snapshot stack and does not manage it.
+    pub fn with_active<R>(
+        f: impl for<'s> FnOnce(Option<&SnapshotHandle<'s>>) -> R,
+    ) -> R {
+        // SAFETY: ActiveSnapshotSet proves GetActiveSnapshot returns a non-null
+        // snapshot, and the calling path keeps it active while `f` runs.
+        let active = unsafe {
+            pg_sys::ActiveSnapshotSet()
+                .then(|| SnapshotHandle::from_raw(pg_sys::GetActiveSnapshot()))
+        };
+        f(active.as_ref())
     }
 
     #[inline]

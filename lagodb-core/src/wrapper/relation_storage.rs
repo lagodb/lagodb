@@ -1,50 +1,46 @@
 use std::ffi::CStr;
-use std::ptr::null_mut;
 
-use pgrx::pg_sys::{FileTag, ForkNumber, SyncRequestHandler, SyncRequestType};
+use pgrx::pg_sys::ffi::pg_guard_ffi_boundary;
+use pgrx::pg_sys::{ForkNumber, RelFileLocator as PgRelFileLocator};
 use pgrx::{PgTryBuilder, pg_sys};
 
 use super::PgWrapper;
 use crate::diag::PgError;
 use crate::handles::RelFileLocator;
 
+// Manually declare log_smgrcreate because catalog/storage_xlog.h is not in
+// pg_sys.
+unsafe extern "C-unwind" {
+    fn log_smgrcreate(
+        rlocator: *const PgRelFileLocator,
+        fork_number: ForkNumber::Type,
+    );
+}
+
 impl PgWrapper {
     pub(crate) fn relation_path(locator: RelFileLocator, backend: i32) -> String {
-        // SAFETY: GetRelationPath only formats the supplied storage identity
-        // and returns an owned palloc string.
+        // SAFETY: GetRelationPath only formats the supplied storage identity.
+        // PG17 returns a palloc string; PG18 returns an inline RelPathStr.
         unsafe {
-            let pointer = pg_sys::GetRelationPath(
+            let path = pg_sys::GetRelationPath(
                 locator.db_oid,
                 locator.spc_oid,
                 locator.rel_number,
                 backend,
                 ForkNumber::MAIN_FORKNUM,
             );
-            let path = CStr::from_ptr(pointer).to_string_lossy().into_owned();
-            pg_sys::pfree(pointer.cast());
-            path
-        }
-    }
-
-    pub(crate) fn allocate_relation_locator(
-        tablespace: pg_sys::Oid,
-        persistence: u8,
-    ) -> Result<RelFileLocator, PgError> {
-        unsafe {
-            PgTryBuilder::new(move || {
-                let rel_number = pg_sys::GetNewRelFileNumber(
-                    tablespace,
-                    null_mut(),
-                    persistence as _,
-                );
-                Ok(RelFileLocator {
-                    spc_oid: tablespace,
-                    db_oid: pg_sys::MyDatabaseId,
-                    rel_number,
-                })
-            })
-            .catch_others(|error| Err(PgError::from_caught(error)))
-            .execute()
+            #[cfg(any(feature = "pg16", feature = "pg17"))]
+            {
+                let owned = CStr::from_ptr(path).to_string_lossy().into_owned();
+                pg_sys::pfree(path.cast());
+                owned
+            }
+            #[cfg(feature = "pg18")]
+            {
+                CStr::from_ptr(path.str_.as_ptr())
+                    .to_string_lossy()
+                    .into_owned()
+            }
         }
     }
 
@@ -54,46 +50,25 @@ impl PgWrapper {
     ) -> Result<(), PgError> {
         unsafe {
             PgTryBuilder::new(move || {
-                let storage = pg_sys::RelationCreateStorage(
-                    pg_sys::RelFileLocator {
-                        spcOid: locator.spc_oid,
-                        dbOid: locator.db_oid,
-                        relNumber: locator.rel_number,
-                    },
-                    persistence as _,
-                    true,
-                );
-                pg_sys::smgrclose(storage);
-                Ok(())
-            })
-            .catch_others(|error| Err(PgError::from_caught(error)))
-            .execute()
-        }
-    }
-
-    pub(crate) fn defer_relation_main_fork_unlink(
-        locator: RelFileLocator,
-    ) -> Result<(), PgError> {
-        // SAFETY: the tag describes a non-temporary main-fork segment zero,
-        // exactly as md.c's register_unlink_segment does. RegisterSyncRequest
-        // copies it before returning; retryOnError ensures the request is queued.
-        unsafe {
-            PgTryBuilder::new(move || {
-                let tag = FileTag {
-                    handler: SyncRequestHandler::SYNC_HANDLER_MD as i16,
-                    forknum: ForkNumber::MAIN_FORKNUM as i16,
-                    rlocator: pg_sys::RelFileLocator {
-                        spcOid: locator.spc_oid,
-                        dbOid: locator.db_oid,
-                        relNumber: locator.rel_number,
-                    },
-                    segno: 0,
+                let pg_locator = PgRelFileLocator {
+                    spcOid: locator.spc_oid,
+                    dbOid: locator.db_oid,
+                    relNumber: locator.rel_number,
                 };
-                pg_sys::RegisterSyncRequest(
-                    &tag,
-                    SyncRequestType::SYNC_UNLINK_REQUEST,
-                    true,
-                );
+                let storage =
+                    pg_sys::RelationCreateStorage(pg_locator, persistence as _, true);
+                pg_sys::smgrclose(storage);
+                // PostgreSQL WAL-logs only a permanent main fork: an UNLOGGED
+                // heap rebuilds its own from the init fork. Without one, this
+                // record is what recreates the file after a crash or promotion.
+                if persistence == pg_sys::RELPERSISTENCE_UNLOGGED {
+                    pg_guard_ffi_boundary(|| {
+                        log_smgrcreate(
+                            &raw const pg_locator,
+                            ForkNumber::MAIN_FORKNUM,
+                        );
+                    });
+                }
                 Ok(())
             })
             .catch_others(|error| Err(PgError::from_caught(error)))

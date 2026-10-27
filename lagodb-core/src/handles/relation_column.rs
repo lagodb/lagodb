@@ -1,9 +1,9 @@
 //! Owned metadata for a live PostgreSQL relation column.
 
-use std::ffi::{CStr, c_char};
-use std::slice;
-
 use pgrx::pg_sys;
+use std::ffi::{CStr, c_char};
+
+use super::TupleDescHandle;
 
 /// Metadata copied from one non-dropped `TupleDesc` attribute.
 #[derive(Clone, Debug)]
@@ -50,14 +50,9 @@ impl RelationColumn {
     pub(super) unsafe fn live_from_tuple_desc(
         tuple_desc: pg_sys::TupleDesc,
     ) -> Box<[Self]> {
-        // SAFETY: the caller holds the relation that owns this valid tuple
-        // descriptor; `attrs` contains exactly `natts` entries.
-        let attrs = unsafe {
-            slice::from_raw_parts(
-                (*tuple_desc).attrs.as_ptr(),
-                (*tuple_desc).natts as usize,
-            )
-        };
+        // SAFETY: guaranteed by this method's contract.
+        let tuple_desc = unsafe { TupleDescHandle::from_raw(tuple_desc) };
+        let attrs = tuple_desc.attributes();
         attrs
             .iter()
             .filter(|attribute| !attribute.attisdropped)
