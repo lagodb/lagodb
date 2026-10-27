@@ -1,26 +1,22 @@
 # PostgreSQL C compatibility boundary
 
 `lagodb_pg_compat.h` is the shared compile-time vocabulary and support gate
-for lagodb-core C forks and adapters, including the partition-key bridge.
-Version predicates describe known PostgreSQL major
-lines so API differences can remain local to the affected adapter or fork.
-`LAGODB_SUPPORTED_PG_MAJOR`, independently, decides which complete major-line
-port is allowed to compile. It currently rejects every major except PostgreSQL
-17, even when a local adapter already records a later major's API shape.
+for lagodb-core C forks and adapters.
+Version predicates describe known PostgreSQL major lines so API differences
+can remain local to the affected adapter or fork.
+`LAGODB_SUPPORTED_PG_MAJOR()`, independently, decides which target major-line
+ports are allowed to compile. It admits the PostgreSQL 16, 17 and 18 major
+lines.
 
-lagodb-base owns its runtime C support gate in
-`csrc/compat/lagodb_base_pg_compat.h` within that crate. Its build script tracks
-PostgreSQL configuration inputs independently, following core's tracking rules.
-Neither crate relies on a workspace-level build module or compatibility header,
-so their build and C support boundaries remain intact when the crates are split
-into separate workspaces.
-
-The PostgreSQL source forks currently support the PostgreSQL 17 major line. PostgreSQL
-17.10 remains the provenance baseline, not the only accepted minor. Confirmed
-minor API and private-layout changes stay next to the affected code as
-`PG_VERSION_NUM` branches. In particular, ANALYZE has PG17.0-17.4 and PG17.5+
-ReadStream layout epochs, while ModifyTable has PG17.1, PG17.6 and PG17.7 API
-boundaries.
+The PostgreSQL source forks currently target the PostgreSQL 16, 17 and 18 major
+lines. PostgreSQL 16.15, 17.11 and 18.6 are the provenance baselines, not the
+only accepted minors. Confirmed minor API and private-layout changes stay next
+to the affected code as `PG_VERSION_NUM` branches. A change PostgreSQL
+back-patched into several major lines gets one named `LAGODB_HAS_*` capability
+in `lagodb_pg_compat.h`, and the owning module's `README.md` records its first
+minors. In particular, ANALYZE has PG17.0-17.4, PG17.5+, and PG18.6 ReadStream
+layout epochs; PostgreSQL 16 has no ReadStream and does not build that adapter.
+ModifyTable and COPY retain their minor API boundaries.
 
 The repository keeps compiled implementations and headers under `csrc`, without
 vendored PostgreSQL source copies. Each module's `README.md` records the audited
@@ -32,32 +28,40 @@ the affected implementation.
 `lagodb_injection_point.h` is a capability adapter rather than a source
 fork. It records the known API difference between PostgreSQL 17's
 `INJECTION_POINT(name)` and PostgreSQL 18's `INJECTION_POINT(name, arg)`, and
-maps older versions to a no-op. This PG18 branch is compatibility scaffolding,
-not a declaration of framework support: the workspace has no complete `pg18`
-Cargo feature path and the shared PG17-only support gate rejects a PG18 build.
-The Rust facade also checks the target installation's `pg_config.h`: standard
+maps PostgreSQL 16 and builds without injection-point support to a no-op. The Rust facade also
+checks the target installation's `pg_config.h`: standard
 PostgreSQL builds that do not define `USE_INJECTION_POINTS` compile Rust call
 sites to an inline no-op and do not retain an FFI call.
 
-The `pg16` Cargo feature remains a build-selection entry and does not compile
-these forks. Its TableAM and ANALYZE callback ABIs need a separate port; this
-layer does not add Rust fallbacks for an unsupported major. A PG16 build may
-therefore fail during Rust compilation, linking, or runtime initialization.
-PostgreSQL 18 predicates and the injection-point ABI branch are retained as
-compatibility scaffolding, but the complete PG18 port still belongs in a
-separate audited change.
+`lagodb_collation.c` exposes PostgreSQL's own C-equivalent collation fact.
+PostgreSQL 16 and 17 provide it through `lc_collate_is_c()`, while PostgreSQL 18
+stores it in the locale object returned by `pg_newlocale_from_collation()`.
+The adapter preserves that `InvalidOid` behavior before entering the
+PostgreSQL 18 lookup.
+
+`lagodb_json_category.c` exposes PostgreSQL's JSON output classification under
+LagoDB's own enum, so no PostgreSQL enum order crosses into Rust. PostgreSQL 17
+and 18 export `json_categorize_type()`. PostgreSQL 16 keeps its variant private
+to `src/backend/utils/adt/json.c`, so the adapter carries the PostgreSQL 17.11
+semantics from `src/backend/utils/adt/jsonfuncs.c` with `is_jsonb = false`
+(`REL_17_11`, SHA-256
+`eb3081406e737463c36962e7d62f54db22f3395c6250d32bc2517225373c4cb5`). The source
+comment in `lagodb_json_category.c` is authoritative for this derivation.
+
+Cargo features and C gates intentionally expose only PG16, PG17 and PG18. A later
+major gets a predicate only after a concrete compatibility branch needs it and
+every C fork and Rust owner has been audited.
 
 Adding a PostgreSQL version requires:
 
 1. auditing the COPY internal contract and adding local compatibility branches
    to ANALYZE, ModifyTable and VACUUM FULL;
-2. adding its Cargo feature and `build.rs` version entry with C forks disabled;
+2. adding its Cargo feature, `build.rs` version entry, and compile gate so the
+   port can be built and tested;
 3. recording the audited release tag, source paths, adapted scope, source
    hashes, and confirmed version differences in each module's `README.md`;
 4. running that version's complete regression matrix;
-5. only then extending `LAGODB_SUPPORTED_PG_MAJOR` and marking the Cargo
-   feature's `c_forks_supported` and any bridge-specific support entries in
-   `build.rs` as true.
+5. only then declaring the major supported in product documentation.
 
 Release binaries should be built against the target installation's headers.
 Source compatibility is maintained across supported minors, but LagoDB does
