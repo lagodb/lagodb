@@ -9,12 +9,11 @@ mod registration;
 mod storage_volume;
 
 use std::ffi::{CStr, c_char, c_void};
-use std::mem::size_of;
 
 use lagodb_core::runtime_api::{
     RuntimeApi, STAGE_WORKER_WAKEUP_INVALID_REQUEST,
     STAGE_WORKER_WAKEUP_LOCATOR_NOT_FOUND, STAGE_WORKER_WAKEUP_OK,
-    STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED, rendezvous_slot,
+    STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED, SdkVersion, rendezvous_slot,
 };
 use pgrx::{pg_guard, pg_sys};
 
@@ -62,9 +61,8 @@ unsafe extern "C-unwind" fn stage_worker_wakeup(
 }
 
 static RUNTIME_API: RuntimeApi = RuntimeApi {
-    struct_size: size_of::<RuntimeApi>() as u32,
+    sdk_version: SdkVersion::CURRENT,
     register_provider: registration::register_provider,
-    has_providers: table_provider_registry::has_providers,
     provider_for_am: table_provider_registry::provider_for_am,
     customscan_mode,
     maintenance_config: maintenance::maintenance_config,
@@ -73,15 +71,9 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
 };
 
 pub(crate) fn init() {
-    // SAFETY: PostgreSQL owns the rendezvous slot and returns its backend-local
-    // address for the static name defined by the core runtime ABI.
+    // SAFETY: PostgreSQL owns the rendezvous slot and returns its non-null
+    // backend-local address for the static name defined by the core runtime ABI.
     let slot = unsafe { rendezvous_slot() };
-    assert!(
-        !slot.is_null(),
-        "PostgreSQL returned a null rendezvous slot"
-    );
-    // SAFETY: `slot` was checked non-null and points to PostgreSQL's
-    // backend-lifetime rendezvous value.
     let published = unsafe { *slot };
     if !published.is_null()
         && published

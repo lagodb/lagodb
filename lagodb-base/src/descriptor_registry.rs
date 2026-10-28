@@ -80,14 +80,14 @@ pub(crate) struct DescriptorSnapshot<T: Copy> {
     last: *const DescriptorNode<T>,
 }
 
-impl<T: Copy> DescriptorSnapshot<T> {
+impl<T: Copy + 'static> DescriptorSnapshot<T> {
     pub(crate) fn is_empty(self) -> bool {
         self.first.is_null()
     }
 
     pub(crate) fn for_each(self, mut callback: impl FnMut(T)) {
         let _: ControlFlow<(), ()> = self.walk(|descriptor| {
-            callback(descriptor);
+            callback(*descriptor);
             ControlFlow::Continue(())
         });
     }
@@ -108,7 +108,7 @@ impl<T: Copy> DescriptorSnapshot<T> {
         self,
         mut callback: impl FnMut(T) -> Result<(), E>,
     ) -> Result<(), E> {
-        match self.walk(|descriptor| match callback(descriptor) {
+        match self.walk(|descriptor| match callback(*descriptor) {
             Ok(()) => ControlFlow::Continue(()),
             Err(error) => ControlFlow::Break(error),
         }) {
@@ -117,16 +117,21 @@ impl<T: Copy> DescriptorSnapshot<T> {
         }
     }
 
-    fn walk<B>(
+    /// Visit the registered descriptors in place, in registration order.
+    ///
+    /// Committed nodes are never reclaimed, so registries that hand descriptor
+    /// addresses to runtime consumers may publish these `'static` borrows.
+    pub(crate) fn walk<B>(
         self,
-        mut callback: impl FnMut(T) -> ControlFlow<B>,
+        mut callback: impl FnMut(&'static T) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
         let mut current = self.first;
         while !current.is_null() {
-            // SAFETY: nodes remain live for the backend lifetime. The captured
-            // tail keeps recursive registration outside this event snapshot.
-            let node = unsafe { &*current };
-            match callback(node.descriptor) {
+            // SAFETY: committed nodes are leaked and remain live for the
+            // backend lifetime. The captured tail keeps recursive registration
+            // outside this event snapshot.
+            let node: &'static DescriptorNode<T> = unsafe { &*current };
+            match callback(&node.descriptor) {
                 ControlFlow::Continue(()) => {}
                 ControlFlow::Break(error) => return ControlFlow::Break(error),
             }

@@ -1,19 +1,18 @@
 //! Runtime registration for one table access-method provider.
 //!
-//! The descriptor published here owns the AM identity, partitioned table
-//! semantics, and operations shared by COPY, partitioned table DDL, and maintenance.
-//! Command-specific routers remain in their respective modules and consume
-//! this one descriptor.
+//! The descriptor published here owns the AM identity and the operations
+//! shared by COPY and maintenance. Command-specific routers remain in their
+//! respective modules and consume this one descriptor.
+
+mod hierarchy;
 
 use std::ffi::CStr;
-use std::mem::size_of;
 
 use pgrx::pg_sys;
 
-use crate::api::{AmResult, unsupported_callback};
-use crate::diag::ReportableError;
+use self::hierarchy::ProviderHierarchyGuard;
 use crate::handles::RelationHandle;
-use crate::hooks::{HookRegistrationError, freeze_hooks_with_provider};
+use crate::hooks::{HookError, HookRegistrationError, freeze_hooks_with_provider};
 use crate::runtime_api::{
     CallbackErrorReport, MaintenanceReport, MaintenanceRequest, MaintenanceStats,
     ProviderIdentity, RuntimeApiError, RuntimeClient, RuntimeRegistrationError,
@@ -25,23 +24,14 @@ use crate::table_maintenance::{
 };
 
 /// All runtime-visible facets owned by one table access-method provider.
+///
+/// Registration also guards the provider's hierarchies: a provider relation only
+/// shares one with relations of the same access method.
 pub trait LagodbTableProvider: 'static {
     const NAME: &'static CStr;
     const EXTENSION_NAME: &'static CStr;
     const LIBRARY_NAME: &'static CStr;
     const ACCESS_METHOD_NAME: &'static CStr;
-
-    /// Whether the table-AM callbacks provide a valid PostgreSQL ANALYZE sample.
-    const SUPPORTS_ANALYZE: bool = false;
-
-    /// Whether this AM owns a PostgreSQL partitioned table as one logical table.
-    ///
-    /// This declaration applies only to partitioned relations matching this
-    /// provider's AM; registration alone does not claim utility statements.
-    /// Providers must keep these tables out of PostgreSQL partition/inheritance
-    /// relationships. SQL TRUNCATE admission inspects explicitly named targets,
-    /// while the executor owns target expansion and locked reclassification.
-    const OWNS_PARTITIONED_TABLE: bool = false;
 
     fn access_method_oid() -> Option<pg_sys::Oid>;
 
@@ -50,13 +40,16 @@ pub trait LagodbTableProvider: 'static {
         None
     }
 
-    /// Execute TRUNCATE for a provider-owned partitioned table.
+    /// Reject a new pg_inherits edge between two of this provider's relations.
     ///
-    /// The runtime calls this only after PostgreSQL has completed permission,
-    /// dependency, activity, and BEFORE-trigger processing.
-    fn truncate_partitioned_table(rel: &RelationHandle<'_>) -> AmResult<()> {
-        let _ = rel;
-        unsupported_callback("partitioned table truncate")
+    /// PostgreSQL holds both relations' locks and rolls the DDL back on error.
+    /// During CREATE, `child` has no provider state yet: the post-utility hook
+    /// has not run.
+    fn validate_inheritance_edge(
+        _child: pg_sys::Oid,
+        _parent: pg_sys::Oid,
+    ) -> Result<(), HookError> {
+        Ok(())
     }
 
     /// Execute maintenance, rejecting unsupported options before storage changes.
@@ -73,45 +66,10 @@ pub trait LagodbTableProvider: 'static {
 pub struct TableProviderRouter;
 
 impl TableProviderRouter {
-    #[doc(hidden)]
-    pub fn has_providers() -> bool {
-        RuntimeClient::connect().is_ok_and(RuntimeClient::has_providers)
-    }
-
     pub(crate) fn provider_for_am(
         access_method_oid: pg_sys::Oid,
     ) -> Result<Option<&'static TableProvider>, RuntimeApiError> {
         Ok(RuntimeClient::connect()?.provider_for_am(access_method_oid))
-    }
-
-    pub fn is_registered_am(
-        access_method_oid: pg_sys::Oid,
-    ) -> Result<bool, RuntimeApiError> {
-        match Self::provider_for_am(access_method_oid) {
-            Ok(provider) => Ok(provider.is_some()),
-            Err(RuntimeApiError::Unavailable) => Ok(false),
-            Err(error) => Err(error),
-        }
-    }
-
-    pub fn owns_partitioned_table(
-        access_method_oid: pg_sys::Oid,
-    ) -> Result<bool, RuntimeApiError> {
-        match Self::provider_for_am(access_method_oid) {
-            Ok(Some(provider)) => Ok(provider.owns_partitioned_table),
-            Ok(None) | Err(RuntimeApiError::Unavailable) => Ok(false),
-            Err(error) => Err(error),
-        }
-    }
-
-    pub fn supports_analyze(
-        access_method_oid: pg_sys::Oid,
-    ) -> Result<bool, RuntimeApiError> {
-        match Self::provider_for_am(access_method_oid) {
-            Ok(Some(provider)) => Ok(provider.supports_analyze),
-            Ok(None) | Err(RuntimeApiError::Unavailable) => Ok(false),
-            Err(error) => Err(error),
-        }
     }
 }
 
@@ -121,18 +79,6 @@ where
     P: LagodbTableProvider,
 {
     P::access_method_oid().unwrap_or(pg_sys::InvalidOid)
-}
-
-#[pgrx::pg_guard]
-unsafe extern "C-unwind" fn provider_truncate_partitioned_table<P>(
-    relation: pg_sys::Relation,
-) where
-    P: LagodbTableProvider,
-{
-    // SAFETY: the runtime invokes this callback only with the live, locked
-    // partitioned table Relation supplied by its TRUNCATE bridge.
-    let relation = unsafe { RelationHandle::from_raw(relation) };
-    P::truncate_partitioned_table(&relation).report_unwrap();
 }
 
 unsafe extern "C-unwind" fn provider_execute_maintenance<P>(
@@ -201,19 +147,15 @@ pub fn register_provider<P>()
 where
     P: LagodbTableProvider,
 {
-    let descriptor = TableProvider {
-        struct_size: u32::try_from(size_of::<TableProvider>())
-            .expect("table-provider descriptor size exceeds u32"),
-        name: P::NAME.as_ptr(),
-        access_method_name: P::ACCESS_METHOD_NAME.as_ptr(),
-        owns_partitioned_table: P::OWNS_PARTITIONED_TABLE,
-        supports_analyze: P::SUPPORTS_ANALYZE,
-        copy: P::copy_callbacks().map_or(std::ptr::null(), |callbacks| callbacks),
-        access_method_oid: provider_access_method_oid::<P>,
-        truncate_partitioned_table: provider_truncate_partitioned_table::<P>,
-        execute_maintenance: provider_execute_maintenance::<P>,
-        inspect_maintenance: provider_inspect_maintenance::<P>,
-    };
+    ProviderHierarchyGuard::<P>::register();
+    let descriptor = TableProvider::new(
+        P::NAME,
+        P::ACCESS_METHOD_NAME,
+        P::copy_callbacks(),
+        provider_access_method_oid::<P>,
+        provider_execute_maintenance::<P>,
+        provider_inspect_maintenance::<P>,
+    );
     let identity =
         ProviderIdentity::access_method(P::NAME, P::EXTENSION_NAME, P::LIBRARY_NAME);
     match freeze_hooks_with_provider(&identity, Some(&descriptor)) {

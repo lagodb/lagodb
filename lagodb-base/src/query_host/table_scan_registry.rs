@@ -2,7 +2,6 @@
 //! PostgreSQL storage routes.
 
 use std::ffi::{CStr, c_char, c_void};
-use std::mem::size_of;
 use std::ptr;
 
 use arrow_schema::ffi::FFI_ArrowSchema;
@@ -40,21 +39,12 @@ impl TableScanCallbackBundle {
         descriptor: &TableScanDescriptor,
         worker: Option<&TableScanWorkerDescriptor>,
     ) -> Option<Self> {
-        let expected_size = u32::try_from(size_of::<TableScanDescriptor>()).ok()?;
-        if descriptor.struct_size() != expected_size {
-            return None;
-        }
-        // SAFETY: the descriptor has the exact runtime ABI layout. Registration
-        // treats its callback and context contracts as trusted unsafe input.
+        // SAFETY: registration treats the exact-build descriptor's callback and
+        // context contracts as trusted unsafe input.
         let provider =
             unsafe { TableScanCallbacks::from_validated_descriptor(descriptor) }?;
         let worker = match worker {
             Some(worker) => {
-                let expected_size =
-                    u32::try_from(size_of::<TableScanWorkerDescriptor>()).ok()?;
-                if worker.struct_size() != expected_size {
-                    return None;
-                }
                 for (provider, worker) in [
                     (descriptor.access_method_name(), worker.access_method_name()),
                     (
@@ -238,7 +228,7 @@ impl ResolvedTableScan {
 
     pub(super) fn plan(
         self,
-        request: &TableScanPlanningRequest,
+        request: &TableScanPlanningRequest<'_>,
         output: &mut PlannedTableScanResult,
         schema: &mut FFI_ArrowSchema,
         error: &mut CallbackErrorReport,

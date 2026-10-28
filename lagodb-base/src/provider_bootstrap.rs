@@ -2,12 +2,11 @@
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
-use std::mem::{size_of, take};
+use std::mem::take;
 
 use lagodb_core::runtime_api::{
-    PROVIDER_KIND_ACCESS_METHOD, PROVIDER_KIND_FOREIGN_DATA_WRAPPER,
-    ProviderIdentity, REGISTER_DUPLICATE_NAME, REGISTER_OUTSIDE_PROVIDER_BOOTSTRAP,
-    REGISTER_PROVIDER_LIBRARY_MISMATCH,
+    ProviderIdentity, ProviderKind, REGISTER_DUPLICATE_NAME,
+    REGISTER_OUTSIDE_PROVIDER_BOOTSTRAP, REGISTER_PROVIDER_LIBRARY_MISMATCH,
 };
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting, pg_sys};
 use thiserror::Error;
@@ -79,46 +78,22 @@ struct StoredProviderIdentity {
     name: CString,
     extension_name: CString,
     library_name: CString,
-    kind: u32,
+    kind: ProviderKind,
 }
 
 pub(crate) struct ValidatedProviderIdentity<'a> {
     name: &'a CStr,
     extension_name: &'a CStr,
     library_name: &'a CStr,
-    kind: u32,
+    kind: ProviderKind,
 }
 
 impl<'a> ValidatedProviderIdentity<'a> {
-    /// Validate one exact-build provider identity descriptor.
-    ///
-    /// # Safety
-    ///
-    /// `identity` must satisfy the trusted internal ABI pointer contract
-    /// documented by `lagodb_core::runtime_api`.
-    pub(crate) unsafe fn from_raw(identity: *const ProviderIdentity) -> Option<Self> {
-        // SAFETY: the caller supplies a live, aligned descriptor under the
-        // internal runtime ABI contract; `as_ref` handles the permitted null.
-        let identity = unsafe { identity.as_ref() }?;
-        let expected_size = u32::try_from(size_of::<ProviderIdentity>()).ok()?;
-        if identity.struct_size != expected_size
-            || identity.name.is_null()
-            || identity.extension_name.is_null()
-            || identity.library_name.is_null()
-            || !matches!(
-                identity.kind,
-                PROVIDER_KIND_ACCESS_METHOD | PROVIDER_KIND_FOREIGN_DATA_WRAPPER
-            )
-        {
-            return None;
-        }
-        // SAFETY: the non-null string pointers are required to reference
-        // NUL-terminated strings by the trusted internal ABI contract.
-        let name = unsafe { CStr::from_ptr(identity.name) };
-        // SAFETY: same string-pointer contract as `name` above.
-        let extension_name = unsafe { CStr::from_ptr(identity.extension_name) };
-        // SAFETY: same string-pointer contract as `name` above.
-        let library_name = unsafe { CStr::from_ptr(identity.library_name) };
+    /// Validate the provider-declared names of one identity descriptor.
+    pub(crate) fn new(identity: &'a ProviderIdentity) -> Option<Self> {
+        let name = identity.name();
+        let extension_name = identity.extension_name();
+        let library_name = identity.library_name();
         if name.is_empty()
             || !is_extension_name(extension_name.to_bytes())
             || !is_library_basename(library_name.to_bytes())
@@ -129,7 +104,7 @@ impl<'a> ValidatedProviderIdentity<'a> {
             name,
             extension_name,
             library_name,
-            kind: identity.kind,
+            kind: identity.kind(),
         })
     }
 }
