@@ -2,9 +2,10 @@
  * lagodb_analyze_sampler.c
  *      ANALYZE sampler state adapter for PostgreSQL's private ReadStream layout.
  *
- * Provenance: PostgreSQL 17.10 src/backend/storage/aio/read_stream.c and
+ * Provenance: PostgreSQL 17.11 and 18.6
+ * src/backend/storage/aio/read_stream.c and
  * src/include/utils/sampling.h. Layout epochs and source hashes are recorded
- * in README.md. The ANALYZE executor is maintained in lagodb_analyze.c.
+ * in README.md.
  */
 #include "postgres.h"
 
@@ -15,11 +16,7 @@
 #include "lagodb_pg_compat.h"
 #include "lagodb_analyze_sampler.h"
 
-#if !LAGODB_PG17
-#error "ANALYZE sampler adapter has not been ported to this PostgreSQL major version"
-#endif
-
-/* Copied from PostgreSQL 17.10 src/backend/storage/aio/read_stream.c. */
+/* Copied from PostgreSQL 17.11/18.6 src/backend/storage/aio/read_stream.c. */
 typedef struct InProgressIO
 {
 	int16		buffer_index;
@@ -27,7 +24,7 @@ typedef struct InProgressIO
 } InProgressIO;
 
 /*
- * Complete the opaque public declaration with PostgreSQL 17's private layout.
+ * Complete the opaque public declaration with the selected major's private layout.
  * PG17.5 added io_combine_limit before the fields used by this bridge, so that
  * layout epoch is selected locally. Keeping the complete definition lets the
  * C compiler apply the same alignment rules as PostgreSQL.
@@ -42,9 +39,21 @@ struct ReadStream
 	int16		ios_in_progress;
 	int16		queue_size;
 	int16		max_pinned_buffers;
+#if LAGODB_PG18_GE
+	int16		forwarded_buffers;
+#endif
 	int16		pinned_buffers;
 	int16		distance;
+#if LAGODB_PG18_GE
+	int16		initialized_buffers;
+	int			read_buffers_flags;
+	bool		sync_mode;
+	bool		batch_mode;
+#endif
 	bool		advice_enabled;
+#if LAGODB_PG18_GE
+	bool		temporary;
+#endif
 
 	BlockNumber buffered_blocknum;
 
@@ -52,6 +61,9 @@ struct ReadStream
 	void	   *callback_private_data;
 
 	BlockNumber seq_blocknum;
+#if LAGODB_PG18_GE
+	BlockNumber seq_until_processed;
+#endif
 
 	BlockNumber pending_read_blocknum;
 	int16		pending_read_nblocks;

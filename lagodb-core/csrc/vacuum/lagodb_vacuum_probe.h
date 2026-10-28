@@ -4,14 +4,14 @@
 #include "postgres.h"
 #include "nodes/parsenodes.h"
 
-typedef bool (*LagodbVacuumProbeCallback) (Oid access_method,
-										   char relkind,
-										   bits32 options);
+typedef bool (*LagodbVacuumProbeCallback) (Oid access_method);
 
-/* Called after command preparation with its validated VacuumParams options. */
+/* Table AM of an unlocked relation, or InvalidOid if it no longer exists. */
+extern Oid	lagodb_vacuum_relation_am(Oid relid);
+
+/* Called after command preparation, before any target lock is taken. */
 extern bool lagodb_vacuum_probe(
 								VacuumStmt *stmt,
-								bits32 options,
 								LagodbVacuumProbeCallback callback);
 
 #endif
