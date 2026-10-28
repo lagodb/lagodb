@@ -1,22 +1,19 @@
-//! One query-tree traversal for partitioned table semantics and provider preparation.
+//! One query-tree traversal for provider preparation.
 
 use std::ffi::c_void;
 use std::ptr;
 
-use lagodb_core::customscan::ProviderPartitionedTablePlanner;
 use lagodb_core::diag::PgReportError;
 use lagodb_core::runtime_api::CallbackErrorReport;
 use pgrx::pg_sys;
 
 use crate::descriptor_registry::DescriptorSnapshot;
-use crate::table_provider_registry;
 
 use super::callback_result;
 use super::registry::StoredModifyPlanner;
 
 pub(super) struct QueryTreePreparation {
     modify_planners: DescriptorSnapshot<StoredModifyPlanner>,
-    prepare_partitioned_tables: bool,
     error: Option<PgReportError>,
 }
 
@@ -26,8 +23,6 @@ impl QueryTreePreparation {
     ) -> Self {
         Self {
             modify_planners,
-            prepare_partitioned_tables:
-                table_provider_registry::has_partitioned_table_capability(),
             error: None,
         }
     }
@@ -42,9 +37,8 @@ impl QueryTreePreparation {
         &mut self,
         parse: *mut pg_sys::Query,
     ) -> Result<(), PgReportError> {
-        // Capture work from both registration facets, not just Modify. This
-        // decision is made once, before touching the Query or walking VALUES.
-        if !self.prepare_partitioned_tables && self.modify_planners.is_empty() {
+        // Decided once, before touching the Query or walking VALUES.
+        if self.modify_planners.is_empty() {
             return Ok(());
         }
         // SAFETY: the caller supplies the live, locked query tree.
@@ -57,10 +51,6 @@ impl QueryTreePreparation {
         &mut self,
         parse: *mut pg_sys::Query,
     ) -> Result<(), PgReportError> {
-        if self.prepare_partitioned_tables {
-            // SAFETY: rewriter locks protect this Query's relation identities.
-            unsafe { ProviderPartitionedTablePlanner::prepare_query(parse) }?;
-        }
         self.modify_planners.try_for_each(|descriptor| {
             let mut error = CallbackErrorReport::default();
             // SAFETY: registration validated this single-Query callback. The

@@ -1,14 +1,13 @@
 //! Allocation-free snapshots of registered planning descriptor facets.
 
 use std::ffi::c_void;
-use std::mem::size_of;
 
 use crate::descriptor_registry::{
     DescriptorNode, DescriptorRegistry, DescriptorSnapshot,
 };
 use lagodb_core::runtime_api::{
     ModifyPlannerDescriptor, RelationScanPlannerDescriptor, RoutedModifyPlannerPost,
-    RoutedModifyQueryPreparation, RoutedModifyUpperPlanner, RoutedRelationInfo,
+    RoutedModifyQueryPreparation, RoutedModifyUpperPlanner,
     RoutedRelationScanPlanner,
 };
 
@@ -22,19 +21,13 @@ thread_local! {
 #[derive(Clone, Copy)]
 pub(super) struct StoredRelationScanPlanner {
     pub(super) context: *mut c_void,
-    pub(super) relation_info: RoutedRelationInfo,
     pub(super) plan_relation: RoutedRelationScanPlanner,
 }
 
 impl StoredRelationScanPlanner {
     fn from_descriptor(descriptor: &RelationScanPlannerDescriptor) -> Option<Self> {
-        if descriptor.struct_size != size_of::<RelationScanPlannerDescriptor>() as u32
-        {
-            return None;
-        }
         Some(Self {
             context: descriptor.context,
-            relation_info: descriptor.relation_info?,
             plan_relation: descriptor.plan_relation?,
         })
     }
@@ -50,9 +43,6 @@ pub(super) struct StoredModifyPlanner {
 
 impl StoredModifyPlanner {
     fn from_descriptor(descriptor: &ModifyPlannerDescriptor) -> Option<Self> {
-        if descriptor.struct_size != size_of::<ModifyPlannerDescriptor>() as u32 {
-            return None;
-        }
         Some(Self {
             context: descriptor.context,
             prepare_query: descriptor.prepare_query?,
@@ -121,17 +111,6 @@ mod tests {
         CALLBACK_OK
     }
 
-    unsafe extern "C-unwind" fn relation_info(
-        _context: *mut c_void,
-        _root: *mut pg_sys::PlannerInfo,
-        _relation_oid: pg_sys::Oid,
-        _inhparent: bool,
-        _rel: *mut pg_sys::RelOptInfo,
-        _error: *mut CallbackErrorReport,
-    ) -> u32 {
-        CALLBACK_OK
-    }
-
     unsafe extern "C-unwind" fn prepare_query(
         _context: *mut c_void,
         _parse: *mut pg_sys::Query,
@@ -161,20 +140,12 @@ mod tests {
     }
 
     #[test]
-    fn relation_descriptor_requires_exact_layout_and_callback() {
+    fn relation_descriptor_requires_callback() {
         let mut descriptor = RelationScanPlannerDescriptor {
-            struct_size: size_of::<RelationScanPlannerDescriptor>() as u32,
             context: ptr::null_mut(),
-            relation_info: Some(relation_info),
             plan_relation: Some(relation),
         };
         assert!(StoredRelationScanPlanner::from_descriptor(&descriptor).is_some());
-        descriptor.struct_size += 1;
-        assert!(StoredRelationScanPlanner::from_descriptor(&descriptor).is_none());
-        descriptor.struct_size = size_of::<RelationScanPlannerDescriptor>() as u32;
-        descriptor.relation_info = None;
-        assert!(StoredRelationScanPlanner::from_descriptor(&descriptor).is_none());
-        descriptor.relation_info = Some(relation_info);
         descriptor.plan_relation = None;
         assert!(StoredRelationScanPlanner::from_descriptor(&descriptor).is_none());
     }
@@ -182,7 +153,6 @@ mod tests {
     #[test]
     fn modify_descriptor_requires_each_typed_callback() {
         let mut descriptor = ModifyPlannerDescriptor {
-            struct_size: size_of::<ModifyPlannerDescriptor>() as u32,
             context: ptr::null_mut(),
             prepare_query: Some(prepare_query),
             planner_post: Some(planner_post),

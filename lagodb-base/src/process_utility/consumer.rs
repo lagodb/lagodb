@@ -145,8 +145,7 @@ thread_local! {
 }
 
 fn valid_descriptor(descriptor: &UtilityConsumerDescriptor) -> bool {
-    descriptor.struct_size == std::mem::size_of::<UtilityConsumerDescriptor>() as u32
-        && descriptor.tag == pg_sys::NodeTag::T_CopyStmt as u32
+    descriptor.tag == pg_sys::NodeTag::T_CopyStmt as u32
         && !descriptor.context.is_null()
         && descriptor.on_match.is_some()
         && descriptor.on_consume.is_some()
@@ -229,7 +228,6 @@ mod tests {
 
     fn descriptor() -> UtilityConsumerDescriptor {
         UtilityConsumerDescriptor {
-            struct_size: std::mem::size_of::<UtilityConsumerDescriptor>() as u32,
             tag: pg_sys::NodeTag::T_CopyStmt as u32,
             context: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
             on_match: Some(matches),
@@ -241,10 +239,6 @@ mod tests {
     fn descriptor_validation_requires_copy_tag_and_callbacks() {
         assert!(valid_descriptor(&descriptor()));
         let mut candidate = descriptor();
-        candidate.struct_size =
-            std::mem::size_of::<UtilityConsumerDescriptor>() as u32 + 1;
-        assert!(!valid_descriptor(&candidate));
-        candidate = descriptor();
         candidate.tag = pg_sys::NodeTag::T_CommentStmt as u32;
         assert!(!valid_descriptor(&candidate));
         candidate = descriptor();

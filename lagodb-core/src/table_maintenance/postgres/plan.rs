@@ -1,32 +1,41 @@
-//! Command-owned relation order and cross-transaction maintenance storage.
+//! Command-owned relation split and cross-transaction maintenance storage.
 //!
-//! Only relation order is retained: AM, relkind and provider ownership are
-//! resolved from locked relations at execution time. The Portal child owns
-//! expanded nodes, lists and buffer strategies until this plan is dropped.
+//! Expansion classifies each relation from its catalog access method without
+//! holding a target lock. The classification only selects an executor: a
+//! provider relation is resolved again from its locked `Relation`, and a native
+//! relation that became provider-owned fails closed inside PostgreSQL. The
+//! Portal child owns expanded nodes, lists and statements until this plan drops.
+
+use std::ptr;
 
 use pgrx::pg_sys;
 
 use super::MaintenanceCommand;
 use super::bridge::MaintenanceBridge;
 
-/// Ordered relation plan with storage that survives maintenance transactions.
+/// Relations split by executor, in PostgreSQL's expansion order.
 pub struct MaintenancePlan {
     pub(super) command: MaintenanceCommand,
-    pub(super) relations: Box<[*mut pg_sys::VacuumRelation]>,
+    pub(super) stmt: *mut pg_sys::VacuumStmt,
+    pub(super) native: Box<[*mut pg_sys::VacuumRelation]>,
+    pub(super) provider: Box<[*mut pg_sys::VacuumRelation]>,
     context: pg_sys::MemoryContext,
 }
 
 impl MaintenancePlan {
-    /// Expand prepared command targets in PostgreSQL's original order.
+    /// Expand prepared command targets and split them by access method.
     ///
     /// # Safety
-    /// The statement and its referenced names and column lists must remain live
-    /// through execution. PortalContext must outlive this command, and all C
-    /// calls while the plan is live must use PostgreSQL ERROR protection. The
-    /// command must have been prepared from this statement before admission.
+    /// The statement and its referenced names, options and column lists must
+    /// remain live through execution. PortalContext must outlive this command,
+    /// and all C calls while the plan is live must use PostgreSQL ERROR
+    /// protection. The command must have been prepared from this statement
+    /// before admission. The classifier must protect any FFI calls that can
+    /// raise ERROR.
     pub unsafe fn expand(
         stmt: *mut pg_sys::VacuumStmt,
         command: MaintenanceCommand,
+        mut is_provider_am: impl FnMut(pg_sys::Oid) -> bool,
     ) -> Self {
         // SAFETY: the live Portal survives this command's transaction changes;
         // the static name also avoids allocating a context name in the Portal.
@@ -42,7 +51,9 @@ impl MaintenancePlan {
         // Establish ownership before expansion so guarded ERROR also drops it.
         let mut plan = Self {
             command,
-            relations: Box::new([]),
+            stmt,
+            native: Box::new([]),
+            provider: Box::new([]),
             context,
         };
         // SAFETY: the executor allocates the expansion in this owned context.
@@ -54,31 +65,71 @@ impl MaintenancePlan {
                 context,
             );
             let count = pg_sys::list_length(expanded);
-            let mut relations = Vec::with_capacity(count as usize);
+            let mut native = Vec::with_capacity(count as usize);
+            let mut provider = Vec::new();
             for index in 0..count {
-                relations.push(
-                    pg_sys::list_nth(expanded, index)
-                        .cast::<pg_sys::VacuumRelation>(),
-                );
+                let relation = pg_sys::list_nth(expanded, index)
+                    .cast::<pg_sys::VacuumRelation>();
+                // A relation dropped since expansion has no access method and
+                // stays native: PostgreSQL applies its own skip behavior.
+                if is_provider_am(MaintenanceBridge::relation_am((*relation).oid)) {
+                    provider.push(relation);
+                } else {
+                    native.push(relation);
+                }
             }
-            plan.relations = relations.into_boxed_slice();
+            plan.native = native.into_boxed_slice();
+            plan.provider = provider.into_boxed_slice();
         }
         plan
     }
 
+    /// PostgreSQL's statement for the native relations, with every option.
+    ///
     /// # Safety
-    /// `ring_size_kb` must come from command preparation. The returned strategy
-    /// may only be used while this plan remains live on the backend thread.
-    pub(super) unsafe fn buffer_strategy(
-        &self,
-        ring_size_kb: i32,
-    ) -> pg_sys::BufferAccessStrategy {
-        // SAFETY: this plan owns the allocation through all maintenance calls.
-        unsafe { MaintenanceBridge::buffer_strategy(ring_size_kb, self.context) }
+    /// The plan must describe the live command; the result lives as long as
+    /// this plan and must not be used after it drops.
+    pub(super) unsafe fn native_stmt(&self) -> *mut pg_sys::VacuumStmt {
+        // SAFETY: the list and the statement are owned by this plan's context.
+        unsafe {
+            let relations = self.relation_list(&self.native);
+            MaintenanceBridge::vacuum_stmt(self.stmt, relations, self.context)
+        }
     }
 
-    pub(super) fn is_empty(&self) -> bool {
-        self.relations.is_empty()
+    /// PostgreSQL's ANALYZE statement for relations that finished the rewrite.
+    ///
+    /// # Safety
+    /// As for [`Self::native_stmt`].
+    pub(super) unsafe fn analyze_stmt(
+        &self,
+        relations: &[*mut pg_sys::VacuumRelation],
+    ) -> *mut pg_sys::VacuumStmt {
+        // SAFETY: the list and the statement are owned by this plan's context.
+        unsafe {
+            let relations = self.relation_list(relations);
+            MaintenanceBridge::analyze_stmt(self.stmt, relations, self.context)
+        }
+    }
+
+    /// PostgreSQL keeps these nodes across its transactions, so the list must
+    /// survive them too. Expanded nodes carry explicit OIDs, which PostgreSQL
+    /// does not expand a second time.
+    unsafe fn relation_list(
+        &self,
+        relations: &[*mut pg_sys::VacuumRelation],
+    ) -> *mut pg_sys::List {
+        // SAFETY: this plan's context is live; Drop handles an allocation
+        // ERROR raised while it is current.
+        unsafe {
+            let previous = pg_sys::MemoryContextSwitchTo(self.context);
+            let mut list = ptr::null_mut();
+            for relation in relations {
+                list = pg_sys::lappend(list, relation.cast());
+            }
+            pg_sys::MemoryContextSwitchTo(previous);
+            list
+        }
     }
 }
 

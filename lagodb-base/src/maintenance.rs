@@ -1,9 +1,6 @@
 //! Runtime maintenance configuration and SQL boundary.
 
-mod route_policy;
 mod sql_api;
-
-pub(crate) use route_policy::MaintenanceRoutePolicy;
 
 use lagodb_core::runtime_api::RuntimeMaintenanceConfig;
 use pgrx::pg_guard;

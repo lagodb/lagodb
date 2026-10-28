@@ -1,10 +1,10 @@
-//! Shared partitioned table preparation and provider ModifyTable planner routing.
+//! Provider ModifyTable planner routing.
 //!
 //! Query offload does not use this hook. It contributes an upper CustomPath
 //! through `set_join_pathlist_hook`/`create_upper_paths_hook` and then uses
-//! PostgreSQL CustomScan method tables. The planner hook prepares shared
-//! partitioned table semantics and provider Modify inputs in one query-tree walk.
-//! Modify post callbacks fix the resulting plan afterward.
+//! PostgreSQL CustomScan method tables. The planner hook prepares provider
+//! Modify inputs in one query-tree walk. Modify post callbacks fix the
+//! resulting plan afterward.
 
 use std::ffi::c_char;
 
@@ -36,7 +36,7 @@ unsafe fn route(
 ) -> Result<*mut pg_sys::PlannedStmt, PgReportError> {
     let snapshot = registry::modify_snapshot();
     // SAFETY: PostgreSQL supplies rewrite-complete input with relation locks.
-    // One walk prepares partitioned table RTEs and Modify inputs in each Query.
+    // One walk prepares Modify inputs in each Query.
     unsafe { QueryTreePreparation::new(snapshot).prepare_tree(parse) }?;
 
     let planned = if let Some(Some(previous)) = PREV_PLANNER.get() {

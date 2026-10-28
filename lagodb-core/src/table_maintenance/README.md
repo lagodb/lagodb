@@ -1,55 +1,52 @@
 # Table maintenance ownership
 
 `table_maintenance` contains the format-neutral provider requests, reports,
-and errors. Its `postgres` module owns the PostgreSQL execution mechanisms:
+and errors. Its `postgres` module owns the one PostgreSQL mechanism a provider
+cannot get through its table AM, VACUUM FULL:
 
-- `MaintenanceCommand` contains validated PG17 options.
-- `MaintenancePlan` owns expanded relation order and a Portal child context.
-- `MaintenanceExecutor` owns guarded C calls and VACUUM/ANALYZE transaction,
-  snapshot, command-counter, cost-accounting, and database-statistics sequencing.
-- The VACUUM and TRUNCATE C bridges live in core alongside ANALYZE, COPY, and
-  ModifyTable. No base module redeclares core's ANALYZE C entry point.
+- `MaintenanceCommand` contains validated PostgreSQL options.
+- `MaintenancePlan` owns the expanded native and provider relation lists and a
+  Portal child context.
+- `MaintenanceExecutor` owns guarded C calls and the VACUUM FULL transaction,
+  snapshot, and parent-delegation sequence.
+- The VACUUM C bridge lives in core alongside COPY and ModifyTable.
 
 `lagodb-base` owns the process-global hooks and captured parent chain, the
-provider registry, admission, maintenance route policy, provider budget / clock
-selection, and runtime SQL / configuration. Its command-scope C bridge remains
-in base: it owns recursion protection and calls the captured parent directly
-inside `PG_FINALLY`. Provider DSOs do not install another global scope or keep
+provider registry, admission, provider budget / clock selection, and runtime
+SQL / configuration. Provider DSOs do not install another global scope or keep
 another runtime registry.
 
-This boundary follows the history of the framework. `e81e6c9` introduced the
-maintenance mechanisms in core; `9b99bfa` established the cross-DSO provider ABI;
-`af46172` unified RuntimeApi and moved the global ProcessUtility router and its
-VACUUM bridge to the runtime. The runtime ownership of hooks and registration
-is retained. PostgreSQL execution mechanisms are reusable core implementation,
-and do not require a new registry or another cross-DSO API.
+## What PostgreSQL runs natively
 
-## Execution contract
+A provider table is an ordinary `relkind = 'r'` relation, so PostgreSQL owns:
 
-Base prepares options through core before admission. Negative probes still
-delegate to the captured parent; positive probes expand one ordered command.
-The plan never caches AM ownership across maintenance transactions. Runtime
-callbacks classify live execution-locked relations and select provider actions.
+- ANALYZE, including autovacuum's scheduling, through the TableAM sampling
+  callbacks;
+- TRUNCATE, through `relation_nontransactional_truncate` and
+  `relation_set_new_filelocator`;
+- routine VACUUM, through `relation_vacuum`. The callback reports its pass with
+  `RelationHandle::with_vacuum_report`, because autovacuum schedules from the
+  counters that only that report resets.
 
-VACUUM preserves the existing sequence: expansion; buffer strategy; provider
-clock and budget preparation for nonempty plans; initial snapshot pop / commit;
-ordered per-relation VACUUM and optional ANALYZE; final transaction start and
-database statistics. The provider-context initializer returns errors before
-that initial commit and is not called for empty plans.
+## VACUUM FULL execution contract
 
-ANALYZE keeps the outer transaction when in a transaction block or processing
-one relation. Standalone multi-relation ANALYZE retains per-relation snapshots,
-transactions and command counters. Expanded nodes and buffer strategies live
-in the plan's Portal child, independent of those transactions.
+Only a VACUUM statement with FULL enabled is inspected. Base prepares options
+through core before admission. A negative probe delegates the original statement
+to the captured parent. A positive probe expands one ordered command, classifying
+live relations by access method.
 
-TRUNCATE executes one atomic command with the original PG17 permissions,
-locks, FK expansion, triggers, sequences, native storage, FDW and WAL ordering.
-Only the provider-owned partitioned table storage step is dispatched to the runtime callback.
+The command then runs three steps, in order:
+
+1. native relations go to the parent as a rewritten VACUUM statement;
+2. provider relations run the provider's rewrite;
+3. when requested, provider relations go to the parent as a native ANALYZE.
+
+ANALYZE runs through the parent rather than `analyze_rel()` because PostgreSQL's
+`vacuum()` holds the recursion guard that `analyze_rel()` relies on. Provider
+clock and budget preparation returns its errors before any step commits, and is
+not called for empty plans.
 
 Core guards errorful C entries and allows Rust-owned plans to unwind after C
 cleanup. Provider Result errors and diagnostics still reach the existing runtime
-FFI report boundary; executor helpers do not report them early. The runtime's
-admission, parent-chain and recursion contracts are unchanged, including their
-documented negative-probe and hook-observation limits. See the
-[VACUUM contract](../../csrc/vacuum/README.md) and
-[TRUNCATE contract](../../csrc/truncate/README.md).
+FFI report boundary; executor helpers do not report them early. See the
+[VACUUM contract](../../csrc/vacuum/README.md).

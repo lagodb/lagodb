@@ -1,12 +1,9 @@
 //! Runtime-owned `ProcessUtility_hook` router.
 
-mod analyze_router;
 mod consumer;
 mod copy_route;
-mod maintenance_command;
 mod provider_maintenance;
 mod tablespace_policy;
-mod truncate_router;
 mod vacuum_router;
 
 use std::ffi::{c_char, c_void};
@@ -18,11 +15,11 @@ use crate::descriptor_registry::{
 use lagodb_core::diag::{PgReportError, ReportableError};
 use lagodb_core::hooks::{HookError, UtilityHookPhase};
 use lagodb_core::runtime_api::UtilityHookDescriptor;
-use lagodb_core::table_maintenance::TableMaintenanceRouter;
+use pgrx::pg_sys::ffi::pg_guard_ffi_boundary;
 use pgrx::{pg_guard, pg_sys};
 
+use crate::table_provider_registry::TableProviderRegistry;
 use crate::worker;
-use maintenance_command::MaintenanceCommandScope;
 use tablespace_policy::StorageVolumeTablespacePolicy;
 
 pub(crate) use consumer::{
@@ -80,8 +77,7 @@ thread_local! {
 }
 
 fn valid_descriptor(descriptor: &UtilityHookDescriptor) -> bool {
-    descriptor.struct_size == std::mem::size_of::<UtilityHookDescriptor>() as u32
-        && !descriptor.context.is_null()
+    !descriptor.context.is_null()
         && descriptor.on_pre.is_some()
         && descriptor.on_post.is_some()
 }
@@ -134,7 +130,6 @@ mod tests {
 
     fn descriptor(tag: pg_sys::NodeTag) -> UtilityHookDescriptor {
         UtilityHookDescriptor {
-            struct_size: std::mem::size_of::<UtilityHookDescriptor>() as u32,
             tag: tag as u32,
             context: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
             on_pre: Some(pre),
@@ -143,16 +138,10 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_validation_rejects_invalid_size_and_callbacks() {
+    fn descriptor_validation_rejects_missing_callbacks() {
         let mut candidate = descriptor(pg_sys::NodeTag::T_CommentStmt);
         assert!(valid_descriptor(&candidate));
 
-        candidate.struct_size = 0;
-        assert!(!valid_descriptor(&candidate));
-        candidate.struct_size =
-            std::mem::size_of::<UtilityHookDescriptor>() as u32 + 1;
-        assert!(!valid_descriptor(&candidate));
-        candidate.struct_size = std::mem::size_of::<UtilityHookDescriptor>() as u32;
         candidate.on_post = None;
         assert!(!valid_descriptor(&candidate));
     }
@@ -225,8 +214,6 @@ type ProcessUtilityHookFn = unsafe extern "C-unwind" fn(
     completion_tag: *mut pg_sys::QueryCompletion,
 );
 
-// Shared with LagodbMaintenanceUtilityArgs in the runtime C command bridge.
-#[repr(C)]
 #[derive(Clone, Copy)]
 pub(super) struct ProcessUtilityArgs {
     pub(crate) pstmt: *mut pg_sys::PlannedStmt,
@@ -303,6 +290,31 @@ impl ProcessUtilityArgs {
         }
     }
 
+    /// Arguments that run `utility` in place of the original statement. The
+    /// copy lives in the Portal because PostgreSQL's maintenance commands
+    /// change transactions while it is in use, and it leaves a tree that may
+    /// be shared with a cached plan untouched.
+    ///
+    /// # Safety
+    /// These arguments must describe a live top-level ProcessUtility call
+    /// inside a Portal; `utility` must outlive the returned arguments' use.
+    unsafe fn with_utility(self, utility: *mut pg_sys::Node) -> Self {
+        // SAFETY: the Portal outlives this command; PostgreSQL restores its
+        // own context after ProcessUtility returns.
+        unsafe {
+            let previous = pg_sys::MemoryContextSwitchTo(pg_sys::PortalContext);
+            let pstmt = pg_sys::copyObjectImpl(self.pstmt.cast::<c_void>())
+                .cast::<pg_sys::PlannedStmt>();
+            pg_sys::MemoryContextSwitchTo(previous);
+            (*pstmt).utilityStmt = utility;
+            Self {
+                pstmt,
+                read_only_tree: false,
+                ..self
+            }
+        }
+    }
+
     unsafe fn call_standard(self) {
         unsafe {
             pg_sys::standard_ProcessUtility(
@@ -319,17 +331,21 @@ impl ProcessUtilityArgs {
     }
 
     unsafe fn call_previous(self, previous: ProcessUtilityHookFn) {
+        // SAFETY: the guard turns a parent ERROR into an unwind, so Rust state
+        // held across this call drops; the closure only calls the parent hook.
         unsafe {
-            previous(
-                self.pstmt,
-                self.query_string,
-                self.read_only_tree,
-                self.context,
-                self.params,
-                self.query_env,
-                self.dest,
-                self.completion_tag,
-            );
+            pg_guard_ffi_boundary(|| {
+                previous(
+                    self.pstmt,
+                    self.query_string,
+                    self.read_only_tree,
+                    self.context,
+                    self.params,
+                    self.query_env,
+                    self.dest,
+                    self.completion_tag,
+                );
+            });
         }
     }
 
@@ -337,18 +353,6 @@ impl ProcessUtilityArgs {
         match PREV_PROCESS_UTILITY.get() {
             Some(Some(previous)) => unsafe { self.call_previous(*previous) },
             _ => unsafe { self.call_standard() },
-        }
-    }
-
-    unsafe fn check_maintenance_recursion(self) {
-        // SAFETY: the caller supplies live ProcessUtility arguments.
-        let target_node = unsafe { self.target_node() };
-        if unsafe { (*target_node).type_ } == pg_sys::NodeTag::T_VacuumStmt {
-            unsafe {
-                MaintenanceCommandScope::check_recursion(
-                    target_node.cast::<pg_sys::VacuumStmt>(),
-                );
-            }
         }
     }
 }
@@ -384,9 +388,6 @@ unsafe extern "C-unwind" fn process_utility_router(
             dest,
             completion_tag,
         };
-        // Reject a recursive maintenance command before any LagoDB pre-hook
-        // can perform catalog work or rewrite its utility node.
-        args.check_maintenance_recursion();
         let target_node = args.target_node();
 
         // Lifecycle preflight is deliberately first and is a no-op unless the
@@ -403,15 +404,12 @@ unsafe extern "C-unwind" fn process_utility_router(
         let copy_from_route = tag == pg_sys::NodeTag::T_CopyStmt
             && (*target_node.cast::<pg_sys::CopyStmt>()).is_from;
         let may_consume_vacuum = tag == pg_sys::NodeTag::T_VacuumStmt
-            && TableMaintenanceRouter::has_providers();
-        let may_consume_truncate = tag == pg_sys::NodeTag::T_TruncateStmt
-            && crate::table_provider_registry::has_partitioned_table_provider();
+            && TableProviderRegistry::has_available_provider();
 
         if !has_matching_hooks
             && !has_matching_consumers
             && !has_tablespace_policy
             && !may_consume_vacuum
-            && !may_consume_truncate
             && !copy_from_route
         {
             if tag == pg_sys::NodeTag::T_CopyStmt {
@@ -421,11 +419,7 @@ unsafe extern "C-unwind" fn process_utility_router(
                     error.report();
                 }
             }
-            if tag == pg_sys::NodeTag::T_VacuumStmt {
-                MaintenanceCommandScope::execute(args);
-            } else {
-                args.call_parent();
-            }
+            args.call_parent();
             return;
         }
 
@@ -458,11 +452,6 @@ unsafe extern "C-unwind" fn process_utility_router(
                 args.query_string,
             );
         });
-
-        // A pre-hook can replace the utility node. Check the final node as a
-        // separate boundary invariant so a non-maintenance input cannot be
-        // rewritten into a recursive VACUUM/ANALYZE.
-        args.check_maintenance_recursion();
 
         // A pre-hook may rewrite a non-runtime-owned utility node. Native routes,
         // lifecycle, and consumer selection must therefore use the final utility
@@ -500,22 +489,21 @@ unsafe extern "C-unwind" fn process_utility_router(
             } else {
                 false
             };
-        let is_maintenance = final_tag == pg_sys::NodeTag::T_VacuumStmt;
-        let maintenance_consumed = if is_maintenance {
-            MaintenanceCommandScope::execute(args)
-        } else {
-            false
-        };
-        let truncate_consumed = if final_tag == pg_sys::NodeTag::T_TruncateStmt {
-            truncate_router::try_route(target_node.cast::<pg_sys::TruncateStmt>())
-                .report_unwrap()
-        } else {
-            false
-        };
-        let consumed = consumer_consumed
-            || copy_consumed
-            || maintenance_consumed
-            || truncate_consumed;
+        let maintenance_consumed =
+            if final_tag == pg_sys::NodeTag::T_VacuumStmt && !consumer_consumed {
+                vacuum_router::try_route(args)
+                    .map_err(|error| {
+                        error.with_utility_context(
+                            "TableMaintenanceRouter",
+                            UtilityHookPhase::Pre,
+                            pg_sys::NodeTag::T_VacuumStmt,
+                        )
+                    })
+                    .report_unwrap()
+            } else {
+                false
+            };
+        let consumed = consumer_consumed || copy_consumed || maintenance_consumed;
         // Intentionally do not delegate consumed COPY commands to the captured
         // parent ProcessUtility hook: the format consumer or shared AM fallback
         // has already executed them, and delegation would execute them again.
@@ -524,11 +512,11 @@ unsafe extern "C-unwind" fn process_utility_router(
         // extension-composition boundary, including ordinary Iceberg COPY FROM.
         // Unclaimed native COPY retains parent delegation, and LagoDB's own
         // post-hooks still run below for successfully consumed commands.
-        // Maintenance's C scope already performed parent fallback while its
-        // recursion state was active. Other utility routes still delegate here.
-        if !consumed && !is_maintenance {
+        // A consumed VACUUM FULL has already delegated its native relations and
+        // ANALYZE phase to the parent, as separate statements.
+        if !consumed {
             args.call_parent();
-        } else if consumed {
+        } else {
             // standard_ProcessUtility() performs this once after the command
             // implementation returns. A consumer that replaces standard must
             // preserve the same visibility boundary before post-hooks run.

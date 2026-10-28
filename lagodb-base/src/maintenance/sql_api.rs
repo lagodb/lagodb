@@ -63,7 +63,7 @@ mod lagodb {
             relation.oid(),
             pg_sys::AccessShareLock as _,
         )
-        .map_err(PgReportError::from_domain_error)
+        .map_err(PgReportError::from_pg_error)
         .report_unwrap();
         let stats =
             TableMaintenanceRouter::inspect(&relation.as_handle()).report_unwrap();

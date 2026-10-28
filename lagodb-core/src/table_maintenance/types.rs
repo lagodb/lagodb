@@ -18,9 +18,6 @@ pub enum TableMaintenanceMode {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TableMaintenanceOptions {
     pub verbose: bool,
-    pub analyze: bool,
-    pub skip_locked: bool,
-    pub process_main: bool,
 }
 
 impl TableMaintenanceOptions {
@@ -28,9 +25,6 @@ impl TableMaintenanceOptions {
         let options = params.as_ref().options;
         Self {
             verbose: options & pg_sys::VACOPT_VERBOSE != 0,
-            analyze: options & pg_sys::VACOPT_ANALYZE != 0,
-            skip_locked: options & pg_sys::VACOPT_SKIP_LOCKED != 0,
-            process_main: options & pg_sys::VACOPT_PROCESS_MAIN != 0,
         }
     }
 }
