@@ -4,6 +4,7 @@
 //! facets of one provider identity. Their PostgreSQL callback lifecycles remain
 //! separate.
 
+mod attribute_target_name;
 mod import;
 mod maintenance;
 mod modify;
@@ -11,6 +12,7 @@ mod payload;
 mod provider;
 mod routine;
 mod row_identity;
+mod row_identity_registry;
 mod scan;
 mod system_column;
 mod validation;
@@ -41,14 +43,14 @@ pub use routine::{
 pub use row_identity::{ForeignRowIdentityError, ForeignRowIdentityRequirement};
 pub use scan::{
     BeginForeignScanContext, ColumnRequirements, FdwScan, ForeignExpressionValue,
-    ForeignExprs, ForeignFilterEstimate, ForeignFilterExplainValues,
-    ForeignPathBuilder, ForeignPathContext, ForeignPathKey, ForeignPathKeys,
-    ForeignPathSpec, ForeignPlanContext, ForeignPlanFilter, ForeignPlanFilters,
-    ForeignPlanPrivate, ForeignPlanQualLocation, ForeignPlanSpec, ForeignRelContext,
-    ForeignRelSize, ForeignRelSizeContext, ForeignScanError, ForeignScanPhase,
-    ForeignScanResult, PathVariantKind, ReScanForeignScanContext, Relids,
-    RuntimeExpressionValues, ScanDatumWriter, ScanOutputColumn, ScanProjection,
-    ScanProjectionPolicy, ScanSlotWriter, StartForeignScanContext,
+    ForeignExprs, ForeignFilterExplainValues, ForeignPathBuilder, ForeignPathContext,
+    ForeignPathKey, ForeignPathKeys, ForeignPathSpec, ForeignPlanContext,
+    ForeignPlanFilter, ForeignPlanFilters, ForeignPlanPrivate,
+    ForeignPlanQualLocation, ForeignPlanSpec, ForeignRelContext, ForeignRelSize,
+    ForeignRelSizeContext, ForeignScanError, ForeignScanPhase, ForeignScanResult,
+    PathVariantKind, ReScanForeignScanContext, Relids, RuntimeExpressionValues,
+    ScanDatumWriter, ScanOutputColumn, ScanProjection, ScanProjectionPolicy,
+    ScanSlotWriter, StartForeignScanContext,
 };
 pub use validation::ForeignValidationError;
 

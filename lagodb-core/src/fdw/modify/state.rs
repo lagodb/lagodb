@@ -23,7 +23,6 @@ pub(crate) struct ForeignModifyStateWrapper<P: FdwModify> {
     pub(crate) command_id: Option<pg_sys::CommandId>,
     pub(crate) updated_columns: Box<[pg_sys::AttrNumber]>,
     pub(crate) row_identity_layout: RowIdentityLayout,
-    pub(crate) plan_tuple_desc: pg_sys::TupleDesc,
     pub(crate) per_tuple_context: pg_sys::MemoryContext,
     pub(crate) returned_identity: ForeignReturnedIdentity,
     pub(crate) returned_item_pointer_required: bool,
@@ -53,7 +52,6 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
             command_id: None,
             updated_columns: Vec::new().into_boxed_slice(),
             row_identity_layout: RowIdentityLayout::empty(),
-            plan_tuple_desc: ptr::null_mut(),
             per_tuple_context,
             returned_identity,
             returned_item_pointer_required,
@@ -94,7 +92,6 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         self.updated_columns = Vec::new().into_boxed_slice();
         self.row_layout = ModifyRowLayout::empty();
         self.row_identity_layout = RowIdentityLayout::empty();
-        self.plan_tuple_desc = ptr::null_mut();
         self.per_tuple_context = ptr::null_mut();
         self.return_requirements = ForeignModifyReturnRequirements::default();
         self.return_layout = ForeignModifyReturnLayout::empty();

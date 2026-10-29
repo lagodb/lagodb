@@ -191,22 +191,4 @@ impl ModifySlotBuffer {
         // slot.
         unsafe { self.write_datum_unchecked(index, value) };
     }
-
-    /// Deform a complete relation-shaped heap tuple directly into the slot
-    /// arrays.
-    ///
-    /// # Safety
-    ///
-    /// `tuple` and `tuple_desc` must be valid, and `tuple_desc` must describe
-    /// exactly `self.natts` attributes compatible with this slot.
-    #[inline]
-    pub(crate) unsafe fn deform_heap_tuple_unchecked(
-        &self,
-        tuple: pg_sys::HeapTuple,
-        tuple_desc: pg_sys::TupleDesc,
-    ) {
-        unsafe {
-            pg_sys::heap_deform_tuple(tuple, tuple_desc, self.values, self.nulls);
-        }
-    }
 }

@@ -11,6 +11,7 @@ use super::contract::{
 use super::error::{ForeignModifyError, ForeignModifyPhase};
 use super::slot::ModifySlot;
 use super::state::ForeignModifyStateWrapper;
+use crate::handles::TupleDescHandle;
 
 /// Return the Begin-published wrapper without repeating lifecycle checks.
 ///
@@ -66,19 +67,21 @@ pub(super) unsafe fn validate_updated_columns(
     relation: pg_sys::Relation,
 ) -> Result<(), ForeignModifyError> {
     let tuple_desc = unsafe { (*relation).rd_att };
-    let natts = unsafe { (*tuple_desc).natts as usize };
+    // SAFETY: guaranteed by this method's contract.
+    let tuple_desc = unsafe { TupleDescHandle::from_raw(tuple_desc) };
+    let attrs = tuple_desc.attributes();
     for &attno in columns {
         let index = usize::try_from(attno as i32 - 1).map_err(|_| {
             ForeignModifyError::framework(
                 "foreign modify state contains a non-positive updated column",
             )
         })?;
-        if index >= natts {
+        if index >= attrs.len() {
             return Err(ForeignModifyError::framework(
                 "foreign modify state contains an updated column outside the relation",
             ));
         }
-        if unsafe { (*tuple_desc).attrs.as_ptr().add(index).read().attisdropped } {
+        if attrs[index].attisdropped {
             return Err(ForeignModifyError::framework(
                 "foreign modify state updates a dropped relation column",
             ));

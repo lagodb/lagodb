@@ -1,11 +1,9 @@
 //! Begin-time metadata for foreign modify rows.
 
-use core::ptr;
-use std::slice;
-
 use pgrx::pg_sys;
 
 use crate::datum::{BoundColumnDatumCodec, ColumnDatumTarget};
+use crate::handles::TupleDescHandle;
 
 use super::error::ForeignModifyError;
 
@@ -18,7 +16,6 @@ use super::error::ForeignModifyError;
 /// rewrite need a `Cell` conversion path.
 pub(crate) struct ModifyRowLayout {
     relation_oid: pg_sys::Oid,
-    tuple_desc: pg_sys::TupleDesc,
     attributes: Box<[ModifyAttribute]>,
     codecs: Box<[Option<BoundColumnDatumCodec>]>,
     has_live_attributes: bool,
@@ -40,9 +37,9 @@ impl ModifyRowLayout {
     /// descriptor that remains stable for the returned executor state.
     pub(crate) unsafe fn from_relation(relation: pg_sys::Relation) -> Self {
         let tuple_desc = unsafe { (*relation).rd_att };
-        let natts = unsafe { (*tuple_desc).natts as usize };
-        let attrs =
-            unsafe { slice::from_raw_parts((*tuple_desc).attrs.as_ptr(), natts) };
+        // SAFETY: guaranteed by this method's contract.
+        let tuple_desc_handle = unsafe { TupleDescHandle::from_raw(tuple_desc) };
+        let attrs = tuple_desc_handle.attributes();
         let attributes = attrs
             .iter()
             .map(|attr| ModifyAttribute {
@@ -55,8 +52,7 @@ impl ModifyRowLayout {
 
         Self {
             relation_oid: unsafe { (*relation).rd_id },
-            tuple_desc,
-            codecs: vec![None; natts].into_boxed_slice(),
+            codecs: vec![None; attrs.len()].into_boxed_slice(),
             attributes,
             has_live_attributes: attrs.iter().any(|attr| !attr.attisdropped),
         }
@@ -65,7 +61,6 @@ impl ModifyRowLayout {
     pub(crate) fn empty() -> Self {
         Self {
             relation_oid: pg_sys::InvalidOid,
-            tuple_desc: ptr::null_mut(),
             attributes: Vec::new().into_boxed_slice(),
             codecs: Vec::new().into_boxed_slice(),
             has_live_attributes: false,
@@ -75,11 +70,6 @@ impl ModifyRowLayout {
     #[inline]
     pub(crate) fn relation_oid(&self) -> pg_sys::Oid {
         self.relation_oid
-    }
-
-    #[inline]
-    pub(crate) const fn tuple_desc(&self) -> pg_sys::TupleDesc {
-        self.tuple_desc
     }
 
     #[inline]

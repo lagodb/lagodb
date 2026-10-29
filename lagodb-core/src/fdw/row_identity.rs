@@ -3,15 +3,18 @@
 use core::ffi::{CStr, c_int};
 use core::marker::PhantomData;
 use std::ffi::CString;
-use std::str;
 
-use pgrx::pg_sys::{self, INDEX_VAR, INNER_VAR, OUTER_VAR};
+use pgrx::pg_sys;
 
-use crate::handles::ValidItemPointer;
+use crate::handles::{TupleDescHandle, ValidItemPointer};
 use crate::tuple::PgDatumRef;
+
+use super::attribute_target_name::RelationAttributeTargetName;
 
 const ATTRIBUTE_IDENTITY_PREFIX: &str = "__lagodb_fdw_identity_attr_";
 const ITEM_POINTER_IDENTITY_NAME: &CStr = c"__lagodb_fdw_identity_ctid";
+const ATTRIBUTE_IDENTITY_NAME: RelationAttributeTargetName =
+    RelationAttributeTargetName::new(ATTRIBUTE_IDENTITY_PREFIX);
 
 /// Scan-side request for the special system identity representation produced
 /// by a modify-purpose scan.
@@ -54,6 +57,53 @@ pub enum ForeignRowIdentityKind {
     Attribute { attno: pg_sys::AttrNumber },
 }
 
+impl ForeignRowIdentityKind {
+    pub(crate) const fn wire_attno(self) -> pg_sys::AttrNumber {
+        match self {
+            Self::ItemPointer => {
+                pg_sys::SelfItemPointerAttributeNumber as pg_sys::AttrNumber
+            }
+            Self::Attribute { attno } => attno,
+        }
+    }
+
+    pub(crate) fn from_wire_attno(
+        attno: pg_sys::AttrNumber,
+    ) -> Result<Self, ForeignRowIdentityError> {
+        if attno == pg_sys::SelfItemPointerAttributeNumber as pg_sys::AttrNumber {
+            Ok(Self::ItemPointer)
+        } else if attno > 0 {
+            Ok(Self::Attribute { attno })
+        } else {
+            Err(ForeignRowIdentityError::InvalidRelationAttribute)
+        }
+    }
+
+    /// Build the framework-owned planner target name for a validated positive
+    /// relation attribute.
+    pub(crate) fn attribute_target_name(
+        attribute: &pg_sys::FormData_pg_attribute,
+    ) -> CString {
+        ATTRIBUTE_IDENTITY_NAME.encode(attribute)
+    }
+
+    pub(crate) const fn item_pointer_target_name() -> &'static CStr {
+        ITEM_POINTER_IDENTITY_NAME
+    }
+
+    pub(crate) fn from_target_name(
+        name: &CStr,
+    ) -> Result<Option<Self>, ForeignRowIdentityError> {
+        if name == ITEM_POINTER_IDENTITY_NAME {
+            return Ok(Some(Self::ItemPointer));
+        }
+        ATTRIBUTE_IDENTITY_NAME
+            .attno(name)
+            .map(|attno| attno.map(|attno| Self::Attribute { attno }))
+            .map_err(|_| ForeignRowIdentityError::InvalidIdentityName)
+    }
+}
+
 /// One cached identity target entry in the ModifyTable subplan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RowIdentityEntry {
@@ -89,14 +139,12 @@ impl RowIdentityEntry {
 #[derive(Debug, Clone)]
 pub(crate) struct RowIdentityLayout {
     entries: Box<[RowIdentityEntry]>,
-    max_plan_index: Option<usize>,
 }
 
 impl RowIdentityLayout {
     pub(crate) fn empty() -> Self {
         Self {
             entries: Vec::new().into_boxed_slice(),
-            max_plan_index: None,
         }
     }
 
@@ -107,11 +155,10 @@ impl RowIdentityLayout {
     pub(crate) unsafe fn from_targetlist(
         targetlist: *mut pg_sys::List,
         relation: pg_sys::Relation,
-        rtindex: pg_sys::Index,
+        expected: &[ForeignRowIdentityKind],
     ) -> Result<Self, ForeignRowIdentityError> {
         if targetlist.is_null()
             || relation.is_null()
-            || rtindex == 0
             || unsafe { (*relation).rd_att.is_null() }
         {
             return Err(ForeignRowIdentityError::MissingTargetList);
@@ -138,9 +185,13 @@ impl RowIdentityLayout {
             }
 
             let name = unsafe { CStr::from_ptr((*target_entry).resname) };
-            let Some(kind) = Self::kind_for_name(name)? else {
+            let Some(kind) = (unsafe { Self::kind_for_target_name(relation, name) })?
+            else {
                 continue;
             };
+            if !expected.contains(&kind) {
+                continue;
+            }
             let expr = unsafe { (*target_entry).expr };
             if expr.is_null() || unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Var {
                 return Err(ForeignRowIdentityError::MalformedIdentityExpression);
@@ -149,31 +200,12 @@ impl RowIdentityLayout {
             if unsafe { (*var).varlevelsup } != 0 {
                 return Err(ForeignRowIdentityError::MalformedIdentityExpression);
             }
-            let source_rtindex = unsafe {
-                if (*var).varno == INNER_VAR
-                    || (*var).varno == OUTER_VAR
-                    || (*var).varno == INDEX_VAR
-                {
-                    Some((*var).varnosyn)
-                } else {
-                    pg_sys::Index::try_from((*var).varno)
-                        .ok()
-                        .filter(|source| *source != 0)
-                }
-            }
-            .ok_or(ForeignRowIdentityError::MalformedIdentityExpression)?;
-            if source_rtindex != rtindex {
-                continue;
-            }
             let plan_attno = unsafe { (*target_entry).resno };
             if plan_attno <= 0 {
                 return Err(ForeignRowIdentityError::InvalidPlanAttribute);
             }
             let plan_index = usize::try_from(plan_attno as i32 - 1)
                 .map_err(|_| ForeignRowIdentityError::InvalidPlanAttribute)?;
-            if plan_index >= length as usize {
-                return Err(ForeignRowIdentityError::PlanAttributeOutOfRange);
-            }
             if entries
                 .iter()
                 .any(|entry: &RowIdentityEntry| entry.plan_index == plan_index)
@@ -181,36 +213,6 @@ impl RowIdentityLayout {
                 return Err(ForeignRowIdentityError::DuplicatePlanAttribute);
             }
 
-            let source_attno = match kind {
-                ForeignRowIdentityKind::ItemPointer => {
-                    pg_sys::SelfItemPointerAttributeNumber as pg_sys::AttrNumber
-                }
-                ForeignRowIdentityKind::Attribute { attno } => attno,
-            };
-            let is_direct_relation_var = unsafe {
-                (*var).varno == rtindex as c_int && (*var).varattno == source_attno
-            };
-            let is_join_output_var = unsafe {
-                ((*var).varno == INNER_VAR || (*var).varno == OUTER_VAR)
-                    && (*var).varnosyn == rtindex
-                    && (*var).varattnosyn == source_attno
-            };
-            // A projected ForeignScan exposes its output tlist through
-            // INDEX_VAR.  In that shape the original relation Var metadata is
-            // consumed by setrefs, so the internal identity name plus the
-            // type checks below are the remaining stable contract.
-            let is_projected_scan_var = unsafe {
-                (*var).varno == INDEX_VAR
-                    && (*var).varattno > 0
-                    && (*var).varnosyn == rtindex
-                    && (*var).varattnosyn == source_attno
-            };
-            if !(is_direct_relation_var
-                || is_join_output_var
-                || is_projected_scan_var)
-            {
-                return Err(ForeignRowIdentityError::MalformedIdentityExpression);
-            }
             if matches!(kind, ForeignRowIdentityKind::ItemPointer)
                 && (unsafe { (*var).vartype } != pg_sys::TIDOID
                     || unsafe { (*var).vartypmod } != -1
@@ -226,22 +228,15 @@ impl RowIdentityLayout {
                             ForeignRowIdentityError::InvalidRelationAttribute
                         })?;
                     let tuple_desc = unsafe { (*relation).rd_att };
-                    let natts = unsafe { (*tuple_desc).natts };
-                    if natts < 0 || unsafe { (*tuple_desc).attrs.as_ptr().is_null() }
-                    {
+                    // SAFETY: the live relation owns this descriptor.
+                    let tuple_desc = unsafe { TupleDescHandle::from_raw(tuple_desc) };
+                    let attrs = tuple_desc.attributes();
+                    if attribute_index >= attrs.len() {
                         return Err(
                             ForeignRowIdentityError::InvalidRelationAttribute,
                         );
                     }
-                    let natts = natts as usize;
-                    if attribute_index >= natts {
-                        return Err(
-                            ForeignRowIdentityError::InvalidRelationAttribute,
-                        );
-                    }
-                    let attribute = unsafe {
-                        &*(*tuple_desc).attrs.as_ptr().add(attribute_index)
-                    };
+                    let attribute = &attrs[attribute_index];
                     if attribute.attisdropped
                         || unsafe { (*var).vartype } != attribute.atttypid
                         || unsafe { (*var).vartypmod } != attribute.atttypmod
@@ -263,133 +258,9 @@ impl RowIdentityLayout {
             });
         }
 
-        let max_plan_index = entries.iter().map(|entry| entry.plan_index).max();
         Ok(Self {
             entries: entries.into_boxed_slice(),
-            max_plan_index,
         })
-    }
-
-    /// Validate the executor descriptor once, after the subplan has been
-    /// initialized. The descriptor is stable for all rows of this modify
-    /// operation, so row callbacks do not repeat identity type checks.
-    ///
-    /// # Safety
-    ///
-    /// `tuple_desc` must be the initialized result descriptor of the modify
-    /// subplan represented by this layout.
-    pub(crate) unsafe fn validate_tuple_desc(
-        &self,
-        tuple_desc: pg_sys::TupleDesc,
-    ) -> Result<(), ForeignRowIdentityError> {
-        if tuple_desc.is_null() {
-            return Err(ForeignRowIdentityError::MalformedPlanSlot);
-        }
-        let natts = unsafe { (*tuple_desc).natts };
-        if natts < 0
-            || (natts > 0 && unsafe { (*tuple_desc).attrs.as_ptr().is_null() })
-        {
-            return Err(ForeignRowIdentityError::MalformedPlanSlot);
-        }
-        let natts = natts as usize;
-        if let Some(max_plan_index) = self.max_plan_index
-            && max_plan_index >= natts
-        {
-            return Err(ForeignRowIdentityError::PlanAttributeOutOfRange);
-        }
-        for entry in &self.entries {
-            let attribute =
-                unsafe { &*(*tuple_desc).attrs.as_ptr().add(entry.plan_index) };
-            if attribute.atttypid != entry.type_oid
-                || attribute.atttypmod != entry.type_mod
-            {
-                return Err(ForeignRowIdentityError::IdentityTypeMismatch);
-            }
-        }
-        Ok(())
-    }
-
-    /// Check the planner targetlist for the framework-owned ItemPointer row
-    /// identity. This runs after `AddForeignUpdateTargets` and before the
-    /// foreign scan plan is encoded, so the scan contract follows the
-    /// provider's explicit identity registration instead of the command type.
-    ///
-    /// # Safety
-    ///
-    /// `targetlist` must be a live planner targetlist owned by `root`'s
-    /// planner memory context. Its nodes must remain valid for this call.
-    pub(crate) unsafe fn has_item_pointer_identity_in_targetlist(
-        targetlist: *mut pg_sys::List,
-        rtindex: pg_sys::Index,
-    ) -> Result<bool, ForeignRowIdentityError> {
-        if rtindex == 0 {
-            return Err(ForeignRowIdentityError::MissingTargetList);
-        }
-        // A DELETE has no user target entries. Its processed targetlist stays
-        // NIL when the FDW does not register a row identity, which is a valid
-        // planner state (and is later rejected by modify capability checks).
-        if targetlist.is_null() {
-            return Ok(false);
-        }
-        let length = unsafe { pg_sys::list_length(targetlist) };
-        if length < 0 {
-            return Err(ForeignRowIdentityError::NegativeTargetListLength);
-        }
-        for index in 0..length {
-            let target_entry = unsafe { pg_sys::list_nth(targetlist, index) }
-                as *mut pg_sys::TargetEntry;
-            if target_entry.is_null()
-                || unsafe { (*target_entry).xpr.type_ }
-                    != pg_sys::NodeTag::T_TargetEntry
-            {
-                return Err(ForeignRowIdentityError::MalformedTargetEntry);
-            }
-            if !unsafe { (*target_entry).resjunk }
-                || unsafe { (*target_entry).resname.is_null() }
-            {
-                continue;
-            }
-            let name = unsafe { CStr::from_ptr((*target_entry).resname) };
-            if name != ITEM_POINTER_IDENTITY_NAME {
-                continue;
-            }
-            let expr = unsafe { (*target_entry).expr };
-            if expr.is_null() || unsafe { (*expr).type_ } != pg_sys::NodeTag::T_Var {
-                return Err(ForeignRowIdentityError::MalformedIdentityExpression);
-            }
-            let var = expr.cast::<pg_sys::Var>();
-            if unsafe {
-                (*var).varlevelsup != 0
-                    || (*var).varno != rtindex as c_int
-                    || (*var).varattno
-                        != pg_sys::SelfItemPointerAttributeNumber
-                            as pg_sys::AttrNumber
-                    || (*var).vartype != pg_sys::TIDOID
-                    || (*var).vartypmod != -1
-                    || (*var).varcollid != pg_sys::InvalidOid
-            } {
-                return Err(ForeignRowIdentityError::MalformedIdentityExpression);
-            }
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
-    /// Build the framework-owned row identity name for a positive relation
-    /// attribute.  This runs in the planner, where a small CString allocation
-    /// is part of PostgreSQL's Node-list construction rather than row work.
-    pub(crate) fn attribute_identity_name(
-        attno: pg_sys::AttrNumber,
-    ) -> Result<CString, ForeignRowIdentityError> {
-        if attno <= 0 {
-            return Err(ForeignRowIdentityError::InvalidRelationAttribute);
-        }
-        CString::new(format!("{}{}", ATTRIBUTE_IDENTITY_PREFIX, attno))
-            .map_err(|_| ForeignRowIdentityError::InvalidIdentityName)
-    }
-
-    pub(crate) const fn item_pointer_identity_name() -> &'static CStr {
-        ITEM_POINTER_IDENTITY_NAME
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -404,27 +275,26 @@ impl RowIdentityLayout {
         self.entries.is_empty()
     }
 
-    fn kind_for_name(
+    /// Resolve an identity target only when its physical attno and logical
+    /// attribute name both belong to the current result relation. Other leaf
+    /// variants appear as NULL targets in an inherited ModifyTable tlist.
+    ///
+    /// # Safety
+    ///
+    /// `relation` must be live with the descriptor PostgreSQL created for it.
+    unsafe fn kind_for_target_name(
+        relation: pg_sys::Relation,
         name: &CStr,
     ) -> Result<Option<ForeignRowIdentityKind>, ForeignRowIdentityError> {
         if name == ITEM_POINTER_IDENTITY_NAME {
             return Ok(Some(ForeignRowIdentityKind::ItemPointer));
         }
-        let bytes = name.to_bytes();
-        if !bytes.starts_with(ATTRIBUTE_IDENTITY_PREFIX.as_bytes()) {
-            return Ok(None);
-        }
-        let digits = &bytes[ATTRIBUTE_IDENTITY_PREFIX.len()..];
-        if digits.is_empty() {
-            return Err(ForeignRowIdentityError::InvalidIdentityName);
-        }
-        let attno = str::from_utf8(digits)
-            .ok()
-            .and_then(|value| value.parse::<i32>().ok())
-            .and_then(|value| pg_sys::AttrNumber::try_from(value).ok())
-            .filter(|attno| *attno > 0)
-            .ok_or(ForeignRowIdentityError::InvalidRelationAttribute)?;
-        Ok(Some(ForeignRowIdentityKind::Attribute { attno }))
+        // SAFETY: guaranteed by this method's contract.
+        unsafe { ATTRIBUTE_IDENTITY_NAME.decode(relation, name) }
+            .map(|attno| {
+                attno.map(|attno| ForeignRowIdentityKind::Attribute { attno })
+            })
+            .map_err(|_| ForeignRowIdentityError::InvalidIdentityName)
     }
 }
 
@@ -445,28 +315,22 @@ pub enum ForeignRowIdentity<'slot> {
 /// not its complete representation.
 pub struct ModifyPlanSlot<'slot> {
     slot: *mut pg_sys::TupleTableSlot,
-    tuple_desc: pg_sys::TupleDesc,
     layout: &'slot RowIdentityLayout,
     _marker: PhantomData<&'slot pg_sys::TupleTableSlot>,
 }
 
 impl<'slot> ModifyPlanSlot<'slot> {
-    /// Construct a plan-slot view after Begin-time validation.
+    /// Construct a plan-slot view from PostgreSQL's current modify row.
     ///
     /// # Safety
     ///
-    /// `slot` and `tuple_desc` must be live for `'slot`. Begin must have
-    /// validated `tuple_desc` against `layout`, and PostgreSQL must be invoking
-    /// this callback with that descriptor's initialized, non-empty plan slot.
-    /// The slot's Datum arrays must remain valid for the returned view.
+    /// `slot` must be live for `'slot` and contain the targetlist represented
+    /// by `layout`. Its Datum arrays must remain valid for the returned view.
     pub(crate) unsafe fn from_raw_unchecked(
         slot: *mut pg_sys::TupleTableSlot,
         layout: &'slot RowIdentityLayout,
-        tuple_desc: pg_sys::TupleDesc,
     ) -> Self {
         debug_assert!(!slot.is_null());
-        debug_assert!(!tuple_desc.is_null());
-        debug_assert_eq!(unsafe { (*slot).tts_tupleDescriptor }, tuple_desc);
         debug_assert!(!unsafe { (*slot).tts_values }.is_null());
         debug_assert!(!unsafe { (*slot).tts_isnull }.is_null());
         debug_assert_eq!(
@@ -475,7 +339,6 @@ impl<'slot> ModifyPlanSlot<'slot> {
         );
         Self {
             slot,
-            tuple_desc,
             layout,
             _marker: PhantomData,
         }
@@ -486,14 +349,13 @@ impl<'slot> ModifyPlanSlot<'slot> {
         self.layout.len()
     }
 
-    /// Read a plan-slot Datum whose index was validated while building the
-    /// final target layout and during Begin.
+    /// Read a plan-slot Datum whose index was resolved from the final target
+    /// layout during Begin.
     ///
     /// # Safety
     ///
-    /// `plan_index` must be less than the slot descriptor's attribute count.
+    /// `plan_index` must name an attribute in the slot's plan targetlist.
     pub(crate) unsafe fn datum_at(&self, plan_index: usize) -> (pg_sys::Datum, bool) {
-        debug_assert!(plan_index < unsafe { (*self.tuple_desc).natts as usize });
         let mut is_null = false;
         let datum = unsafe {
             pg_sys::slot_getattr(self.slot, (plan_index + 1) as c_int, &mut is_null)
@@ -572,12 +434,8 @@ pub enum ForeignRowIdentityError {
     MalformedPlanSlot,
     #[error("FDW row identity index is outside the cached layout")]
     IdentityIndexOutOfRange,
-    #[error("FDW row identity plan attribute is outside the plan slot")]
-    PlanAttributeOutOfRange,
     #[error("FDW row identity is NULL")]
     NullIdentity,
-    #[error("FDW row identity has an unexpected PostgreSQL type")]
-    IdentityTypeMismatch,
     #[error("FDW row identity contains an invalid item pointer")]
     InvalidItemPointer,
 }

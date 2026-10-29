@@ -1,14 +1,15 @@
 //! Modify-specific private-data envelope.
 
-use core::ffi::CStr;
-
 use pgrx::pg_sys;
 
 use super::contract::{
     FdwModify, ForeignModifyOperation, ForeignModifyPrivate, ForeignReturnedIdentity,
 };
 use super::error::ForeignModifyError;
-use crate::fdw::{ForeignPrivateReader, ForeignPrivateWriter};
+use super::return_requirements::ForeignModifyReturnRequirements;
+use crate::fdw::{
+    ForeignPrivateReader, ForeignPrivateWriter, ForeignRowIdentityKind,
+};
 
 const PRIVATE_MODIFY: i32 = 3;
 
@@ -17,38 +18,57 @@ pub(crate) struct DecodedModifyPrivate<D> {
     pub(crate) relation_oid: pg_sys::Oid,
     pub(crate) operation: ForeignModifyOperation,
     pub(crate) updated_columns: Box<[pg_sys::AttrNumber]>,
+    pub(crate) row_identities: Box<[ForeignRowIdentityKind]>,
     pub(crate) returned_identity: ForeignReturnedIdentity,
     pub(crate) returned_item_pointer_required: bool,
+    pub(crate) return_requirements: ForeignModifyReturnRequirements,
 }
 
-pub(crate) fn encode_modify_private<P: FdwModify>(
-    provider_name: &'static CStr,
-    relation_oid: pg_sys::Oid,
-    operation: ForeignModifyOperation,
-    updated_columns: &[pg_sys::AttrNumber],
-    returned_identity: ForeignReturnedIdentity,
-    returned_item_pointer_required: bool,
-    private_data: &P::ModifyPrivateData,
-) -> Result<*mut pg_sys::List, ForeignModifyError> {
-    let payload =
-        ForeignPrivateWriter::encode_list(|writer| private_data.encode(writer))?;
+pub(crate) struct ModifyPrivateEnvelope<'a, P: FdwModify> {
+    pub(crate) relation_oid: pg_sys::Oid,
+    pub(crate) operation: ForeignModifyOperation,
+    pub(crate) updated_columns: &'a [pg_sys::AttrNumber],
+    pub(crate) row_identities: &'a [ForeignRowIdentityKind],
+    pub(crate) returned_identity: ForeignReturnedIdentity,
+    pub(crate) returned_item_pointer_required: bool,
+    pub(crate) return_requirements: &'a ForeignModifyReturnRequirements,
+    pub(crate) private_data: &'a P::ModifyPrivateData,
+}
 
-    ForeignPrivateWriter::encode_list(|envelope| {
-        envelope
-            .append_i32(PRIVATE_MODIFY)
-            .append_cstr(provider_name)
-            .append_oid(relation_oid)
-            .append_i32(operation.as_pg() as i32)
-            .append_i32(returned_identity.wire_kind())
-            .append_bool(returned_item_pointer_required)
-            .append_nested(|writer| {
-                for &attno in updated_columns {
-                    writer.append_i32(attno as i32);
-                }
-            });
-        unsafe { envelope.append_list(payload) };
-        Ok(())
-    })
+impl<P: FdwModify> ModifyPrivateEnvelope<'_, P> {
+    pub(crate) fn encode(self) -> Result<*mut pg_sys::List, ForeignModifyError> {
+        let payload = ForeignPrivateWriter::encode_list(|writer| {
+            self.private_data.encode(writer)
+        })?;
+
+        ForeignPrivateWriter::encode_list(|envelope| {
+            envelope
+                .append_i32(PRIVATE_MODIFY)
+                .append_cstr(P::NAME)
+                .append_oid(self.relation_oid)
+                .append_i32(self.operation.as_pg() as i32)
+                .append_i32(self.returned_identity.wire_kind())
+                .append_bool(self.returned_item_pointer_required)
+                .append_bool(self.return_requirements.all_columns())
+                .append_nested(|writer| {
+                    for &attno in self.updated_columns {
+                        writer.append_i32(attno as i32);
+                    }
+                })
+                .append_nested(|writer| {
+                    for &attno in self.return_requirements.columns() {
+                        writer.append_i32(attno as i32);
+                    }
+                })
+                .append_nested(|writer| {
+                    for &identity in self.row_identities {
+                        writer.append_i32(identity.wire_attno() as i32);
+                    }
+                });
+            unsafe { envelope.append_list(payload) };
+            Ok(())
+        })
+    }
 }
 
 /// # Safety
@@ -78,14 +98,8 @@ pub(crate) unsafe fn decode_modify_private<P: FdwModify>(
             let returned_identity =
                 ForeignReturnedIdentity::from_wire(reader.read_i32()?)?;
             let returned_item_pointer_required = reader.read_bool()?;
-            if returned_item_pointer_required
-                && !returned_identity.supports_item_pointer()
-            {
-                return Err(ForeignModifyError::framework(
-                    "FDW modify private data requires an undeclared returned identity",
-                ));
-            }
-            let updated_columns = reader.read_nested(|updated_columns_reader| {
+            let returning_all_columns = reader.read_bool()?;
+            let updated_columns = reader.read_nested(|updated_columns_reader| -> Result<_, ForeignModifyError> {
                 let mut updated_columns =
                     Vec::with_capacity(updated_columns_reader.remaining());
                 while updated_columns_reader.remaining() > 0 {
@@ -97,24 +111,46 @@ pub(crate) unsafe fn decode_modify_private<P: FdwModify>(
                             "FDW modify private data contains an invalid updated column",
                         )
                     })?;
-                    if attno <= 0 || updated_columns.contains(&attno) {
-                        return Err(ForeignModifyError::framework(
-                            "FDW modify private data contains a non-positive or duplicate updated column",
-                        ));
-                    }
                     updated_columns.push(attno);
                 }
                 Ok(updated_columns)
             })?;
-            if matches!(
-                operation,
-                ForeignModifyOperation::Insert | ForeignModifyOperation::Delete
-            ) && !updated_columns.is_empty()
-            {
-                return Err(ForeignModifyError::framework(
-                    "INSERT or DELETE modify private data contains updated columns",
-                ));
-            }
+            let returning_columns = reader.read_nested(|returning_columns_reader| -> Result<_, ForeignModifyError> {
+                let mut returning_columns =
+                    Vec::with_capacity(returning_columns_reader.remaining());
+                while returning_columns_reader.remaining() > 0 {
+                    let attno = pg_sys::AttrNumber::try_from(
+                        returning_columns_reader.read_i32()?,
+                    )
+                    .map_err(|_| {
+                        ForeignModifyError::framework(
+                            "FDW modify private data contains an invalid RETURNING column",
+                        )
+                    })?;
+                    returning_columns.push(attno);
+                }
+                Ok(returning_columns)
+            })?;
+            let row_identities = reader.read_nested(|identities_reader| -> Result<_, ForeignModifyError> {
+                let mut identities = Vec::with_capacity(identities_reader.remaining());
+                while identities_reader.remaining() > 0 {
+                    let attno = pg_sys::AttrNumber::try_from(
+                        identities_reader.read_i32()?,
+                    )
+                    .map_err(|_| {
+                        ForeignModifyError::framework(
+                            "FDW modify private data contains an invalid row identity",
+                        )
+                    })?;
+                    let identity = ForeignRowIdentityKind::from_wire_attno(attno)?;
+                    identities.push(identity);
+                }
+                Ok(identities)
+            })?;
+            let return_requirements = ForeignModifyReturnRequirements::from_parts(
+                returning_columns.into_boxed_slice(),
+                returning_all_columns,
+            );
             let private_data = reader
                 .read_nested(|payload| P::ModifyPrivateData::decode(payload))?;
             Ok(DecodedModifyPrivate {
@@ -122,8 +158,10 @@ pub(crate) unsafe fn decode_modify_private<P: FdwModify>(
                 relation_oid,
                 operation,
                 updated_columns: updated_columns.into_boxed_slice(),
+                row_identities: row_identities.into_boxed_slice(),
                 returned_identity,
                 returned_item_pointer_required,
+                return_requirements,
             })
         })
     }

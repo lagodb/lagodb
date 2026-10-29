@@ -34,7 +34,6 @@ pub(crate) unsafe extern "C-unwind" fn exec_foreign_delete<P: FdwModify>(
                     ModifyPlanSlot::from_raw_unchecked(
                         plan_slot,
                         &wrapper.row_identity_layout,
-                        wrapper.plan_tuple_desc,
                     )
                 };
 

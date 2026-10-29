@@ -2,7 +2,6 @@
 
 use core::ffi::c_int;
 use core::marker::PhantomData;
-use core::ptr;
 
 use pgrx::pg_sys;
 
@@ -18,10 +17,9 @@ use super::planning::analyze_returning_system_columns;
 use super::planning_context::ForeignModifyRelationContext;
 use super::private::decode_modify_private;
 use super::return_layout::ForeignModifyReturnLayout;
-use super::return_requirements::ForeignModifyReturnRequirements;
 use super::row_layout::ModifyRowLayout;
 use super::state::ForeignModifyStateWrapper;
-use super::target_scan::ForeignModifyTargetScan;
+use super::target_scan::{ForeignModifyTargetScan, ForeignModifyTargetScanMatch};
 
 impl<P: FdwModify> ForeignModifyStateWrapper<P> {
     /// Build and publish the normal INSERT/UPDATE/DELETE executor state.
@@ -64,57 +62,60 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         }
         unsafe { validate_updated_columns(&decoded.updated_columns, relation) }?;
 
-        let (row_identity_layout, plan_tuple_desc) = match operation {
-            ForeignModifyOperation::Insert => {
-                (RowIdentityLayout::empty(), ptr::null_mut())
+        let target_scan = match operation {
+            ForeignModifyOperation::Insert => None,
+            ForeignModifyOperation::Update | ForeignModifyOperation::Delete => {
+                let target_scan = unsafe {
+                    ForeignModifyTargetScan::<P>::find(
+                        (*mtstate).ps.lefttree,
+                        (*relation).rd_id,
+                        (*rinfo).ri_RangeTableIndex,
+                    )
+                }?;
+                match target_scan {
+                    ForeignModifyTargetScanMatch::NotInitialized => {
+                        // PostgreSQL can retain a result relation whose target
+                        // scan was removed by planning or initial pruning. No
+                        // initialized matching scan means this relation cannot
+                        // supply a modify row; EndForeignModify already treats
+                        // a NULL ri_FdwState as a no-op.
+                        return Ok(());
+                    }
+                    ForeignModifyTargetScanMatch::Initialized(context) => context,
+                }
             }
+        };
+        let row_identity_layout = match operation {
+            ForeignModifyOperation::Insert => RowIdentityLayout::empty(),
             ForeignModifyOperation::Update | ForeignModifyOperation::Delete => {
                 let subplan_state = unsafe { (*mtstate).ps.lefttree };
-                let plan_slot = unsafe { (*subplan_state).ps_ResultTupleSlot };
-                let plan_tuple_desc = unsafe { (*plan_slot).tts_tupleDescriptor };
                 let targetlist = unsafe { (*(*subplan_state).plan).targetlist };
                 let layout = unsafe {
                     RowIdentityLayout::from_targetlist(
                         targetlist,
                         relation,
-                        (*rinfo).ri_RangeTableIndex,
+                        &decoded.row_identities,
                     )
                 }?;
-                unsafe { layout.validate_tuple_desc(plan_tuple_desc) }?;
                 if layout.is_empty() {
                     return Err(ForeignModifyError::framework(
                         "UPDATE/DELETE modify subplan has no provider row identity",
                     ));
                 }
-                (layout, plan_tuple_desc)
+                layout
             }
         };
-        let return_requirements =
-            if matches!(operation, ForeignModifyOperation::Delete) {
-                unsafe {
-                    ForeignModifyReturnRequirements::from_modify_plan(
-                        plan,
-                        relation,
-                        (*rinfo).ri_RangeTableIndex,
-                        subplan_index,
-                    )
-                }?
-            } else {
-                ForeignModifyReturnRequirements::default()
-            };
+        let return_requirements = decoded.return_requirements;
         let return_layout = if matches!(operation, ForeignModifyOperation::Delete) {
             let subplan_state = unsafe { (*mtstate).ps.lefttree };
             let targetlist = unsafe { (*(*subplan_state).plan).targetlist };
-            let layout = unsafe {
+            unsafe {
                 ForeignModifyReturnLayout::from_targetlist(
                     targetlist,
                     relation,
-                    (*rinfo).ri_RangeTableIndex,
                     &return_requirements,
                 )
-            }?;
-            unsafe { layout.validate_tuple_desc(plan_tuple_desc) }?;
-            layout
+            }?
         } else {
             ForeignModifyReturnLayout::empty()
         };
@@ -130,18 +131,6 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         let per_tuple_context = unsafe { Self::per_tuple_context(estate) };
         let effective_user_id =
             unsafe { pg_sys::ExecGetResultRelCheckAsUser(rinfo, estate) };
-        let target_scan = match operation {
-            ForeignModifyOperation::Insert => None,
-            ForeignModifyOperation::Update | ForeignModifyOperation::Delete => {
-                unsafe {
-                    ForeignModifyTargetScan::<P>::find(
-                        (*mtstate).ps.lefttree,
-                        (*relation).rd_id,
-                        (*rinfo).ri_RangeTableIndex,
-                    )
-                }?
-            }
-        };
         // SAFETY: PostgreSQL keeps the live result relation open for the modify
         // state.
         let row_layout = unsafe { ModifyRowLayout::from_relation(relation) };
@@ -152,7 +141,6 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
             command_id: Some(unsafe { (*estate).es_output_cid }),
             updated_columns: decoded.updated_columns,
             row_identity_layout,
-            plan_tuple_desc,
             per_tuple_context,
             returned_identity: decoded.returned_identity,
             returned_item_pointer_required: decoded.returned_item_pointer_required,
@@ -234,6 +222,7 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
                     analyze_returning_system_columns(
                         returning,
                         (*root_result_relation).ri_RangeTableIndex,
+                        operation,
                     )?
                 }
             }

@@ -1,23 +1,17 @@
 //! Provider-facing modify slot and value API.
 
-use core::ffi::c_int;
-use core::mem::MaybeUninit;
-
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys;
-
-use crate::datum::Cell;
-use crate::diag::PgReportError;
-use crate::handles::ValidItemPointer;
-use crate::tuple::{PgDatumRef, TupleSlotRow};
-use crate::wrapper::PgWrapper;
 
 use super::contract::{ForeignModifyOperation, ForeignModifyOutcome};
 use super::error::ForeignModifyError;
 use super::executor::map_outcome;
-use super::return_layout::ForeignModifyReturnColumn;
 use super::row_layout::ModifyRowLayout;
 use super::slot_buffer::ModifySlotBuffer;
+use crate::datum::Cell;
+use crate::diag::PgReportError;
+use crate::handles::ValidItemPointer;
+use crate::tuple::{PgDatumRef, TupleSlotRow};
 
 /// Mutable, relation-shaped view of a slot passed to a modify callback.
 pub struct ModifySlot<'slot> {
@@ -250,55 +244,6 @@ impl<'slot> ModifySlot<'slot> {
             self.columns
                 .set_datum_without_deform_unchecked(index, copied)
         };
-        self.representation_dirty = true;
-    }
-
-    pub(crate) fn set_columns_from_composite(
-        &mut self,
-        datum: pg_sys::Datum,
-        required_columns: &[ForeignModifyReturnColumn],
-        full_whole_row: bool,
-    ) {
-        let tuple_desc = self.layout.tuple_desc();
-        let header = unsafe { PgWrapper::datum_get_heap_tuple_header(datum) };
-
-        let mut tuple = MaybeUninit::<pg_sys::HeapTupleData>::uninit();
-        let tuple_ptr = tuple.as_mut_ptr();
-        unsafe {
-            (*tuple_ptr).t_len =
-                PgWrapper::heap_tuple_header_get_datum_length(header);
-            pg_sys::ItemPointerSetInvalid(&mut (*tuple_ptr).t_self);
-            (*tuple_ptr).t_tableOid = pg_sys::InvalidOid;
-            (*tuple_ptr).t_data = header;
-        }
-
-        if full_whole_row {
-            unsafe {
-                self.columns
-                    .deform_heap_tuple_unchecked(tuple_ptr, tuple_desc);
-            }
-        } else {
-            for column in required_columns {
-                let index = column.relation_index;
-                let mut value_is_null = false;
-                let value = unsafe {
-                    pg_sys::heap_getattr(
-                        tuple_ptr,
-                        column.relation_attno as c_int,
-                        tuple_desc,
-                        &mut value_is_null,
-                    )
-                };
-                let copied = if value_is_null { None } else { Some(value) };
-                // SAFETY: the return layout validated each relation index at
-                // Begin, and DELETE starts from a slot whose arrays are already
-                // initialized.
-                unsafe {
-                    self.columns
-                        .set_datum_without_deform_unchecked(index, copied)
-                };
-            }
-        }
         self.representation_dirty = true;
     }
 

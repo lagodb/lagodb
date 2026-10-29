@@ -7,12 +7,19 @@ use pgrx::pg_sys;
 
 use super::contract::FdwModify;
 use super::error::ForeignModifyError;
-use crate::fdw::ForeignRowIdentityRequirement;
 use crate::fdw::scan::ForeignScanStateWrapper;
+
+pub(super) enum ForeignModifyTargetScanMatch<T> {
+    /// The initialized modify subtree contains no target scan for this result
+    /// relation, so it cannot produce a row callback in this execution.
+    NotInitialized,
+    Initialized(Option<T>),
+}
 
 pub(super) struct ForeignModifyTargetScan<P: FdwModify> {
     relation_oid: pg_sys::Oid,
     range_table_index: pg_sys::Index,
+    matched: bool,
     found: Option<P::TargetScanContext>,
     error: Option<ForeignModifyError>,
     _provider: PhantomData<fn() -> P>,
@@ -23,10 +30,12 @@ impl<P: FdwModify> ForeignModifyTargetScan<P> {
         root: *mut pg_sys::PlanState,
         relation_oid: pg_sys::Oid,
         range_table_index: pg_sys::Index,
-    ) -> Result<Option<P::TargetScanContext>, ForeignModifyError> {
+    ) -> Result<ForeignModifyTargetScanMatch<P::TargetScanContext>, ForeignModifyError>
+    {
         let mut finder = Self {
             relation_oid,
             range_table_index,
+            matched: false,
             found: None,
             error: None,
             _provider: PhantomData,
@@ -34,7 +43,10 @@ impl<P: FdwModify> ForeignModifyTargetScan<P> {
         unsafe { finder.walk(root) };
         match finder.error {
             Some(error) => Err(error),
-            None => Ok(finder.found),
+            None if finder.matched => {
+                Ok(ForeignModifyTargetScanMatch::Initialized(finder.found))
+            }
+            None => Ok(ForeignModifyTargetScanMatch::NotInitialized),
         }
     }
 
@@ -60,8 +72,7 @@ impl<P: FdwModify> ForeignModifyTargetScan<P> {
     unsafe fn inspect_foreign_scan(&mut self, scan: *mut pg_sys::ForeignScanState) {
         let relation = unsafe { (*scan).ss.ss_currentRelation };
         let plan = unsafe { (*scan).ss.ps.plan } as *mut pg_sys::ForeignScan;
-        if relation.is_null()
-            || unsafe { (*relation).rd_id } != self.relation_oid
+        if unsafe { (*relation).rd_id } != self.relation_oid
             || unsafe { (*plan).scan.scanrelid } != self.range_table_index
         {
             return;
@@ -71,22 +82,17 @@ impl<P: FdwModify> ForeignModifyTargetScan<P> {
         // as ResultRelInfo, and core's BeginForeignScan stores this exact
         // wrapper type in fdw_state before BeginForeignModify is called.
         let wrapper = unsafe { &*(raw as *const ForeignScanStateWrapper<P>) };
-        if wrapper.row_identity_requirement
-            != ForeignRowIdentityRequirement::ItemPointer
-        {
-            return;
-        }
-        // SAFETY: BeginForeignScan installs provider state before
-        // BeginForeignModify walks the initialized target plan tree.
-        let state = unsafe { wrapper.payload.provider_state_unchecked() };
-        let Some(context) = P::target_scan_context(state) else {
-            return;
-        };
-        if self.found.replace(context).is_some() {
+        if self.matched {
             self.error = Some(ForeignModifyError::framework(
                 "ModifyTable has more than one matching target ForeignScan",
             ));
+            return;
         }
+        self.matched = true;
+        // SAFETY: BeginForeignScan installs provider state before
+        // BeginForeignModify walks the initialized target plan tree.
+        let state = unsafe { wrapper.payload.provider_state_unchecked() };
+        self.found = P::target_scan_context(state);
     }
 
     unsafe extern "C-unwind" fn walker(

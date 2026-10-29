@@ -6,7 +6,7 @@ use core::ptr;
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
-use super::super::row_identity::RowIdentityLayout;
+use super::super::row_identity_registry::RowIdentityRegistry;
 use super::super::system_column::SystemColumnRequirement;
 use super::contract::{FdwModify, ForeignModifyOperation};
 use super::error::{ForeignModifyError, ForeignModifyPhase};
@@ -14,7 +14,8 @@ use super::planning_context::{
     ForeignModifyPlanContext, ForeignModifyRelationContext,
     ForeignUpdateTargetContext,
 };
-use super::private::encode_modify_private;
+use super::private::ModifyPrivateEnvelope;
+use super::return_requirements::ForeignModifyReturnRequirements;
 
 /// # Safety
 ///
@@ -24,19 +25,16 @@ use super::private::encode_modify_private;
 pub(crate) unsafe extern "C-unwind" fn add_foreign_update_targets<P: FdwModify>(
     root: *mut pg_sys::PlannerInfo,
     rtindex: pg_sys::Index,
-    target_rte: *mut pg_sys::RangeTblEntry,
+    _target_rte: *mut pg_sys::RangeTblEntry,
     target_relation: pg_sys::Relation,
 ) {
     let result = (|| {
         let mut context = unsafe {
-            ForeignUpdateTargetContext::from_raw(
-                root,
-                rtindex,
-                target_rte,
-                target_relation,
-            )
+            ForeignUpdateTargetContext::from_raw(root, rtindex, target_relation)
         }?;
-        P::add_update_targets(&mut context)
+        P::add_update_targets(&mut context)?;
+        context.register_returning_columns();
+        Ok::<(), ForeignModifyError>(())
     })();
 
     if let Err(error) = result {
@@ -101,7 +99,6 @@ pub(crate) unsafe extern "C-unwind" fn plan_foreign_modify<P: FdwModify>(
                 unsafe { updated_columns(plan, operation, subplan_index)? };
             let context = unsafe {
                 ForeignModifyPlanContext::from_raw(
-                    root,
                     plan,
                     relation,
                     result_relation,
@@ -114,25 +111,25 @@ pub(crate) unsafe extern "C-unwind" fn plan_foreign_modify<P: FdwModify>(
                 analyze_returning_system_columns(
                     context.returning_list(),
                     result_relation,
+                    operation,
                 )?
             };
-            if matches!(
+            let row_identities = if matches!(
                 operation,
                 ForeignModifyOperation::Update | ForeignModifyOperation::Delete
             ) {
-                let identity_layout = unsafe {
-                    RowIdentityLayout::from_targetlist(
-                        context.subplan_targetlist(),
-                        relation,
-                        result_relation,
-                    )
+                let identities = unsafe {
+                    RowIdentityRegistry::new(root, result_relation).identities()
                 }?;
-                if identity_layout.is_empty() {
+                if identities.is_empty() {
                     return Err(ForeignModifyError::unsupported(
                         "foreign UPDATE/DELETE provider did not register a row identity",
                     ));
                 }
-            }
+                identities
+            } else {
+                Vec::new().into_boxed_slice()
+            };
             let plan_spec = P::plan_modify(&context)?;
             if returned_item_pointer_required
                 && !plan_spec.returned_identity.supports_item_pointer()
@@ -141,15 +138,17 @@ pub(crate) unsafe extern "C-unwind" fn plan_foreign_modify<P: FdwModify>(
                     "foreign provider does not support target-table ctid in modify RETURNING",
                 ));
             }
-            encode_modify_private::<P>(
-                P::NAME,
-                unsafe { (*relation).rd_id },
+            ModifyPrivateEnvelope::<P> {
+                relation_oid: unsafe { (*relation).rd_id },
                 operation,
-                &updated_columns,
-                plan_spec.returned_identity,
+                updated_columns: &updated_columns,
+                row_identities: &row_identities,
+                returned_identity: plan_spec.returned_identity,
                 returned_item_pointer_required,
-                &plan_spec.private_data,
-            )
+                return_requirements: context.return_requirements(),
+                private_data: &plan_spec.private_data,
+            }
+            .encode()
         })();
         unsafe { pg_sys::relation_close(relation, pg_sys::NoLock as i32) };
         result
@@ -292,38 +291,20 @@ unsafe fn updated_columns(
 pub(crate) unsafe fn analyze_returning_system_columns(
     returning: *mut pg_sys::List,
     result_relation: pg_sys::Index,
+    operation: ForeignModifyOperation,
 ) -> Result<bool, ForeignModifyError> {
     if returning.is_null() {
         return Ok(false);
     }
-    let mut attributes = ptr::null_mut();
-    unsafe {
-        pg_sys::pull_varattnos(
-            returning.cast::<pg_sys::Node>(),
+    let attributes = unsafe {
+        ForeignModifyReturnRequirements::referenced_attributes(
+            returning,
             result_relation,
-            &mut attributes,
-        );
-    }
+            operation,
+        )
+    }?;
     let mut item_pointer_required = false;
-    let mut bit = -1;
-    loop {
-        bit = unsafe { pg_sys::bms_next_member(attributes, bit) };
-        if bit < 0 {
-            break;
-        }
-        let attno = match pg_sys::AttrNumber::try_from(
-            bit + pg_sys::FirstLowInvalidHeapAttributeNumber,
-        ) {
-            Ok(attno) => attno,
-            Err(_) => {
-                if !attributes.is_null() {
-                    unsafe { pg_sys::bms_free(attributes) };
-                }
-                return Err(ForeignModifyError::framework(
-                    "PlanForeignModify returning attribute exceeds PostgreSQL range",
-                ));
-            }
-        };
+    for attno in attributes {
         if attno >= 0 {
             // Positive attributes and attno 0 (whole-row) are ordinary
             // target-table values, not system columns.
@@ -335,17 +316,11 @@ pub(crate) unsafe fn analyze_returning_system_columns(
                 item_pointer_required = true;
             }
             SystemColumnRequirement::UnsupportedHeaderField(_) => {
-                if !attributes.is_null() {
-                    unsafe { pg_sys::bms_free(attributes) };
-                }
                 return Err(ForeignModifyError::unsupported(
                     "FDW framework v1 does not support this target-table system column in modify RETURNING",
                 ));
             }
         }
-    }
-    if !attributes.is_null() {
-        unsafe { pg_sys::bms_free(attributes) };
     }
     Ok(item_pointer_required)
 }
