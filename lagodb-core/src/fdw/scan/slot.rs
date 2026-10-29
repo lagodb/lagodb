@@ -2,14 +2,13 @@
 
 use core::marker::PhantomData;
 use core::ptr;
-use core::slice;
 
 use pgrx::pg_sys;
 
 use super::super::row_identity::ForeignRowIdentityRequirement;
 use super::error::ForeignScanError;
 use super::projection::{ScanProjection, SlotWritePlan};
-use crate::handles::ValidItemPointer;
+use crate::handles::{TupleDescHandle, ValidItemPointer};
 use crate::tuple::SlotDatumWriter;
 
 /// Executor layout derived once from the plan's slot-write contract.
@@ -52,9 +51,10 @@ impl SlotWriteLayout {
         write_plan: &SlotWritePlan,
     ) -> Self {
         let tuple_desc = unsafe { (*slot).tts_tupleDescriptor };
-        let natts = unsafe { (*tuple_desc).natts as usize };
-        let attrs =
-            unsafe { slice::from_raw_parts((*tuple_desc).attrs.as_ptr(), natts) };
+        // SAFETY: guaranteed by this method's contract.
+        let tuple_desc = unsafe { TupleDescHandle::from_raw(tuple_desc) };
+        let attrs = tuple_desc.attributes();
+        let natts = attrs.len();
         let mut output_destinations = vec![false; natts];
         let mut output_columns = Vec::new();
         match projection {

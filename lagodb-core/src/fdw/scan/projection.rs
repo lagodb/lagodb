@@ -2,7 +2,6 @@
 
 use core::ffi::c_void;
 use core::ptr;
-use core::slice;
 use std::collections::BTreeSet;
 
 use pgrx::pg_sys;
@@ -10,6 +9,7 @@ use pgrx::pg_sys;
 use super::super::row_identity::ForeignRowIdentityRequirement;
 use super::super::system_column::SystemColumnRequirement;
 use super::error::ForeignScanError;
+use crate::handles::TupleDescHandle;
 
 mod dependencies;
 
@@ -94,9 +94,9 @@ pub enum ScanProjection {
     /// `fdw_scan_tlist` contains one synthetic NULL slot column.  It carries
     /// no relation attribute and is used when the executor needs no base
     /// relation column, for example for a constant-only scan whose plan
-    /// targetlist can be rewritten without a base-relation `Var`. PostgreSQL
-    /// 17 ordinary ForeignPaths use a physical targetlist for `COUNT(*)`, so
-    /// those scans retain [`Self::Relation`] while writing no attributes.
+    /// targetlist can be rewritten without a base-relation `Var`. Ordinary
+    /// ForeignPaths use a physical targetlist for `COUNT(*)`, so those scans
+    /// retain [`Self::Relation`] while writing no attributes.
     SyntheticNull,
 }
 
@@ -380,30 +380,12 @@ unsafe fn add_required_columns(
     }
     let relation =
         unsafe { pg_sys::relation_open(relation_oid, pg_sys::NoLock as i32) };
-    if relation.is_null() {
-        return Err(ForeignScanError::framework(
-            "FDW projection planning could not open the base relation",
-        ));
-    }
 
     let tuple_desc = unsafe { (*relation).rd_att };
-    let natts = if tuple_desc.is_null() {
-        0
-    } else {
-        let natts = unsafe { (*tuple_desc).natts };
-        if natts < 0 {
-            unsafe { pg_sys::relation_close(relation, pg_sys::NoLock as i32) };
-            return Err(ForeignScanError::framework(
-                "FDW projection planning received a TupleDesc with a negative width",
-            ));
-        }
-        natts as usize
-    };
-    let attrs = if tuple_desc.is_null() {
-        &[][..]
-    } else {
-        unsafe { slice::from_raw_parts((*tuple_desc).attrs.as_ptr(), natts) }
-    };
+    // SAFETY: relation_open returned a live relation with its relcache
+    // descriptor pinned until relation_close below.
+    let tuple_desc = unsafe { TupleDescHandle::from_raw(tuple_desc) };
+    let attrs = tuple_desc.attributes();
 
     let mut result = Ok(());
     for &attno in requirements.user_columns_slice() {

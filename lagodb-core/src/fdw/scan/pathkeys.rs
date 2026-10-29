@@ -1,10 +1,11 @@
 //! PostgreSQL pathkey analysis for ordered foreign base-relation paths.
 
-use core::ffi::c_int;
-
 use pgrx::pg_sys;
 
-use crate::expr::inspect::{RelationExprAnalyzer, RelationScope};
+use crate::expr::{
+    PgOrderingDirection,
+    inspect::{RelationExprAnalyzer, RelationScope},
+};
 
 use super::error::ForeignScanError;
 
@@ -20,7 +21,7 @@ pub struct ForeignPathKey {
     data_type: pg_sys::Oid,
     collation: pg_sys::Oid,
     opfamily: pg_sys::Oid,
-    strategy: c_int,
+    direction: PgOrderingDirection,
     nulls_first: bool,
 }
 
@@ -50,10 +51,10 @@ impl ForeignPathKey {
         self.opfamily
     }
 
-    /// B-tree strategy number: ascending or descending ordering.
+    /// Direction represented by the PostgreSQL pathkey.
     #[inline]
-    pub fn strategy(&self) -> c_int {
-        self.strategy
+    pub fn direction(&self) -> PgOrderingDirection {
+        self.direction
     }
 
     /// Whether NULL values precede non-NULL values.
@@ -215,32 +216,9 @@ impl ForeignPathKeys {
         if pathkeys.is_null() {
             return Ok(Some(Self::default()));
         }
-        if root.is_null() || baserel.is_null() {
-            return Err(ForeignScanError::framework(
-                "FDW pathkey analysis received a NULL planner relation",
-            ));
-        }
         let relation_relids = unsafe { (*baserel).relids };
-        if relation_relids.is_null() {
-            return Err(ForeignScanError::framework(
-                "FDW pathkey analysis received a relation with NULL relids",
-            ));
-        }
-        if check_local_sort && unsafe { (*baserel).reltarget.is_null() } {
-            return Ok(None);
-        }
 
         let pathkey_list = unsafe { &*pathkeys };
-        if pathkey_list.type_ != pg_sys::NodeTag::T_List {
-            return Err(ForeignScanError::framework(
-                "FDW pathkeys pointer does not reference a PostgreSQL List",
-            ));
-        }
-        if pathkey_list.length < 0 {
-            return Err(ForeignScanError::framework(
-                "FDW pathkey list has a negative length",
-            ));
-        }
         let length = pathkey_list.length;
         if length == 0 {
             return Ok(Some(Self::default()));
@@ -249,24 +227,10 @@ impl ForeignPathKeys {
         for index in 0..length {
             let pathkey =
                 unsafe { pg_sys::list_nth(pathkeys, index) } as *mut pg_sys::PathKey;
-            if pathkey.is_null()
-                || unsafe { (*pathkey).type_ } != pg_sys::NodeTag::T_PathKey
-            {
-                return Err(ForeignScanError::framework(
-                    "FDW pathkey list contains a non-PathKey node",
-                ));
-            }
 
             let mut eclass = unsafe { (*pathkey).pk_eclass };
-            while !eclass.is_null() && unsafe { !(*eclass).ec_merged.is_null() } {
+            while unsafe { !(*eclass).ec_merged.is_null() } {
                 eclass = unsafe { (*eclass).ec_merged };
-            }
-            if eclass.is_null()
-                || unsafe { (*eclass).type_ } != pg_sys::NodeTag::T_EquivalenceClass
-            {
-                return Err(ForeignScanError::framework(
-                    "FDW pathkey does not reference a valid EquivalenceClass",
-                ));
             }
             if unsafe { (*eclass).ec_has_volatile } {
                 return Ok(None);
@@ -284,12 +248,11 @@ impl ForeignPathKeys {
                     return Ok(None);
                 }
             }
-            let strategy = unsafe { (*pathkey).pk_strategy };
-            if strategy != pg_sys::BTLessStrategyNumber as c_int
-                && strategy != pg_sys::BTGreaterStrategyNumber as c_int
-            {
+            let Some(direction) =
+                PgOrderingDirection::from_path_key(unsafe { &*pathkey })
+            else {
                 return Ok(None);
-            }
+            };
             if unsafe { (*pathkey).pk_opfamily } == pg_sys::InvalidOid {
                 return Ok(None);
             }
@@ -314,7 +277,7 @@ impl ForeignPathKeys {
                     data_type: unsafe { (*member).em_datatype },
                     collation: unsafe { (*eclass).ec_collation },
                     opfamily: unsafe { (*pathkey).pk_opfamily },
-                    strategy,
+                    direction,
                     nulls_first: unsafe { (*pathkey).pk_nulls_first },
                 })
                 .collect::<Vec<_>>();
@@ -348,12 +311,37 @@ impl ForeignPathKeys {
         let mut members = Vec::new();
         let analyzer =
             RelationExprAnalyzer::new(RelationScope::relids(relation_relids));
-        let ec_members = unsafe { (*eclass).ec_members };
-        if !ec_members.is_null() {
+
+        #[cfg(any(feature = "pg16", feature = "pg17"))]
+        {
+            let ec_members = unsafe { (*eclass).ec_members };
             let length = unsafe { pg_sys::list_length(ec_members) };
             for index in 0..length {
                 let member = unsafe { pg_sys::list_nth(ec_members, index) }
                     as *mut pg_sys::EquivalenceMember;
+                if unsafe { Self::usable_member(member, relation_relids, &analyzer) }
+                {
+                    members.push(member);
+                }
+            }
+        }
+
+        #[cfg(feature = "pg18")]
+        {
+            let mut iterator = pg_sys::EquivalenceMemberIterator::default();
+            unsafe {
+                pg_sys::setup_eclass_member_iterator(
+                    &mut iterator,
+                    eclass,
+                    relation_relids,
+                )
+            };
+            loop {
+                let member =
+                    unsafe { pg_sys::eclass_member_iterator_next(&mut iterator) };
+                if member.is_null() {
+                    break;
+                }
                 if unsafe { Self::usable_member(member, relation_relids, &analyzer) }
                 {
                     members.push(member);
@@ -372,13 +360,8 @@ impl ForeignPathKeys {
         relation_relids: *mut pg_sys::Bitmapset,
         analyzer: &RelationExprAnalyzer,
     ) -> bool {
-        if member.is_null() {
-            return false;
-        }
         let member = unsafe { &*member };
-        if member.type_ != pg_sys::NodeTag::T_EquivalenceMember
-            || member.em_expr.is_null()
-            || member.em_is_const
+        if member.em_is_const
             || member.em_datatype == pg_sys::InvalidOid
             || member.em_relids.is_null()
             || unsafe {

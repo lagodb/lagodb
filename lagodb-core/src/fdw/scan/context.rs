@@ -1,12 +1,13 @@
 //! Public provider API for the FDW planner/executor seam.
 
-use core::ffi::c_int;
 use core::marker::PhantomData;
 use core::ptr;
 
 use pgrx::pg_sys;
 
-use crate::expr::pushdown::{FilterPlanSummary, PathFilterSet};
+use crate::expr::pushdown::{
+    FilterPlanSummary, PathFilterEstimates, PathFilterSet, RelationFilterEstimator,
+};
 use crate::expr::relation::PlanRelationResolver;
 
 use super::super::row_identity::ForeignRowIdentityRequirement;
@@ -202,40 +203,14 @@ impl<'a> ForeignRelContext<'a> {
         unsafe { (*self.baserel).rows }
     }
 
-    fn filter_estimate_for_exprs(
-        &self,
-        exprs: impl IntoIterator<Item = *mut pg_sys::Expr>,
-    ) -> ForeignFilterEstimate {
-        let mut clauses = ptr::null_mut();
-        for expr in exprs {
-            clauses = unsafe { pg_sys::lappend(clauses, expr.cast()) };
-        }
-        if clauses.is_null() {
-            return ForeignFilterEstimate::NONE;
-        }
-        let selectivity = unsafe {
-            pg_sys::clauselist_selectivity(
-                self.root,
-                clauses,
-                (*self.baserel).relid as c_int,
-                pg_sys::JoinType::JOIN_INNER,
-                ptr::null_mut(),
-            )
-        };
-        let mut cost = pg_sys::QualCost {
-            startup: 0.0,
-            per_tuple: 0.0,
-        };
-        unsafe { pg_sys::cost_qual_eval(&mut cost, clauses, self.root) };
-        ForeignFilterEstimate {
-            selectivity: selectivity.clamp(0.0, 1.0),
-            startup_cost: cost.startup,
-            per_tuple_cost: cost.per_tuple,
-        }
+    fn filter_estimator(&self) -> RelationFilterEstimator {
+        // SAFETY: this context borrows the live planner state that owns
+        // `baserel`, and pushed filters are planner-owned quals of it.
+        unsafe { RelationFilterEstimator::new(self.root, (*self.baserel).relid) }
     }
 
-    /// Whether PostgreSQL is planning this base relation as the target of an
-    /// UPDATE or DELETE statement.
+    /// Whether PostgreSQL is planning this base relation as a target of an
+    /// UPDATE or DELETE statement, including an inheritance or partition leaf.
     ///
     /// This is planner metadata, not an executor-time check. Providers use it
     /// to limit explicit modify row-identity registration to the target scan;
@@ -243,13 +218,12 @@ impl<'a> ForeignRelContext<'a> {
     #[inline]
     pub fn is_modify_target(&self) -> bool {
         let parse = unsafe { (*self.root).parse };
-        !parse.is_null()
-            && matches!(
-                unsafe { (*parse).commandType },
-                pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE
-            )
-            && unsafe { (*parse).resultRelation as pg_sys::Index }
-                == self.scan_relid()
+        matches!(
+            unsafe { (*parse).commandType },
+            pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_DELETE
+        ) && unsafe {
+            PlanRelationResolver::new(self.root).is_result_relation(self.scan_relid())
+        }
     }
 }
 
@@ -344,25 +318,6 @@ pub struct ForeignPathContext<'a> {
     param_info: *mut pg_sys::ParamPathInfo,
 }
 
-/// PostgreSQL's selectivity and evaluation cost for provider-side filters.
-#[derive(Debug, Clone, Copy)]
-pub struct ForeignFilterEstimate {
-    /// Fraction of input rows expected to survive the provider filter.
-    pub selectivity: f64,
-    /// One-time expression evaluation cost.
-    pub startup_cost: f64,
-    /// Expression evaluation cost charged for each provider input row.
-    pub per_tuple_cost: f64,
-}
-
-impl ForeignFilterEstimate {
-    const NONE: Self = Self {
-        selectivity: 1.0,
-        startup_cost: 0.0,
-        per_tuple_cost: 0.0,
-    };
-}
-
 impl<'a> ForeignPathContext<'a> {
     pub(crate) fn new(
         relation: ForeignRelContext<'a>,
@@ -394,11 +349,15 @@ impl<'a> ForeignPathContext<'a> {
         FilterPlanSummary::from_path_set(self.pushdown)
     }
 
-    /// Selectivity and execution cost of provider filters that are allowed to
-    /// reduce scan-volume costing. Unsupported/local quals are excluded.
-    pub fn pruning_estimate(&self) -> ForeignFilterEstimate {
-        self.relation
-            .filter_estimate_for_exprs(self.pushdown.costed_pruning_exprs())
+    /// Estimates of the filters the provider executes on this path. FDW
+    /// filter negotiation carries no storage units, so statistics pruning is
+    /// priced at row granularity.
+    pub fn filter_estimates(&self) -> PathFilterEstimates<'_> {
+        PathFilterEstimates::new(
+            &self.pushdown.planned,
+            self.relation.filter_estimator(),
+            None,
+        )
     }
 
     /// Rows emitted by this path after all base and parameterized local quals.

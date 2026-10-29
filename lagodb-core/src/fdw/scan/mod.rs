@@ -22,9 +22,9 @@ mod slot;
 mod state;
 
 pub use context::{
-    ForeignFilterEstimate, ForeignPathContext, ForeignPathSpec, ForeignPlanContext,
-    ForeignPlanPrivate, ForeignPlanSpec, ForeignRelContext, ForeignRelSize,
-    ForeignRelSizeContext, PathVariantKind, Relids,
+    ForeignPathContext, ForeignPathSpec, ForeignPlanContext, ForeignPlanPrivate,
+    ForeignPlanSpec, ForeignRelContext, ForeignRelSize, ForeignRelSizeContext,
+    PathVariantKind, Relids,
 };
 pub use contract::FdwScan;
 pub use error::{ForeignScanError, ForeignScanPhase};

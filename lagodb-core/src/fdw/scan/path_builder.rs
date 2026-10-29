@@ -1,10 +1,10 @@
 //! Provider path alternatives and framework path validation.
 
-use core::ffi::c_void;
 use core::ptr::{self, NonNull};
 
 use pgrx::pg_sys;
 
+use crate::expr::pg::expr_list;
 use crate::expr::pushdown::PathFilterSet;
 
 use super::context::{
@@ -236,7 +236,7 @@ fn finalize_path_spec<D>(
     // rounded remote estimate. Every estimated output row still requires a
     // materialized scan tuple, so use the output estimate as the lower bound.
     let materialized_rows = spec.retrieved_rows.max(spec.rows);
-    let residual_quals = unsafe { expr_list_from_ptrs(&filters.residual) }?;
+    let residual_quals = expr_list(filters.residual.iter().copied());
     let reltarget = unsafe { (*baserel).reltarget };
     let local_cost = unsafe {
         pg::ForeignScanLocalCost::estimate(
@@ -261,24 +261,4 @@ fn finalize_path_spec<D>(
         ));
     }
     Ok((startup_cost, total_cost))
-}
-
-/// # Safety
-///
-/// Every expression pointer in `exprs` must be a non-NULL live planner node
-/// valid for the duration of the current planner callback. The returned list
-/// is allocated in the current PostgreSQL memory context.
-pub(super) unsafe fn expr_list_from_ptrs(
-    exprs: &[*mut pg_sys::Expr],
-) -> Result<*mut pg_sys::List, ForeignScanError> {
-    let mut list = ptr::null_mut();
-    for &expr in exprs {
-        if expr.is_null() {
-            return Err(ForeignScanError::framework(
-                "FDW planner produced a NULL expression node",
-            ));
-        }
-        list = unsafe { pg_sys::lappend(list, expr.cast::<c_void>()) };
-    }
-    Ok(list)
 }

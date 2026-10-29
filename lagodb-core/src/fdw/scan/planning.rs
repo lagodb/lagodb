@@ -7,12 +7,14 @@ use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
+use crate::expr::pg::expr_list;
 use crate::expr::pushdown::{
     FilterNegotiator, FilterPlanningContext, NegotiatedFilterSet, PathFilterSet,
     ScanClauseSource,
 };
 
-use super::super::row_identity::{ForeignRowIdentityRequirement, RowIdentityLayout};
+use super::super::row_identity::ForeignRowIdentityRequirement;
+use super::super::row_identity_registry::RowIdentityRegistry;
 use super::context::{
     ForeignPathContext, ForeignPlanContext, ForeignRelContext, ForeignRelSize,
     ForeignRelSizeContext, PathVariantKind,
@@ -21,7 +23,7 @@ use super::contract::FdwScan;
 use super::error::{ForeignScanError, ForeignScanPhase};
 use super::explain::ForeignScanExplain;
 use super::filter::ForeignScanFilters;
-use super::path_builder::{build_path_variants, expr_list_from_ptrs};
+use super::path_builder::build_path_variants;
 use super::pathkeys::ForeignPathKeys;
 use super::plan_filter::ForeignPlanFilters;
 use super::private::{DecodedPathPrivate, decode_path_private, encode_scan_private};
@@ -376,24 +378,14 @@ pub(crate) unsafe extern "C-unwind" fn get_foreign_plan<P: FdwScan>(
                 ));
             }
         }
-        let residual_quals = unsafe { expr_list_from_ptrs(&final_filters.residual) }?;
-        let binding_exprs = unsafe {
-            expr_list_from_ptrs(
-                &final_filters
-                    .bindings
-                    .iter()
-                    .map(|binding| binding.expr)
-                    .collect::<Vec<_>>(),
-            )
-        }?;
-        let recheck_quals = unsafe { expr_list_from_ptrs(&final_filters.recheck) }?;
+        let residual_quals = expr_list(final_filters.residual.iter().copied());
+        let binding_exprs =
+            expr_list(final_filters.bindings.iter().map(|binding| binding.expr));
+        let recheck_quals = expr_list(final_filters.recheck.iter().copied());
         let row_identity_requirement = if relation.is_modify_target() {
-            let processed_tlist = unsafe { (*relation.root()).processed_tlist };
             let has_item_pointer_identity = unsafe {
-                RowIdentityLayout::has_item_pointer_identity_in_targetlist(
-                    processed_tlist,
-                    relation.scan_relid(),
-                )
+                RowIdentityRegistry::new(relation.root(), relation.scan_relid())
+                    .has_item_pointer()
             }
             .map_err(ForeignScanError::framework)?;
             if has_item_pointer_identity {

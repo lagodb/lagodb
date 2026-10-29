@@ -1,13 +1,12 @@
 //! Non-FFI scan executor layout construction.
 
-use core::slice;
-
 use pgrx::pg_sys;
 
 use super::super::row_identity::ForeignRowIdentityRequirement;
 use super::error::ForeignScanError;
 use super::projection::{ColumnRequirements, ScanProjection, SlotWritePlan};
 use super::slot::SlotWriteLayout;
+use crate::handles::TupleDescHandle;
 
 /// Compile the row-write layout from executor-owned scan objects.
 ///
@@ -26,18 +25,19 @@ pub(crate) unsafe fn compile_executor_layout(
     slot: *mut pg_sys::TupleTableSlot,
 ) -> Result<SlotWriteLayout, ForeignScanError> {
     let desc = unsafe { (*slot).tts_tupleDescriptor };
-    let natts = unsafe { (*desc).natts as usize };
+    // SAFETY: guaranteed by this function's contract.
+    let desc = unsafe { TupleDescHandle::from_raw(desc) };
+    let natts = desc.len();
     let relation_desc = unsafe { (*relation).rd_att };
-    let relation_natts = unsafe { (*relation_desc).natts as usize };
+    // SAFETY: guaranteed by this function's contract.
+    let relation_desc = unsafe { TupleDescHandle::from_raw(relation_desc) };
+    let relation_attrs = relation_desc.attributes();
+    let relation_natts = relation_attrs.len();
     if row_identity.needs_item_pointer() && !projection.is_relation() {
         return Err(ForeignScanError::framework(
             "FDW item-pointer identity requires a relation-shaped scan slot",
         ));
     }
-    // SAFETY: relation_desc is live and stores relation_natts contiguous attrs.
-    let relation_attrs = unsafe {
-        slice::from_raw_parts((*relation_desc).attrs.as_ptr(), relation_natts)
-    };
     let valid_user_attno = |attno: pg_sys::AttrNumber| {
         attno > 0
             && (attno as usize) <= relation_attrs.len()
