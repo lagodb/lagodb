@@ -1,6 +1,5 @@
 //! Stage-neutral error transport for exact-build runtime callbacks.
 
-use std::mem::size_of;
 use std::panic::AssertUnwindSafe;
 use std::{ptr, slice, str};
 
@@ -73,25 +72,12 @@ impl ErrorReportText {
 /// runtime consumes it synchronously before that context can be reset, so no
 /// Rust allocation or error object crosses the DSO boundary.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct CallbackErrorReport {
-    struct_size: u32,
     sql_error_code: i32,
     message: ErrorReportText,
     detail: ErrorReportText,
     hint: ErrorReportText,
-}
-
-impl Default for CallbackErrorReport {
-    fn default() -> Self {
-        Self {
-            struct_size: size_of::<Self>() as u32,
-            sql_error_code: 0,
-            message: ErrorReportText::default(),
-            detail: ErrorReportText::default(),
-            hint: ErrorReportText::default(),
-        }
-    }
 }
 
 impl CallbackErrorReport {
@@ -194,10 +180,7 @@ impl CallbackErrorReport {
     /// Non-empty text slices must reference live UTF-8 bytes allocated by the
     /// provider callback in the current PostgreSQL context.
     pub unsafe fn to_error(&self, callback: &'static str) -> PgReportError {
-        let expected_size = size_of::<Self>() as u32;
-        if self.struct_size != expected_size
-            || self.sql_error_code
-                == PgSqlErrorCode::ERRCODE_SUCCESSFUL_COMPLETION as i32
+        if self.sql_error_code == PgSqlErrorCode::ERRCODE_SUCCESSFUL_COMPLETION as i32
             || !self.message.is_valid()
             || !self.detail.is_valid()
             || !self.hint.is_valid()
@@ -227,7 +210,6 @@ impl CallbackErrorReport {
     ) {
         let sql_error_code = error.sql_error_code();
         let report = error.into_report();
-        self.struct_size = size_of::<Self>() as u32;
         self.sql_error_code = sql_error_code as i32;
         // SAFETY: the caller guarantees that `memory_context` is live and this
         // method consumes each borrowed report string synchronously.

@@ -66,16 +66,21 @@
 //! Rust error flow inside the AM while keeping the public callback API aligned
 //! with PostgreSQL.
 
+mod scan_ops;
+
+pub use scan_ops::{BitmapScanOps, TidRangeOps};
+
 use crate::TableAmRoutine;
 use crate::access::index::IndexBuildContext;
 use crate::access::mutation::trigger_rows::TriggerQueryState;
 use crate::batch::ScanBatchDriver;
 use crate::diag::{PgReportError, SqlStateError};
+#[cfg(any(feature = "pg17", feature = "pg18"))]
+use crate::handles::AnalyzeReadStreamHandle;
 use crate::handles::{
-    AnalyzeReadStreamHandle, AttrWidthsHandle, BufferAccessStrategyHandle,
-    IndexBuildCallbackHandle, IndexInfoHandle, ItemPointer, OwnedScanKeys,
-    ParallelTableScanDescHandle, RelFileLocator, RelationHandle,
-    SampleScanStateHandle, ScanDirection, SnapshotHandle, TBMIterateResultHandle,
+    AttrWidthsHandle, BufferAccessStrategyHandle, IndexBuildCallbackHandle,
+    IndexInfoHandle, ItemPointer, OwnedScanKeys, ParallelTableScanDescHandle,
+    RelFileLocator, RelationHandle, SampleScanStateHandle, SnapshotHandle,
     TMIndexDeleteOpHandle, TupleTableSlotHandle, VacuumParamsHandle,
     ValidateIndexStateHandle, VarlenaHandle,
 };
@@ -157,10 +162,6 @@ pub fn unsupported_callback<T>(method: &'static str) -> AmResult<T> {
 pub trait TableAccessMethod:
     AmScan + AmRelation + AmIndexCallbacks + AmDdl + 'static
 {
-    /// Whether this AM stores a PostgreSQL partitioned table as one logical
-    /// provider-owned table instead of PostgreSQL child relations.
-    const OWNS_PARTITIONED_TABLE: bool = false;
-
     type ScanSession: AmScanSession;
     type IndexFetchSession: AmIndexFetchSession;
     type ModifyQueryState: AmModifyQueryState;
@@ -179,12 +180,6 @@ pub trait TableAccessMethod:
     {
         crate::registry::build_table_am_routine::<Self>()
     }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ScanCapabilities {
-    pub tid_range: bool,
-    pub bitmap: bool,
 }
 
 /// Type-safe view of PostgreSQL's `ScanOptions` bitmask.
@@ -247,23 +242,22 @@ impl AnalyzeTupleOutcome {
             dead_delta: 0.0,
         }
     }
-}
 
-impl ScanCapabilities {
-    pub const NONE: Self = Self {
-        tid_range: false,
-        bitmap: false,
-    };
-
-    pub const TID_RANGE_AND_BITMAP: Self = Self {
-        tid_range: true,
-        bitmap: true,
-    };
+    /// End a scan unit that contributes `live_delta` without emitting a row.
+    ///
+    /// PostgreSQL divides its live-row total by the blocks it visited, so a
+    /// store whose rows are not tied to a block reports each unit's share here.
+    #[inline]
+    pub const fn end_of_block_with_live_delta(live_delta: f64) -> Self {
+        Self {
+            found: false,
+            live_delta,
+            dead_delta: 0.0,
+        }
+    }
 }
 
 pub trait AmScan {
-    const SCAN_CAPABILITIES: ScanCapabilities = ScanCapabilities::NONE;
-
     fn slot_callbacks() -> *const pg_sys::TupleTableSlotOps {
         unsafe { &pg_sys::TTSOpsVirtual }
     }
@@ -309,6 +303,12 @@ pub trait AmScan {
 }
 
 pub trait AmScanSession {
+    /// TID-range support and its complete callback implementation.
+    const TID_RANGE: Option<TidRangeOps<Self>> = None;
+
+    /// Bitmap table-scan support and its complete callback implementation.
+    const BITMAP: Option<BitmapScanOps<Self>> = None;
+
     /// Concrete slot-filling scan driver (implements [`ScanBatchDriver`]).
     /// A columnar AM sets this to its cursor type (e.g. an Arrow batch
     /// cursor). Binding a concrete type (rather than `dyn ScanBatchDriver`)
@@ -384,41 +384,6 @@ pub trait AmScanSession {
 
     fn scan_end(&mut self) -> AmResult<()>;
 
-    fn scan_set_tidrange(
-        &mut self,
-        mintid: &ItemPointer,
-        maxtid: &ItemPointer,
-    ) -> AmResult<()> {
-        let _ = (mintid, maxtid);
-        unsupported_callback("scan_set_tidrange")
-    }
-
-    fn scan_getnextslot_tidrange(
-        &mut self,
-        direction: ScanDirection,
-        row: &mut Row,
-    ) -> AmResult<bool> {
-        let _ = (direction, row);
-        unsupported_callback("scan_getnextslot_tidrange")
-    }
-
-    fn scan_bitmap_next_block(
-        &mut self,
-        tbmres: &TBMIterateResultHandle,
-    ) -> AmResult<bool> {
-        let _ = tbmres;
-        unsupported_callback("scan_bitmap_next_block")
-    }
-
-    fn scan_bitmap_next_tuple(
-        &mut self,
-        tbmres: &TBMIterateResultHandle,
-        row: &mut Row,
-    ) -> AmResult<bool> {
-        let _ = (tbmres, row);
-        unsupported_callback("scan_bitmap_next_tuple")
-    }
-
     fn scan_sample_next_block(
         &mut self,
         scanstate: &SampleScanStateHandle,
@@ -436,6 +401,17 @@ pub trait AmScanSession {
         unsupported_callback("scan_sample_next_tuple")
     }
 
+    /// PostgreSQL 16 chooses each block itself and keeps its sampler private.
+    #[cfg(feature = "pg16")]
+    fn scan_analyze_next_block(
+        &mut self,
+        block: pg_sys::BlockNumber,
+    ) -> AmResult<bool> {
+        let _ = block;
+        unsupported_callback("scan_analyze_next_block")
+    }
+
+    #[cfg(any(feature = "pg17", feature = "pg18"))]
     fn scan_analyze_next_block(
         &mut self,
         stream: &AnalyzeReadStreamHandle,
@@ -645,7 +621,6 @@ pub struct MutationDeleteContext<'a> {
     pub snapshot: &'a SnapshotHandle<'a>,
     pub crosscheck: Option<&'a SnapshotHandle<'a>>,
     pub wait: bool,
-    pub changing_partition: bool,
 }
 
 /// Storage-format-neutral result of a row mutation.
@@ -953,7 +928,7 @@ pub trait AmModifyState {
     /// Finishes the relation-local write session for a successful execution.
     ///
     /// A single PostgreSQL ModifyTable execution can host multiple AM sessions, for example
-    /// partition routing or COPY into a partitioned table. Implementations
+    /// an UPDATE or DELETE across an inheritance tree. Implementations
     /// should not make per-session writes externally visible here unless that
     /// publication can remain correct when a later session in the same frame
     /// fails. Prefer staging publication and deferring the externally visible
@@ -1068,9 +1043,7 @@ pub trait AmCopySession {
 pub trait AmDdl {
     /// Remove all rows from one provider-owned logical table transactionally.
     ///
-    /// PostgreSQL reaches this operation through its relfilenumber callbacks
-    /// for ordinary relations. The runtime TRUNCATE bridge invokes it directly
-    /// for provider-owned partitioned tables, whose `rd_tableam` remains unset.
+    /// PostgreSQL reaches this operation through its relfilenumber callbacks.
     fn truncate(rel: &RelationHandle) -> AmResult<()>
     where
         Self: Sized;

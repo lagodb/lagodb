@@ -1,10 +1,9 @@
 //! Exact-build ABI for reconstructing table-scan sources in parallel workers.
 
 use std::ffi::{c_char, c_void};
-use std::mem::size_of;
-use std::ptr;
+use std::ptr::{self, NonNull};
 
-use super::{CallbackErrorReport, TableScanRoutes, TableScanTaskMetrics};
+use super::{AbiSlice, CallbackErrorReport, TableScanRoutes, TableScanTaskMetrics};
 
 pub const WORKER_SOURCE_READY: u32 = 0;
 pub const WORKER_SOURCE_UNSUPPORTED: u32 = 1;
@@ -25,7 +24,6 @@ pub type SourceWorkId = u32;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PreparedWorkerSourceResult {
-    pub struct_size: u32,
     pub payload: *mut c_void,
     pub data: *const u8,
     pub data_len: usize,
@@ -36,7 +34,6 @@ pub struct PreparedWorkerSourceResult {
 impl Default for PreparedWorkerSourceResult {
     fn default() -> Self {
         Self {
-            struct_size: size_of_u32::<Self>(),
             payload: ptr::null_mut(),
             data: ptr::null(),
             data_len: 0,
@@ -52,19 +49,15 @@ impl Default for PreparedWorkerSourceResult {
 /// safety contract.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct TableScanWorkerSourceRequest {
-    pub struct_size: u32,
-    pub data: *const u8,
-    pub data_len: usize,
+pub struct TableScanWorkerSourceRequest<'a> {
+    pub data: AbiSlice<'a, u8>,
 }
 
-impl TableScanWorkerSourceRequest {
+impl<'a> TableScanWorkerSourceRequest<'a> {
     #[must_use]
-    pub fn new(data: &[u8]) -> Self {
+    pub const fn new(data: &'a [u8]) -> Self {
         Self {
-            struct_size: size_of_u32::<Self>(),
-            data: data.as_ptr(),
-            data_len: data.len(),
+            data: AbiSlice::new(data),
         }
     }
 }
@@ -73,14 +66,12 @@ impl TableScanWorkerSourceRequest {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct WorkerTableScanSourceResult {
-    pub struct_size: u32,
     pub source: *mut c_void,
 }
 
 impl Default for WorkerTableScanSourceResult {
     fn default() -> Self {
         Self {
-            struct_size: size_of_u32::<Self>(),
             source: ptr::null_mut(),
         }
     }
@@ -89,25 +80,22 @@ impl Default for WorkerTableScanSourceResult {
 /// Work assigned to one execution-plan partition in a worker backend.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct TableScanWorkerStreamRequest {
-    pub struct_size: u32,
-    pub work_ids: *const SourceWorkId,
-    pub work_id_count: usize,
+pub struct TableScanWorkerStreamRequest<'a> {
+    pub work_ids: AbiSlice<'a, SourceWorkId>,
     pub maximum_batch_rows: u64,
-    pub stream_error: *mut CallbackErrorReport,
+    /// Engine-owned error slot that remains live until stream release.
+    pub stream_error: NonNull<CallbackErrorReport>,
 }
 
-impl TableScanWorkerStreamRequest {
+impl<'a> TableScanWorkerStreamRequest<'a> {
     #[must_use]
-    pub fn new(
-        work_ids: &[SourceWorkId],
+    pub const fn new(
+        work_ids: &'a [SourceWorkId],
         maximum_batch_rows: u64,
-        stream_error: *mut CallbackErrorReport,
+        stream_error: NonNull<CallbackErrorReport>,
     ) -> Self {
         Self {
-            struct_size: size_of_u32::<Self>(),
-            work_ids: work_ids.as_ptr(),
-            work_id_count: work_ids.len(),
+            work_ids: AbiSlice::new(work_ids),
             maximum_batch_rows,
             stream_error,
         }
@@ -130,7 +118,7 @@ pub type ReleasePreparedTableScanWorkerSource = unsafe extern "C-unwind" fn(
 
 pub type DecodeTableScanWorkerSource = unsafe extern "C-unwind" fn(
     context: *mut c_void,
-    request: *const TableScanWorkerSourceRequest,
+    request: *const TableScanWorkerSourceRequest<'_>,
     output: *mut WorkerTableScanSourceResult,
     error: *mut CallbackErrorReport,
 ) -> u32;
@@ -139,7 +127,7 @@ pub type DecodeTableScanWorkerSource = unsafe extern "C-unwind" fn(
 pub type OpenTableScanWorkerStream = unsafe extern "C-unwind" fn(
     context: *mut c_void,
     source: *mut c_void,
-    request: *const TableScanWorkerStreamRequest,
+    request: *const TableScanWorkerStreamRequest<'_>,
     stream: *mut c_void,
     error: *mut CallbackErrorReport,
 ) -> u32;
@@ -159,7 +147,6 @@ pub type ReleaseTableScanWorkerSource = unsafe extern "C-unwind" fn(
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TableScanWorkerDescriptor {
-    struct_size: u32,
     access_method_name: *const c_char,
     foreign_data_wrapper_name: *const c_char,
     context: *mut c_void,
@@ -168,12 +155,6 @@ pub struct TableScanWorkerDescriptor {
     decode_source: Option<DecodeTableScanWorkerSource>,
     open_stream: Option<OpenTableScanWorkerStream>,
     release_source: Option<ReleaseTableScanWorkerSource>,
-}
-
-const fn size_of_u32<T>() -> u32 {
-    let size = size_of::<T>();
-    assert!(size <= u32::MAX as usize, "runtime ABI type exceeds u32");
-    size as u32
 }
 
 impl TableScanWorkerDescriptor {
@@ -194,7 +175,6 @@ impl TableScanWorkerDescriptor {
         release_source: ReleaseTableScanWorkerSource,
     ) -> Self {
         Self {
-            struct_size: size_of_u32::<Self>(),
             access_method_name: routes.access_method_name(),
             foreign_data_wrapper_name: routes.foreign_data_wrapper_name(),
             context,
@@ -204,11 +184,6 @@ impl TableScanWorkerDescriptor {
             open_stream: Some(open_stream),
             release_source: Some(release_source),
         }
-    }
-
-    #[inline]
-    pub const fn struct_size(&self) -> u32 {
-        self.struct_size
     }
 
     #[inline]

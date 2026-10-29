@@ -227,10 +227,6 @@ pub(super) fn prepare_copy_consumers() -> PreparedCopyConsumers {
             .last_mut()
             .expect("a just-pushed COPY consumer context is present");
         descriptors.push(UtilityConsumerDescriptor {
-            struct_size: u32::try_from(
-                std::mem::size_of::<UtilityConsumerDescriptor>(),
-            )
-            .expect("utility consumer descriptor size exceeds u32"),
             tag: pg_sys::NodeTag::T_CopyStmt as u32,
             context: std::ptr::from_mut(context).cast(),
             on_match: Some(callbacks.on_match),

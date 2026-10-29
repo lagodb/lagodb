@@ -1,31 +1,36 @@
 //! Runtime registration transaction and callback descriptors.
 
 use std::ffi::{CStr, c_char, c_void};
-use std::mem::size_of;
 
 use pgrx::pg_sys;
 
 use super::{
-    ModifyPlannerDescriptor, RelationScanPlannerDescriptor, TableProvider,
+    AbiSlice, ModifyPlannerDescriptor, RelationScanPlannerDescriptor, TableProvider,
     TableScanDescriptor, TableScanWorkerDescriptor,
 };
 
-pub const PROVIDER_KIND_ACCESS_METHOD: u32 = 1;
-pub const PROVIDER_KIND_FOREIGN_DATA_WRAPPER: u32 = 2;
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderKind {
+    AccessMethod = 1,
+    ForeignDataWrapper = 2,
+}
 
 /// Stable identity of one runtime-loaded LagoDB provider.
 ///
 /// Every AM and FDW DSO publishes this identity together with its complete
 /// hook batch. The runtime copies the strings during registration, so the
 /// descriptor itself only needs to live for the synchronous registration call.
+///
+/// Fields are private: the only constructors take `&'static CStr`, so every
+/// string pointer names a live NUL-terminated string for the backend lifetime.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ProviderIdentity {
-    pub struct_size: u32,
-    pub name: *const c_char,
-    pub extension_name: *const c_char,
-    pub library_name: *const c_char,
-    pub kind: u32,
+    name: *const c_char,
+    extension_name: *const c_char,
+    library_name: *const c_char,
+    kind: ProviderKind,
 }
 
 impl ProviderIdentity {
@@ -39,7 +44,7 @@ impl ProviderIdentity {
             name,
             extension_name,
             library_name,
-            PROVIDER_KIND_ACCESS_METHOD,
+            ProviderKind::AccessMethod,
         )
     }
 
@@ -53,7 +58,7 @@ impl ProviderIdentity {
             name,
             extension_name,
             library_name,
-            PROVIDER_KIND_FOREIGN_DATA_WRAPPER,
+            ProviderKind::ForeignDataWrapper,
         )
     }
 
@@ -61,16 +66,37 @@ impl ProviderIdentity {
         name: &'static CStr,
         extension_name: &'static CStr,
         library_name: &'static CStr,
-        kind: u32,
+        kind: ProviderKind,
     ) -> Self {
         Self {
-            struct_size: u32::try_from(size_of::<Self>())
-                .expect("provider identity size exceeds u32"),
             name: name.as_ptr(),
             extension_name: extension_name.as_ptr(),
             library_name: library_name.as_ptr(),
             kind,
         }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &'static CStr {
+        // SAFETY: constructors store only `&'static CStr` pointers.
+        unsafe { CStr::from_ptr(self.name) }
+    }
+
+    #[must_use]
+    pub fn extension_name(&self) -> &'static CStr {
+        // SAFETY: constructors store only `&'static CStr` pointers.
+        unsafe { CStr::from_ptr(self.extension_name) }
+    }
+
+    #[must_use]
+    pub fn library_name(&self) -> &'static CStr {
+        // SAFETY: constructors store only `&'static CStr` pointers.
+        unsafe { CStr::from_ptr(self.library_name) }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> ProviderKind {
+        self.kind
     }
 }
 
@@ -82,7 +108,6 @@ pub type RoutedUtilityPostHook =
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct UtilityHookDescriptor {
-    pub struct_size: u32,
     pub tag: u32,
     pub context: *mut c_void,
     pub on_pre: Option<RoutedUtilityPreHook>,
@@ -122,7 +147,6 @@ pub type RoutedUtilityConsumer = unsafe extern "C-unwind" fn(
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct UtilityConsumerDescriptor {
-    pub struct_size: u32,
     pub tag: u32,
     pub context: *mut c_void,
     pub on_match: Option<RoutedUtilityPredicate>,
@@ -150,7 +174,6 @@ pub type RoutedObjectAccessStrHook = unsafe extern "C-unwind" fn(
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ObjectAccessHookDescriptor {
-    pub struct_size: u32,
     pub event_mask: u32,
     /// `InvalidOid` matches every PostgreSQL object class.
     pub class_id: pg_sys::Oid,
@@ -161,7 +184,6 @@ pub struct ObjectAccessHookDescriptor {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ObjectAccessStrHookDescriptor {
-    pub struct_size: u32,
     pub event_mask: u32,
     /// `InvalidOid` matches every PostgreSQL object class.
     pub class_id: pg_sys::Oid,
@@ -172,36 +194,153 @@ pub struct ObjectAccessStrHookDescriptor {
 /// One provider's complete runtime registration transaction.
 ///
 /// The runtime validates and prepares the optional table-provider facet and
-/// every hook descriptor before publishing any of them. Pointer fields may be
-/// null only when the corresponding count is zero; descriptor storage only
-/// needs to live for the registration call.
-///
-/// The raw pointers are part of the trusted internal ABI described in the
-/// parent module's trust model. Construct registrations through the core
-/// hook/provider APIs rather than assembling this type in application code.
+/// every hook descriptor before publishing any of them. Descriptor storage is
+/// borrowed only for the registration call. Fields are private so every
+/// reference and descriptor array is valid by construction.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct ProviderRegistration {
-    pub struct_size: u32,
-    /// Required identity of the registering AM or FDW.
-    pub provider: *const ProviderIdentity,
-    /// Optional table-provider facet staged by the same provider. Null means none.
-    pub table_provider: *const TableProvider,
-    pub utility_hooks: *const UtilityHookDescriptor,
-    pub utility_hook_count: u32,
-    pub utility_consumers: *const UtilityConsumerDescriptor,
-    pub utility_consumer_count: u32,
-    pub object_access_hooks: *const ObjectAccessHookDescriptor,
-    pub object_access_hook_count: u32,
-    pub object_access_str_hooks: *const ObjectAccessStrHookDescriptor,
-    pub object_access_str_hook_count: u32,
-    /// Optional relation CustomScan planning facet. Null means none.
-    pub relation_scan_planner: *const RelationScanPlannerDescriptor,
-    /// Optional ModifyTable planning facet. Null means none.
-    pub modify_planner: *const ModifyPlannerDescriptor,
-    /// Optional table-scan facet. Null means none.
-    pub table_scan: *const TableScanDescriptor,
-    /// Optional worker reconstruction facet for `table_scan`. Null means the
+pub struct ProviderRegistration<'a> {
+    provider: &'a ProviderIdentity,
+    table_provider: Option<&'a TableProvider>,
+    utility_hooks: AbiSlice<'a, UtilityHookDescriptor>,
+    utility_consumers: AbiSlice<'a, UtilityConsumerDescriptor>,
+    object_access_hooks: AbiSlice<'a, ObjectAccessHookDescriptor>,
+    object_access_str_hooks: AbiSlice<'a, ObjectAccessStrHookDescriptor>,
+    relation_scan_planner: Option<&'a RelationScanPlannerDescriptor>,
+    modify_planner: Option<&'a ModifyPlannerDescriptor>,
+    table_scan: Option<&'a TableScanDescriptor>,
+    /// Worker reconstruction facet for `table_scan`. `None` means the
     /// registered routes support only direct stream execution.
-    pub table_scan_worker: *const TableScanWorkerDescriptor,
+    table_scan_worker: Option<&'a TableScanWorkerDescriptor>,
+}
+
+impl<'a> ProviderRegistration<'a> {
+    /// Start a registration that carries only the provider identity.
+    #[must_use]
+    pub const fn new(provider: &'a ProviderIdentity) -> Self {
+        Self {
+            provider,
+            table_provider: None,
+            utility_hooks: AbiSlice::new(&[]),
+            utility_consumers: AbiSlice::new(&[]),
+            object_access_hooks: AbiSlice::new(&[]),
+            object_access_str_hooks: AbiSlice::new(&[]),
+            relation_scan_planner: None,
+            modify_planner: None,
+            table_scan: None,
+            table_scan_worker: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_table_provider(
+        mut self,
+        table_provider: Option<&'a TableProvider>,
+    ) -> Self {
+        self.table_provider = table_provider;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_utility_hooks(
+        mut self,
+        hooks: &'a [UtilityHookDescriptor],
+    ) -> Self {
+        self.utility_hooks = AbiSlice::new(hooks);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_utility_consumers(
+        mut self,
+        consumers: &'a [UtilityConsumerDescriptor],
+    ) -> Self {
+        self.utility_consumers = AbiSlice::new(consumers);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_object_access_hooks(
+        mut self,
+        hooks: &'a [ObjectAccessHookDescriptor],
+        str_hooks: &'a [ObjectAccessStrHookDescriptor],
+    ) -> Self {
+        self.object_access_hooks = AbiSlice::new(hooks);
+        self.object_access_str_hooks = AbiSlice::new(str_hooks);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_planners(
+        mut self,
+        relation_scan: Option<&'a RelationScanPlannerDescriptor>,
+        modify: Option<&'a ModifyPlannerDescriptor>,
+    ) -> Self {
+        self.relation_scan_planner = relation_scan;
+        self.modify_planner = modify;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_table_scan(
+        mut self,
+        table_scan: Option<&'a TableScanDescriptor>,
+        worker: Option<&'a TableScanWorkerDescriptor>,
+    ) -> Self {
+        self.table_scan = table_scan;
+        self.table_scan_worker = worker;
+        self
+    }
+
+    #[must_use]
+    pub const fn provider(&self) -> &'a ProviderIdentity {
+        self.provider
+    }
+
+    #[must_use]
+    pub const fn table_provider(&self) -> Option<&'a TableProvider> {
+        self.table_provider
+    }
+
+    #[must_use]
+    pub fn utility_hooks(&self) -> &'a [UtilityHookDescriptor] {
+        self.utility_hooks.as_slice()
+    }
+
+    #[must_use]
+    pub fn utility_consumers(&self) -> &'a [UtilityConsumerDescriptor] {
+        self.utility_consumers.as_slice()
+    }
+
+    #[must_use]
+    pub fn object_access_hooks(&self) -> &'a [ObjectAccessHookDescriptor] {
+        self.object_access_hooks.as_slice()
+    }
+
+    #[must_use]
+    pub fn object_access_str_hooks(&self) -> &'a [ObjectAccessStrHookDescriptor] {
+        self.object_access_str_hooks.as_slice()
+    }
+
+    #[must_use]
+    pub const fn relation_scan_planner(
+        &self,
+    ) -> Option<&'a RelationScanPlannerDescriptor> {
+        self.relation_scan_planner
+    }
+
+    #[must_use]
+    pub const fn modify_planner(&self) -> Option<&'a ModifyPlannerDescriptor> {
+        self.modify_planner
+    }
+
+    #[must_use]
+    pub const fn table_scan(&self) -> Option<&'a TableScanDescriptor> {
+        self.table_scan
+    }
+
+    #[must_use]
+    pub const fn table_scan_worker(&self) -> Option<&'a TableScanWorkerDescriptor> {
+        self.table_scan_worker
+    }
 }

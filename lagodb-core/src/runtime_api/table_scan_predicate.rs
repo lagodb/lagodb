@@ -7,15 +7,15 @@
 //! Only compact bytes cross the DSO boundary, so Rust enum layout and
 //! DataFusion/Iceberg types are not part of the runtime ABI.
 //!
-//! Set membership is intentionally absent from this scan-pushdown contract.
-//! The current Iceberg reader expands `IN` into one full-batch equality and OR
-//! per literal. PostgreSQL can select hashed ScalarArrayOp execution, and
-//! DataFusion builds a hash-based static filter.
+//! The DataFusion adapters intentionally never construct
+//! [`PredicateExpr::InSet`], and the Iceberg planner declines it here.
+//! DataFusion's static filter is hash-based while the current Iceberg reader
+//! expands `IN` into one full-batch equality and OR per literal, and scan tasks
+//! use one predicate for both file pruning and row filtering.
 //! Keeping `IN` in the engine also avoids crediting temporal-array pruning that
 //! an Iceberg binder can later reject for unrepresentable values.
 
 use std::borrow::Cow;
-use std::mem::size_of;
 use std::ptr;
 
 use crate::expr::pushdown::PredicateExpr;
@@ -105,10 +105,6 @@ pub type RuntimePruningPredicate<'a> =
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimePredicateCodecError {
-    #[error("runtime pruning predicate has an incompatible ABI layout")]
-    IncompatibleLayout,
-    #[error("runtime pruning predicate has an unsupported codec version")]
-    UnsupportedVersion,
     #[error("runtime pruning predicate payload is truncated")]
     Truncated,
     #[error("runtime pruning predicate payload has a null data pointer")]
@@ -165,7 +161,6 @@ impl RuntimePredicateUpdateAction {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TableScanRuntimePredicate {
-    pub struct_size: u32,
     pub action: u32,
     pub generation: u64,
     pub data: *const u8,
@@ -176,7 +171,6 @@ impl TableScanRuntimePredicate {
     #[must_use]
     pub const fn clear(generation: u64) -> Self {
         Self {
-            struct_size: size_of::<Self>() as u32,
             action: RuntimePredicateUpdateAction::Clear.code(),
             generation,
             data: ptr::null(),
@@ -187,7 +181,6 @@ impl TableScanRuntimePredicate {
     #[must_use]
     pub fn replacement(generation: u64, encoded: &[u8]) -> Self {
         Self {
-            struct_size: size_of::<Self>() as u32,
             action: RuntimePredicateUpdateAction::Replace.code(),
             generation,
             data: encoded.as_ptr(),

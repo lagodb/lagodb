@@ -6,15 +6,6 @@ use pgrx::pg_sys;
 
 use super::CallbackErrorReport;
 
-pub type RoutedRelationInfo = unsafe extern "C-unwind" fn(
-    context: *mut c_void,
-    root: *mut pg_sys::PlannerInfo,
-    relation_oid: pg_sys::Oid,
-    inhparent: bool,
-    rel: *mut pg_sys::RelOptInfo,
-    error: *mut CallbackErrorReport,
-) -> u32;
-
 pub type RoutedRelationScanPlanner = unsafe extern "C-unwind" fn(
     context: *mut c_void,
     root: *mut pg_sys::PlannerInfo,
@@ -28,14 +19,11 @@ pub type RoutedRelationScanPlanner = unsafe extern "C-unwind" fn(
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RelationScanPlannerDescriptor {
-    pub struct_size: u32,
     pub context: *mut c_void,
-    pub relation_info: Option<RoutedRelationInfo>,
     pub plan_relation: Option<RoutedRelationScanPlanner>,
 }
 
-/// Prepare one rewrite-complete Query after its partitioned table RTEs are prepared.
-/// The runtime owns tree traversal and invokes this for nested queries and CTEs;
+/// Prepare one rewrite-complete Query. The runtime owns tree traversal and invokes this for nested queries and CTEs;
 /// callbacks prepare only the supplied Query and must not recurse themselves.
 pub type RoutedModifyQueryPreparation = unsafe extern "C-unwind" fn(
     context: *mut c_void,
@@ -63,7 +51,6 @@ pub type RoutedModifyUpperPlanner = unsafe extern "C-unwind" fn(
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ModifyPlannerDescriptor {
-    pub struct_size: u32,
     pub context: *mut c_void,
     pub prepare_query: Option<RoutedModifyQueryPreparation>,
     pub planner_post: Option<RoutedModifyPlannerPost>,

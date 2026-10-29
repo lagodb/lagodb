@@ -111,6 +111,12 @@ pub mod catalog;
 /// PostgreSQL backend latch primitives.
 pub mod pg_latch;
 
+/// Version-stable extension wait-event registration.
+pub mod wait_event;
+
+/// PostgreSQL backend-process lifecycle operations.
+pub mod backend_process;
+
 /// Typed PostgreSQL injection points with version-compatible no-op fallback.
 pub mod injection_point;
 
@@ -119,6 +125,9 @@ pub mod extension_worker;
 
 /// Storage service and storage-volume APIs.
 pub mod storage;
+
+/// PostgreSQL temporary files with independent positioned access.
+pub mod temp_file;
 
 /// The prelude includes all necessary imports to make lagodb_core work
 pub mod prelude {

@@ -3,7 +3,7 @@
 //! # Trust model
 //!
 //! This is an internal ABI between `lagodb-base` and provider DSOs built
-//! against the same `lagodb-core` SDK release. It is not a general C
+//! from the same `lagodb-core` source tree. It is not a general C
 //! plugin interface and does not attempt to make arbitrary addresses or
 //! malformed foreign allocations safe to inspect.
 //!
@@ -11,22 +11,32 @@
 //! values of the declared `#[repr(C)]` types. Pointer/count pairs must describe
 //! live arrays of the exact element type, callback and C-string pointers must
 //! be valid, and registered callbacks and contexts must remain live for the
-//! backend lifetime. Size fields reject layouts built from a different SDK
-//! after those memory-safety preconditions hold; they do not validate an
-//! otherwise invalid pointer. Every runtime API type is an exact-build
-//! contract: the runtime and every consuming extension must be rebuilt
-//! together after an ABI change.
+//! backend lifetime. Every runtime API type is an exact-build contract: the
+//! runtime and every consuming extension must be built from the same source
+//! tree and installed together. The build and install flow guarantees this;
+//! it is the safety precondition for every cross-DSO read, and the runtime
+//! does not verify it.
+//!
+//! Descriptors carry no per-type layout fields. The only compatibility check
+//! is the [`SdkVersion`] a provider compares once when it connects. It is a
+//! diagnostic for packages from different `lagodb-core` releases, so every
+//! release must bump the workspace version. Like PostgreSQL's magic block,
+//! which compares only the major version, it does not detect DSOs built from
+//! different revisions under one version; installing such a mix violates the
+//! contract above.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::mem::MaybeUninit;
+use std::ptr;
 use std::sync::OnceLock;
 
-use pgrx::pg_sys;
+use pgrx::pg_sys::{self, ffi::pg_guard_ffi_boundary};
 
 use crate::table_maintenance::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
     TableMaintenanceOptions, TableMaintenanceReport, TableMaintenanceStats,
 };
+mod abi_slice;
 mod error;
 mod planning;
 mod registration;
@@ -35,7 +45,9 @@ mod table_copy;
 mod table_scan;
 mod table_scan_predicate;
 mod table_scan_worker;
+mod version;
 
+pub use abi_slice::AbiSlice;
 pub use error::*;
 pub use planning::*;
 pub use registration::*;
@@ -44,6 +56,7 @@ pub use table_copy::TableCopyCallbacks;
 pub use table_scan::*;
 pub use table_scan_predicate::*;
 pub use table_scan_worker::*;
+pub use version::SdkVersion;
 
 pub const RUNTIME_API_RENDEZVOUS: &CStr = c"lagodb.runtime_api";
 pub const FORMAT_NAME_CAPACITY: usize = 32;
@@ -60,12 +73,6 @@ pub const REGISTER_DUPLICATE_ACCESS_METHOD: u32 = 3;
 pub const REGISTER_OUTSIDE_PROVIDER_BOOTSTRAP: u32 = 4;
 pub const REGISTER_PROVIDER_LIBRARY_MISMATCH: u32 = 5;
 pub const REGISTER_DUPLICATE_TABLE_SCAN_ROUTE: u32 = 6;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct AbiHeader {
-    pub struct_size: u32,
-}
 
 pub const UTILITY_ROUTE_PASS_THROUGH: u8 = 0;
 pub const UTILITY_ROUTE_CONSUMED: u8 = 1;
@@ -158,9 +165,6 @@ pub struct RuntimeMaintenanceConfig {
 }
 
 const OPTION_VERBOSE: u32 = 1 << 0;
-const OPTION_ANALYZE: u32 = 1 << 1;
-const OPTION_SKIP_LOCKED: u32 = 1 << 2;
-const OPTION_PROCESS_MAIN: u32 = 1 << 3;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -183,15 +187,10 @@ impl MaintenanceRequest {
         budget: TableMaintenanceBudget,
         command_time: TableMaintenanceCommandTime,
     ) -> Self {
-        let mut option_flags = 0;
-        option_flags |= u32::from(options.verbose) * OPTION_VERBOSE;
-        option_flags |= u32::from(options.analyze) * OPTION_ANALYZE;
-        option_flags |= u32::from(options.skip_locked) * OPTION_SKIP_LOCKED;
-        option_flags |= u32::from(options.process_main) * OPTION_PROCESS_MAIN;
         Self {
             relation,
             mode,
-            option_flags,
+            option_flags: u32::from(options.verbose) * OPTION_VERBOSE,
             max_input_objects: budget.max_input_objects,
             max_input_bytes: budget.max_input_bytes,
             max_group_objects: budget.max_group_objects,
@@ -203,9 +202,6 @@ impl MaintenanceRequest {
     pub fn options(self) -> TableMaintenanceOptions {
         TableMaintenanceOptions {
             verbose: self.option_flags & OPTION_VERBOSE != 0,
-            analyze: self.option_flags & OPTION_ANALYZE != 0,
-            skip_locked: self.option_flags & OPTION_SKIP_LOCKED != 0,
-            process_main: self.option_flags & OPTION_PROCESS_MAIN != 0,
         }
     }
 
@@ -331,8 +327,6 @@ impl MaintenanceStats {
 }
 
 pub type AccessMethodOidCallback = unsafe extern "C-unwind" fn() -> pg_sys::Oid;
-pub type TruncatePartitionedTableCallback =
-    unsafe extern "C-unwind" fn(relation: pg_sys::Relation);
 /// Return CALLBACK_OK with an initialized report, or CALLBACK_FAILED with a
 /// synchronous PostgreSQL-owned error payload. This callback must not report
 /// to PostgreSQL or let a Rust panic cross the DSO boundary.
@@ -357,40 +351,104 @@ pub type StageWorkerWakeupCallback = unsafe extern "C-unwind" fn(
 /// This is the single runtime identity and operation record for one table AM.
 /// Operation-specific callbacks remain grouped by name rather than being
 /// exposed through parallel provider registries.
+///
+/// Fields are private: the constructor takes only `'static` borrows, and
+/// PostgreSQL never unloads a library after `_PG_init`, so every pointer stays
+/// valid for the backend lifetime in whichever DSO holds a copy.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TableProvider {
-    pub struct_size: u32,
-    pub name: *const c_char,
+    name: *const c_char,
     /// Stable catalog name of the table access method owned by this provider.
     ///
     /// Runtime registration uses this identity because access-method OIDs are
     /// database-local and may not be resolvable while extensions are preloaded.
-    pub access_method_name: *const c_char,
-    /// Whether this provider stores a partitioned table as one logical table.
-    pub owns_partitioned_table: bool,
-    /// Whether the table-AM callbacks provide a valid PostgreSQL ANALYZE sample.
-    pub supports_analyze: bool,
-    /// Null for AMs that use their native TableAM insertion callbacks.
-    pub copy: *const TableCopyCallbacks,
-    pub access_method_oid: AccessMethodOidCallback,
-    pub truncate_partitioned_table: TruncatePartitionedTableCallback,
-    pub execute_maintenance: ExecuteMaintenanceCallback,
-    pub inspect_maintenance: InspectMaintenanceCallback,
+    access_method_name: *const c_char,
+    /// `None` for AMs that use their native TableAM insertion callbacks.
+    copy: Option<&'static TableCopyCallbacks>,
+    access_method_oid: AccessMethodOidCallback,
+    execute_maintenance: ExecuteMaintenanceCallback,
+    inspect_maintenance: InspectMaintenanceCallback,
+}
+
+impl TableProvider {
+    #[must_use]
+    pub const fn new(
+        name: &'static CStr,
+        access_method_name: &'static CStr,
+        copy: Option<&'static TableCopyCallbacks>,
+        access_method_oid: AccessMethodOidCallback,
+        execute_maintenance: ExecuteMaintenanceCallback,
+        inspect_maintenance: InspectMaintenanceCallback,
+    ) -> Self {
+        Self {
+            name: name.as_ptr(),
+            access_method_name: access_method_name.as_ptr(),
+            copy,
+            access_method_oid,
+            execute_maintenance,
+            inspect_maintenance,
+        }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &'static CStr {
+        // SAFETY: `new` stores only `&'static CStr` pointers.
+        unsafe { CStr::from_ptr(self.name) }
+    }
+
+    #[must_use]
+    pub fn access_method_name(&self) -> &'static CStr {
+        // SAFETY: `new` stores only `&'static CStr` pointers.
+        unsafe { CStr::from_ptr(self.access_method_name) }
+    }
+
+    #[must_use]
+    pub const fn copy(&self) -> Option<&'static TableCopyCallbacks> {
+        self.copy
+    }
+
+    #[must_use]
+    pub const fn access_method_oid(&self) -> AccessMethodOidCallback {
+        self.access_method_oid
+    }
+
+    #[must_use]
+    pub const fn execute_maintenance(&self) -> ExecuteMaintenanceCallback {
+        self.execute_maintenance
+    }
+
+    #[must_use]
+    pub const fn inspect_maintenance(&self) -> InspectMaintenanceCallback {
+        self.inspect_maintenance
+    }
+
+    /// Whether `other` publishes the same identity and callbacks, as when one
+    /// DSO registers the same provider again.
+    #[must_use]
+    pub fn is_same_provider(&self, other: &Self) -> bool {
+        self.name() == other.name()
+            && self.access_method_name() == other.access_method_name()
+            && self.copy.map(ptr::from_ref) == other.copy.map(ptr::from_ref)
+            && ptr::fn_addr_eq(self.access_method_oid, other.access_method_oid)
+            && ptr::fn_addr_eq(self.execute_maintenance, other.execute_maintenance)
+            && ptr::fn_addr_eq(self.inspect_maintenance, other.inspect_maintenance)
+    }
 }
 
 /// Runtime-owned rendezvous function table.
 ///
-/// The runtime publishes one static instance. Provider clients may only interpret a
-/// slot as this type after matching the rendezvous name and exact size under
-/// the module-level internal ABI contract.
+/// The runtime publishes one static instance. Interpreting a slot as this type
+/// relies on the exact-build install contract; clients first compare
+/// `sdk_version` only to reject a runtime from a different release.
 #[repr(C)]
 #[derive(Debug)]
 pub struct RuntimeApi {
-    pub struct_size: u32,
+    /// Must remain the first field: clients read it before trusting the rest
+    /// of the layout.
+    pub sdk_version: SdkVersion,
     pub register_provider:
-        unsafe extern "C-unwind" fn(*const ProviderRegistration) -> u32,
-    pub has_providers: unsafe extern "C-unwind" fn() -> u8,
+        unsafe extern "C-unwind" fn(*const ProviderRegistration<'_>) -> u32,
     pub provider_for_am:
         unsafe extern "C-unwind" fn(pg_sys::Oid) -> *const TableProvider,
     pub customscan_mode: unsafe extern "C-unwind" fn() -> u32,
@@ -409,8 +467,11 @@ unsafe extern "C" {
 /// # Safety
 ///
 /// PostgreSQL must be initialized in the current backend process. The returned
-/// slot is backend-lifetime memory; callers must validate any published pointer
-/// and exact ABI size before dereferencing it.
+/// slot is never null: `find_rendezvous_variable` enters the name with
+/// `HASH_ENTER`, which raises an ERROR instead of returning null on allocation
+/// failure. The slot is backend-lifetime memory. The rest of the table is
+/// interpreted under the exact-build install contract, after the published
+/// [`SdkVersion`] matches.
 pub unsafe fn rendezvous_slot() -> *mut *mut c_void {
     unsafe { find_rendezvous_variable(RUNTIME_API_RENDEZVOUS.as_ptr()) }
 }
@@ -424,11 +485,11 @@ pub enum RuntimeApiError {
     )]
     Unavailable,
     #[error(
-        "incompatible LagoDB runtime API size {actual_size}; expected exactly {expected_size}"
+        "LagoDB runtime version {runtime} does not match provider SDK version {provider}; install lagodb_base and every provider extension from the same release"
     )]
     Incompatible {
-        actual_size: u32,
-        expected_size: u32,
+        runtime: SdkVersion,
+        provider: SdkVersion,
     },
 }
 
@@ -483,22 +544,24 @@ impl RuntimeClient {
     }
 
     fn connect_uncached() -> Result<Self, RuntimeApiError> {
-        let slot = unsafe { rendezvous_slot() };
-        if slot.is_null() {
-            return Err(RuntimeApiError::Unavailable);
-        }
-        let published = unsafe { *slot };
-        let Some(header) = (unsafe { published.cast::<AbiHeader>().as_ref() }) else {
+        // SAFETY: PostgreSQL returns a non-null backend-lifetime slot.
+        let published = unsafe { *rendezvous_slot() };
+        // SAFETY: a published runtime table starts with `SdkVersion` in every
+        // release, so the leading bytes are readable before the layout is
+        // trusted.
+        let Some(&runtime) = (unsafe { published.cast::<SdkVersion>().as_ref() })
+        else {
             return Err(RuntimeApiError::Unavailable);
         };
-        let expected_size = u32::try_from(std::mem::size_of::<RuntimeApi>())
-            .expect("runtime API size exceeds u32");
-        if header.struct_size != expected_size {
+        if runtime != SdkVersion::CURRENT {
             return Err(RuntimeApiError::Incompatible {
-                actual_size: header.struct_size,
-                expected_size,
+                runtime,
+                provider: SdkVersion::CURRENT,
             });
         }
+        // SAFETY: the exact-build install contract guarantees this runtime
+        // was built from the same source tree, so the table has this layout.
+        // The version match above only rules out a different release.
         let api = unsafe { &*published.cast::<RuntimeApi>() };
         let _ = RUNTIME_API_CACHE.set(api);
         Ok(Self { api })
@@ -508,14 +571,12 @@ impl RuntimeClient {
     ///
     /// # Safety
     ///
-    /// `registration` and every non-null pointer reachable from it must satisfy
-    /// the module-level internal ABI contract. In particular, descriptor
-    /// pointer/count pairs must identify live, correctly aligned arrays of the
-    /// exact current descriptor types. On success, callback functions and
+    /// Every descriptor reachable from `registration` must satisfy the
+    /// module-level internal ABI contract. On success, callback functions and
     /// opaque contexts must remain valid until backend exit.
     pub unsafe fn register_provider(
         self,
-        registration: &ProviderRegistration,
+        registration: &ProviderRegistration<'_>,
     ) -> Result<(), RuntimeRegistrationError> {
         let status = unsafe { (self.api.register_provider)(registration) };
         match status {
@@ -545,15 +606,16 @@ impl RuntimeClient {
         }
     }
 
-    pub fn has_providers(self) -> bool {
-        unsafe { (self.api.has_providers)() != 0 }
-    }
-
     pub fn provider_for_am(
         self,
         access_method_oid: pg_sys::Oid,
     ) -> Option<&'static TableProvider> {
-        let provider = unsafe { (self.api.provider_for_am)(access_method_oid) };
+        // SAFETY: the runtime callback has pg_guard and returns a
+        // backend-lifetime descriptor. The closure contains only the FFI call,
+        // so a PostgreSQL ERROR unwinds the caller's Rust resources normally.
+        let provider = unsafe {
+            pg_guard_ffi_boundary(|| (self.api.provider_for_am)(access_method_oid))
+        };
         unsafe { provider.as_ref() }
     }
 
@@ -574,11 +636,16 @@ impl RuntimeClient {
         extension_name: &CStr,
         worker_name: &CStr,
     ) -> Result<(), WorkerWakeupError> {
+        // SAFETY: worker notification runs on a PostgreSQL backend or worker
+        // main thread, and both strings outlive this synchronous callback. The
+        // barrier lets a catalog ERROR unwind caller-owned transaction state.
         let status = unsafe {
-            (self.api.stage_worker_wakeup)(
-                extension_name.as_ptr(),
-                worker_name.as_ptr(),
-            )
+            pg_guard_ffi_boundary(|| {
+                (self.api.stage_worker_wakeup)(
+                    extension_name.as_ptr(),
+                    worker_name.as_ptr(),
+                )
+            })
         };
         match status {
             STAGE_WORKER_WAKEUP_OK => Ok(()),
@@ -594,24 +661,4 @@ impl RuntimeClient {
             status => Err(WorkerWakeupError::UnknownStatus(status)),
         }
     }
-}
-
-/// Borrow the provider name carried by a validated descriptor.
-///
-/// # Safety
-///
-/// A non-null `provider.name` must point to a live NUL-terminated C string.
-pub unsafe fn provider_name(provider: &TableProvider) -> Option<&CStr> {
-    (!provider.name.is_null()).then(|| unsafe { CStr::from_ptr(provider.name) })
-}
-
-/// Borrow the access-method name carried by a validated descriptor.
-///
-/// # Safety
-///
-/// A non-null `provider.access_method_name` must point to a live
-/// NUL-terminated C string.
-pub unsafe fn provider_access_method_name(provider: &TableProvider) -> Option<&CStr> {
-    (!provider.access_method_name.is_null())
-        .then(|| unsafe { CStr::from_ptr(provider.access_method_name) })
 }

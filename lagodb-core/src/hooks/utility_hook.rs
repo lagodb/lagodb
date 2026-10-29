@@ -389,8 +389,6 @@ pub(super) fn prepare_utility_hooks(
     for (tag, hook) in entries {
         let mut context = Box::new(ExternalHookContext { tag, hook });
         descriptors.push(UtilityHookDescriptor {
-            struct_size: u32::try_from(std::mem::size_of::<UtilityHookDescriptor>())
-                .expect("utility hook descriptor size exceeds u32"),
             tag: tag as u32,
             context: std::ptr::from_mut(context.as_mut()).cast(),
             on_pre: Some(callbacks.on_pre),

@@ -7,7 +7,30 @@ use super::{
 use crate::expr::BooleanTestKind;
 use std::borrow::Cow;
 
-const CODEC_VERSION: u8 = 6;
+impl RuntimeComparisonOperator {
+    const fn wire_id(self) -> u8 {
+        match self {
+            Self::Equal => 1,
+            Self::NotEqual => 2,
+            Self::LessThan => 3,
+            Self::LessThanOrEqual => 4,
+            Self::GreaterThan => 5,
+            Self::GreaterThanOrEqual => 6,
+        }
+    }
+
+    const fn from_wire_id(id: u8) -> Option<Self> {
+        match id {
+            1 => Some(Self::Equal),
+            2 => Some(Self::NotEqual),
+            3 => Some(Self::LessThan),
+            4 => Some(Self::LessThanOrEqual),
+            5 => Some(Self::GreaterThan),
+            6 => Some(Self::GreaterThanOrEqual),
+            _ => None,
+        }
+    }
+}
 
 impl RuntimePruningPredicate<'_> {
     #[must_use]
@@ -21,7 +44,6 @@ impl RuntimePruningPredicate<'_> {
     /// allocation for the next evolving-filter generation.
     pub fn encode_into(&self, output: &mut Vec<u8>) {
         output.clear();
-        output.push(CODEC_VERSION);
         self.encode_node(output);
     }
 
@@ -29,9 +51,6 @@ impl RuntimePruningPredicate<'_> {
         input: &[u8],
     ) -> Result<RuntimePruningPredicate<'static>, RuntimePredicateCodecError> {
         let mut decoder = PredicateDecoder { input, position: 0 };
-        if decoder.read_u8()? != CODEC_VERSION {
-            return Err(RuntimePredicateCodecError::UnsupportedVersion);
-        }
         let predicate = decoder.read_node()?;
         if decoder.position != input.len() {
             return Err(RuntimePredicateCodecError::TrailingBytes);
@@ -57,14 +76,7 @@ impl RuntimePruningPredicate<'_> {
                 right,
             } => {
                 output.push(3);
-                output.push(match operator {
-                    RuntimeComparisonOperator::Equal => 1,
-                    RuntimeComparisonOperator::NotEqual => 2,
-                    RuntimeComparisonOperator::LessThan => 3,
-                    RuntimeComparisonOperator::LessThanOrEqual => 4,
-                    RuntimeComparisonOperator::GreaterThan => 5,
-                    RuntimeComparisonOperator::GreaterThanOrEqual => 6,
-                });
+                output.push(operator.wire_id());
                 left.encode(output);
                 right.encode(output);
             }
@@ -93,6 +105,16 @@ impl RuntimePruningPredicate<'_> {
                 output.push(12);
                 value.encode(output);
                 prefix.encode(output);
+            }
+            Self::InSet {
+                operator,
+                value,
+                set,
+            } => {
+                output.push(16);
+                output.push(operator.wire_id());
+                value.encode(output);
+                set.encode(output);
             }
             Self::And(children) | Self::Or(children) => {
                 output.push(if matches!(self, Self::And(_)) { 7 } else { 8 });
@@ -207,22 +229,11 @@ impl PredicateDecoder<'_> {
                     value: self.read_scalar()?,
                 })
             }
-            3 => {
-                let operator = match self.read_u8()? {
-                    1 => RuntimeComparisonOperator::Equal,
-                    2 => RuntimeComparisonOperator::NotEqual,
-                    3 => RuntimeComparisonOperator::LessThan,
-                    4 => RuntimeComparisonOperator::LessThanOrEqual,
-                    5 => RuntimeComparisonOperator::GreaterThan,
-                    6 => RuntimeComparisonOperator::GreaterThanOrEqual,
-                    _ => return Err(RuntimePredicateCodecError::UnknownTag),
-                };
-                Ok(RuntimePruningPredicate::Comparison {
-                    operator,
-                    left: self.read_scalar()?,
-                    right: self.read_scalar()?,
-                })
-            }
+            3 => Ok(RuntimePruningPredicate::Comparison {
+                operator: self.read_operator()?,
+                left: self.read_scalar()?,
+                right: self.read_scalar()?,
+            }),
             4 => Ok(RuntimePruningPredicate::IsNull(self.read_scalar()?)),
             5 => Ok(RuntimePruningPredicate::IsNotNull(self.read_scalar()?)),
             tag @ (7 | 8) => {
@@ -247,8 +258,20 @@ impl PredicateDecoder<'_> {
             }),
             13 => Ok(RuntimePruningPredicate::StrictFalse(self.read_scalar()?)),
             14 => Ok(RuntimePruningPredicate::StrictTrue(self.read_scalar()?)),
+            16 => Ok(RuntimePruningPredicate::InSet {
+                operator: self.read_operator()?,
+                value: self.read_scalar()?,
+                set: self.read_scalar()?,
+            }),
             _ => Err(RuntimePredicateCodecError::UnknownTag),
         }
+    }
+
+    fn read_operator(
+        &mut self,
+    ) -> Result<RuntimeComparisonOperator, RuntimePredicateCodecError> {
+        RuntimeComparisonOperator::from_wire_id(self.read_u8()?)
+            .ok_or(RuntimePredicateCodecError::UnknownTag)
     }
 
     fn read_scalar(

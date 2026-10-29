@@ -335,10 +335,6 @@ pub(super) fn prepare_object_access_hooks(
         let filter = hook.filter();
         let mut context = Box::new(ExternalObjectAccessContext { hook });
         descriptors.push(ObjectAccessHookDescriptor {
-            struct_size: u32::try_from(
-                std::mem::size_of::<ObjectAccessHookDescriptor>(),
-            )
-            .expect("object-access hook descriptor size exceeds u32"),
             event_mask: filter.event_mask(),
             class_id: filter.class_id(),
             context: std::ptr::from_mut(context.as_mut()).cast(),
@@ -354,10 +350,6 @@ pub(super) fn prepare_object_access_hooks(
         let filter = hook.filter();
         let mut context = Box::new(ExternalObjectAccessStrContext { hook });
         str_descriptors.push(ObjectAccessStrHookDescriptor {
-            struct_size: u32::try_from(std::mem::size_of::<
-                ObjectAccessStrHookDescriptor,
-            >())
-            .expect("object-access-str hook descriptor size exceeds u32"),
             event_mask: filter.event_mask(),
             class_id: filter.class_id(),
             context: std::ptr::from_mut(context.as_mut()).cast(),

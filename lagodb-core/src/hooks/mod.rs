@@ -12,8 +12,6 @@ mod utility_consumer;
 pub mod utility_hook;
 
 use std::cell::Cell;
-use std::mem::size_of;
-use std::ptr;
 
 use crate::runtime_api::{
     ProviderIdentity, ProviderRegistration, RuntimeApiError, RuntimeClient,
@@ -95,8 +93,6 @@ pub enum HookRegistrationError {
     RuntimeApi(#[from] RuntimeApiError),
     #[error(transparent)]
     Registration(#[from] RuntimeRegistrationError),
-    #[error("one provider registered more hooks than the runtime ABI can represent")]
-    TooManyHooks,
     #[error(
         "provider hooks were already published without the table provider; provider and hooks must be registered together"
     )]
@@ -116,9 +112,9 @@ pub enum HookRegistrationError {
 ///
 /// # Errors
 ///
-/// Returns an error when the runtime is absent or ABI-incompatible, the batch
-/// exceeds ABI limits, or the runtime rejects the complete batch. Failure does
-/// not publish a partial batch.
+/// Returns an error when the runtime is absent or ABI-incompatible, or the
+/// runtime rejects the complete batch. Failure does not publish a partial
+/// batch.
 pub fn freeze_hooks(
     provider: &ProviderIdentity,
 ) -> Result<(), HookRegistrationError> {
@@ -156,80 +152,19 @@ pub(crate) fn freeze_hooks_with_provider(
     let table_scan = table_scan::descriptor();
     let table_scan_worker = table_scan::worker_descriptor();
 
-    let counts = (
-        u32::try_from(utility.descriptors().len()),
-        u32::try_from(consumers.descriptors().len()),
-        u32::try_from(object_access.descriptors().len()),
-        u32::try_from(object_access.str_descriptors().len()),
-    );
-    let (
-        Ok(utility_count),
-        Ok(utility_consumer_count),
-        Ok(object_access_count),
-        Ok(object_access_str_count),
-    ) = counts
-    else {
-        utility.restore();
-        consumers.restore();
-        object_access.restore();
-        return Err(HookRegistrationError::TooManyHooks);
-    };
-    let utility_hooks = if utility.descriptors().is_empty() {
-        ptr::null()
-    } else {
-        utility.descriptors().as_ptr()
-    };
-    let utility_consumers = if consumers.descriptors().is_empty() {
-        ptr::null()
-    } else {
-        consumers.descriptors().as_ptr()
-    };
-    let object_access_hooks = if object_access.descriptors().is_empty() {
-        ptr::null()
-    } else {
-        object_access.descriptors().as_ptr()
-    };
-    let object_access_str_hooks = if object_access.str_descriptors().is_empty() {
-        ptr::null()
-    } else {
-        object_access.str_descriptors().as_ptr()
-    };
-    let registration = ProviderRegistration {
-        struct_size: u32::try_from(size_of::<ProviderRegistration>())
-            .expect("provider registration size exceeds u32"),
-        provider,
-        table_provider: table_provider.map(ptr::from_ref).unwrap_or(ptr::null()),
-        utility_hooks,
-        utility_hook_count: utility_count,
-        utility_consumers,
-        utility_consumer_count,
-        object_access_hooks,
-        object_access_hook_count: object_access_count,
-        object_access_str_hooks,
-        object_access_str_hook_count: object_access_str_count,
-        relation_scan_planner: planning
-            .relation_scan
-            .as_ref()
-            .map(ptr::from_ref)
-            .unwrap_or(ptr::null()),
-        modify_planner: planning
-            .modify
-            .as_ref()
-            .map(ptr::from_ref)
-            .unwrap_or(ptr::null()),
-        table_scan: table_scan
-            .as_ref()
-            .map(ptr::from_ref)
-            .unwrap_or(ptr::null()),
-        table_scan_worker: table_scan_worker
-            .as_ref()
-            .map(ptr::from_ref)
-            .unwrap_or(ptr::null()),
-    };
-    // SAFETY: every descriptor and pointer in `registration` was constructed
-    // above from the current core ABI types. Their backing vectors remain live
-    // for this synchronous call; published callbacks and contexts are retained
-    // for the backend lifetime below.
+    let registration = ProviderRegistration::new(provider)
+        .with_table_provider(table_provider)
+        .with_utility_hooks(utility.descriptors())
+        .with_utility_consumers(consumers.descriptors())
+        .with_object_access_hooks(
+            object_access.descriptors(),
+            object_access.str_descriptors(),
+        )
+        .with_planners(planning.relation_scan.as_ref(), planning.modify.as_ref())
+        .with_table_scan(table_scan.as_ref(), table_scan_worker.as_ref());
+    // SAFETY: every descriptor in `registration` was constructed above from
+    // the current core ABI types; published callbacks and contexts are
+    // retained for the backend lifetime below.
     if let Err(error) = unsafe { runtime.register_provider(&registration) } {
         utility.restore();
         consumers.restore();

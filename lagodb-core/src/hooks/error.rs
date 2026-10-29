@@ -1,6 +1,7 @@
 use crate::copy::CopyError;
 use crate::diag::{
-    PgReportError, SqlStateError, error_source_chain_detail, join_error_details,
+    PgError, PgReportError, SqlStateError, error_source_chain_detail,
+    join_error_details,
 };
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
@@ -226,6 +227,12 @@ where
 {
     fn from(value: E) -> Self {
         Self::with_source(value.sql_error_code(), value)
+    }
+}
+
+impl From<PgError> for HookError {
+    fn from(err: PgError) -> Self {
+        PgReportError::from_pg_error(err).into()
     }
 }
 

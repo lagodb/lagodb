@@ -5,30 +5,23 @@
 //! storage. Rust ownership and Arrow/DataFusion objects never cross directly.
 
 use std::ffi::{CStr, c_char, c_void};
-use std::mem::size_of;
-use std::ptr;
+use std::ptr::{self, NonNull};
 
 use pgrx::pg_sys;
 
-use super::{CallbackErrorReport, TableScanRuntimePredicate};
+use super::{AbiSlice, CallbackErrorReport, TableScanRuntimePredicate};
 
 pub const TABLE_SCAN_UNSUPPORTED: u32 = 0;
 pub const TABLE_SCAN_PLANNED: u32 = 1;
 pub const TABLE_SCAN_FAILED: u32 = 2;
 
-/// Produce visible rows without materializing user columns.
-pub const TABLE_SCAN_PROJECTION_ROW_COUNT: u32 = 1;
-/// Produce the listed PostgreSQL user attributes in request order.
-pub const TABLE_SCAN_PROJECTION_COLUMNS: u32 = 2;
-
 /// Borrowed planner facts for one relation leaf.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct TableScanPlanningRequest {
-    pub struct_size: u32,
-    pub projection_kind: u32,
-    pub projected_attnos: *const pg_sys::AttrNumber,
-    pub projected_attno_count: usize,
+pub struct TableScanPlanningRequest<'a> {
+    /// PostgreSQL user attributes to produce in request order. Empty requests
+    /// visible rows without materializing user columns.
+    pub projected_attnos: AbiSlice<'a, pg_sys::AttrNumber>,
     /// Optional complete scan predicate. The typed provider adapter applies
     /// provider-aware conservative negotiation; exact execution remains owned
     /// by the query engine.
@@ -47,7 +40,6 @@ pub struct TableScanPlanningRequest {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PlannedTableScanResult {
-    pub struct_size: u32,
     pub plan_data: *mut pg_sys::List,
     /// Provider-approved exact or widened expression used for EXPLAIN.
     pub pruning_expression: *mut pg_sys::Expr,
@@ -59,7 +51,6 @@ pub struct PlannedTableScanResult {
 impl Default for PlannedTableScanResult {
     fn default() -> Self {
         Self {
-            struct_size: size_of_u32::<Self>(),
             plan_data: ptr::null_mut(),
             pruning_expression: ptr::null_mut(),
             rows_read: 0.0,
@@ -77,7 +68,6 @@ impl Default for PlannedTableScanResult {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TableScanBindRequest {
-    pub struct_size: u32,
     pub plan_data: *const pg_sys::List,
     /// Live executor owning the snapshot and provider read-view lifetime.
     pub estate: *mut pg_sys::EState,
@@ -87,7 +77,6 @@ pub struct TableScanBindRequest {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct BoundTableScanResult {
-    pub struct_size: u32,
     pub bound: *mut c_void,
 }
 
@@ -96,7 +85,6 @@ pub struct BoundTableScanResult {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TableScanPredicateResult {
-    pub struct_size: u32,
     pub support: u32,
     /// Provider-owned immutable predicate artifact. Null only when support is
     /// zero; ownership transfers to the runtime until `release_predicate`.
@@ -106,7 +94,6 @@ pub struct TableScanPredicateResult {
 impl Default for TableScanPredicateResult {
     fn default() -> Self {
         Self {
-            struct_size: size_of_u32::<Self>(),
             support: 0,
             predicate: ptr::null_mut(),
         }
@@ -116,7 +103,6 @@ impl Default for TableScanPredicateResult {
 impl Default for BoundTableScanResult {
     fn default() -> Self {
         Self {
-            struct_size: size_of_u32::<Self>(),
             bound: ptr::null_mut(),
         }
     }
@@ -138,7 +124,6 @@ pub struct TableScanTaskMetrics {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PlannedTableScanTasks {
-    pub struct_size: u32,
     pub planned: *mut c_void,
     pub metrics: TableScanTaskMetrics,
     /// Whether `exact_rows` is the exact output cardinality of this task plan,
@@ -151,18 +136,15 @@ pub struct PlannedTableScanTasks {
 /// plan before optimization to obtain exact aggregate statistics.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct TableScanTaskPlanningRequest {
-    pub struct_size: u32,
+pub struct TableScanTaskPlanningRequest<'a> {
     /// Source-schema column positions requested from the provider in output
     /// order. The provider reader must expose exactly this projected schema.
-    pub projected_columns: *const usize,
-    pub projected_column_count: usize,
+    pub projected_columns: AbiSlice<'a, usize>,
     /// Statement-stable provider predicate handles retained by the physical
     /// scan plan and borrowed for this synchronous callback.
-    pub static_predicates: *const *const c_void,
-    pub static_predicate_count: usize,
+    pub static_predicates: AbiSlice<'a, NonNull<c_void>>,
     /// Optional complete fixed predicate retained by this QueryRun.
-    pub runtime_predicate: *const c_void,
+    pub runtime_predicate: Option<NonNull<c_void>>,
     /// Nonzero requests an optional exact output row count. Zero skips this
     /// computation. This affects returned statistics, not the task inventory.
     pub request_exact_rows: u8,
@@ -171,7 +153,6 @@ pub struct TableScanTaskPlanningRequest {
 impl Default for PlannedTableScanTasks {
     fn default() -> Self {
         Self {
-            struct_size: size_of_u32::<Self>(),
             planned: ptr::null_mut(),
             metrics: TableScanTaskMetrics::default(),
             has_exact_rows: 0,
@@ -184,10 +165,9 @@ impl Default for PlannedTableScanTasks {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TableScanStreamRequest {
-    pub struct_size: u32,
     pub maximum_batch_rows: u64,
     /// Engine-owned error slot that remains live until stream release.
-    pub stream_error: *mut CallbackErrorReport,
+    pub stream_error: NonNull<CallbackErrorReport>,
     /// Optional evolving predicate slot. Its address remains stable until the
     /// Arrow stream release callback returns; the engine updates it only
     /// between serialized `get_next` calls.
@@ -200,7 +180,7 @@ pub struct TableScanStreamRequest {
 /// no bound scan or execution tasks are created by this callback.
 pub type PlanTableScan = unsafe extern "C-unwind" fn(
     context: *mut c_void,
-    request: *const TableScanPlanningRequest,
+    request: *const TableScanPlanningRequest<'_>,
     output: *mut PlannedTableScanResult,
     schema: *mut c_void,
     error: *mut CallbackErrorReport,
@@ -234,7 +214,7 @@ pub type NegotiateTableScanPredicate = unsafe extern "C-unwind" fn(
 pub type PlanTableScanTasks = unsafe extern "C-unwind" fn(
     context: *mut c_void,
     bound: *mut c_void,
-    request: *const TableScanTaskPlanningRequest,
+    request: *const TableScanTaskPlanningRequest<'_>,
     output: *mut PlannedTableScanTasks,
     error: *mut CallbackErrorReport,
 ) -> u32;
@@ -359,7 +339,6 @@ pub struct TableScanCallbacks {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TableScanDescriptor {
-    struct_size: u32,
     access_method_name: *const c_char,
     foreign_data_wrapper_name: *const c_char,
     context: *mut c_void,
@@ -375,41 +354,23 @@ pub struct TableScanDescriptor {
     release_bound: Option<ReleaseBoundTableScan>,
 }
 
-const fn size_of_u32<T>() -> u32 {
-    let size = size_of::<T>();
-    assert!(size <= u32::MAX as usize, "runtime ABI type exceeds u32");
-    size as u32
-}
-
-impl TableScanPlanningRequest {
-    /// Exact-build ABI size for a fully initialized planning request.
-    pub const STRUCT_SIZE: u32 = size_of_u32::<Self>();
-}
-
 impl TableScanBindRequest {
     #[must_use]
     pub fn new(plan_data: *const pg_sys::List, estate: *mut pg_sys::EState) -> Self {
-        Self {
-            struct_size: size_of_u32::<Self>(),
-            plan_data,
-            estate,
-        }
+        Self { plan_data, estate }
     }
 }
 
-impl TableScanTaskPlanningRequest {
+impl<'a> TableScanTaskPlanningRequest<'a> {
     #[must_use]
-    pub fn new(
-        projected_columns: &[usize],
-        static_predicates: &[*const c_void],
-        runtime_predicate: *const c_void,
+    pub const fn new(
+        projected_columns: &'a [usize],
+        static_predicates: &'a [NonNull<c_void>],
+        runtime_predicate: Option<NonNull<c_void>>,
     ) -> Self {
         Self {
-            struct_size: size_of_u32::<Self>(),
-            projected_columns: projected_columns.as_ptr(),
-            projected_column_count: projected_columns.len(),
-            static_predicates: static_predicates.as_ptr(),
-            static_predicate_count: static_predicates.len(),
+            projected_columns: AbiSlice::new(projected_columns),
+            static_predicates: AbiSlice::new(static_predicates),
             runtime_predicate,
             request_exact_rows: 0,
         }
@@ -420,11 +381,10 @@ impl TableScanStreamRequest {
     #[must_use]
     pub fn new(
         maximum_batch_rows: u64,
-        stream_error: *mut CallbackErrorReport,
+        stream_error: NonNull<CallbackErrorReport>,
         evolving_predicate: *const TableScanRuntimePredicate,
     ) -> Self {
         Self {
-            struct_size: size_of_u32::<Self>(),
             maximum_batch_rows,
             stream_error,
             evolving_predicate,
@@ -449,7 +409,6 @@ impl TableScanDescriptor {
         callbacks: TableScanCallbacks,
     ) -> Self {
         Self {
-            struct_size: size_of_u32::<Self>(),
             access_method_name: routes.access_method_name(),
             foreign_data_wrapper_name: routes.foreign_data_wrapper_name(),
             context,
@@ -464,11 +423,6 @@ impl TableScanDescriptor {
             release_planned: Some(callbacks.release_planned),
             release_bound: Some(callbacks.release_bound),
         }
-    }
-
-    #[inline]
-    pub const fn struct_size(&self) -> u32 {
-        self.struct_size
     }
 
     #[inline]
