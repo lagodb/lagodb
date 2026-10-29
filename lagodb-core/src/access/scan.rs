@@ -8,10 +8,15 @@ mod descriptor;
 use crate::api::{AmResult, AmScanSession, ScanFlags, TableAccessMethod};
 use crate::batch::ScanBatchDriver;
 use crate::diag::ReportableError;
+#[cfg(any(feature = "pg17", feature = "pg18"))]
+use crate::handles::AnalyzeReadStreamHandle;
+#[cfg(any(feature = "pg16", feature = "pg17"))]
+use crate::handles::TBMIterateResultHandle;
+#[cfg(feature = "pg18")]
+use crate::handles::{BitmapScanOutputHandle, TBMIteratorHandle};
 use crate::handles::{
-    AnalyzeReadStreamHandle, ItemPointer, OwnedScanKeys, ParallelTableScanDescHandle,
-    RelationHandle, SampleScanStateHandle, ScanDirection, SnapshotHandle,
-    TBMIterateResultHandle,
+    ItemPointer, OwnedScanKeys, ParallelTableScanDescHandle, RelationHandle,
+    SampleScanStateHandle, ScanDirection, SnapshotHandle,
 };
 use crate::tuple::SlotDatumWriter;
 pub(crate) use descriptor::TableAmScanDesc;
@@ -252,10 +257,12 @@ pub extern "C-unwind" fn scan_set_tidrange<A>(
         // Convert raw pointers to safe Handle types
         let mintid_handle = ItemPointer::from_raw(mintid);
         let maxtid_handle = ItemPointer::from_raw(maxtid);
+        let Some(operations) = <A::ScanSession as AmScanSession>::TID_RANGE else {
+            unreachable!("TID-range trampoline registered without TID_RANGE");
+        };
 
-        state
-            .am_instance
-            .scan_set_tidrange(&mintid_handle, &maxtid_handle)
+        operations
+            .set(&mut state.am_instance, &mintid_handle, &maxtid_handle)
             .report_unwrap()
     }
 }
@@ -278,9 +285,11 @@ where
         state.reset_tmp_context();
 
         let direction_handle = ScanDirection::try_from_raw(direction).report_unwrap();
-        let found = state
-            .am_instance
-            .scan_getnextslot_tidrange(direction_handle, &mut state.row)
+        let Some(operations) = <A::ScanSession as AmScanSession>::TID_RANGE else {
+            unreachable!("TID-range trampoline registered without TID_RANGE");
+        };
+        let found = operations
+            .next(&mut state.am_instance, direction_handle, &mut state.row)
             .report_unwrap();
 
         if !found {
@@ -294,6 +303,7 @@ where
 }
 
 #[pg_guard]
+#[cfg(any(feature = "pg16", feature = "pg17"))]
 pub extern "C-unwind" fn scan_bitmap_next_block<A>(
     scan: pg_sys::TableScanDesc,
     tbmres: *mut pg_sys::TBMIterateResult,
@@ -307,15 +317,18 @@ where
 
         // Convert raw pointer to safe Handle type
         let tbmres_handle = TBMIterateResultHandle::from_raw(tbmres);
+        let Some(operations) = <A::ScanSession as AmScanSession>::BITMAP else {
+            unreachable!("bitmap trampoline registered without BITMAP");
+        };
 
-        state
-            .am_instance
-            .scan_bitmap_next_block(&tbmres_handle)
+        operations
+            .next_block(&mut state.am_instance, &tbmres_handle)
             .report_unwrap()
     }
 }
 
 #[pg_guard]
+#[cfg(any(feature = "pg16", feature = "pg17"))]
 pub extern "C-unwind" fn scan_bitmap_next_tuple<A>(
     scan: pg_sys::TableScanDesc,
     tbmres: *mut pg_sys::TBMIterateResult,
@@ -332,9 +345,56 @@ where
         state.reset_tmp_context();
 
         let tbmres_handle = TBMIterateResultHandle::from_raw(tbmres);
-        let found = state
-            .am_instance
-            .scan_bitmap_next_tuple(&tbmres_handle, &mut state.row)
+        let Some(operations) = <A::ScanSession as AmScanSession>::BITMAP else {
+            unreachable!("bitmap trampoline registered without BITMAP");
+        };
+        let found = operations
+            .next_tuple(&mut state.am_instance, &tbmres_handle, &mut state.row)
+            .report_unwrap();
+
+        if !found {
+            return false;
+        }
+
+        state.write_row_to_slot(slot).report_unwrap();
+        pg_sys::ExecStoreVirtualTuple(slot);
+        true
+    }
+}
+
+#[pg_guard]
+#[cfg(feature = "pg18")]
+pub extern "C-unwind" fn scan_bitmap_next_tuple<A>(
+    scan: pg_sys::TableScanDesc,
+    slot: *mut pg_sys::TupleTableSlot,
+    recheck: *mut bool,
+    lossy_pages: *mut u64,
+    exact_pages: *mut u64,
+) -> bool
+where
+    A: TableAccessMethod,
+{
+    unsafe {
+        let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
+        pg_sys::ExecClearTuple(slot);
+
+        let state = (*custom_scan).session_mut();
+        state.reset_tmp_context();
+
+        let iterator = &mut (*scan).st.rs_tbmiterator;
+        let mut iterator_handle = TBMIteratorHandle::from_raw(iterator);
+        let mut output_handle =
+            BitmapScanOutputHandle::from_raw(recheck, lossy_pages, exact_pages);
+        let Some(operations) = <A::ScanSession as AmScanSession>::BITMAP else {
+            unreachable!("bitmap trampoline registered without BITMAP");
+        };
+        let found = operations
+            .next_tuple(
+                &mut state.am_instance,
+                &mut iterator_handle,
+                &mut output_handle,
+                &mut state.row,
+            )
             .report_unwrap();
 
         if !found {
@@ -478,6 +538,28 @@ pub extern "C-unwind" fn tuple_get_latest_tid<A>(
 }
 
 #[pg_guard]
+#[cfg(feature = "pg16")]
+pub extern "C-unwind" fn scan_analyze_next_block<A>(
+    scan: pg_sys::TableScanDesc,
+    block: pg_sys::BlockNumber,
+    _strategy: pg_sys::BufferAccessStrategy,
+) -> bool
+where
+    A: TableAccessMethod,
+{
+    unsafe {
+        let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
+        let state = (*custom_scan).session_mut();
+
+        state
+            .am_instance
+            .scan_analyze_next_block(block)
+            .report_unwrap()
+    }
+}
+
+#[pg_guard]
+#[cfg(any(feature = "pg17", feature = "pg18"))]
 pub extern "C-unwind" fn scan_analyze_next_block<A>(
     scan: pg_sys::TableScanDesc,
     stream: *mut pg_sys::ReadStream,
@@ -489,9 +571,9 @@ where
         let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
         let state = (*custom_scan).session_mut();
         // SAFETY: PostgreSQL invokes this callback only from the active
-        // acquire_sample_rows() loop. On PG17 that loop owns both `stream` and
-        // the BlockSamplerData installed as its callback-private data until
-        // table_endscan() and read_stream_end() after the callback loop.
+        // acquire_sample_rows() loop. That loop owns both `stream` and the
+        // BlockSamplerData installed as its callback-private data until
+        // read_stream_end() and table_endscan() after the callback loop.
         let stream_handle = AnalyzeReadStreamHandle::from_raw(stream);
 
         state
@@ -556,20 +638,21 @@ pub fn register<A>(routine: &mut pg_sys::TableAmRoutine)
 where
     A: TableAccessMethod,
 {
-    let capabilities = A::SCAN_CAPABILITIES;
-
     routine.slot_callbacks = Some(slot_callbacks::<A>);
     routine.scan_begin = Some(scan_begin::<A>);
     routine.scan_end = Some(scan_end::<A>);
     routine.scan_rescan = Some(scan_rescan::<A>);
     routine.scan_getnextslot = Some(scan_getnextslot::<A>);
-    if capabilities.tid_range {
+    if <A::ScanSession as AmScanSession>::TID_RANGE.is_some() {
         routine.scan_set_tidrange = Some(scan_set_tidrange::<A>);
         routine.scan_getnextslot_tidrange = Some(scan_getnextslot_tidrange::<A>);
     }
 
-    if capabilities.bitmap {
-        routine.scan_bitmap_next_block = Some(scan_bitmap_next_block::<A>);
+    if <A::ScanSession as AmScanSession>::BITMAP.is_some() {
+        #[cfg(any(feature = "pg16", feature = "pg17"))]
+        {
+            routine.scan_bitmap_next_block = Some(scan_bitmap_next_block::<A>);
+        }
         routine.scan_bitmap_next_tuple = Some(scan_bitmap_next_tuple::<A>);
     }
     routine.scan_sample_next_block = Some(scan_sample_next_block::<A>);

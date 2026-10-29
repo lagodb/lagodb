@@ -1,7 +1,7 @@
 //! Arrow C Stream adapter for typed provider table scans.
 
 use std::ffi::{c_char, c_int, c_void};
-use std::ptr;
+use std::ptr::{self, NonNull};
 
 use arrow_array::ffi::FFI_ArrowArray;
 use arrow_array::ffi_stream::FFI_ArrowArrayStream;
@@ -15,7 +15,7 @@ use super::provider::TableScanStream;
 
 struct StreamState<S> {
     stream: S,
-    error: *mut CallbackErrorReport,
+    error: NonNull<CallbackErrorReport>,
 }
 
 /// Export one provider stream using callbacks that contain both PostgreSQL
@@ -26,7 +26,7 @@ struct StreamState<S> {
 /// `error` must remain writable until the returned Arrow stream is released.
 pub(super) unsafe fn export<S: TableScanStream>(
     stream: S,
-    error: *mut CallbackErrorReport,
+    error: NonNull<CallbackErrorReport>,
 ) -> FFI_ArrowArrayStream {
     let state = Box::new(StreamState { stream, error });
     FFI_ArrowArrayStream {
@@ -47,7 +47,7 @@ unsafe extern "C" fn get_schema<S: TableScanStream>(
     let state = unsafe { state::<S>(stream) };
     // SAFETY: `export` ties this pointer to the stream's release lifetime and
     // Arrow invokes callbacks synchronously on the PostgreSQL backend thread.
-    let error = unsafe { &mut *state.error };
+    let error = unsafe { state.error.as_mut() };
     // SAFETY: the engine-owned record is live and this is a PostgreSQL backend
     // thread with a live current memory context.
     let result = unsafe {
@@ -82,7 +82,7 @@ unsafe extern "C" fn get_next<S: TableScanStream>(
     let state = unsafe { state::<S>(stream) };
     // SAFETY: the error slot follows the same lifetime and backend-thread
     // contract documented by `export`.
-    let error = unsafe { &mut *state.error };
+    let error = unsafe { state.error.as_mut() };
     // SAFETY: the engine-owned record is live and this is a PostgreSQL backend
     // thread with a live current memory context.
     let result = unsafe {
@@ -154,9 +154,9 @@ unsafe extern "C" fn release<S: TableScanStream>(stream: *mut FFI_ArrowArrayStre
     let status = unsafe { cleanup_error.capture(release_state) };
     // SAFETY: the engine-owned slot outlives stream release by `export`'s
     // contract and callback/consumer access is serialized.
-    if status == CALLBACK_FAILED && !unsafe { (*error).is_set() } {
+    if status == CALLBACK_FAILED && !unsafe { error.as_ref() }.is_set() {
         // SAFETY: same live, uniquely written error slot as the condition.
-        unsafe { *error = cleanup_error };
+        unsafe { error.write(cleanup_error) };
     }
 }
 

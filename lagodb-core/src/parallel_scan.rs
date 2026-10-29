@@ -14,9 +14,6 @@ use thiserror::Error;
 
 use crate::diag::SqlStateError;
 
-const MAGIC: u32 = 0x4c_47_50_53;
-const VERSION: u16 = 1;
-
 #[derive(Debug, Error)]
 pub enum ParallelScanError {
     #[error("parallel scan work count must be greater than zero")]
@@ -25,10 +22,8 @@ pub enum ParallelScanError {
     EmptyPayload,
     #[error("parallel scan DSM size overflows PostgreSQL Size")]
     SizeOverflow,
-    #[error("parallel scan DSM coordinate is null")]
-    NullCoordinate,
-    #[error("parallel scan DSM header is invalid")]
-    InvalidHeader,
+    #[error("parallel scan coordinator is not attached to its DSM coordinate")]
+    NotAttached,
     #[error("parallel scan payload was not prepared before DSM estimation")]
     NotPrepared,
 }
@@ -59,9 +54,6 @@ impl PreparedParallelScan {
 
 #[repr(C)]
 struct SharedHeader {
-    magic: u32,
-    version: u16,
-    reserved: u16,
     work_count: u32,
     payload_len: usize,
     next_work: pg_sys::pg_atomic_uint32,
@@ -94,20 +86,19 @@ impl ParallelScanCoordinator {
     ///
     /// # Safety
     ///
-    /// `coordinate` must address at least [`Self::estimate`] bytes of DSM.
+    /// `coordinate` must be the `shm_toc_allocate` result PostgreSQL passes to
+    /// `InitializeDSM*Scan`, sized by [`Self::estimate`].
     pub unsafe fn initialize(
         &mut self,
         coordinate: *mut c_void,
     ) -> Result<(), ParallelScanError> {
-        let shared = NonNull::new(coordinate.cast::<SharedHeader>())
-            .ok_or(ParallelScanError::NullCoordinate)?;
+        // SAFETY: `shm_toc_allocate` raises ERROR instead of returning NULL.
+        let shared =
+            unsafe { NonNull::new_unchecked(coordinate.cast::<SharedHeader>()) };
         let prepared = self.prepared.take().ok_or(ParallelScanError::NotPrepared)?;
         let header = shared.as_ptr();
         unsafe {
             header.write(SharedHeader {
-                magic: MAGIC,
-                version: VERSION,
-                reserved: 0,
                 work_count: prepared.work_count,
                 payload_len: prepared.bytes.len(),
                 next_work: pg_sys::pg_atomic_uint32::default(),
@@ -130,33 +121,21 @@ impl ParallelScanCoordinator {
     ///
     /// # Safety
     ///
-    /// `coordinate` must remain live DSM storage until this coordinator is
-    /// detached or dropped.
-    pub unsafe fn attach(
-        &mut self,
-        coordinate: *mut c_void,
-    ) -> Result<(), ParallelScanError> {
-        let shared = NonNull::new(coordinate.cast::<SharedHeader>())
-            .ok_or(ParallelScanError::NullCoordinate)?;
-        let header = unsafe { shared.as_ref() };
-        if header.magic != MAGIC
-            || header.version != VERSION
-            || header.reserved != 0
-            || header.work_count == 0
-            || header.payload_len == 0
-        {
-            return Err(ParallelScanError::InvalidHeader);
-        }
-        payload_offset()
-            .checked_add(header.payload_len)
-            .ok_or(ParallelScanError::InvalidHeader)?;
+    /// `coordinate` must be the `shm_toc_lookup` result PostgreSQL passes to
+    /// `InitializeWorker*Scan` or `ReInitializeDSM*Scan` for a coordinate the
+    /// leader populated with [`Self::initialize`], and must remain live DSM
+    /// storage until this coordinator is detached or dropped.
+    pub unsafe fn attach(&mut self, coordinate: *mut c_void) {
+        // SAFETY: `shm_toc_lookup(..., false)` raises ERROR instead of
+        // returning NULL.
+        let shared =
+            unsafe { NonNull::new_unchecked(coordinate.cast::<SharedHeader>()) };
         self.prepared = None;
         self.shared = Some(shared);
-        Ok(())
     }
 
     pub fn payload(&self) -> Result<&[u8], ParallelScanError> {
-        let shared = self.shared.ok_or(ParallelScanError::InvalidHeader)?;
+        let shared = self.shared.ok_or(ParallelScanError::NotAttached)?;
         let header = unsafe { shared.as_ref() };
         let data = unsafe { shared.as_ptr().cast::<u8>().add(payload_offset()) };
         Ok(unsafe { slice::from_raw_parts(data, header.payload_len) })
@@ -164,7 +143,7 @@ impl ParallelScanCoordinator {
 
     /// Claim one group. The atomic operation runs once per group, not per row.
     pub fn claim(&self) -> Result<Option<u32>, ParallelScanError> {
-        let shared = self.shared.ok_or(ParallelScanError::InvalidHeader)?;
+        let shared = self.shared.ok_or(ParallelScanError::NotAttached)?;
         let header = shared.as_ptr();
         let work_id = unsafe {
             pg_sys::pg_atomic_fetch_add_u32(
@@ -177,7 +156,7 @@ impl ParallelScanCoordinator {
 
     /// Reset only shared claim state; the immutable payload remains in place.
     pub fn reinitialize(&self) -> Result<(), ParallelScanError> {
-        let shared = self.shared.ok_or(ParallelScanError::InvalidHeader)?;
+        let shared = self.shared.ok_or(ParallelScanError::NotAttached)?;
         unsafe {
             pg_sys::pg_atomic_write_u32(
                 core::ptr::addr_of_mut!((*shared.as_ptr()).next_work),

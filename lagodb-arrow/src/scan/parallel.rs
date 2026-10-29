@@ -2,7 +2,6 @@
 
 use std::ffi::c_void;
 use std::marker::PhantomData;
-use std::mem::size_of;
 use std::ptr;
 
 use arrow_array::ffi_stream::FFI_ArrowArrayStream;
@@ -14,7 +13,6 @@ use lagodb_core::runtime_api::{
     TableScanWorkerStreamRequest, WORKER_SOURCE_FAILED, WORKER_SOURCE_READY,
     WORKER_SOURCE_UNSUPPORTED, WorkerTableScanSourceResult,
 };
-use pgrx::prelude::PgSqlErrorCode;
 
 use super::c_stream;
 use super::provider::{ScanSupport, TableScanProvider, TableScanStream};
@@ -169,7 +167,6 @@ impl<P: TableScanWorkerProvider> TableScanWorkerAdapter<P> {
             let task_metrics = payload.task_metrics();
             unsafe {
                 *output = PreparedWorkerSourceResult {
-                    struct_size: size_of::<PreparedWorkerSourceResult>() as u32,
                     payload: Box::into_raw(Box::new(payload)).cast(),
                     data,
                     data_len,
@@ -203,24 +200,13 @@ impl<P: TableScanWorkerProvider> TableScanWorkerAdapter<P> {
 
     unsafe extern "C-unwind" fn decode_source(
         context: *mut c_void,
-        request: *const TableScanWorkerSourceRequest,
+        request: *const TableScanWorkerSourceRequest<'_>,
         output: *mut WorkerTableScanSourceResult,
         error: *mut CallbackErrorReport,
     ) -> u32 {
         let operation = || {
             let request = unsafe { &*request };
-            if request.struct_size != size_of::<TableScanWorkerSourceRequest>() as u32
-                || request.data_len == 0
-                || request.data.is_null()
-            {
-                return Err(PgReportError::from_message(
-                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    "table scan worker received an invalid source payload",
-                ));
-            }
-            let bytes = unsafe {
-                core::slice::from_raw_parts(request.data, request.data_len)
-            };
+            let bytes = request.data.as_slice();
             let provider = unsafe { Self::provider(context) };
             // SAFETY: the engine-side worker source owner keeps the immutable
             // DSM payload mapped until release_source has completed.
@@ -228,7 +214,6 @@ impl<P: TableScanWorkerProvider> TableScanWorkerAdapter<P> {
                 .map_err(PgReportError::from_domain_error)?;
             unsafe {
                 *output = WorkerTableScanSourceResult {
-                    struct_size: size_of::<WorkerTableScanSourceResult>() as u32,
                     source: Box::into_raw(Box::new(source)).cast(),
                 };
             }
@@ -240,25 +225,13 @@ impl<P: TableScanWorkerProvider> TableScanWorkerAdapter<P> {
     unsafe extern "C-unwind" fn open_stream(
         context: *mut c_void,
         source: *mut c_void,
-        request: *const TableScanWorkerStreamRequest,
+        request: *const TableScanWorkerStreamRequest<'_>,
         output: *mut c_void,
         error: *mut CallbackErrorReport,
     ) -> u32 {
         let operation = || {
             let request = unsafe { &*request };
-            if request.struct_size != size_of::<TableScanWorkerStreamRequest>() as u32
-                || request.work_id_count == 0
-                || request.work_ids.is_null()
-                || request.stream_error.is_null()
-            {
-                return Err(PgReportError::from_message(
-                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    "table scan worker received an invalid stream request",
-                ));
-            }
-            let work_ids = unsafe {
-                core::slice::from_raw_parts(request.work_ids, request.work_id_count)
-            };
+            let work_ids = request.work_ids.as_slice();
             let provider = unsafe { Self::provider(context) };
             let source = unsafe { &*source.cast::<P::WorkerSource>() };
             let stream = provider

@@ -1,14 +1,13 @@
 use std::ffi::c_void;
 use std::marker::PhantomData;
-use std::mem::size_of;
 use std::ptr;
 
 use arrow_array::ffi_stream::FFI_ArrowArrayStream;
 use arrow_schema::ffi::FFI_ArrowSchema;
 use lagodb_core::diag::PgReportError;
 use lagodb_core::expr::pushdown::{
-    FilterPlanningContext, PredicatePlan, QueryExpressionNormalizer,
-    QueryExpressionScope, QueryPruningPlanner,
+    FilterPlanningContext, FilterPushdownPlanner, PredicatePlan,
+    QueryExpressionNormalizer, QueryExpressionScope, QueryPruningPlanner,
 };
 use lagodb_core::handles::ExecutorHandle;
 use lagodb_core::hooks::register_table_scan;
@@ -26,7 +25,7 @@ use pgrx::prelude::PgSqlErrorCode;
 use super::c_stream;
 use super::provider::{
     ScanPlanningContext, ScanStreamOptions, ScanSupport, ScanTaskPlanningOptions,
-    TableScanProvider, decode_runtime_predicate, runtime_predicate_slot,
+    TableScanProvider, decode_runtime_predicate,
 };
 
 /// Complete C-compatible descriptor adapter for one typed provider.
@@ -91,7 +90,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
 
     unsafe extern "C-unwind" fn plan_scan(
         provider_context: *mut c_void,
-        request: *const TableScanPlanningRequest,
+        request: *const TableScanPlanningRequest<'_>,
         output: *mut PlannedTableScanResult,
         schema_output: *mut c_void,
         error: *mut CallbackErrorReport,
@@ -99,7 +98,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
         let mut outcome = TABLE_SCAN_UNSUPPORTED;
         let operation = || {
             // SAFETY: request remains live for this synchronous callback.
-            let mut planning = ScanPlanningContext::try_new(unsafe { &*request })?;
+            let mut planning = ScanPlanningContext::new(unsafe { &*request });
             // SAFETY: this adapter installed the backend-static context.
             let provider = unsafe { Self::provider(provider_context) };
             let pruning = Self::negotiate_pruning(provider, &mut planning)?;
@@ -127,7 +126,6 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
                     unsafe {
                         schema_output.cast::<FFI_ArrowSchema>().write(schema);
                         *output = PlannedTableScanResult {
-                            struct_size: size_of::<PlannedTableScanResult>() as u32,
                             plan_data,
                             pruning_expression,
                             rows_read: cost.rows_read(),
@@ -177,12 +175,15 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
         else {
             return Ok(None);
         };
-        let (normalized, predicate, costing) = negotiated.into_parts();
-        if costing.is_costed() {
-            planning.set_pruning_selectivity(unsafe {
-                planning.estimate_pruning_selectivity(normalized.pushed_expr())
-            });
-        }
+        let (normalized, predicate, costed_conjuncts) = negotiated.into_parts();
+        // SAFETY: the conjuncts are planner-owned quals of this scan's
+        // relation, live for this planning callback.
+        unsafe {
+            planning.set_pruning_conjuncts(
+                costed_conjuncts,
+                filter_planner.pruning_units(),
+            )
+        };
         let (_, _, pruning_expression) = normalized.into_parts();
         // PostgreSQL planning uses this artifact only to establish capability,
         // costing, and EXPLAIN identity. DataFusion negotiates the final filter
@@ -208,12 +209,6 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
         let operation = || {
             // SAFETY: request remains live for this synchronous callback.
             let request = unsafe { &*request };
-            if request.struct_size != size_of::<TableScanBindRequest>() as u32 {
-                return Err(PgReportError::from_message(
-                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    "table scan received an incompatible bind request",
-                ));
-            }
             // SAFETY: adapter installed context and plan_data is live.
             let provider = unsafe { Self::provider(context) };
             let plan = unsafe {
@@ -232,7 +227,6 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
             // SAFETY: runtime assumes ownership through release_bound.
             unsafe {
                 *output = BoundTableScanResult {
-                    struct_size: size_of::<BoundTableScanResult>() as u32,
                     bound: Box::into_raw(Box::new(scan)).cast(),
                 };
             }
@@ -309,15 +303,14 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
         let operation = || {
             let provider = unsafe { Self::provider(context) };
             let scan = unsafe { &*bound.cast::<P::BoundScan>() };
-            let slot = unsafe { runtime_predicate_slot(predicate) }
-                .map_err(P::Error::from)
-                .map_err(PgReportError::from_domain_error)?
-                .ok_or_else(|| {
-                    PgReportError::from_message(
-                        PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                        "table scan received a null predicate negotiation request",
-                    )
-                })?;
+            // SAFETY: the engine lends the predicate slot for this synchronous
+            // negotiation callback.
+            let &slot = unsafe { predicate.as_ref() }.ok_or_else(|| {
+                PgReportError::from_message(
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    "table scan received a null predicate negotiation request",
+                )
+            })?;
             let predicate = decode_runtime_predicate(&slot)
                 .map_err(P::Error::from)
                 .map_err(PgReportError::from_domain_error)?;
@@ -338,11 +331,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
                 ),
             };
             unsafe {
-                *output = TableScanPredicateResult {
-                    struct_size: size_of::<TableScanPredicateResult>() as u32,
-                    support,
-                    predicate,
-                };
+                *output = TableScanPredicateResult { support, predicate };
             }
             Ok(())
         };
@@ -352,7 +341,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
     unsafe extern "C-unwind" fn plan_scan_tasks(
         context: *mut c_void,
         bound: *mut c_void,
-        request: *const TableScanTaskPlanningRequest,
+        request: *const TableScanTaskPlanningRequest<'_>,
         output: *mut PlannedTableScanTasks,
         error: *mut CallbackErrorReport,
     ) -> u32 {
@@ -360,42 +349,19 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
             let provider = unsafe { Self::provider(context) };
             let scan = unsafe { &*bound.cast::<P::BoundScan>() };
             let request = unsafe { &*request };
-            let options = ScanTaskPlanningOptions::try_from_request(request)?;
-            if request.static_predicate_count != 0
-                && request.static_predicates.is_null()
-            {
-                return Err(PgReportError::from_message(
-                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    "table scan received an invalid static predicate handle array",
-                ));
-            }
-            let static_predicates = if request.static_predicate_count == 0 {
-                Vec::new()
-            } else {
-                unsafe {
-                    core::slice::from_raw_parts(
-                        request.static_predicates,
-                        request.static_predicate_count,
-                    )
-                }
+            let options = ScanTaskPlanningOptions::from_request(request);
+            // SAFETY: every handle was produced by this adapter's
+            // `negotiate_predicate` and stays open for this callback.
+            let static_predicates = request
+                .static_predicates
+                .as_slice()
                 .iter()
-                .map(|predicate| {
-                    let predicate = *predicate;
-                    if predicate.is_null() {
-                        return Err(PgReportError::from_message(
-                            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                            "table scan received a null static predicate handle",
-                        ));
-                    }
-                    Ok(unsafe { &*predicate.cast::<P::Predicate>() })
-                })
-                .collect::<Result<Vec<_>, _>>()?
-            };
-            let runtime_predicate = if request.runtime_predicate.is_null() {
-                None
-            } else {
-                Some(unsafe { &*request.runtime_predicate.cast::<P::Predicate>() })
-            };
+                .map(|predicate| unsafe { predicate.cast::<P::Predicate>().as_ref() })
+                .collect::<Vec<_>>();
+            let runtime_predicate =
+                request.runtime_predicate.map(|predicate| unsafe {
+                    predicate.cast::<P::Predicate>().as_ref()
+                });
             let (planned, metrics, exact_rows) = provider
                 .plan_scan_tasks(
                     scan,
@@ -407,7 +373,6 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
                 .into_parts();
             unsafe {
                 *output = PlannedTableScanTasks {
-                    struct_size: size_of::<PlannedTableScanTasks>() as u32,
                     planned: Box::into_raw(Box::new(planned)).cast(),
                     metrics,
                     has_exact_rows: u8::from(exact_rows.is_some()),

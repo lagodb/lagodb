@@ -1,20 +1,17 @@
-use std::mem::size_of;
-use std::ptr;
-
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use lagodb_core::diag::{PgReportError, SqlStateError};
 use lagodb_core::expr::ExpressionCodecError;
 use lagodb_core::expr::pushdown::{
-    FilterPlanningContext, FilterPushdown, PredicatePlan,
+    CostedConjunct, FilterPlanningContext, FilterPushdown, PredicatePlan,
+    PruningEstimate, RelationFilterEstimator,
 };
 use lagodb_core::handles::ExecutorHandle;
 use lagodb_core::plan_data::{PlanDataError, PlanDataReader, PlanDataWriter};
 use lagodb_core::query_contract::{ScanCost, ScanId};
 use lagodb_core::runtime_api::{
     RuntimePredicateCodecError, RuntimePredicateUpdateAction,
-    RuntimePruningPredicate, TABLE_SCAN_PROJECTION_COLUMNS,
-    TABLE_SCAN_PROJECTION_ROW_COUNT, TableScanPlanningRequest, TableScanRoutes,
+    RuntimePruningPredicate, TableScanPlanningRequest, TableScanRoutes,
     TableScanRuntimePredicate, TableScanStreamRequest, TableScanTaskMetrics,
     TableScanTaskPlanningRequest,
 };
@@ -30,93 +27,74 @@ pub enum ScanProjection<'a> {
 
 /// Borrowed provider-facing view of one table-scan planning request.
 pub struct ScanPlanningContext<'a> {
-    request: &'a TableScanPlanningRequest,
+    request: &'a TableScanPlanningRequest<'a>,
     projection: ScanProjection<'a>,
-    pruning_selectivity: f64,
+    /// Provider-approved pruning conjuncts, each with the costing the
+    /// provider gives it alone, and the provider's pruning units.
+    pruning_conjuncts: Vec<CostedConjunct>,
+    pruning_units: Option<f64>,
 }
 
 impl<'a> ScanPlanningContext<'a> {
-    pub(super) fn try_new(
-        request: &'a TableScanPlanningRequest,
-    ) -> Result<Self, PgReportError> {
-        if request.struct_size != size_of::<TableScanPlanningRequest>() as u32 {
-            return Err(PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "table scan received an incompatible planning request",
-            ));
-        }
-        let projection = match request.projection_kind {
-            TABLE_SCAN_PROJECTION_ROW_COUNT => ScanProjection::RowCount,
-            TABLE_SCAN_PROJECTION_COLUMNS => {
-                if request.projected_attno_count == 0
-                    || request.projected_attnos.is_null()
-                {
-                    return Err(PgReportError::from_message(
-                        PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                        "column table scan received an empty projection",
-                    ));
-                }
-                let columns = unsafe {
-                    core::slice::from_raw_parts(
-                        request.projected_attnos,
-                        request.projected_attno_count,
-                    )
-                };
-                if columns.iter().any(|attno| *attno <= 0) {
-                    return Err(PgReportError::from_message(
-                        PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                        "column table scan received an invalid attribute number",
-                    ));
-                }
-                ScanProjection::Columns(columns)
-            }
-            _ => {
-                return Err(PgReportError::from_message(
-                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    "table scan received an unknown projection kind",
-                ));
-            }
+    pub(super) fn new(request: &'a TableScanPlanningRequest<'a>) -> Self {
+        // A nonempty projection lists planner-validated user attnos (>= 1).
+        let attnos = request.projected_attnos.as_slice();
+        let projection = if attnos.is_empty() {
+            ScanProjection::RowCount
+        } else {
+            ScanProjection::Columns(attnos)
         };
-        Ok(Self {
+        Self {
             request,
             projection,
-            pruning_selectivity: 1.0,
-        })
+            pruning_conjuncts: Vec::new(),
+            pruning_units: None,
+        }
     }
 
-    pub(super) fn set_pruning_selectivity(&mut self, selectivity: f64) {
-        self.pruning_selectivity = selectivity.clamp(0.0, 1.0);
+    /// Record the provider-approved pruning conjuncts and pruning units that
+    /// [`Self::pruning`] and [`Self::layout_fraction`] estimate.
+    ///
+    /// # Safety
+    ///
+    /// Every conjunct is a planner-owned qual of this scan's relation that
+    /// outlives this planning callback.
+    pub(super) unsafe fn set_pruning_conjuncts(
+        &mut self,
+        conjuncts: Vec<CostedConjunct>,
+        units: Option<f64>,
+    ) {
+        self.pruning_conjuncts = conjuncts;
+        self.pruning_units = units;
     }
 
-    /// Estimate the provider-approved pruning expression with PostgreSQL's
-    /// relation statistics. The adapter calls this once during planning, never
-    /// from execution or a per-row path.
-    pub(super) unsafe fn estimate_pruning_selectivity(
-        &self,
-        expression: *mut pg_sys::Expr,
-    ) -> f64 {
-        let clauses = unsafe { pg_sys::lappend(ptr::null_mut(), expression.cast()) };
-        let selectivity = unsafe {
-            pg_sys::clauselist_selectivity(
+    /// Share of the relation the costed pruning conjuncts leave to scan,
+    /// layout and statistics pruning together, computed on each call.
+    /// [`PruningEstimate::NONE`] means that no pruning may reduce physical
+    /// work.
+    pub fn pruning(&self) -> PruningEstimate {
+        self.filter_estimator()
+            .pruning(self.pruning_conjuncts.iter().copied(), self.pruning_units)
+    }
+
+    /// Share of the relation the layout-pruned conjuncts alone leave to scan,
+    /// for a relation whose statistics do not follow its physical order. It
+    /// looks up no column correlation.
+    pub fn layout_fraction(&self) -> f64 {
+        self.filter_estimator()
+            .layout_selectivity(self.pruning_conjuncts.iter().copied())
+    }
+
+    fn filter_estimator(&self) -> RelationFilterEstimator {
+        // SAFETY: the request carries the live planner state that owns this
+        // scan's range-table entry, and `set_pruning_conjuncts` admits only
+        // its planner-owned quals.
+        unsafe {
+            RelationFilterEstimator::new(
                 self.request.root,
-                clauses,
-                self.request.range_table_index as i32,
-                pg_sys::JoinType::JOIN_INNER,
-                ptr::null_mut(),
+                self.request.range_table_index,
             )
-        };
-        // `lappend` owns only its list cell; the expression remains
-        // planner-owned. Provider negotiation runs for every candidate, so do
-        // not retain one cell until planner-context teardown per attempt.
-        unsafe { pg_sys::list_free(clauses) };
-        selectivity.clamp(0.0, 1.0)
-    }
-
-    /// PostgreSQL estimate for the provider-approved, costable pruning
-    /// expression. `1.0` means that no pruning may reduce physical work.
-    #[inline]
-    pub const fn pruning_selectivity(&self) -> f64 {
-        self.pruning_selectivity
+        }
     }
 
     #[inline]
@@ -235,37 +213,11 @@ pub struct ScanTaskPlanningOptions {
 }
 
 impl ScanTaskPlanningOptions {
-    pub(super) fn try_from_request(
-        request: &TableScanTaskPlanningRequest,
-    ) -> Result<Self, PgReportError> {
-        if request.struct_size != size_of::<TableScanTaskPlanningRequest>() as u32 {
-            return Err(PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "table scan received incompatible task-planning options",
-            ));
-        }
-        if request.projected_column_count != 0 && request.projected_columns.is_null()
-        {
-            return Err(PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "table scan received invalid task-planning arrays",
-            ));
-        }
-        let projection = if request.projected_column_count == 0 {
-            Vec::new().into_boxed_slice()
-        } else {
-            unsafe {
-                core::slice::from_raw_parts(
-                    request.projected_columns,
-                    request.projected_column_count,
-                )
-            }
-            .into()
-        };
-        Ok(Self {
-            projection,
+    pub(super) fn from_request(request: &TableScanTaskPlanningRequest<'_>) -> Self {
+        Self {
+            projection: request.projected_columns.as_slice().into(),
             request_exact_rows: request.request_exact_rows != 0,
-        })
+        }
     }
 
     #[inline]
@@ -317,10 +269,7 @@ impl ScanStreamOptions {
     pub(super) fn try_from_request(
         request: &TableScanStreamRequest,
     ) -> Result<Self, PgReportError> {
-        if request.struct_size != size_of::<TableScanStreamRequest>() as u32
-            || request.maximum_batch_rows == 0
-            || request.stream_error.is_null()
-        {
+        if request.maximum_batch_rows == 0 {
             return Err(PgReportError::from_message(
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
                 "table scan received invalid stream limits",
@@ -349,9 +298,9 @@ impl ScanStreamOptions {
         self,
         last_generation: u64,
     ) -> Result<Option<RuntimePredicateUpdate>, RuntimePredicateCodecError> {
-        let Some(slot) =
-            (unsafe { runtime_predicate_slot(self.evolving_predicate) })?
-        else {
+        // SAFETY: a non-null evolving slot is engine-owned and stays live until
+        // the Arrow stream release callback returns.
+        let Some(&slot) = (unsafe { self.evolving_predicate.as_ref() }) else {
             return Ok(None);
         };
         if slot.generation == last_generation {
@@ -406,24 +355,6 @@ impl RuntimePredicateUpdate {
     }
 }
 
-/// Copy a predicate slot whose lifetime is governed by the table-scan ABI.
-///
-/// # Safety
-///
-/// A non-null pointer must name the engine-owned slot retained for the current
-/// synchronous callback or Arrow stream lifetime.
-pub(super) unsafe fn runtime_predicate_slot(
-    predicate: *const TableScanRuntimePredicate,
-) -> Result<Option<TableScanRuntimePredicate>, RuntimePredicateCodecError> {
-    let Some(predicate) = (unsafe { predicate.as_ref() }) else {
-        return Ok(None);
-    };
-    if predicate.struct_size != size_of::<TableScanRuntimePredicate>() as u32 {
-        return Err(RuntimePredicateCodecError::IncompatibleLayout);
-    }
-    Ok(Some(*predicate))
-}
-
 pub(super) fn decode_runtime_predicate(
     predicate: &TableScanRuntimePredicate,
 ) -> Result<RuntimePruningPredicate<'static>, RuntimePredicateCodecError> {
@@ -436,15 +367,11 @@ pub(super) fn decode_runtime_predicate(
             return Err(RuntimePredicateCodecError::ExpectedReplacement);
         }
     }
-    if predicate.data_len == 0 {
-        return Err(RuntimePredicateCodecError::Truncated);
-    }
     if predicate.data.is_null() {
         return Err(RuntimePredicateCodecError::NullData);
     }
-    // SAFETY: `runtime_predicate_slot` validated the fixed-layout slot, and the
-    // exact-build ABI requires its non-null data/count pair to remain live for
-    // this serialized callback.
+    // SAFETY: the exact-build ABI requires the slot's non-null data/count pair
+    // to remain live for this serialized callback.
     let data =
         unsafe { core::slice::from_raw_parts(predicate.data, predicate.data_len) };
     RuntimePruningPredicate::decode(data)
