@@ -2,7 +2,7 @@
 
 mod codec;
 mod contract;
-mod expression_codec;
+mod estimate;
 mod ir;
 mod negotiate;
 mod negotiation;
@@ -13,14 +13,17 @@ mod scope;
 mod tree;
 
 pub(crate) use codec::{EncodedFilterData, FilterDataCodec, FilterDataError};
-pub(crate) use contract::{BoundFilter, EffectiveFilterContract};
+pub(crate) use contract::{BoundFilter, EffectiveFilterContract, RowFilter};
 pub use contract::{
-    BoundFilterSet, FilterBindResult, FilterPlan, FilterPlanningContext,
-    FilterPushdown, FilterPushdownPlanner, PlannedFilter,
+    BoundFilterSet, FilterBindResult, FilterEvaluation, FilterPlan,
+    FilterPlanningContext, FilterPushdown, FilterPushdownPlanner, PlannedFilter,
+};
+pub use estimate::{
+    FilterEstimate, PathFilterEstimates, PruningEstimate, RelationFilterEstimator,
 };
 pub use ir::{PredicateExpr, PredicateFragment, ScalarExpr};
 pub(crate) use negotiate::{FilterNegotiator, ScanClauseSource};
-pub use negotiation::{QueryPruningPlan, QueryPruningPlanner};
+pub use negotiation::{CostedConjunct, QueryPruningPlan, QueryPruningPlanner};
 pub(crate) use normalize::RelationExpressionNormalizer;
 pub use normalize::{NormalizedPredicate, QueryExpressionNormalizer};
 pub use plan_set::FilterPlanSummary;

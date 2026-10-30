@@ -3,6 +3,7 @@
 
 use pgrx::pg_sys;
 
+use crate::datum::PgType;
 use crate::query_contract::ScanId;
 
 /// PostgreSQL type metadata for one scalar expression.
@@ -103,6 +104,22 @@ pub struct RuntimeValueSpec {
     /// direct scalar constant is exactly bindable to it.
     pub value_type: ExprType,
     pub source_kind: RuntimeValueSource,
+}
+
+impl RuntimeValueSpec {
+    /// Element metadata of an array-valued slot; `None` for any other type.
+    pub fn array_element(self) -> Option<Self> {
+        let element = PgType::new(self.value_type.type_oid, self.value_type.typmod)
+            .element()?;
+        Some(Self {
+            value_type: ExprType {
+                type_oid: element.oid,
+                typmod: element.typmod,
+                ..self.value_type
+            },
+            ..self
+        })
+    }
 }
 
 /// Dense metadata table shared by plan codecs and executor binding state.

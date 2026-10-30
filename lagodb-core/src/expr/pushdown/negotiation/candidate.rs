@@ -96,12 +96,18 @@ unsafe fn candidate_from_boolean<E>(
 pub struct QueryPruningPlan<P> {
     normalized: NormalizedPredicate,
     planned: P,
-    costing: PushdownCosting,
+    costed_conjuncts: Vec<CostedConjunct>,
 }
 
+/// A top-level conjunct's pushed expression and the costing the provider
+/// gives it alone. A relation scan prices each RestrictInfo by its own
+/// costing; a query scan prices each conjunct so, keeping the layout and
+/// statistics pruning of one conjunction apart.
+pub type CostedConjunct = (*mut pg_sys::Expr, PushdownCosting);
+
 impl<P> QueryPruningPlan<P> {
-    pub fn into_parts(self) -> (NormalizedPredicate, P, PushdownCosting) {
-        (self.normalized, self.planned, self.costing)
+    pub fn into_parts(self) -> (NormalizedPredicate, P, Vec<CostedConjunct>) {
+        (self.normalized, self.planned, self.costed_conjuncts)
     }
 }
 
@@ -147,16 +153,35 @@ impl<'a> QueryPruningPlanner<'a> {
         {
             match planner.try_plan_filter(normalized.fragment())? {
                 FilterPlan::Exact(planned) | FilterPlan::Conservative(planned) => {
+                    let source_conjuncts =
+                        unsafe { Self::source_conjuncts(expression) };
+                    let mut costed_conjuncts = Vec::new();
+                    if source_conjuncts.len() == 1 {
+                        // The expression is its only conjunct, planned above.
+                        costed_conjuncts
+                            .push((normalized.pushed_expr(), planned.costing));
+                    } else {
+                        for child in source_conjuncts {
+                            if let Some(conjunct) = unsafe {
+                                self.normalizer.normalize_predicate(child.cast())
+                            } && let Some(costed) =
+                                Self::costed_conjunct(&conjunct, planner)?
+                            {
+                                costed_conjuncts.push(costed);
+                            }
+                        }
+                    }
                     return Ok(Some(QueryPruningPlan {
                         normalized,
                         planned: planned.predicate,
-                        costing: planned.costing,
+                        costed_conjuncts,
                     }));
                 }
                 FilterPlan::Partial(_) | FilterPlan::Unsupported => {}
             }
         }
 
+        let mut costed_conjuncts = Vec::new();
         let candidate = {
             let mut normalize = |node: *mut pg_sys::Expr| unsafe {
                 self.normalizer.normalize_predicate(node.cast())
@@ -184,6 +209,13 @@ impl<'a> QueryPruningPlanner<'a> {
             }
             let is_widened = candidates.len() != source_conjunct_count
                 || candidates.iter().any(|candidate| candidate.is_widened);
+            for candidate in &candidates {
+                if let Some(costed) =
+                    Self::costed_conjunct(&candidate.filter, planner)?
+                {
+                    costed_conjuncts.push(costed);
+                }
+            }
             (unsafe {
                 NormalizedPredicate::combine_and(
                     candidates
@@ -197,18 +229,32 @@ impl<'a> QueryPruningPlanner<'a> {
         let Some(candidate) = candidate else {
             return Ok(None);
         };
-        let (planned, costing) =
-            match planner.try_plan_filter(candidate.filter.fragment())? {
-                FilterPlan::Exact(planned) | FilterPlan::Conservative(planned) => {
-                    (planned.predicate, planned.costing)
-                }
-                FilterPlan::Partial(_) | FilterPlan::Unsupported => return Ok(None),
-            };
+        let planned = match planner.try_plan_filter(candidate.filter.fragment())? {
+            FilterPlan::Exact(planned) | FilterPlan::Conservative(planned) => {
+                planned.predicate
+            }
+            FilterPlan::Partial(_) | FilterPlan::Unsupported => return Ok(None),
+        };
         Ok(Some(QueryPruningPlan {
             normalized: candidate.filter,
             planned,
-            costing,
+            costed_conjuncts,
         }))
+    }
+
+    /// `conjunct` with the costing the provider gives it alone, `None` when
+    /// the provider cannot plan it alone. Both callers pass a conjunct of a
+    /// statement-stable plan, so its values are statement-stable too.
+    fn costed_conjunct<P: FilterPushdownPlanner>(
+        conjunct: &NormalizedPredicate,
+        planner: &mut P,
+    ) -> Result<Option<CostedConjunct>, P::Error> {
+        Ok(match planner.try_plan_filter(conjunct.fragment())? {
+            FilterPlan::Exact(planned) | FilterPlan::Conservative(planned) => {
+                Some((conjunct.pushed_expr(), planned.costing))
+            }
+            FilterPlan::Partial(_) | FilterPlan::Unsupported => None,
+        })
     }
 
     /// Flatten the same top-level conjunction that DataFusion presents to

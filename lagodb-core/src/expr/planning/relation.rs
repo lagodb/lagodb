@@ -48,6 +48,20 @@ impl PlanRelationResolver {
         };
         unsafe { (*rte).relid }
     }
+
+    /// Whether `relid` belongs to PostgreSQL's complete result-relation set.
+    /// Command-specific support remains the caller's policy.
+    ///
+    /// # Safety
+    ///
+    /// `self.root` must point to a live `PlannerInfo`, and `relid` must be a
+    /// valid planner relation index for that root.
+    #[inline]
+    pub unsafe fn is_result_relation(self, relid: pg_sys::Index) -> bool {
+        unsafe {
+            pg_sys::bms_is_member(relid as c_int, (*self.root).all_result_relids)
+        }
+    }
 }
 
 /// Planner-local index of relation user-column `Var` nodes by attribute number.

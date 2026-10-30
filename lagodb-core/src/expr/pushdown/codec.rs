@@ -17,8 +17,9 @@ use super::{FilterPushdown, NegotiatedFilterSet, PlannedFilterRecord};
 
 const CONTRACT_EXACT: i32 = 0;
 const CONTRACT_CONSERVATIVE: i32 = 1;
-const COSTING_COSTED: i32 = 0;
+const COSTING_LAYOUT: i32 = 0;
 const COSTING_UNCOSTED: i32 = 1;
+const COSTING_STATISTICS: i32 = 2;
 
 pub(crate) struct EncodedFilterData {
     pub planned: *mut pg_sys::List,
@@ -128,7 +129,8 @@ impl FilterRecordCodec {
 
     fn costing_tag(costing: PushdownCosting) -> i32 {
         match costing {
-            PushdownCosting::CostedPruning => COSTING_COSTED,
+            PushdownCosting::LayoutPruning => COSTING_LAYOUT,
+            PushdownCosting::StatisticsPruning => COSTING_STATISTICS,
             PushdownCosting::UncostedBestEffort => COSTING_UNCOSTED,
         }
     }
@@ -138,7 +140,8 @@ impl FilterRecordCodec {
         value: i32,
     ) -> Result<PushdownCosting, FilterRecordError> {
         match value {
-            COSTING_COSTED => Ok(PushdownCosting::CostedPruning),
+            COSTING_LAYOUT => Ok(PushdownCosting::LayoutPruning),
+            COSTING_STATISTICS => Ok(PushdownCosting::StatisticsPruning),
             COSTING_UNCOSTED => Ok(PushdownCosting::UncostedBestEffort),
             value => Err(FilterRecordError::UnknownCosting { record, value }),
         }
@@ -364,7 +367,8 @@ mod tests {
     #[test]
     fn costing_tags_round_trip_and_unknown_tag_is_rejected() {
         for costing in [
-            PushdownCosting::CostedPruning,
+            PushdownCosting::LayoutPruning,
+            PushdownCosting::StatisticsPruning,
             PushdownCosting::UncostedBestEffort,
         ] {
             assert_eq!(

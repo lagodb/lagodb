@@ -3,7 +3,7 @@
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 
-use pgrx::pg_sys;
+use pgrx::{FromDatum, pg_sys};
 
 use crate::expr::contract::{ParamKey, PgComparisonOp};
 use crate::expr::{BooleanTestKind, PgIntegerWidening};
@@ -109,6 +109,7 @@ pg_node_view!(PgVar, Var, T_Var);
 pg_node_view!(PgConst, Const, T_Const);
 pg_node_view!(PgParam, Param, T_Param);
 pg_node_view!(PgOpExpr, OpExpr, T_OpExpr);
+pg_node_view!(PgScalarArrayOpExpr, ScalarArrayOpExpr, T_ScalarArrayOpExpr);
 pg_node_view!(PgBoolExpr, BoolExpr, T_BoolExpr);
 pg_node_view!(PgNullTest, NullTest, T_NullTest);
 pg_node_view!(PgBooleanTest, BooleanTest, T_BooleanTest);
@@ -162,6 +163,16 @@ impl PgConst<'_> {
     #[inline]
     pub fn typmod(self) -> i32 {
         unsafe { (*self.ptr.as_ptr()).consttypmod }
+    }
+
+    /// Read a non-NULL built-in `int4` constant.
+    pub fn int4_value(self) -> Option<i32> {
+        let (type_oid, _, datum, is_null) = self.parts();
+        if type_oid != pg_sys::INT4OID {
+            return None;
+        }
+        // SAFETY: the type check above makes this Const's datum an int4.
+        unsafe { i32::from_datum(datum, is_null) }
     }
 
     /// Copy a non-NULL built-in `text` constant as server-encoding bytes.
@@ -344,6 +355,39 @@ impl<'a> PgFuncExpr<'a> {
             node.funcresulttype,
         )?;
         Some(var)
+    }
+}
+
+impl<'a> PgScalarArrayOpExpr<'a> {
+    /// True for `op ANY (array)`, false for `op ALL (array)`.
+    #[inline]
+    pub fn use_or(self) -> bool {
+        unsafe { (*self.ptr.as_ptr()).useOr }
+    }
+
+    /// The operator applied to each element. The node stores no result type or
+    /// result collation because its operator always yields boolean.
+    #[inline]
+    pub fn comparison_op(self) -> PgComparisonOp {
+        let node = unsafe { self.ptr.as_ref() };
+        PgComparisonOp {
+            opno: node.opno,
+            opfuncid: node.opfuncid,
+            opresulttype: pg_sys::BOOLOID,
+            opcollid: pg_sys::InvalidOid,
+            inputcollid: node.inputcollid,
+        }
+    }
+
+    /// The scalar and array operands PostgreSQL supplies on every node.
+    #[inline]
+    pub fn operands(self) -> (PgExprRef<'a>, PgExprRef<'a>) {
+        let args = unsafe { (*self.ptr.as_ptr()).args };
+        let scalar = unsafe { pg_sys::list_nth(args, 0) } as *mut pg_sys::Expr;
+        let array = unsafe { pg_sys::list_nth(args, 1) } as *mut pg_sys::Expr;
+        (unsafe { PgExprRef::from_raw(scalar) }, unsafe {
+            PgExprRef::from_raw(array)
+        })
     }
 }
 

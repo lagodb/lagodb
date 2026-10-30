@@ -8,20 +8,14 @@ use crate::plan_data::{PlanDataError, PlanDataReader, PlanDataWriter};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExpressionCodecError {
-    #[error("unknown boolean test tag {0}")]
-    UnknownBooleanTest(i32),
     #[error("expression plan-data primitive failed: {0}")]
     PlanData(#[from] PlanDataError),
     #[error("unknown scalar expression tag {0}")]
     UnknownScalar(i32),
-    #[error("unknown predicate expression tag {0}")]
-    UnknownPredicate(i32),
     #[error("unknown runtime value source tag {0}")]
     UnknownRuntimeValueSource(i32),
     #[error("runtime value identity {index} exceeds layout length {count}")]
     RuntimeValueOutOfBounds { index: usize, count: usize },
-    #[error("column expression contains invalid attribute number {0}")]
-    InvalidAttribute(i32),
 }
 
 pub trait ExpressionPlanDataEncode {

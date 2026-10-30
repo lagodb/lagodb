@@ -2,15 +2,16 @@
 
 use pgrx::pg_sys;
 
-use crate::expr::contract::{PushdownContract, PushdownCosting};
+use crate::expr::contract::PushdownContract;
 use crate::expr::inspect::subtree_is_unsafe_to_push;
 
 use super::negotiation::{
     ConservativeCandidate, bool_children, bool_expr, conservative_candidate,
 };
 use super::{
-    EffectiveFilterContract, FilterPlan, FilterPushdownPlanner, NegotiatedFilterSet,
-    NormalizedPredicate, RelationExpressionNormalizer,
+    EffectiveFilterContract, FilterEvaluation, FilterPlan, FilterPushdownPlanner,
+    NegotiatedFilterSet, NormalizedPredicate, PlannedFilter,
+    RelationExpressionNormalizer, RowFilter,
 };
 
 /// Origin of a PostgreSQL planner clause list.
@@ -102,28 +103,26 @@ impl<'a, P: FilterPushdownPlanner> FilterNegotiator<'a, P> {
         if let Some(normalized) = unsafe { self.normalizer.normalize(original) } {
             match self.planner.try_plan_filter(&normalized.fragment)? {
                 FilterPlan::Exact(planned) => {
-                    out.accept(
-                        original,
-                        normalized,
-                        planned.predicate,
-                        EffectiveFilterContract {
-                            contract: PushdownContract::ExactRowFilter,
-                            costing: planned.costing,
-                        },
-                    );
-                    return Ok(());
+                    return unsafe {
+                        self.accept(
+                            original,
+                            normalized,
+                            planned,
+                            PushdownContract::ExactRowFilter,
+                            out,
+                        )
+                    };
                 }
                 FilterPlan::Conservative(planned) => {
-                    out.accept(
-                        original,
-                        normalized,
-                        planned.predicate,
-                        EffectiveFilterContract {
-                            contract: PushdownContract::ConservativePruning,
-                            costing: planned.costing,
-                        },
-                    );
-                    return Ok(());
+                    return unsafe {
+                        self.accept(
+                            original,
+                            normalized,
+                            planned,
+                            PushdownContract::ConservativePruning,
+                            out,
+                        )
+                    };
                 }
                 FilterPlan::Partial(_) | FilterPlan::Unsupported => {}
             }
@@ -167,18 +166,19 @@ impl<'a, P: FilterPushdownPlanner> FilterNegotiator<'a, P> {
                     return Ok(());
                 }
                 match self.planner.try_plan_filter(&candidate.fragment)? {
+                    // The widened filter keeps the provider's costing: path
+                    // costing prices the pushed expression, not the narrower
+                    // source clause PostgreSQL rechecks.
                     FilterPlan::Exact(planned)
-                    | FilterPlan::Conservative(planned) => {
-                        out.accept(
+                    | FilterPlan::Conservative(planned) => unsafe {
+                        self.accept(
                             original,
                             candidate,
-                            planned.predicate,
-                            EffectiveFilterContract {
-                                contract: PushdownContract::ConservativePruning,
-                                costing: PushdownCosting::UncostedBestEffort,
-                            },
-                        );
-                    }
+                            planned,
+                            PushdownContract::ConservativePruning,
+                            out,
+                        )
+                    }?,
                     FilterPlan::Partial(_) | FilterPlan::Unsupported => {
                         out.push_residual(original)
                     }
@@ -190,17 +190,81 @@ impl<'a, P: FilterPushdownPlanner> FilterNegotiator<'a, P> {
         Ok(())
     }
 
+    unsafe fn accept(
+        &mut self,
+        original: *mut pg_sys::Expr,
+        filter: NormalizedPredicate,
+        planned: PlannedFilter<P::PlannedPredicate>,
+        contract: PushdownContract,
+        out: &mut NegotiatedFilterSet<P::PlannedPredicate>,
+    ) -> Result<(), P::Error> {
+        let row_filter =
+            unsafe { self.row_filter(filter.pushed_expr, planned.evaluation) }?;
+        out.accept(
+            original,
+            filter,
+            planned.predicate,
+            EffectiveFilterContract {
+                contract,
+                costing: planned.costing,
+                row_filter,
+            },
+        );
+        Ok(())
+    }
+
+    /// What of `pushed_expr` the provider evaluates on each row it reads.
+    /// A [`FilterEvaluation::Projected`] part is the widened candidate of
+    /// the sub-filters the provider plans as per-row filters. A derivation
+    /// that keeps nothing leaves the filter priced as pruning-only.
+    unsafe fn row_filter(
+        &mut self,
+        pushed_expr: *mut pg_sys::Expr,
+        evaluation: FilterEvaluation,
+    ) -> Result<RowFilter, P::Error> {
+        match evaluation {
+            FilterEvaluation::PerRow => Ok(RowFilter::Whole),
+            FilterEvaluation::PruningOnly => Ok(RowFilter::Nothing),
+            FilterEvaluation::Projected => Ok(unsafe {
+                self.candidate_where(pushed_expr, |plan| {
+                    matches!(
+                        plan,
+                        FilterPlan::Exact(planned) | FilterPlan::Conservative(planned)
+                            if planned.evaluation == FilterEvaluation::PerRow
+                    )
+                })
+            }?
+            .map_or(RowFilter::Nothing, |candidate| {
+                RowFilter::Part(candidate.filter.pushed_expr)
+            })),
+        }
+    }
+
     unsafe fn candidate_for(
         &mut self,
         expr: *mut pg_sys::Expr,
+    ) -> Result<Option<ConservativeCandidate>, P::Error> {
+        unsafe {
+            self.candidate_where(expr, |plan| {
+                !matches!(plan, FilterPlan::Partial(_) | FilterPlan::Unsupported)
+            })
+        }
+    }
+
+    /// The widened candidate of `expr` keeping the fragments whose provider
+    /// plan `accepts_plan` accepts.
+    unsafe fn candidate_where(
+        &mut self,
+        expr: *mut pg_sys::Expr,
+        accepts_plan: impl Fn(&FilterPlan<P::PlannedPredicate>) -> bool,
     ) -> Result<Option<ConservativeCandidate>, P::Error> {
         let normalizer = self.normalizer;
         let mut normalize = |expression| unsafe { normalizer.normalize(expression) };
         let planner = &mut *self.planner;
         let mut accepts = |fragment: &_| {
-            planner.try_plan_filter(fragment).map(|plan| {
-                !matches!(plan, FilterPlan::Partial(_) | FilterPlan::Unsupported)
-            })
+            planner
+                .try_plan_filter(fragment)
+                .map(|plan| accepts_plan(&plan))
         };
         unsafe { conservative_candidate(expr, &mut normalize, &mut accepts) }
     }

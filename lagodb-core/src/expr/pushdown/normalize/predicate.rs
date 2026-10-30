@@ -2,15 +2,45 @@
 
 use pgrx::pg_sys;
 
-use crate::expr::pg::{PgConst, PgExprRef};
+use crate::expr::pg::{PgConst, PgExprRef, PgScalarArrayOpExpr};
 use crate::expr::{
     PgComparisonKind, PgComparisonOp, PgComparisonSignature, PgNanComparison,
     PgTextComparisonSemantics, RuntimeValueExpr,
 };
 
-use super::{ExpressionNormalizer, PredicateExpr, ScalarExpr};
+use super::{ExpressionNormalizer, ExpressionScope, PredicateExpr, ScalarExpr};
 
 impl ExpressionNormalizer<'_> {
+    /// Normalize `column op ANY (array)` with the array in one value slot.
+    ///
+    /// Query scope declines the leaf. PostgreSQL negotiation there only sets
+    /// costing and EXPLAIN identity; DataFusion negotiates the filter it
+    /// executes, and that filter carries no set. Accepting it here would credit
+    /// file selection that execution never performs.
+    pub(super) fn normalize_in_set(
+        &self,
+        membership: PgScalarArrayOpExpr<'_>,
+        bindings: &mut Vec<RuntimeValueExpr>,
+    ) -> Option<PredicateExpr> {
+        if matches!(self.scope, ExpressionScope::Query(_)) || !membership.use_or() {
+            return None;
+        }
+        let (value, set) = membership.operands();
+        let value = self.normalize_scalar(value, bindings)?;
+        if !matches!(value, ScalarExpr::Column(_)) {
+            return None;
+        }
+        let set = self.normalize_scalar(set, bindings)?;
+        if !matches!(set, ScalarExpr::Value(_)) {
+            return None;
+        }
+        Some(PredicateExpr::InSet {
+            operator: membership.comparison_op(),
+            value,
+            set,
+        })
+    }
+
     pub(super) unsafe fn normalize_boolean_column(
         &self,
         value: PgExprRef<'_>,

@@ -9,6 +9,7 @@ mod decimal128;
 pub(crate) mod execution;
 pub mod explain;
 mod integer_widening;
+mod ordering;
 pub mod pg;
 pub mod planning;
 pub mod pushdown;
@@ -28,6 +29,7 @@ pub use contract::{
     ParamKey, PgComparisonIdentity, PgComparisonOp, PushdownContract, PushdownCosting,
 };
 pub use integer_widening::PgIntegerWidening;
+pub use ordering::PgOrderingDirection;
 pub use runtime_values::{RuntimeValueState, RuntimeValueStateError};
 pub use scalar_semantics::PgTextComparisonSemantics;
 pub use value::{

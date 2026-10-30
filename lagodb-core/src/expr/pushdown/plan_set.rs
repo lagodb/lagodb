@@ -6,11 +6,10 @@ use std::ops::Range;
 use crate::expr::RuntimeValueExpr;
 use crate::expr::contract::{PushdownContract, PushdownCosting};
 
-use super::{EffectiveFilterContract, NormalizedPredicate};
+use super::{EffectiveFilterContract, NormalizedPredicate, RowFilter};
 
 /// One provider-owned planned predicate and its local binding range.
 pub(crate) struct NegotiatedFilter<P> {
-    pub original_expr: *mut pg_sys::Expr,
     pub pushed_expr: *mut pg_sys::Expr,
     pub planned: P,
     pub effective: EffectiveFilterContract,
@@ -76,7 +75,6 @@ impl<P> NegotiatedFilterSet<P> {
             FilterQualLocation::Local(index)
         };
         self.planned.push(NegotiatedFilter {
-            original_expr,
             pushed_expr,
             planned,
             effective,
@@ -91,9 +89,10 @@ impl<P> NegotiatedFilterSet<P> {
             .planned
             .into_iter()
             .map(|entry| PathPlannedFilter {
-                original_expr: entry.original_expr,
+                pushed_expr: entry.pushed_expr,
                 contract: entry.effective.contract,
                 costing: entry.effective.costing,
+                row_filter: entry.effective.row_filter,
             })
             .collect();
         PathFilterSet {
@@ -108,9 +107,10 @@ impl<P> NegotiatedFilterSet<P> {
             .planned
             .iter()
             .map(|entry| PathPlannedFilter {
-                original_expr: entry.original_expr,
+                pushed_expr: entry.pushed_expr,
                 contract: entry.effective.contract,
                 costing: entry.effective.costing,
+                row_filter: entry.effective.row_filter,
             })
             .collect();
         PathFilterSet {
@@ -195,10 +195,16 @@ impl FilterPlanSummary {
     }
 }
 
-/// Provider-free path-stage record. Planned artifacts are deliberately dropped.
+/// Provider-free path-stage record. Planned artifacts are deliberately dropped,
+/// and so is the source clause: PostgreSQL keeps it in the residual or recheck
+/// list, and path costing prices what the provider executes.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PathPlannedFilter {
-    pub original_expr: *mut pg_sys::Expr,
+    /// The expression the provider executes, wider than its source clause
+    /// when negotiation widened it.
+    pub pushed_expr: *mut pg_sys::Expr,
+    /// What of `pushed_expr` the provider evaluates on each row it reads.
+    pub row_filter: RowFilter,
     pub contract: PushdownContract,
     pub costing: PushdownCosting,
 }
@@ -215,15 +221,6 @@ impl PathFilterSet {
     #[inline]
     pub(crate) fn has_planned_filters(&self) -> bool {
         !self.planned.is_empty()
-    }
-
-    pub(crate) fn costed_pruning_exprs(
-        &self,
-    ) -> impl Iterator<Item = *mut pg_sys::Expr> + '_ {
-        self.planned
-            .iter()
-            .filter(|entry| entry.costing.is_costed())
-            .map(|entry| entry.original_expr)
     }
 
     pub(crate) fn merged(&self, right: &Self) -> Self {
@@ -297,7 +294,8 @@ mod tests {
             "exact",
             EffectiveFilterContract {
                 contract: PushdownContract::ExactRowFilter,
-                costing: PushdownCosting::CostedPruning,
+                costing: PushdownCosting::StatisticsPruning,
+                row_filter: RowFilter::Whole,
             },
         );
         filters.accept(
@@ -307,6 +305,7 @@ mod tests {
             EffectiveFilterContract {
                 contract: PushdownContract::ConservativePruning,
                 costing: PushdownCosting::UncostedBestEffort,
+                row_filter: RowFilter::Nothing,
             },
         );
 

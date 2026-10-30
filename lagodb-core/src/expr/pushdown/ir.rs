@@ -51,6 +51,12 @@ pub enum PredicateExpr<S = ScalarExpr, O = PgComparisonOp> {
         value: S,
         prefix: S,
     },
+    /// `value operator ANY (set)`. One array-valued operand holds the whole set.
+    InSet {
+        operator: O,
+        value: S,
+        set: S,
+    },
     And(Box<[PredicateExpr<S, O>]>),
     Or(Box<[PredicateExpr<S, O>]>),
     Not(Box<PredicateExpr<S, O>>),
@@ -114,6 +120,15 @@ impl PredicateExpr<ScalarExpr, PgComparisonOp> {
                 value: value.rebase_runtime_values(offset),
                 prefix: prefix.rebase_runtime_values(offset),
             },
+            Self::InSet {
+                operator,
+                value,
+                set,
+            } => Self::InSet {
+                operator: *operator,
+                value: value.rebase_runtime_values(offset),
+                set: set.rebase_runtime_values(offset),
+            },
             Self::And(children) => Self::And(
                 children
                     .iter()
@@ -150,16 +165,6 @@ impl PredicateFragment {
         Self {
             root,
             runtime_values: RuntimeValueLayout::new(values.into_boxed_slice()),
-        }
-    }
-
-    pub(crate) fn from_layout(
-        root: PredicateExpr,
-        runtime_values: RuntimeValueLayout,
-    ) -> Self {
-        Self {
-            root,
-            runtime_values,
         }
     }
 

@@ -192,6 +192,13 @@ pub trait PredicatePlanner<S, O> {
         prefix: &S,
     ) -> Result<PredicatePlan<Self::Predicate>, Self::Error>;
 
+    fn in_set(
+        &self,
+        operator: &O,
+        value: &S,
+        set: &S,
+    ) -> Result<PredicatePlan<Self::Predicate>, Self::Error>;
+
     fn conjunction(&self, children: Vec<Self::Predicate>) -> Self::Predicate;
 
     fn disjunction(&self, children: Vec<Self::Predicate>) -> Self::Predicate;
@@ -223,6 +230,11 @@ impl<S, O> PredicateExpr<S, O> {
             Self::IsNan(value) => planner.is_nan(value),
             Self::IsNotNan(value) => planner.is_not_nan(value),
             Self::StartsWith { value, prefix } => planner.starts_with(value, prefix),
+            Self::InSet {
+                operator,
+                value,
+                set,
+            } => planner.in_set(operator, value, set),
             Self::And(children) => {
                 let children = children
                     .iter()

@@ -21,17 +21,53 @@ impl PushdownContract {
     }
 }
 
-/// Whether a planned filter contributes to scan-volume costing.
+/// Whether and how a planned filter reduces the physical scan volume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PushdownCosting {
-    CostedPruning,
+    /// The provider's data layout groups rows by the filter's columns, as a
+    /// partition does, so the filter's selectivity is the scanned share.
+    LayoutPruning,
+    /// The provider skips storage units by per-unit column statistics, as
+    /// min/max metrics do, so the scanned share depends on how closely the
+    /// columns follow physical order.
+    StatisticsPruning,
     UncostedBestEffort,
 }
 
 impl PushdownCosting {
     #[inline]
     pub fn is_costed(self) -> bool {
-        matches!(self, Self::CostedPruning)
+        !matches!(self, Self::UncostedBestEffort)
+    }
+
+    /// Costing of an AND whose children carry `self` and `other`.
+    ///
+    /// Children of one kind keep it: statistics-pruned children prune one
+    /// scan together, as the quals of one BRIN scan do. A mixed AND is
+    /// uncosted, since its statistics children do not narrow the units its
+    /// layout children keep. Top-level conjuncts are costed apart and never
+    /// meet here.
+    #[inline]
+    pub fn conjunction(self, other: Self) -> Self {
+        if self == other {
+            self
+        } else {
+            Self::UncostedBestEffort
+        }
+    }
+
+    /// Costing of an OR whose children carry `self` and `other`.
+    ///
+    /// Only layout-pruned children keep their kind: the union of the
+    /// partitions each selects is the scanned share. A statistics-pruned
+    /// branch can select rows in every unit whatever the other branches'
+    /// correlation, so any other OR is uncosted.
+    #[inline]
+    pub fn disjunction(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::LayoutPruning, Self::LayoutPruning) => Self::LayoutPruning,
+            _ => Self::UncostedBestEffort,
+        }
     }
 }
 

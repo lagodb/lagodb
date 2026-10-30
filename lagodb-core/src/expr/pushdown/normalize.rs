@@ -9,7 +9,8 @@ use pgrx::pg_sys;
 
 use crate::datum::Decimal128Semantics;
 use crate::expr::pg::{
-    PgBoolExpr, PgExprRef, PgNullTestKind, PgPredicateLeafRef, PgScalarExprRef,
+    PgBoolExpr, PgExprRef, PgNullTestKind, PgPredicateLeafRef, PgScalarArrayOpExpr,
+    PgScalarExprRef,
 };
 use crate::expr::{
     ColumnRef, ExprType, RuntimeValueExpr, RuntimeValueId, RuntimeValueSource,
@@ -175,6 +176,9 @@ impl<'a> ExpressionNormalizer<'a> {
             && expr.type_oid() == pg_sys::BOOLOID
         {
             return unsafe { self.normalize_boolean_column(expr, bindings) };
+        }
+        if let Some(membership) = PgScalarArrayOpExpr::try_from_expr(expr) {
+            return self.normalize_in_set(membership, bindings);
         }
         match PgPredicateLeafRef::parse(expr).ok()? {
             PgPredicateLeafRef::BooleanTest { kind, value } => {
