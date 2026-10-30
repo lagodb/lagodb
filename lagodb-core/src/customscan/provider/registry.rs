@@ -9,10 +9,11 @@ use pgrx::pg_sys;
 use crate::customscan::error::CustomScanError;
 use crate::customscan::planning::builder::{EmitCustomPathContext, emit_custom_path};
 use crate::expr::pushdown::{
-    FilterNegotiator, FilterPlanningContext, PathFilterSet, ScanClauseSource,
+    FilterNegotiator, FilterPlanningContext, FilterPushdownPlanner, PathFilterSet,
+    ScanClauseSource,
 };
 
-use super::{LagodbCustomScanProvider, RelationContext};
+use super::{LagodbCustomScanProvider, RelationContext, TableAmSeqScan};
 
 pub(crate) trait ErasedFilterPlanner {
     /// # Safety
@@ -23,6 +24,9 @@ pub(crate) trait ErasedFilterPlanner {
         clauses: *mut pg_sys::List,
         source: ScanClauseSource,
     ) -> Result<PathFilterSet, CustomScanError>;
+
+    /// Forwards to [`FilterPushdownPlanner::pruning_units`].
+    fn pruning_units(&self) -> Option<f64>;
 }
 
 /// Type-erased registered provider for the pathlist router.
@@ -30,9 +34,8 @@ pub(crate) trait ErasedProvider: Sync {
     /// Provider name (`P::NAME`).
     fn name(&self) -> &'static CStr;
 
-    fn suppress_table_am_parallel_scan(&self) -> bool;
-
-    fn owns_partitioned_table(&self) -> bool;
+    /// `P::TABLE_AM_SEQ_SCAN`.
+    fn table_am_seq_scan(&self) -> TableAmSeqScan;
 
     /// Forwards to `P::supports_relation` (framework path-stage gates already applied).
     fn supports_relation(&self, ctx: &RelationContext<'_>) -> bool;
@@ -80,6 +83,10 @@ impl<P: LagodbCustomScanProvider> ErasedFilterPlanner for ProviderFilterPlanner<
             Err(error) => Err(CustomScanError::provider(error)),
         }
     }
+
+    fn pruning_units(&self) -> Option<f64> {
+        self.planner.pruning_units()
+    }
 }
 
 impl<P: LagodbCustomScanProvider> ProviderEntry<P> {
@@ -98,12 +105,8 @@ impl<P: LagodbCustomScanProvider> ErasedProvider for ProviderEntry<P> {
         P::NAME
     }
 
-    fn suppress_table_am_parallel_scan(&self) -> bool {
-        P::SUPPRESS_TABLE_AM_PARALLEL_SCAN
-    }
-
-    fn owns_partitioned_table(&self) -> bool {
-        P::OWNS_PARTITIONED_TABLE
+    fn table_am_seq_scan(&self) -> TableAmSeqScan {
+        P::TABLE_AM_SEQ_SCAN
     }
 
     fn supports_relation(&self, ctx: &RelationContext<'_>) -> bool {

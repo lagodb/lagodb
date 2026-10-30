@@ -102,22 +102,9 @@ row identity, whole-row output, system columns, and projected scan tuples.
 
 CustomScan rejects every `TABLESAMPLE` clause before expression analysis or
 path replacement because the provider scan contract does not carry sampling
-semantics. Ordinary relations retain PostgreSQL's paths; sampling is executed
-or explicitly rejected by their table AM. Provider-owned partitioned tables
-cannot use that fallback and return `FEATURE_NOT_SUPPORTED`, even when
-optional CustomScan planning is disabled. Candidate rejections travel through
-the existing callback error record to the runtime's PostgreSQL hook boundary.
-
-Before query or modify paths are built for a provider-owned partitioned table,
-core restores the estimates that PostgreSQL's storage-less dummy path omits.
-It calls the table's catalog-selected TableAM `relation_estimate_size`, just as an ordinary
-storage-backed relation does, through a borrowed Relation view. Catalog relkind
-and the shared relcache entry stay unchanged. PostgreSQL's
-`set_baserel_size_estimates` supplies filtered rows, target width and qual cost;
-the existing provider pruning and CustomPath cost model then apply to both table
-shapes. Dummy Append parameterization records are discarded so LATERAL paths
-recompute their own base-relation estimates. No statistics lookup is added to
-execution or per-row paths.
+semantics. Relations retain PostgreSQL's paths; sampling is executed or
+explicitly rejected by their table AM. Candidate rejections travel through the
+existing callback error record to the runtime's PostgreSQL hook boundary.
 
 ## Plan field layout
 

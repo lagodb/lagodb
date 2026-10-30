@@ -19,12 +19,6 @@ pub type PlanCustomPath = unsafe extern "C-unwind" fn(
     *mut pg_sys::List,
 ) -> *mut pg_sys::Plan;
 
-pub type ReparameterizeCustomPath = unsafe extern "C-unwind" fn(
-    *mut pg_sys::PlannerInfo,
-    *mut pg_sys::List,
-    *mut pg_sys::RelOptInfo,
-) -> *mut pg_sys::List;
-
 pub type CreateCustomScanState =
     unsafe extern "C-unwind" fn(*mut pg_sys::CustomScan) -> *mut pg_sys::Node;
 pub type BeginCustomScan = unsafe extern "C-unwind" fn(
@@ -63,7 +57,6 @@ pub type ShutdownCustomScan =
 /// Callback family implemented by one serial CustomScan consumer.
 pub struct SerialCustomScanCallbacks {
     pub plan: PlanCustomPath,
-    pub reparameterize: Option<ReparameterizeCustomPath>,
     pub create_state: CreateCustomScanState,
     pub begin: BeginCustomScan,
     pub execute: ExecCustomScan,
@@ -134,7 +127,7 @@ impl CustomScanMethodTables {
             path: pg_sys::CustomPathMethods {
                 CustomName: name.as_ptr(),
                 PlanCustomPath: Some(callbacks.plan),
-                ReparameterizeCustomPathByChild: callbacks.reparameterize,
+                ReparameterizeCustomPathByChild: None,
             },
             scan: pg_sys::CustomScanMethods {
                 CustomName: name.as_ptr(),

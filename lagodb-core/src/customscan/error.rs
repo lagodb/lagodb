@@ -156,25 +156,6 @@ impl CustomScanError {
         ))
     }
 
-    pub(crate) fn required_partitioned_table_path(provider: &CStr) -> Self {
-        Self::framework(format!(
-            "CustomScan provider {provider:?} emitted no path for a partitioned table"
-        ))
-    }
-
-    pub(crate) fn partitioned_table_rejected(
-        provider: &CStr,
-        reason: impl Display,
-    ) -> Self {
-        PgReportError::from_message(
-            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            format!(
-                "provider {provider:?} cannot use PostgreSQL fallback for a partitioned table: {reason}"
-            ),
-        )
-        .into()
-    }
-
     pub(crate) fn modify_binding(message: impl Into<String>) -> Self {
         Self::framework(message.into())
     }

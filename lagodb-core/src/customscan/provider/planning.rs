@@ -7,14 +7,13 @@ use pgrx::pg_sys;
 pub use super::context::{PathContext, RelationContext};
 use super::contract::LagodbCustomScanProvider;
 pub use crate::customscan::ScanPurpose;
-use crate::expr::contract::PushdownContract;
+use crate::expr::pg::expr_list;
+use crate::expr::pushdown::{FilterPlanSummary, PathFilterEstimates};
 
 /// Typed builder for [`LagodbCustomScanProvider::create_path`]: cost overrides
 /// and provider-private metadata. `path.rows` is set by the framework, not here.
 pub struct CustomPathBuilder<P: LagodbCustomScanProvider> {
-    pub(crate) scanned_pages: Option<f64>,
-    pub(crate) scanned_tuples: Option<f64>,
-    pub(crate) extra_startup_cost: Option<f64>,
+    pub(crate) cost: CustomPathCost,
     pub(crate) extra_tuple_width: i32,
     pub(crate) parallel_safe_complete: bool,
     pub(crate) native_parallel_partial: bool,
@@ -24,9 +23,7 @@ pub struct CustomPathBuilder<P: LagodbCustomScanProvider> {
 impl<P: LagodbCustomScanProvider> CustomPathBuilder<P> {
     pub(crate) fn new() -> Self {
         Self {
-            scanned_pages: None,
-            scanned_tuples: None,
-            extra_startup_cost: None,
+            cost: CustomPathCost::default(),
             extra_tuple_width: 0,
             parallel_safe_complete: false,
             native_parallel_partial: true,
@@ -40,17 +37,31 @@ impl<P: LagodbCustomScanProvider> CustomPathBuilder<P> {
             pages >= 0.0,
             "CustomPathBuilder::scanned_pages: must be non-negative",
         );
-        self.scanned_pages = Some(pages);
+        self.cost.scanned_pages = Some(pages);
         self
     }
 
-    /// Pruned scan-tuple count (defaults to `baserel->tuples`).
-    pub fn scanned_tuples(mut self, tuples: f64) -> Self {
+    /// Rows the provider returns to PostgreSQL, each charged `cpu_tuple_cost`
+    /// and the residual quals (defaults to `baserel->tuples`, a sequential
+    /// scan returning every row it reads).
+    pub fn returned_tuples(mut self, tuples: f64) -> Self {
         debug_assert!(
             tuples >= 0.0,
-            "CustomPathBuilder::scanned_tuples: must be non-negative",
+            "CustomPathBuilder::returned_tuples: must be non-negative",
         );
-        self.scanned_tuples = Some(tuples);
+        self.cost.returned_tuples = Some(tuples);
+        self
+    }
+
+    /// Run cost the provider spends reading and filtering rows before it
+    /// returns them (default `0.0`), as an index AM's own cost precedes the
+    /// fetched heap tuples in `cost_index`.
+    pub fn provider_run_cost(mut self, cost: f64) -> Self {
+        debug_assert!(
+            cost >= 0.0,
+            "CustomPathBuilder::provider_run_cost: must be non-negative",
+        );
+        self.cost.provider_run_cost = Some(cost);
         self
     }
 
@@ -60,7 +71,7 @@ impl<P: LagodbCustomScanProvider> CustomPathBuilder<P> {
             cost >= 0.0,
             "CustomPathBuilder::extra_startup_cost: must be non-negative",
         );
-        self.extra_startup_cost = Some(cost);
+        self.cost.extra_startup_cost = Some(cost);
         self
     }
 
@@ -94,9 +105,7 @@ impl<P: LagodbCustomScanProvider> CustomPathBuilder<P> {
     /// Finish the path and attach the provider's typed plan data.
     pub fn build(self, private_data: P::PrivateData) -> CustomPathPlan<P> {
         CustomPathPlan {
-            scanned_pages: self.scanned_pages,
-            scanned_tuples: self.scanned_tuples,
-            extra_startup_cost: self.extra_startup_cost,
+            cost: self.cost,
             extra_tuple_width: self.extra_tuple_width,
             parallel_safe_complete: self.parallel_safe_complete,
             native_parallel_partial: self.native_parallel_partial,
@@ -108,14 +117,94 @@ impl<P: LagodbCustomScanProvider> CustomPathBuilder<P> {
 
 /// Output of `create_path`; consumed by the framework's path emitter.
 pub struct CustomPathPlan<P: LagodbCustomScanProvider> {
-    pub(crate) scanned_pages: Option<f64>,
-    pub(crate) scanned_tuples: Option<f64>,
-    pub(crate) extra_startup_cost: Option<f64>,
+    pub(crate) cost: CustomPathCost,
     pub(crate) extra_tuple_width: i32,
     pub(crate) parallel_safe_complete: bool,
     pub(crate) native_parallel_partial: bool,
     pub(crate) private_data: P::PrivateData,
     _marker: PhantomData<fn() -> P>,
+}
+
+/// Cost overrides a provider sets on its CustomPath. Each one it leaves unset
+/// takes a sequential scan's relation estimate.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CustomPathCost {
+    pub(crate) scanned_pages: Option<f64>,
+    pub(crate) returned_tuples: Option<f64>,
+    pub(crate) provider_run_cost: Option<f64>,
+    pub(crate) extra_startup_cost: Option<f64>,
+}
+
+impl CustomPathCost {
+    /// Pages the scan reads (`baserel->pages` unless the provider pruned some).
+    ///
+    /// # Safety
+    ///
+    /// `baserel` is a live planner node.
+    pub(crate) unsafe fn scanned_pages(
+        &self,
+        baserel: *const pg_sys::RelOptInfo,
+    ) -> f64 {
+        self.scanned_pages
+            .unwrap_or_else(|| unsafe { (*baserel).pages } as f64)
+    }
+
+    /// CustomPath cost: disk + provider run cost + `cpu_tuple_cost` and
+    /// residual `cost_qual_eval` per returned tuple + projection.
+    ///
+    /// # Safety
+    ///
+    /// Live planner pointers; each `residual` entry is a live planner-owned
+    /// `Expr`.
+    pub(crate) unsafe fn costs(
+        &self,
+        root: *mut pg_sys::PlannerInfo,
+        baserel: *mut pg_sys::RelOptInfo,
+        path_rows: f64,
+        residual: &[*mut pg_sys::Expr],
+    ) -> (f64, f64) {
+        let scanned_pages = unsafe { self.scanned_pages(baserel) };
+        let returned_tuples = self
+            .returned_tuples
+            .unwrap_or_else(|| unsafe { (*baserel).tuples });
+        let provider_run_cost = self.provider_run_cost.unwrap_or(0.0);
+        let extra_startup_cost = self.extra_startup_cost.unwrap_or(0.0);
+
+        let pathtarget = unsafe { (*baserel).reltarget };
+        let target_startup = unsafe { (*pathtarget).cost.startup };
+        let target_per_tuple = unsafe { (*pathtarget).cost.per_tuple };
+
+        let residual_list = expr_list(residual.iter().copied());
+
+        let mut qpqual_cost = pg_sys::QualCost {
+            startup: 0.0,
+            per_tuple: 0.0,
+        };
+        unsafe {
+            pg_sys::cost_qual_eval(
+                &mut qpqual_cost as *mut pg_sys::QualCost,
+                residual_list,
+                root,
+            );
+        }
+
+        let seq_page_cost = unsafe { pg_sys::seq_page_cost };
+        let cpu_tuple_cost = unsafe { pg_sys::cpu_tuple_cost };
+
+        let disk_cost = seq_page_cost * scanned_pages;
+        let per_tuple_cpu =
+            (cpu_tuple_cost + qpqual_cost.per_tuple) * returned_tuples;
+        let projection_per_row = target_per_tuple * path_rows;
+
+        let startup_cost = target_startup + qpqual_cost.startup + extra_startup_cost;
+        let total_cost = startup_cost
+            + disk_cost
+            + provider_run_cost
+            + per_tuple_cpu
+            + projection_per_row;
+
+        (startup_cost, total_cost)
+    }
 }
 
 /// Nullable PG `Bitmapset *` (Relids). Use `bms_is_empty`, not pointer null test.
@@ -132,57 +221,6 @@ pub enum PathVariantKind {
     JoinParameterized,
 }
 
-/// Path-stage pushdown metadata for [`PathVariant`]; no raw PG `Expr` pointers.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PathPushdownSummary {
-    /// Number of complete filters planned for this variant.
-    pub planned_count: usize,
-    /// Planned filters with [`PushdownContract::ExactRowFilter`].
-    pub exact_row_filter_count: usize,
-    /// Planned filters with [`PushdownContract::ConservativePruning`].
-    pub conservative_pruning_count: usize,
-    /// Planned filters with costed pruning.
-    pub costed_pruning_count: usize,
-    /// Combined selectivity of costed-pruning planned filters.
-    pub pruning_selectivity: f64,
-}
-
-impl PathPushdownSummary {
-    /// Whether this variant has any provider-planned filters.
-    #[inline]
-    pub fn has_planned_filters(self) -> bool {
-        self.planned_count > 0
-    }
-
-    pub(crate) fn from_filter_set(
-        filters: &crate::expr::pushdown::PathFilterSet,
-        pruning_selectivity: f64,
-    ) -> Self {
-        let planned_count = filters.planned.len();
-        let mut exact_row_filter_count = 0;
-        let mut conservative_pruning_count = 0;
-        let mut costed_pruning_count = 0;
-        for filter in &filters.planned {
-            match filter.contract {
-                PushdownContract::ExactRowFilter => exact_row_filter_count += 1,
-                PushdownContract::ConservativePruning => {
-                    conservative_pruning_count += 1;
-                }
-            }
-            if filter.costing.is_costed() {
-                costed_pruning_count += 1;
-            }
-        }
-        Self {
-            planned_count,
-            exact_row_filter_count,
-            conservative_pruning_count,
-            costed_pruning_count,
-            pruning_selectivity: pruning_selectivity.clamp(0.0, 1.0),
-        }
-    }
-}
-
 /// Per-variant input to [`super::contract::LagodbCustomScanProvider::create_path`].
 pub struct PathVariant<'a> {
     /// Read scan or modification-target scan using the same provider.
@@ -193,6 +231,8 @@ pub struct PathVariant<'a> {
     pub param_info: Option<&'a pg_sys::ParamPathInfo>,
     /// Required outer relids for this variant.
     pub required_outer: Relids,
-    /// Pre-gated pushdown summary for this variant.
-    pub pushdown: PathPushdownSummary,
+    /// Pre-gated pushdown counts for this variant.
+    pub pushdown: FilterPlanSummary,
+    /// Estimates of the filters the provider executes for this variant.
+    pub filters: PathFilterEstimates<'a>,
 }

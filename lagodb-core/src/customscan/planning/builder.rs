@@ -1,65 +1,21 @@
-//! Path-stage `CustomPath` construction and child-path reparameterization.
+//! Path-stage `CustomPath` construction.
 
 use core::ptr;
 
-use pgrx::pg_guard;
 use pgrx::pg_sys;
 
 use crate::customscan::ScanPurpose;
 use crate::customscan::error::CustomScanError;
 use crate::customscan::gucs;
-use crate::customscan::plan_data::path_private::{
-    decode_path_private, encode_path_private,
-};
+use crate::customscan::plan_data::path_private::encode_path_private;
 use crate::customscan::provider::{
     CustomPathBuilder, CustomScanPrivate, LagodbCustomScanProvider, PathContext,
-    PathPushdownSummary, PathVariant, PathVariantKind, PrivateDataWriter,
-    method_tables_for,
+    PathVariant, PathVariantKind, PrivateDataWriter, method_tables_for,
 };
 
-use crate::diag::ReportableError;
-use crate::expr::pushdown::PathFilterSet;
-
-/// Forwards to [`P::reparameterize_private_data`] when a CustomPath is pushed under an appendrel child.
-///
-/// # Safety
-///
-/// Called from `reparameterize_path_by_child`; planner pointers are live.
-#[pg_guard]
-pub(crate) unsafe extern "C-unwind" fn reparameterize_custom_path_by_child_trampoline<
-    P: LagodbCustomScanProvider,
->(
-    root: *mut pg_sys::PlannerInfo,
-    custom_private: *mut pg_sys::List,
-    child_rel: *mut pg_sys::RelOptInfo,
-) -> *mut pg_sys::List {
-    unsafe {
-        reparameterize_custom_path_by_child::<P>(root, custom_private, child_rel)
-    }
-    .report_unwrap()
-}
-
-unsafe fn reparameterize_custom_path_by_child<P: LagodbCustomScanProvider>(
-    root: *mut pg_sys::PlannerInfo,
-    custom_private: *mut pg_sys::List,
-    child_rel: *mut pg_sys::RelOptInfo,
-) -> Result<*mut pg_sys::List, CustomScanError> {
-    let path_private = unsafe { decode_path_private(custom_private) }?;
-    let provider_metadata = unsafe {
-        P::reparameterize_private_data(
-            root,
-            path_private.provider_metadata,
-            child_rel,
-        )
-    };
-    unsafe {
-        encode_path_private(
-            path_private.purpose,
-            path_private.requires_wholerow,
-            provider_metadata,
-        )
-    }
-}
+use crate::expr::pushdown::{
+    FilterPlanSummary, PathFilterEstimates, PathFilterSet, RelationFilterEstimator,
+};
 
 /// Context for [`emit_custom_path`].
 pub(crate) struct EmitCustomPathContext<'a> {
@@ -70,6 +26,8 @@ pub(crate) struct EmitCustomPathContext<'a> {
     pub(crate) required_outer: pg_sys::Relids,
     /// Path-stage planned-filter hint; plan-stage recomputes authoritatively.
     pub(crate) filters: &'a PathFilterSet,
+    /// The relation's statistics-pruning units, from its filter planner.
+    pub(crate) pruning_units: Option<f64>,
 }
 
 /// Build and register a `CustomPath` for one variant via `add_path`.
@@ -108,10 +66,13 @@ pub(crate) unsafe fn emit_custom_path<P: LagodbCustomScanProvider>(
             &*ctx.baserel,
         )
     };
-    let costed_filters: Vec<_> = ctx.filters.costed_pruning_exprs().collect();
-    let pushdown = PathPushdownSummary::from_filter_set(
-        ctx.filters,
-        path_ctx.clauselist_selectivity_for_exprs(&costed_filters),
+    let pushdown = FilterPlanSummary::from_path_set(ctx.filters);
+    let filters = PathFilterEstimates::new(
+        &ctx.filters.planned,
+        // SAFETY: the same live planner state owns `ctx.baserel`, and planned
+        // filters are its planner-owned quals.
+        unsafe { RelationFilterEstimator::new(ctx.root, (*ctx.baserel).relid) },
+        ctx.pruning_units,
     );
     let variant = PathVariant {
         purpose: ctx.purpose,
@@ -123,6 +84,7 @@ pub(crate) unsafe fn emit_custom_path<P: LagodbCustomScanProvider>(
         },
         required_outer: ctx.required_outer,
         pushdown,
+        filters,
     };
     let plan =
         match P::create_path(&path_ctx, &variant, CustomPathBuilder::<P>::new()) {
@@ -165,16 +127,9 @@ pub(crate) unsafe fn emit_custom_path<P: LagodbCustomScanProvider>(
         };
         path.pathkeys = ptr::null_mut();
 
-        let (startup_cost, total_cost) = compute_costs(
-            ctx.root,
-            ctx.baserel,
-            path.rows,
-            plan.scanned_pages
-                .unwrap_or_else(|| (*ctx.baserel).pages as f64),
-            plan.scanned_tuples.unwrap_or_else(|| (*ctx.baserel).tuples),
-            plan.extra_startup_cost.unwrap_or(0.0),
-            &ctx.filters.residual,
-        );
+        let (startup_cost, total_cost) =
+            plan.cost
+                .costs(ctx.root, ctx.baserel, path.rows, &ctx.filters.residual);
         // `customscan_mode = force`: override published costs to (0, 1) after baseline compute.
         let (startup_cost, total_cost) = if gucs::force_mode() {
             let _ = (startup_cost, total_cost);
@@ -187,7 +142,10 @@ pub(crate) unsafe fn emit_custom_path<P: LagodbCustomScanProvider>(
 
         (*cpath_ptr).flags = pg_sys::CUSTOMPATH_SUPPORT_PROJECTION;
         (*cpath_ptr).custom_paths = ptr::null_mut();
-        (*cpath_ptr).custom_restrictinfo = ptr::null_mut();
+        #[cfg(any(feature = "pg17", feature = "pg18"))]
+        {
+            (*cpath_ptr).custom_restrictinfo = ptr::null_mut();
+        }
 
         let provider_metadata = PrivateDataWriter::encode_list(|writer| {
             plan.private_data.encode(writer)
@@ -206,8 +164,7 @@ pub(crate) unsafe fn emit_custom_path<P: LagodbCustomScanProvider>(
         {
             let workers = pg_sys::compute_parallel_worker(
                 ctx.baserel,
-                plan.scanned_pages
-                    .unwrap_or_else(|| (*ctx.baserel).pages as f64),
+                plan.cost.scanned_pages(ctx.baserel),
                 -1.0,
                 pg_sys::max_parallel_workers_per_gather,
             );
@@ -264,60 +221,6 @@ unsafe fn resolve_rte(
         pg_sys::list_nth(rtable, (relid - 1) as core::ffi::c_int)
             as *mut pg_sys::RangeTblEntry
     }
-}
-
-/// CustomPath cost: disk + residual `cost_qual_eval` per tuple + projection.
-///
-/// # Safety
-///
-/// Live planner pointers; each `residual` entry is NULL or a live `Expr`/`RestrictInfo`.
-unsafe fn compute_costs(
-    root: *mut pg_sys::PlannerInfo,
-    baserel: *mut pg_sys::RelOptInfo,
-    path_rows: f64,
-    scanned_pages: f64,
-    scanned_tuples: f64,
-    extra_startup_cost: f64,
-    residual: &[*mut pg_sys::Expr],
-) -> (f64, f64) {
-    let pathtarget = unsafe { (*baserel).reltarget };
-    let target_startup = unsafe { (*pathtarget).cost.startup };
-    let target_per_tuple = unsafe { (*pathtarget).cost.per_tuple };
-
-    let residual_list: *mut pg_sys::List = unsafe {
-        let mut out: *mut pg_sys::List = ptr::null_mut();
-        for &cell in residual {
-            if cell.is_null() {
-                continue;
-            }
-            out = pg_sys::lappend(out, cell.cast::<core::ffi::c_void>());
-        }
-        out
-    };
-
-    let mut qpqual_cost = pg_sys::QualCost {
-        startup: 0.0,
-        per_tuple: 0.0,
-    };
-    unsafe {
-        pg_sys::cost_qual_eval(
-            &mut qpqual_cost as *mut pg_sys::QualCost,
-            residual_list,
-            root,
-        );
-    }
-
-    let seq_page_cost = unsafe { pg_sys::seq_page_cost };
-    let cpu_tuple_cost = unsafe { pg_sys::cpu_tuple_cost };
-
-    let disk_cost = seq_page_cost * scanned_pages;
-    let per_tuple_cpu = (cpu_tuple_cost + qpqual_cost.per_tuple) * scanned_tuples;
-    let projection_per_row = target_per_tuple * path_rows;
-
-    let startup_cost = target_startup + qpqual_cost.startup + extra_startup_cost;
-    let total_cost = startup_cost + disk_cost + per_tuple_cpu + projection_per_row;
-
-    (startup_cost, total_cost)
 }
 
 #[cfg(test)]
@@ -479,9 +382,10 @@ mod tests {
     #[test]
     fn custom_path_builder_defaults_are_none() {
         let plan = CustomPathBuilder::<TestProviderA>::new().build(TestPrivate);
-        assert!(plan.scanned_pages.is_none());
-        assert!(plan.scanned_tuples.is_none());
-        assert!(plan.extra_startup_cost.is_none());
+        assert!(plan.cost.scanned_pages.is_none());
+        assert!(plan.cost.returned_tuples.is_none());
+        assert!(plan.cost.provider_run_cost.is_none());
+        assert!(plan.cost.extra_startup_cost.is_none());
     }
 
     /// The setters round-trip into the produced [`CustomPathPlan`].
@@ -489,11 +393,13 @@ mod tests {
     fn custom_path_builder_setters_round_trip() {
         let plan = CustomPathBuilder::<TestProviderA>::new()
             .scanned_pages(42.0)
-            .scanned_tuples(100.0)
+            .returned_tuples(100.0)
+            .provider_run_cost(7.0)
             .extra_startup_cost(1.5)
             .build(TestPrivate);
-        assert_eq!(plan.scanned_pages, Some(42.0));
-        assert_eq!(plan.scanned_tuples, Some(100.0));
-        assert_eq!(plan.extra_startup_cost, Some(1.5));
+        assert_eq!(plan.cost.scanned_pages, Some(42.0));
+        assert_eq!(plan.cost.returned_tuples, Some(100.0));
+        assert_eq!(plan.cost.provider_run_cost, Some(7.0));
+        assert_eq!(plan.cost.extra_startup_cost, Some(1.5));
     }
 }

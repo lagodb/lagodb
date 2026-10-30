@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::customscan::execution::{exec, explain, parallel, state};
-use crate::customscan::planning::{builder, final_plan};
+use crate::customscan::planning::final_plan;
 use crate::customscan::{
     CustomScanMethodTables, ParallelCustomScanCallbacks, SerialCustomScanCallbacks,
 };
@@ -33,9 +33,6 @@ pub fn method_tables_for<P: LagodbCustomScanProvider>()
 
     let callbacks = SerialCustomScanCallbacks {
         plan: final_plan::plan_custom_path_trampoline::<P>,
-        reparameterize: Some(
-            builder::reparameterize_custom_path_by_child_trampoline::<P>,
-        ),
         create_state: state::create_custom_scan_state_trampoline::<P>,
         begin: exec::begin_custom_scan_trampoline::<P>,
         execute: exec::exec_custom_scan_trampoline::<P>,

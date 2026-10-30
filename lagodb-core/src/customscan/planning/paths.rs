@@ -58,9 +58,11 @@ impl CustomScanPathPlanner {
     }
 
     /// Emit Plain first, followed by useful JoinParameterized variants.
-    pub(super) unsafe fn emit(&mut self) -> Result<usize, CustomScanError> {
-        Ok(usize::from(unsafe { self.emit_plain_variant()? })
-            + unsafe { self.emit_parameterized_variants()? })
+    /// Returns whether the provider built the Plain variant.
+    pub(super) unsafe fn emit(&mut self) -> Result<bool, CustomScanError> {
+        let plain = unsafe { self.emit_plain_variant()? };
+        unsafe { self.emit_parameterized_variants()? };
+        Ok(plain)
     }
 
     unsafe fn emit_plain_variant(&mut self) -> Result<bool, CustomScanError> {
@@ -86,16 +88,13 @@ impl CustomScanPathPlanner {
         unsafe { self.emit_path(PathVariantKind::Plain, required_outer, &filters) }
     }
 
-    unsafe fn emit_parameterized_variants(
-        &mut self,
-    ) -> Result<usize, CustomScanError> {
+    unsafe fn emit_parameterized_variants(&mut self) -> Result<(), CustomScanError> {
         let root = self.candidate.root();
         let rel = self.candidate.rel();
         let groups = unsafe {
             ParameterizedPathPlanner::new(root, rel).enumerate((*rel).joininfo)
         };
 
-        let mut emitted = 0;
         for group in groups {
             let ppi_filters = unsafe {
                 ParameterizedPathResolver::new(root, rel).resolve_and_plan(
@@ -111,15 +110,15 @@ impl CustomScanPathPlanner {
             .merged_filters() else {
                 continue;
             };
-            emitted += usize::from(unsafe {
+            unsafe {
                 self.emit_path(
                     PathVariantKind::JoinParameterized,
                     group.outer_relids,
                     &filters,
                 )?
-            });
+            };
         }
-        Ok(emitted)
+        Ok(())
     }
 
     unsafe fn emit_path(
@@ -135,6 +134,7 @@ impl CustomScanPathPlanner {
             kind,
             required_outer,
             filters,
+            pruning_units: self.filter_planner.pruning_units(),
         };
         unsafe { self.provider.emit_path(&ctx) }
     }

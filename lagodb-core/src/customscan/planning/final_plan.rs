@@ -146,14 +146,6 @@ unsafe fn plan_custom_path<P: LagodbCustomScanProvider>(
         let plan = &mut scan.plan;
 
         plan.type_ = pg_sys::NodeTag::T_CustomScan;
-        // Mirror `copy_generic_path_info` (not exposed in pg_sys).
-        let path_ptr = best_path.cast::<pg_sys::Path>();
-        plan.startup_cost = (*path_ptr).startup_cost;
-        plan.total_cost = (*path_ptr).total_cost;
-        plan.plan_rows = (*path_ptr).rows;
-        plan.plan_width = (*(*path_ptr).pathtarget).width;
-        plan.parallel_aware = (*path_ptr).parallel_aware;
-        plan.parallel_safe = (*path_ptr).parallel_safe;
         plan.async_capable = false;
         plan.plan_node_id = 0;
         plan.targetlist = tlist;

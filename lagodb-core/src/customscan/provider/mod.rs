@@ -16,7 +16,7 @@ pub use crate::customscan::error::CustomScanError;
 pub use crate::customscan::plan_data::tuple_layout::{
     NeededColumns, ScanTupleDescriptor, ScanTupleLayout, WHOLEROW_NAME,
 };
-pub use contract::LagodbCustomScanProvider;
+pub use contract::{LagodbCustomScanProvider, TableAmSeqScan};
 pub use execution::{
     NextSlotAttempt, NextSlotContext, NextSlotEmitter, NextSlotResult,
 };

@@ -19,7 +19,7 @@ use provider::RelationContext;
 pub use methods::{
     BeginCustomScan, CreateCustomScanState, CustomScanMethodTables, EndCustomScan,
     ExecCustomScan, ExplainCustomScan, ParallelCustomScanCallbacks, PlanCustomPath,
-    ReScanCustomScan, ReparameterizeCustomPath, SerialCustomScanCallbacks,
+    ReScanCustomScan, SerialCustomScanCallbacks,
 };
 pub use plan_data::ScanPurpose;
 
@@ -27,9 +27,7 @@ pub use plan_data::ScanPurpose;
 // modules they exercise, exposed through the normal public facade.
 pub use execution::{exec, explain, state};
 pub use plan_data::{custom_exprs, custom_private};
-pub use planning::{
-    ProviderPartitionedTablePlanner, candidate, router, tuple_planner,
-};
+pub use planning::{candidate, router, tuple_planner};
 
 pub mod modify;
 

@@ -6,6 +6,7 @@ use thiserror::Error;
 use crate::customscan::ScanPurpose;
 use crate::customscan::provider::RelationContext;
 use crate::expr::inspect::{RelationExprAnalyzer, RelationExprUsage, RelationScope};
+use crate::expr::relation::PlanRelationResolver;
 
 /// Reason a relation cannot participate in CustomScan planning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -67,8 +68,7 @@ impl CustomScanCandidate {
         // PG's set_rel_pathlist builds Append paths for inh RTEs. Preserve
         // that composition; our scan contract covers one physical relation.
         // expand_single_inheritance_child clears inh on physical members,
-        // including the parent's own scan. Provider-owned partitioned tables
-        // already have inh cleared by query preparation.
+        // including the parent's own scan.
         // SAFETY: `inspect` requires a live planner-owned RTE.
         if unsafe { (*self.rte).inh } {
             return Err(CustomScanRejection::InheritanceParent);
@@ -141,13 +141,7 @@ impl CustomScanCandidate {
             return false;
         }
 
-        let relid = unsafe { (*rel).relid } as core::ffi::c_int;
-        let all_result_relids = unsafe { (*root).all_result_relids };
-        let leaf_result_relids = unsafe { (*root).leaf_result_relids };
-        unsafe {
-            pg_sys::bms_is_member(relid, all_result_relids)
-                || pg_sys::bms_is_member(relid, leaf_result_relids)
-        }
+        unsafe { PlanRelationResolver::new(root).is_result_relation((*rel).relid) }
     }
 
     /// Relation-local expression usage consulted by path-stage gates.
@@ -175,8 +169,6 @@ impl CustomScanCandidate {
     }
 
     /// Relation kinds whose tuple shape fits the provider scan contract.
-    /// Partitioned tables are only admitted as candidates; the selected
-    /// provider must separately claim partitioned table ownership.
     #[inline]
     fn is_supported_storage_relkind(relkind: u8) -> bool {
         matches!(
@@ -184,7 +176,6 @@ impl CustomScanCandidate {
             pg_sys::RELKIND_RELATION
                 | pg_sys::RELKIND_MATVIEW
                 | pg_sys::RELKIND_TOASTVALUE
-                | pg_sys::RELKIND_PARTITIONED_TABLE
         )
     }
 

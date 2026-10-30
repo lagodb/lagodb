@@ -8,6 +8,7 @@ use pgrx::pg_sys;
 
 use crate::customscan::error::CustomScanError;
 use crate::customscan::plan_data::EnvelopeError;
+use crate::handles::TupleDescHandle;
 
 const LAYOUT_RELATION: i32 = 0;
 const LAYOUT_PROJECTED_BASE: i32 = 1;
@@ -382,7 +383,8 @@ impl<'a> ScanTupleDescriptor<'a> {
 
     /// Number of physical cells in the raw scan slot.
     pub fn len(&self) -> usize {
-        unsafe { (*self.tuple_desc).natts as usize }
+        // SAFETY: guaranteed by `new`.
+        unsafe { TupleDescHandle::from_raw(self.tuple_desc) }.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -398,11 +400,9 @@ impl<'a> ScanTupleDescriptor<'a> {
 
     /// Actual scan-slot target types, indexed by raw scan position.
     pub fn attr_types(&self) -> Vec<(pg_sys::Oid, i32)> {
-        let len = self.len();
-        let attrs = unsafe {
-            std::slice::from_raw_parts((*self.tuple_desc).attrs.as_ptr(), len)
-        };
-        attrs
+        // SAFETY: guaranteed by `new`.
+        unsafe { TupleDescHandle::from_raw(self.tuple_desc) }
+            .attributes()
             .iter()
             .map(|attr| (attr.atttypid, attr.atttypmod))
             .collect()
