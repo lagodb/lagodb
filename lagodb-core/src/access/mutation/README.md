@@ -23,7 +23,7 @@ has no raw pointer back to `ResultRelationState`.
 Provider-specific relation execution belongs in the provider crate. For
 Iceberg this includes scan context, synthetic physical-`ctid` codec,
 transaction/relation file interning, shared mutation-owner bitmaps, modify
-state, partition-destination handling, and conflict-validation metadata.
+state, and conflict-validation metadata.
 
 Core retains complete rows only for PostgreSQL AFTER ROW trigger execution.
 Those rows use one query-level PostgreSQL tuplestore per relation (spillable
@@ -40,11 +40,6 @@ COPY FROM bypasses ModifyTable and uses its separate utility-scoped
 `RelationTriggerPolicy` owns the shared execution-time capability checks.
 ModifyTable checks each provider relation during result-state initialization;
 COPY FROM checks its locked relation during preparation, before opening a
-source or starting the COPY driver. Provider-owned partitioned tables
-reject AFTER ROW triggers for the statement's operations: INSERT, UPDATE,
-DELETE, the concrete MERGE actions, or COPY FROM's INSERT. Disabled and
-WHEN-false triggers are included because PG17 validates partitioned table row
-events before checking whether the trigger is enabled. BEFORE ROW and
-statement-level triggers are outside this restriction. Ordinary ModifyTable
-targets retain the existing deferred-trigger restriction and immediate-trigger
-row store. No relation kind or TableAM pointer is changed.
+source or starting the COPY driver. ModifyTable and COPY targets retain the
+deferred-trigger restriction and the immediate-trigger row store. No relation
+kind or TableAM pointer is changed.

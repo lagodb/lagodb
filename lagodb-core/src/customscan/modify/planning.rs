@@ -54,13 +54,7 @@ unsafe fn provider_for_rte(
         return None;
     }
     let context = RelationContext::from_ref(unsafe { &*rte });
-    let provider = registry::matching(&context)?;
-    if context.relkind() == pg_sys::RELKIND_PARTITIONED_TABLE
-        && !provider.owns_partitioned_table()
-    {
-        return None;
-    }
-    Some(provider)
+    registry::matching(&context)
 }
 
 struct WholeRowPlanner {
@@ -354,7 +348,7 @@ pub(super) struct ModifyQueryPreparation;
 
 impl ModifyQueryPreparation {
     /// # Safety
-    /// `parse` is live rewrite-complete input whose provider-owned partitioned tables are prepared.
+    /// `parse` is live rewrite-complete input.
     /// The runtime owns recursion into nested queries and CTEs.
     pub(super) unsafe fn prepare(
         parse: *mut pg_sys::Query,
@@ -373,7 +367,7 @@ pub(super) unsafe extern "C-unwind" fn plan_modify_table<
 >(
     root: *mut pg_sys::PlannerInfo,
     _rel: *mut pg_sys::RelOptInfo,
-    best_path: *mut pg_sys::CustomPath,
+    _best_path: *mut pg_sys::CustomPath,
     _tlist: *mut pg_sys::List,
     _clauses: *mut pg_sys::List,
     custom_plans: *mut pg_sys::List,
@@ -382,7 +376,6 @@ pub(super) unsafe extern "C-unwind" fn plan_modify_table<
     let scan = unsafe {
         pg_sys::palloc0(size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
     };
-    let path = unsafe { &(*best_path).path };
     // create_plan applies processed_tlist's labels to this wrapper before
     // setrefs, so preserve its column count and types using slot references.
     // Copying its expressions into custom_scan_tlist would let fix_upper_expr
@@ -395,10 +388,6 @@ pub(super) unsafe extern "C-unwind" fn plan_modify_table<
     // rewriting the children's row identities would break their tlist match.
     unsafe {
         (*scan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
-        (*scan).scan.plan.startup_cost = path.startup_cost;
-        (*scan).scan.plan.total_cost = path.total_cost;
-        (*scan).scan.plan.plan_rows = path.rows;
-        (*scan).scan.plan.plan_width = (*path.pathtarget).width;
         (*scan).scan.plan.targetlist = targetlist;
         (*scan).scan.scanrelid = 0;
         (*scan).custom_plans = custom_plans;

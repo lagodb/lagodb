@@ -57,7 +57,7 @@ pub trait LagodbCustomModifyProvider: LagodbCustomScanProvider {
     /// separately from their source metadata. PostgreSQL retains every qual,
     /// including residuals for conservative predicates, for final qualification.
     ///
-    /// Keep even exact pushed predicates in the native SeqScan's qual. In PG17,
+    /// Keep even exact pushed predicates in the native SeqScan's qual.
     /// `ExecScanFetch` can return an EPQ replacement tuple without calling
     /// `SeqNext` or the TableAM reader, and `SeqRecheck` simply returns true;
     /// `ExecScan` must still evaluate the qual on that tuple. Unlike our
@@ -90,6 +90,9 @@ pub trait LagodbCustomModifyProvider: LagodbCustomScanProvider {
 
     /// Whether the relation can be the nominal target of the outer
     /// ModifyTable.
+    ///
+    /// The target's access method must belong to a registered table provider,
+    /// whose hierarchy guard makes every result relation this provider's.
     fn supports_modify_target(context: &RelationContext<'_>) -> bool {
         Self::supports_relation(context)
     }

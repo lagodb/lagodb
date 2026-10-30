@@ -1,7 +1,6 @@
 //! Provider-side adapter for the runtime-owned modify planning router.
 
 use std::ffi::c_void;
-use std::mem::size_of;
 use std::ptr;
 
 use pgrx::pg_sys;
@@ -12,7 +11,6 @@ use super::planning::{self, ModifyQueryPreparation};
 
 pub(super) fn descriptor() -> ModifyPlannerDescriptor {
     ModifyPlannerDescriptor {
-        struct_size: size_of::<ModifyPlannerDescriptor>() as u32,
         context: ptr::null_mut(),
         prepare_query: Some(prepare_query),
         planner_post: Some(planner_post),
@@ -26,8 +24,8 @@ unsafe extern "C-unwind" fn prepare_query(
     error: *mut CallbackErrorReport,
 ) -> u32 {
     let operation = || {
-        // SAFETY: the runtime prepared this Query's partitioned table RTEs and owns
-        // recursion. Provider matching and Modify changes stay in this DSO.
+        // SAFETY: the runtime supplies this live Query and owns recursion.
+        // Provider matching and Modify changes stay in this DSO.
         unsafe { ModifyQueryPreparation::prepare(parse) }
     };
     // SAFETY: the runtime supplies a live error record and forwards a live

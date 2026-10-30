@@ -1,9 +1,7 @@
-use std::ffi::c_void;
 use std::ptr;
 use std::rc::Rc;
 
 use crate::access::mutation::acquire_modify_query_state;
-use crate::api::TableAccessMethod;
 use crate::customscan::error::CustomScanError;
 use crate::customscan::modify::LagodbCustomModifyProvider;
 use crate::diag::{PgReportError, ReportableError};
@@ -25,7 +23,6 @@ unsafe extern "C-unwind" {
         plan: *mut pg_sys::ModifyTable,
         estate: *mut pg_sys::EState,
         eflags: i32,
-        provider_owns_partitioned_table: bool,
     ) -> *mut pg_sys::ModifyTableState;
 
     unsafe fn lagodb_exec_modify_table(
@@ -154,37 +151,9 @@ unsafe fn begin_impl<P: LagodbCustomModifyProvider>(
         unsafe { (*inner_plan).type_ },
         pg_sys::NodeTag::T_ModifyTable
     );
-    let modify_plan = inner_plan.cast::<pg_sys::ModifyTable>();
-    let root_rti = if unsafe { (*modify_plan).rootRelation } > 0 {
-        unsafe { (*modify_plan).rootRelation }
-    } else {
-        unsafe {
-            pg_sys::list_nth_int((*modify_plan).resultRelations, 0) as pg_sys::Index
-        }
-    };
-    // SAFETY: ModifyTable root/result RTIs are one-based indexes into the
-    // executor range table established by InitPlan before this node begins.
-    let root_rte = unsafe {
-        pg_sys::list_nth(
-            (*estate).es_range_table,
-            i32::try_from(root_rti - 1)
-                .expect("a PostgreSQL range-table index fits in i32"),
-        )
-        .cast::<pg_sys::RangeTblEntry>()
-    };
-    let provider_owned_partitioned_table = P::OWNS_PARTITIONED_TABLE
-        && unsafe { (*root_rte).relkind } as u8 == pg_sys::RELKIND_PARTITIONED_TABLE
-        && P::AccessMethod::access_method_oid().is_some_and(|access_method| {
-            access_method == unsafe { pg_sys::get_rel_relam((*root_rte).relid) }
-        });
     let inner = unsafe {
         pg_guard_ffi_boundary(|| {
-            lagodb_exec_init_modify_table(
-                inner_plan.cast(),
-                estate,
-                eflags,
-                provider_owned_partitioned_table,
-            )
+            lagodb_exec_init_modify_table(inner_plan.cast(), estate, eflags)
         })
     };
     let inner_state = inner.cast::<pg_sys::PlanState>();
@@ -226,36 +195,7 @@ unsafe fn begin_impl<P: LagodbCustomModifyProvider>(
         // the mutation callback and is serialized in the backend thread.
         unsafe { cleanup.with_mut(ModifyNodeState::cleanup_after_error) };
     }));
-    let root_info = unsafe { (*state.inner).rootResultRelInfo };
-    let root_relation = unsafe { (*root_info).ri_RelationDesc };
-    debug_assert_eq!(
-        provider_owned_partitioned_table,
-        unsafe { ModifyScanBinder::<P>::owns_relation(root_relation) }
-            && unsafe { (*(*root_relation).rd_rel).relkind } as u8
-                == pg_sys::RELKIND_PARTITIONED_TABLE
-    );
-    let provider_owned_partitioned_table_state: *mut c_void =
-        if provider_owned_partitioned_table {
-            unsafe {
-                execution.with_mut(|execution| execution.resolve_relation(root_info))
-            }?
-            .map_or(std::ptr::null_mut(), |relation| relation.as_ptr().cast())
-        } else {
-            std::ptr::null_mut()
-        };
-    if provider_owned_partitioned_table
-        && provider_owned_partitioned_table_state.is_null()
-    {
-        return Err(PgReportError::from_message(
-            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-            "provider-owned partitioned table has no mutation relation state",
-        )
-        .into());
-    }
-    state.bridge = Some(execution.bridge(
-        provider_owned_partitioned_table,
-        provider_owned_partitioned_table_state,
-    ));
+    state.bridge = Some(execution.bridge());
     state.execution = Some(execution);
 
     // A WHERE FALSE target can disappear completely; only surviving scans bind.
@@ -354,7 +294,7 @@ pub(super) unsafe extern "C-unwind" fn explain(
     unsafe {
         pg_sys::ExplainPropertyText(
             c"Executor".as_ptr(),
-            c"PG17 LagoDB ModifyTable fork".as_ptr(),
+            c"LagoDB ModifyTable fork".as_ptr(),
             explain_state,
         );
     }

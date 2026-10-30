@@ -111,8 +111,8 @@ impl<P: LagodbCustomModifyProvider> ResultRelationState<P> {
             ));
         }
         let relation_handle = unsafe { RelationHandle::from_raw(relation.as_ptr()) };
-        RelationTriggerPolicy::new(&relation_handle, P::OWNS_PARTITIONED_TABLE)
-            .validate_modify(command, actions)?;
+        RelationTriggerPolicy::new(&relation_handle)
+            .validate_immediate_rows(actions)?;
         Ok(Self {
             relation,
             command,
@@ -274,15 +274,9 @@ pub(super) struct ModifyNodeState<P: LagodbCustomModifyProvider> {
     relation_by_oid: HashMap<pg_sys::Oid, NonNull<ResultRelationState<P>>>,
     relation_by_info:
         HashMap<NonNull<pg_sys::ResultRelInfo>, NonNull<ResultRelationState<P>>>,
-    access_method_oid: pg_sys::Oid,
     command: pg_sys::CmdType::Type,
     actions: ModifyActions,
     phase: RelationPhase,
-}
-
-pub(super) struct PreparedUpdateTriggerRows {
-    pub old_tid: Option<ItemPointer>,
-    pub new_tid: Option<ItemPointer>,
 }
 
 impl<P: LagodbCustomModifyProvider> ModifyNodeState<P> {
@@ -322,16 +316,10 @@ impl<P: LagodbCustomModifyProvider> ModifyNodeState<P> {
         let mut relations = Vec::with_capacity(count);
         let mut relation_by_oid = HashMap::with_capacity(count);
         let mut relation_by_info = HashMap::with_capacity(count);
-        let access_method_oid = P::AccessMethod::access_method_oid()
-            .ok_or_else(|| internal_error("registered access method is missing"))?;
         for index in 0..count {
             let info =
                 unsafe { NonNull::new_unchecked(state.resultRelInfo.add(index)) };
-            let relation_desc = unsafe { info.as_ref().ri_RelationDesc };
-            if unsafe { (*(*relation_desc).rd_rel).relam } != access_method_oid {
-                continue;
-            }
-            let relation_oid = unsafe { (*relation_desc).rd_id };
+            let relation_oid = unsafe { (*info.as_ref().ri_RelationDesc).rd_id };
             if let Some(&existing) = relation_by_oid.get(&relation_oid) {
                 relation_by_info.insert(info, existing);
                 continue;
@@ -355,7 +343,6 @@ impl<P: LagodbCustomModifyProvider> ModifyNodeState<P> {
             relations,
             relation_by_oid,
             relation_by_info,
-            access_method_oid,
             command: state.operation,
             actions,
             phase: RelationPhase::Ready,
@@ -383,6 +370,12 @@ impl<P: LagodbCustomModifyProvider> ModifyNodeState<P> {
 
     /// Resolve the provider-owned relation for a PostgreSQL result relation.
     ///
+    /// The planner selects this node from the nominal relation and core's
+    /// provider hierarchy guard keeps other access methods out, so every result
+    /// relation belongs to this provider. An inherited target's root
+    /// `ResultRelInfo` is outside the result array: MERGE's INSERT actions can
+    /// reach it, and its relation, first here.
+    ///
     /// # Safety
     ///
     /// `result_rel_info` is the live `ResultRelInfo` supplied by PostgreSQL's
@@ -390,19 +383,15 @@ impl<P: LagodbCustomModifyProvider> ModifyNodeState<P> {
     pub(super) unsafe fn resolve_relation(
         &mut self,
         result_rel_info: *mut pg_sys::ResultRelInfo,
-    ) -> AmResult<Option<NonNull<ResultRelationState<P>>>> {
+    ) -> AmResult<NonNull<ResultRelationState<P>>> {
         let info = unsafe { NonNull::new_unchecked(result_rel_info) };
         if let Some(&pointer) = self.relation_by_info.get(&info) {
-            return Ok(Some(pointer));
+            return Ok(pointer);
         }
-        let relation_desc = unsafe { info.as_ref().ri_RelationDesc };
-        if unsafe { (*(*relation_desc).rd_rel).relam } != self.access_method_oid {
-            return Ok(None);
-        }
-        let relation_oid = unsafe { (*relation_desc).rd_id };
+        let relation_oid = unsafe { (*info.as_ref().ri_RelationDesc).rd_id };
         if let Some(&pointer) = self.relation_by_oid.get(&relation_oid) {
             self.relation_by_info.insert(info, pointer);
-            return Ok(Some(pointer));
+            return Ok(pointer);
         }
         let mut relation = Box::new(unsafe {
             ResultRelationState::<P>::new(
@@ -416,42 +405,7 @@ impl<P: LagodbCustomModifyProvider> ModifyNodeState<P> {
         self.relations.push(relation);
         self.relation_by_oid.insert(relation_oid, pointer);
         self.relation_by_info.insert(info, pointer);
-        Ok(Some(pointer))
-    }
-
-    /// Preserve both sides of one UPDATE trigger event under the exact leaf
-    /// relations PostgreSQL will later use to fetch OLD and NEW.
-    ///
-    /// A cross-partition update may cross AM boundaries, so either side can
-    /// remain a native PostgreSQL TID. Keeping the pair in one operation
-    /// prevents the C executor's one-entry relation cache from accidentally
-    /// associating both rows with the same partition.
-    pub(super) unsafe fn prepare_update_trigger_rows(
-        &mut self,
-        source_info: *mut pg_sys::ResultRelInfo,
-        destination_info: *mut pg_sys::ResultRelInfo,
-        old_slot: *mut pg_sys::TupleTableSlot,
-        new_slot: *mut pg_sys::TupleTableSlot,
-    ) -> AmResult<PreparedUpdateTriggerRows> {
-        let source = unsafe { self.resolve_relation(source_info) }?;
-        let destination = if source_info == destination_info {
-            source
-        } else {
-            unsafe { self.resolve_relation(destination_info) }?
-        };
-
-        let old_tid = if let Some(mut source) = source {
-            Some(unsafe { source.as_mut().preserve_trigger_row(old_slot) }?)
-        } else {
-            None
-        };
-        let new_tid = if let Some(mut destination) = destination {
-            Some(unsafe { destination.as_mut().preserve_trigger_row(new_slot) }?)
-        } else {
-            None
-        };
-
-        Ok(PreparedUpdateTriggerRows { old_tid, new_tid })
+        Ok(pointer)
     }
 
     pub(super) fn finish(&mut self) -> AmResult<()> {

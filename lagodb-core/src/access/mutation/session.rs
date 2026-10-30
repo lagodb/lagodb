@@ -25,8 +25,7 @@ impl<A: TableAccessMethod> CopyRelationSession<A> {
     ) -> AmResult<Self> {
         let handle = unsafe { RelationHandle::from_raw(relation) };
         let preserve_rows =
-            RelationTriggerPolicy::new(&handle, A::OWNS_PARTITIONED_TABLE)
-                .bind_copy_session()?;
+            RelationTriggerPolicy::new(&handle).bind_copy_session()?;
         Ok(Self {
             relation,
             command_id,

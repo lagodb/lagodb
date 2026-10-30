@@ -10,22 +10,16 @@ use crate::handles::RelationHandle;
 
 /// Trigger support for one locked provider relation.
 ///
-/// Provider-owned partitioned tables cannot enter PostgreSQL's native AFTER ROW queue:
-/// that path requires physical leaf relations for partitioned-table events.
-/// Ordinary ModifyTable and COPY targets support immediate triggers backed
-/// by core's statement-scoped row stores.
+/// ModifyTable and COPY targets support immediate triggers backed by core's
+/// statement-scoped row stores.
 pub(crate) struct RelationTriggerPolicy<'relation> {
     triggers: &'relation [pg_sys::Trigger],
-    partitioned_table: bool,
 }
 
 impl<'relation> RelationTriggerPolicy<'relation> {
     /// The caller must have selected the relation's provider and retain the
     /// execution lock while inspecting its trigger metadata.
-    pub(crate) fn new(
-        relation: &'relation RelationHandle<'_>,
-        provider_owns_partitioned_table: bool,
-    ) -> Self {
+    pub(crate) fn new(relation: &'relation RelationHandle<'_>) -> Self {
         // SAFETY: the relation handle retains live relcache metadata. PostgreSQL's
         // RelationBuildTriggers leaves trigdesc NULL for zero triggers and
         // otherwise supplies an initialized array of numtriggers elements.
@@ -38,50 +32,12 @@ impl<'relation> RelationTriggerPolicy<'relation> {
                 None => &[],
             }
         };
-        Self {
-            triggers,
-            partitioned_table: provider_owns_partitioned_table
-                && relation.relkind() as u8 == pg_sys::RELKIND_PARTITIONED_TABLE,
-        }
+        Self { triggers }
     }
 
-    pub(crate) fn validate_modify(
-        &self,
-        command: pg_sys::CmdType::Type,
-        actions: ModifyActions,
-    ) -> AmResult<()> {
-        if self.partitioned_table {
-            return self.validate_partitioned_table(actions);
-        }
-
-        // Preserve the existing deferred-trigger restriction for ordinary
-        // targets, including UPDATE's physical partition-movement events.
-        let actions = match command {
-            pg_sys::CmdType::CMD_INSERT => {
-                ModifyActions::INSERT.union(ModifyActions::UPDATE)
-            }
-            pg_sys::CmdType::CMD_DELETE => ModifyActions::DELETE,
-            pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_MERGE => {
-                ModifyActions::INSERT
-                    .union(ModifyActions::UPDATE)
-                    .union(ModifyActions::DELETE)
-            }
-            _ => ModifyActions::NONE,
-        };
-        self.validate_immediate_rows(actions)
-    }
-
-    /// Preparation also visits native heap targets, so only apply the
-    /// provider-owned partitioned-table restriction at that boundary.
-    pub(crate) fn validate_copy_from(&self) -> AmResult<()> {
-        self.validate_partitioned_table(ModifyActions::INSERT)
-    }
-
-    /// Called only when binding an actual LagoDB AM COPY session, including
-    /// a physical leaf reached by native PostgreSQL partition routing.
+    /// Called only when binding an actual LagoDB AM COPY session.
     /// Returns whether successful inserts need a retained trigger row.
     pub(super) fn bind_copy_session(&self) -> AmResult<bool> {
-        self.validate_copy_from()?;
         self.validate_immediate_rows(ModifyActions::INSERT)?;
         Ok(self
             .triggers
@@ -89,7 +45,10 @@ impl<'relation> RelationTriggerPolicy<'relation> {
             .any(|trigger| Self::is_after_row_for(trigger, ModifyActions::INSERT)))
     }
 
-    fn validate_immediate_rows(&self, actions: ModifyActions) -> AmResult<()> {
+    pub(crate) fn validate_immediate_rows(
+        &self,
+        actions: ModifyActions,
+    ) -> AmResult<()> {
         if self.triggers.iter().any(|trigger| {
             trigger.tgdeferrable && Self::is_after_row_for(trigger, actions)
         }) {
@@ -97,23 +56,6 @@ impl<'relation> RelationTriggerPolicy<'relation> {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
                 "LagoDB does not support deferrable AFTER ROW triggers; \
                  retained OLD/NEW rows have statement lifetime",
-            ));
-        }
-        Ok(())
-    }
-
-    fn validate_partitioned_table(&self, actions: ModifyActions) -> AmResult<()> {
-        // Check declared trigger shape even for disabled/WHEN-false triggers:
-        // PostgreSQL validates partitioned table row events before TriggerEnabled.
-        if self.partitioned_table
-            && self
-                .triggers
-                .iter()
-                .any(|trigger| Self::is_after_row_for(trigger, actions))
-        {
-            return Err(PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                "LagoDB does not support AFTER ROW triggers on provider-owned partitioned tables",
             ));
         }
         Ok(())

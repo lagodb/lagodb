@@ -58,14 +58,6 @@ impl<'a, P: LagodbCustomModifyProvider> ModifyScanBinder<'a, P> {
         binder.result
     }
 
-    /// # Safety
-    /// A non-null relation must be a live executor relation.
-    pub(super) unsafe fn owns_relation(relation: pg_sys::Relation) -> bool {
-        !relation.is_null()
-            && P::AccessMethod::access_method_oid()
-                .is_some_and(|oid| unsafe { (*(*relation).rd_rel).relam } == oid)
-    }
-
     unsafe fn walk(
         &mut self,
         state: *mut pg_sys::PlanState,
@@ -75,9 +67,7 @@ impl<'a, P: LagodbCustomModifyProvider> ModifyScanBinder<'a, P> {
         }
         if let Some(scan) = unsafe { Self::scan_state(state) } {
             let rti = unsafe { (*(*scan).ps.plan.cast::<pg_sys::Scan>()).scanrelid };
-            if let Some(index) = self.targets[rti as usize]
-                && unsafe { Self::owns_relation((*scan).ss_currentRelation) }
-            {
+            if let Some(index) = self.targets[rti as usize] {
                 match unsafe { (*state).type_ } {
                     pg_sys::NodeTag::T_CustomScanState => {
                         unsafe { self.bind_custom(state.cast()) }?

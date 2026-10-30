@@ -3,11 +3,12 @@
 //! retain their separate static-only conflict scope. PostgreSQL retains every
 //! SeqScan qual for final row qualification.
 //!
-//! PG17's SeqNext (nodeSeqscan.c) passes zero scan keys to table_beginscan;
-//! ExecScan (execScan.c) evaluates quals after fetching each row. These predicates
-//! instead come from baserestrictinfo at planning time and travel through the
-//! outer ModifyTable CustomScan's plan data to prepare_modify_seq_scan. They are
-//! an explicit LagoDB channel, not qual pushdown supplied by native SeqScan.
+//! PostgreSQL's SeqNext (nodeSeqscan.c) passes zero scan keys to table_beginscan;
+//! the scan loop evaluates quals after fetching each row: ExecScan on PG17 and
+//! ExecScanExtended on PG18. These predicates instead come from baserestrictinfo
+//! at planning time and travel through the outer ModifyTable CustomScan's plan
+//! data to prepare_modify_seq_scan. They are an explicit LagoDB channel, not qual
+//! pushdown supplied by native SeqScan.
 
 use std::{marker::PhantomData, mem, ptr};
 

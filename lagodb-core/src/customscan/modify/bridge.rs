@@ -30,23 +30,14 @@ pub(super) struct LagodbMutationResult {
 }
 
 #[repr(C)]
-pub(super) struct LagodbPreparedUpdateTriggerRows {
-    pub old_tid: pg_sys::ItemPointerData,
-    pub new_tid: pg_sys::ItemPointerData,
-}
-
-#[repr(C)]
 pub(super) struct LagodbModifyBridge {
     pub state: *mut c_void,
     pub postgres_indexes: bool,
-    pub provider_owned_partitioned_table: bool,
-    pub provider_owned_partitioned_table_state: *mut c_void,
     pub resolve_relation: unsafe extern "C-unwind" fn(
         *mut c_void,
         *mut pg_sys::ResultRelInfo,
     ) -> *mut c_void,
-    pub wholerow_attno:
-        unsafe extern "C-unwind" fn(*mut c_void) -> pg_sys::AttrNumber,
+    pub wholerow_attno: pg_sys::AttrNumber,
     pub insert: unsafe extern "C-unwind" fn(
         *mut c_void,
         *mut pg_sys::TupleTableSlot,
@@ -57,14 +48,6 @@ pub(super) struct LagodbModifyBridge {
         *mut c_void,
         *mut pg_sys::TupleTableSlot,
         *mut pg_sys::ItemPointerData,
-    ),
-    pub prepare_update_trigger_rows: unsafe extern "C-unwind" fn(
-        *mut c_void,
-        *mut pg_sys::ResultRelInfo,
-        *mut pg_sys::ResultRelInfo,
-        *mut pg_sys::TupleTableSlot,
-        *mut pg_sys::TupleTableSlot,
-        *mut LagodbPreparedUpdateTriggerRows,
     ),
     pub update: unsafe extern "C-unwind" fn(
         *mut c_void,
@@ -82,7 +65,6 @@ pub(super) struct LagodbModifyBridge {
         pg_sys::CommandId,
         pg_sys::Snapshot,
         pg_sys::Snapshot,
-        bool,
         bool,
     ) -> LagodbMutationResult,
 }
@@ -127,10 +109,14 @@ impl<P: LagodbCustomModifyProvider> ModifyNodeCell<P> {
             let wholerow = unsafe {
                 pg_sys::ExecFindJunkAttributeInTlist(tlist, WHOLEROW_NAME.as_ptr())
             };
-            if operation == pg_sys::CmdType::CMD_UPDATE && wholerow <= 0 {
+            if matches!(
+                operation,
+                pg_sys::CmdType::CMD_UPDATE | pg_sys::CmdType::CMD_MERGE
+            ) && wholerow <= 0
+            {
                 return Err(PgReportError::from_message(
                     PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    "LagoDB UPDATE input is missing PostgreSQL wholerow",
+                    "LagoDB UPDATE/MERGE input is missing PostgreSQL wholerow",
                 ));
             }
             wholerow.max(0)
@@ -154,21 +140,14 @@ impl<P: LagodbCustomModifyProvider> ModifyNodeCell<P> {
         operation(unsafe { &mut *self.inner.get() })
     }
 
-    pub fn bridge(
-        &self,
-        provider_owned_partitioned_table: bool,
-        provider_owned_partitioned_table_state: *mut c_void,
-    ) -> LagodbModifyBridge {
+    pub fn bridge(&self) -> LagodbModifyBridge {
         LagodbModifyBridge {
             state: std::ptr::from_ref(self).cast_mut().cast(),
             postgres_indexes: P::MODIFY_CAPABILITIES.postgres_indexes(),
-            provider_owned_partitioned_table,
-            provider_owned_partitioned_table_state,
             resolve_relation: resolve_relation::<P>,
-            wholerow_attno: wholerow_attno::<P>,
+            wholerow_attno: self.wholerow_attno,
             insert: insert::<P>,
             preserve_trigger_row: preserve_trigger_row::<P>,
-            prepare_update_trigger_rows: prepare_update_trigger_rows::<P>,
             update: update::<P>,
             delete_: delete_::<P>,
         }
@@ -189,41 +168,6 @@ unsafe extern "C-unwind" fn preserve_trigger_row<P: LagodbCustomModifyProvider>(
     unsafe { preserved.write_to_raw(row_id) };
 }
 
-/// PostgreSQL passes live trigger metadata and output storage from the active
-/// ModifyTable callback. The slot for each provider-owned side is non-NULL;
-/// the OLD slot is intentionally NULL when the source side remains native.
-/// The outer callback reports the Rust result.
-#[pg_guard]
-unsafe extern "C-unwind" fn prepare_update_trigger_rows<
-    P: LagodbCustomModifyProvider,
->(
-    state: *mut c_void,
-    source_info: *mut pg_sys::ResultRelInfo,
-    destination_info: *mut pg_sys::ResultRelInfo,
-    old_slot: *mut pg_sys::TupleTableSlot,
-    new_slot: *mut pg_sys::TupleTableSlot,
-    prepared: *mut LagodbPreparedUpdateTriggerRows,
-) {
-    let cell = unsafe { cell::<P>(state) };
-    let rows = unsafe {
-        cell.with_mut(|execution| {
-            execution.prepare_update_trigger_rows(
-                source_info,
-                destination_info,
-                old_slot,
-                new_slot,
-            )
-        })
-    }
-    .report_unwrap();
-    if let Some(old_tid) = rows.old_tid {
-        unsafe { old_tid.write_to_raw(&raw mut (*prepared).old_tid) };
-    }
-    if let Some(new_tid) = rows.new_tid {
-        unsafe { new_tid.write_to_raw(&raw mut (*prepared).new_tid) };
-    }
-}
-
 unsafe fn cell<'a, P: LagodbCustomModifyProvider>(
     state: *mut c_void,
 ) -> &'a ModifyNodeCell<P> {
@@ -242,15 +186,8 @@ unsafe extern "C-unwind" fn resolve_relation<P: LagodbCustomModifyProvider>(
     // operation that mutates the relation ownership maps.
     unsafe { cell.with_mut(|execution| execution.resolve_relation(result_rel_info)) }
         .report_unwrap()
-        .map_or(std::ptr::null_mut(), |relation| relation.as_ptr().cast())
-}
-
-#[pg_guard]
-unsafe extern "C-unwind" fn wholerow_attno<P: LagodbCustomModifyProvider>(
-    state: *mut c_void,
-) -> pg_sys::AttrNumber {
-    let cell = unsafe { cell::<P>(state) };
-    cell.wholerow_attno
+        .as_ptr()
+        .cast()
 }
 
 /// PostgreSQL supplies a live relation state and insert slot for this
@@ -330,7 +267,6 @@ unsafe extern "C-unwind" fn delete_<P: LagodbCustomModifyProvider>(
     snapshot: pg_sys::Snapshot,
     crosscheck: pg_sys::Snapshot,
     wait: bool,
-    changing_partition: bool,
 ) -> LagodbMutationResult {
     let tuple_id = unsafe { ItemPointer::from_raw(tuple_id.cast_mut()) };
     let snapshot_handle = unsafe { SnapshotHandle::from_raw(snapshot) };
@@ -341,7 +277,6 @@ unsafe extern "C-unwind" fn delete_<P: LagodbCustomModifyProvider>(
         snapshot: &snapshot_handle,
         crosscheck: crosscheck_handle.as_ref(),
         wait,
-        changing_partition,
     };
     let relation = relation.cast::<ResultRelationState<P>>();
     let outcome =
