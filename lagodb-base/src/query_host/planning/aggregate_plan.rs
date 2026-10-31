@@ -2,12 +2,12 @@
 
 use std::ffi::{CStr, CString, c_int, c_void};
 
-use lagodb_core::expr::{ExprType, RuntimeValueLayout};
+use lagodb_core::expr::{ExprType, PgOrderingDirection, RuntimeValueLayout};
 use lagodb_core::query_contract::OutputId;
 use lagodb_query::plan::{
     AggCall, AggregateArguments, AggregateNode, AggregateOrderExpr, ExecutionExpr,
     FilterNode, GroupExpr, ProjectExpr, ProjectNode, QueryFragment, QueryNode,
-    QueryPlanData, QueryTupleLayout, QueryTupleSlot, ScalarSemantics, SortDirection,
+    QueryPlanData, QueryTupleLayout, QueryTupleSlot, ScalarSemantics,
 };
 use pgrx::pg_sys;
 
@@ -338,12 +338,6 @@ impl AggregatePlanBuilder {
             )
         };
         let distinct = !aggregate.aggdistinct.is_null();
-        let retain_order = matches!(
-            u32::from(aggregate.aggfnoid),
-            pg_sys::F_ARRAY_AGG_ANYNONARRAY | pg_sys::F_STRING_AGG_TEXT_TEXT
-        );
-        let order_by =
-            unsafe { self.build_aggregate_order_by(aggregate, retain_order) }?;
         let filter = if aggregate.aggfilter.is_null() {
             None
         } else {
@@ -357,11 +351,10 @@ impl AggregatePlanBuilder {
                 .ok()?,
             )
         };
-        AggCall::try_new(
+        let call = AggCall::try_new(
             aggregate.aggfnoid,
             arguments,
             distinct,
-            order_by.into_boxed_slice(),
             filter,
             ExprType {
                 type_oid: aggregate.aggtype,
@@ -372,7 +365,9 @@ impl AggregatePlanBuilder {
             },
             output,
         )
-        .ok()
+        .ok()?;
+        let order_by = unsafe { self.build_aggregate_order_by(aggregate, &call) }?;
+        call.try_with_order_by(order_by.into_boxed_slice()).ok()
     }
 
     unsafe fn semantic_arguments(
@@ -393,10 +388,22 @@ impl AggregatePlanBuilder {
     unsafe fn build_aggregate_order_by(
         &mut self,
         aggregate: &pg_sys::Aggref,
-        retain_order: bool,
+        call: &AggCall,
     ) -> Option<Vec<AggregateOrderExpr>> {
         let count = unsafe { pg_sys::list_length(aggregate.aggorder) };
-        let mut order_by = Vec::with_capacity(count as usize);
+        let honors_order_by = call.kind().honors_order_by();
+        if count > 0 && call.result_depends_on_input_order() && !honors_order_by {
+            return None;
+        }
+        let mut order_by = if honors_order_by {
+            Vec::with_capacity(count as usize)
+        } else {
+            Vec::new()
+        };
+        // An order-insensitive transition can omit sorting only after proving
+        // that the skipped expression is a direct column and the comparator is
+        // a side-effect-free built-in operator. Implementations that honor
+        // ORDER BY retain the same proof before lowering the key into the IR.
         for index in 0..count {
             let clause = unsafe { pg_sys::list_nth(aggregate.aggorder, index) }
                 .cast::<pg_sys::SortGroupClause>();
@@ -406,48 +413,32 @@ impl AggregatePlanBuilder {
                     aggregate.args,
                 )
             };
-            if target.is_null() {
-                return None;
-            }
             let target_expression = unsafe { (*target).expr };
             let direct =
                 unsafe { QueryExpressionPlanner::unwrap_relabel(target_expression) };
             if unsafe { (*direct).type_ } != pg_sys::NodeTag::T_Var {
                 return None;
             }
-            let mut opfamily = pg_sys::InvalidOid;
-            let mut opcintype = pg_sys::InvalidOid;
-            let mut strategy = 0_i16;
-            if !unsafe {
-                pg_sys::get_ordering_op_properties(
-                    (*clause).sortop,
-                    &mut opfamily,
-                    &mut opcintype,
-                    &mut strategy,
+            let direction =
+                PgOrderingDirection::from_builtin_sort_operator(unsafe {
+                    (*clause).sortop
+                })?;
+            if !honors_order_by {
+                continue;
+            }
+            let expression = unsafe {
+                self.expressions.lower(
+                    target_expression.cast(),
+                    ExpressionScope::scalar(self.root),
                 )
-            } {
-                return None;
             }
-            let direction = match u32::try_from(strategy).ok()? {
-                pg_sys::BTLessStrategyNumber => SortDirection::Ascending,
-                pg_sys::BTGreaterStrategyNumber => SortDirection::Descending,
-                _ => return None,
-            };
-            if retain_order {
-                let expression = unsafe {
-                    self.expressions.lower(
-                        target_expression.cast(),
-                        ExpressionScope::scalar(self.root),
-                    )
-                }
-                .ok()?;
-                order_by.push(
-                    AggregateOrderExpr::try_new(expression, direction, unsafe {
-                        (*clause).nulls_first
-                    })
-                    .ok()?,
-                );
-            }
+            .ok()?;
+            order_by.push(
+                AggregateOrderExpr::try_new(expression, direction, unsafe {
+                    (*clause).nulls_first
+                })
+                .ok()?,
+            );
         }
         Some(order_by)
     }

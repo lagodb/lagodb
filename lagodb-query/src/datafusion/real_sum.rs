@@ -39,7 +39,7 @@ struct RealSumResult {
 impl RealSumResult {
     fn convert(value: f64) -> Result<f32> {
         let result = value as f32;
-        // Match PG17 dtof's overflow rule. Infinity/NaN remain valid; a finite
+        // Match PostgreSQL dtof's overflow rule. Infinity/NaN remain valid; a finite
         // aggregate overflowing real is an SQL error, not a storage invariant.
         if result.is_infinite() && !value.is_infinite() {
             return Err(Self::overflow());

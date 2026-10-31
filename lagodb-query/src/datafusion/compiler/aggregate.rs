@@ -7,12 +7,11 @@ use datafusion::functions_aggregate::expr_fn::{
     array_agg, avg, bool_and, bool_or, count, max, min, stddev, stddev_pop, sum,
     var_pop, var_sample,
 };
-use datafusion::functions_aggregate::string_agg::string_agg;
 use datafusion::logical_expr::expr::{AggregateFunction, Sort};
 use datafusion::logical_expr::{Expr, ScalarUDF, lit};
 use pgrx::pg_sys;
 
-use crate::datafusion::{numeric_aggregate, real_sum};
+use crate::datafusion::{numeric_aggregate, postgres_string_agg, real_sum};
 use crate::plan::{AggCall, AggregateKind, SortDirection};
 
 use super::DataFusionPlanError;
@@ -78,7 +77,7 @@ impl DataFusionLogicalPlanCompiler<'_> {
                     .expect("validated STRING_AGG has a delimiter")
                     .to_str()
                     .map_err(|_| DataFusionPlanError::InvalidStringAggDelimiter)?;
-                string_agg(argument, lit(delimiter.to_owned()))
+                postgres_string_agg::string_agg(argument, lit(delimiter.to_owned()))
             }
             _ => {
                 return Err(DataFusionError::Plan(
@@ -114,9 +113,8 @@ impl DataFusionLogicalPlanCompiler<'_> {
         // pair equal. AVG/variance coerce integer inputs to Float64 before
         // DISTINCT evaluation, so distinct int8 values outside Float64's exact
         // integer domain (above 2^53 in magnitude) can collapse to one key.
-        // Collated text uses Arrow byte equality, aggregate-local text ORDER BY
-        // uses Arrow byte ordering, and growing distinct state is reserved
-        // after accumulator update.
+        // Collated text uses Arrow byte equality, and growing distinct state is
+        // reserved after accumulator update.
         // These limitations are recorded at the capability boundary and do
         // not add per-datum normalization or reservation checks to the hot
         // path.
@@ -126,22 +124,17 @@ impl DataFusionLogicalPlanCompiler<'_> {
             .map(|filter| expressions.compile(filter))
             .transpose()?
             .map(Box::new);
-        if matches!(
-            aggregate.kind(),
-            AggregateKind::ArrayAgg | AggregateKind::StringAgg
-        ) {
-            params.order_by = aggregate
-                .order_by()
-                .iter()
-                .map(|order| {
-                    Ok(Sort::new(
-                        expressions.compile(order.expression())?,
-                        matches!(order.direction(), SortDirection::Ascending),
-                        order.nulls_first(),
-                    ))
-                })
-                .collect::<Result<Vec<_>, DataFusionPlanError>>()?;
-        }
+        params.order_by = aggregate
+            .order_by()
+            .iter()
+            .map(|order| {
+                Ok(Sort::new(
+                    expressions.compile(order.expression())?,
+                    matches!(order.direction(), SortDirection::Ascending),
+                    order.nulls_first(),
+                ))
+            })
+            .collect::<Result<Vec<_>, DataFusionPlanError>>()?;
         Ok(Expr::AggregateFunction(AggregateFunction { func, params }))
     }
 }

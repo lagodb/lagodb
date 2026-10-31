@@ -1,4 +1,4 @@
-//! PostgreSQL aggregate OID and type allowlist.
+//! PostgreSQL aggregate OID, type, and transition semantics.
 
 use lagodb_core::expr::ExprType;
 use pgrx::pg_sys;
@@ -7,6 +7,16 @@ use super::super::{Decimal128Semantics, QueryPlanError, ScalarSemantics};
 use super::{AggCall, AggregateArguments, AggregateKind};
 
 impl AggregateKind {
+    /// Whether the physical aggregate implementation honors aggregate ORDER BY.
+    ///
+    /// Other aggregate kinds must keep their IR ordering empty. When their
+    /// PostgreSQL result depends on transition order, planning leaves the
+    /// complete aggregate in PostgreSQL instead.
+    #[inline]
+    pub const fn honors_order_by(self) -> bool {
+        matches!(self, Self::ArrayAgg | Self::StringAgg)
+    }
+
     pub(super) fn classify(
         function_oid: pg_sys::Oid,
         arguments: &AggregateArguments,
@@ -148,6 +158,34 @@ impl AggregateKind {
 }
 
 impl AggCall {
+    /// Whether PostgreSQL's aggregate result changes with transition order.
+    ///
+    /// Floating MIN/MAX are included because PostgreSQL returns the second
+    /// operand on equal comparisons, making signed zero and NaN payloads
+    /// order-dependent even though their comparison values are equal.
+    pub fn result_depends_on_input_order(&self) -> bool {
+        let float_argument = self
+            .argument()
+            .and_then(|argument| argument.result_type_hint())
+            .is_some_and(Self::supports_float);
+        match self.kind() {
+            AggregateKind::ArrayAgg | AggregateKind::StringAgg => true,
+            AggregateKind::Min
+            | AggregateKind::Max
+            | AggregateKind::Sum
+            | AggregateKind::Average
+            | AggregateKind::VarianceSample
+            | AggregateKind::VariancePopulation
+            | AggregateKind::StddevSample
+            | AggregateKind::StddevPopulation => float_argument,
+            AggregateKind::Count
+            | AggregateKind::NumericSum
+            | AggregateKind::NumericAverage
+            | AggregateKind::BoolAnd
+            | AggregateKind::BoolOr => false,
+        }
+    }
+
     pub(in crate::plan::ir) fn validate_argument_type(
         &self,
         argument_type: Option<ExprType>,

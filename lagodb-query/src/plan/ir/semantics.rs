@@ -14,7 +14,7 @@ pub use lagodb_core::expr::PgComparisonKind as ComparisonKind;
 ///
 /// Provider pruning keeps its separate, smaller IR. Exact query execution may
 /// additionally use PostgreSQL boolean operators, deterministic byte equality,
-/// and byte-ordered C/POSIX text comparisons; HAVING also admits
+/// and PostgreSQL-recognized C-equivalent text comparisons; HAVING also admits
 /// unbounded-typmod NUMERIC values
 /// produced by integer SUM/AVG aggregates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

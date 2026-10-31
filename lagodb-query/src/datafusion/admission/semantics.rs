@@ -75,9 +75,19 @@ impl RepresentationSemantics {
                 }
                 Expr::InList(list) => Self::nanoseconds(&list.expr.get_type(schema)?)
                     .then_some(AdmissionDeclineReason::NanosecondComparison),
-                Expr::AggregateFunction(aggregate) if aggregate.params.distinct => {
-                    for argument in &aggregate.params.args {
-                        if Self::nanoseconds(&argument.get_type(schema)?) {
+                Expr::AggregateFunction(aggregate) => {
+                    let ordered = aggregate
+                        .params
+                        .order_by
+                        .iter()
+                        .map(|order| &order.expr);
+                    let distinct = aggregate
+                        .params
+                        .args
+                        .iter()
+                        .filter(|_| aggregate.params.distinct);
+                    for expression in ordered.chain(distinct) {
+                        if Self::nanoseconds(&expression.get_type(schema)?) {
                             decline = Some(AdmissionDeclineReason::NanosecondComparison);
                             return Ok(TreeNodeRecursion::Stop);
                         }

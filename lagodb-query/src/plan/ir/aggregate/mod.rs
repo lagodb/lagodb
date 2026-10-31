@@ -9,6 +9,7 @@ use pgrx::pg_sys;
 mod row_count;
 mod semantics;
 
+use super::ordering::{OrderingSemantics, SortDirection};
 use super::semantics::ScalarSemantics;
 use super::{ExecutionExpr, QueryNode, QueryPlanError, RowEstimate};
 
@@ -71,12 +72,6 @@ impl AggregateArguments {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortDirection {
-    Ascending,
-    Descending,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggregateOrderExpr {
     expression: ExecutionExpr,
@@ -90,7 +85,10 @@ impl AggregateOrderExpr {
         direction: SortDirection,
         nulls_first: bool,
     ) -> Result<Self, QueryPlanError> {
-        if !matches!(&expression, ExecutionExpr::Column(_)) {
+        let ExecutionExpr::Column(column) = &expression else {
+            return Err(QueryPlanError::UnsupportedAggregate);
+        };
+        if !OrderingSemantics::supports_aggregate_order(column.value_type) {
             return Err(QueryPlanError::UnsupportedAggregate);
         }
         Ok(Self {
@@ -134,7 +132,6 @@ impl AggCall {
         function_oid: pg_sys::Oid,
         arguments: AggregateArguments,
         distinct: bool,
-        order_by: Box<[AggregateOrderExpr]>,
         filter: Option<ExecutionExpr>,
         result_type: ExprType,
         output: OutputId,
@@ -144,7 +141,7 @@ impl AggCall {
             kind: AggregateKind::classify(function_oid, &arguments)?,
             arguments,
             distinct,
-            order_by,
+            order_by: Box::new([]),
             filter,
             result_type,
             output,
@@ -166,6 +163,18 @@ impl AggCall {
             aggregate.arguments.primary().and_then(Self::scalar_type),
         )?;
         Ok(aggregate)
+    }
+
+    /// Attach validated aggregate ordering to an implementation that honors it.
+    pub fn try_with_order_by(
+        mut self,
+        order_by: Box<[AggregateOrderExpr]>,
+    ) -> Result<Self, QueryPlanError> {
+        if !order_by.is_empty() && !self.kind.honors_order_by() {
+            return Err(QueryPlanError::UnsupportedAggregate);
+        }
+        self.order_by = order_by;
+        Ok(self)
     }
 
     fn scalar_type(value: &ExecutionExpr) -> Option<ExprType> {

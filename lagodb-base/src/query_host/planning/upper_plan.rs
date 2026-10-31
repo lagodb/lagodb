@@ -3,12 +3,12 @@
 use std::ffi::c_void;
 
 use lagodb_core::expr::{
-    ExprType, PgComparisonKind, PgComparisonSignature, RuntimeValueId,
-    RuntimeValueSource, RuntimeValueSpec,
+    ExprType, PgOrderingDirection, RuntimeValueId, RuntimeValueSource,
+    RuntimeValueSpec,
 };
 use lagodb_query::plan::{
     LimitEstimate, LimitNode, PlanCost, QueryFragment, QueryNode, QueryPlanData,
-    QueryPlanError, SelectedQueryPlan, SortDirection, SortExpr, SortNode,
+    QueryPlanError, SelectedQueryPlan, SortExpr, SortNode,
 };
 use pgrx::pg_sys;
 
@@ -269,24 +269,10 @@ impl UpperPlanCandidate {
                     }
                 })?;
             let slot = selected.query().tuple_layout().slots()[position];
-            let signature =
-                PgComparisonSignature::for_operator(unsafe { (*clause).sortop })?;
-            let direction = match signature.kind() {
-                PgComparisonKind::Less => SortDirection::Ascending,
-                PgComparisonKind::Greater => SortDirection::Descending,
-                _ => return None,
-            };
-            if signature.left_type() != signature.right_type()
-                || (signature.left_type() != slot.type_oid()
-                    && !unsafe {
-                        pg_sys::IsBinaryCoercible(
-                            slot.type_oid(),
-                            signature.left_type(),
-                        )
-                    })
-            {
-                return None;
-            }
+            let direction =
+                PgOrderingDirection::from_builtin_sort_operator(unsafe {
+                    (*clause).sortop
+                })?;
             keys.push(
                 SortExpr::try_new(
                     slot.output(),

@@ -1,6 +1,7 @@
 //! Construction of PostgreSQL CustomPath and CustomScan nodes.
 
-use std::ffi::{c_int, c_void};
+use std::ffi::c_int;
+use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr;
 
@@ -11,11 +12,51 @@ use pgrx::{pg_guard, pg_sys};
 use super::super::error::QueryHostError;
 use super::super::methods;
 
+/// PostgreSQL path-ranking fields that changed together in PG18.
+#[derive(Clone, Copy)]
+pub(super) struct PathRankingCost {
+    plan: PlanCost,
+    #[cfg(feature = "pg18")]
+    disabled_nodes: c_int,
+}
+
+impl PathRankingCost {
+    pub(super) fn new(plan: PlanCost) -> Self {
+        Self {
+            plan,
+            #[cfg(feature = "pg18")]
+            disabled_nodes: 0,
+        }
+    }
+
+    #[cfg(any(feature = "pg16", feature = "pg17"))]
+    fn replacing(plan: PlanCost, _old_path: &pg_sys::Path) -> Self {
+        Self { plan }
+    }
+
+    #[cfg(feature = "pg18")]
+    fn replacing(plan: PlanCost, old_path: &pg_sys::Path) -> Self {
+        Self {
+            plan,
+            disabled_nodes: old_path.disabled_nodes,
+        }
+    }
+
+    fn apply(self, path: &mut pg_sys::Path) {
+        path.startup_cost = self.plan.startup();
+        path.total_cost = self.plan.total();
+        #[cfg(feature = "pg18")]
+        {
+            path.disabled_nodes = self.disabled_nodes;
+        }
+    }
+}
+
 pub(super) unsafe fn add_path(
     output_rel: *mut pg_sys::RelOptInfo,
     path_target: *mut pg_sys::PathTarget,
     selected_plan: *mut pg_sys::List,
-    cost: PlanCost,
+    ranking_cost: PathRankingCost,
     rows: f64,
     parameter_info: *mut pg_sys::ParamPathInfo,
     pathkeys: *mut pg_sys::List,
@@ -36,8 +77,7 @@ pub(super) unsafe fn add_path(
         path.parallel_safe = false;
         path.parallel_workers = 0;
         path.rows = rows;
-        path.startup_cost = cost.startup();
-        path.total_cost = cost.total();
+        ranking_cost.apply(path);
         path.pathkeys = pathkeys;
 
         // The encoded query fixes both its tuple layout and the corresponding
@@ -46,7 +86,10 @@ pub(super) unsafe fn add_path(
         // rather than mutating the CustomPath target in place.
         (*custom_path).flags = 0;
         (*custom_path).custom_paths = ptr::null_mut();
-        (*custom_path).custom_restrictinfo = ptr::null_mut();
+        #[cfg(any(feature = "pg17", feature = "pg18"))]
+        {
+            (*custom_path).custom_restrictinfo = ptr::null_mut();
+        }
         (*custom_path).custom_private = selected_plan;
         (*custom_path).methods = methods::tables().path();
         pg_sys::add_path(output_rel, path);
@@ -68,6 +111,7 @@ pub(super) unsafe fn replace_path(
     let rows = old_path_fields.rows;
     let parameter_info = old_path_fields.param_info;
     let pathkeys = old_path_fields.pathkeys;
+    let ranking_cost = PathRankingCost::replacing(cost, old_path_fields);
     unsafe {
         (*output_rel).pathlist =
             pg_sys::list_delete_nth_cell((*output_rel).pathlist, old_index);
@@ -76,7 +120,7 @@ pub(super) unsafe fn replace_path(
             output_rel,
             path_target,
             selected_plan,
-            cost,
+            ranking_cost,
             rows,
             parameter_info,
             pathkeys,
@@ -131,14 +175,7 @@ unsafe fn materialize_plan(
     };
     unsafe {
         let plan = &mut (*custom_scan).scan.plan;
-        let path = &(*best_path).path;
         plan.type_ = pg_sys::NodeTag::T_CustomScan;
-        plan.startup_cost = path.startup_cost;
-        plan.total_cost = path.total_cost;
-        plan.plan_rows = path.rows;
-        plan.plan_width = (*path.pathtarget).width;
-        plan.parallel_aware = false;
-        plan.parallel_safe = false;
         plan.async_capable = false;
         plan.targetlist = target_list;
         plan.qual = ptr::null_mut();

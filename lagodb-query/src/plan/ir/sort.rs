@@ -2,10 +2,9 @@
 
 use lagodb_core::expr::ExprType;
 use lagodb_core::query_contract::OutputId;
-use pgrx::pg_sys;
 
-use super::aggregate::SortDirection;
-use super::{Decimal128Semantics, QueryNode, QueryPlanError};
+use super::ordering::{OrderingSemantics, SortDirection};
+use super::{QueryNode, QueryPlanError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SortExpr {
@@ -22,7 +21,7 @@ impl SortExpr {
         direction: SortDirection,
         nulls_first: bool,
     ) -> Result<Self, QueryPlanError> {
-        if !Self::supports_type(result_type) {
+        if !OrderingSemantics::supports_query_sort(result_type) {
             return Err(QueryPlanError::UnsupportedSortKey);
         }
         Ok(Self {
@@ -31,33 +30,6 @@ impl SortExpr {
             direction,
             nulls_first,
         })
-    }
-
-    fn supports_type(result_type: ExprType) -> bool {
-        match result_type.type_oid {
-            pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID => {
-                result_type.typmod == -1
-                    && result_type.collation == pg_sys::InvalidOid
-            }
-            pg_sys::TEXTOID => {
-                result_type.typmod == -1
-                    && matches!(
-                        result_type.collation,
-                        pg_sys::C_COLLATION_OID | pg_sys::POSIX_COLLATION_OID
-                    )
-            }
-            pg_sys::VARCHAROID => {
-                result_type.typmod >= -1
-                    && matches!(
-                        result_type.collation,
-                        pg_sys::C_COLLATION_OID | pg_sys::POSIX_COLLATION_OID
-                    )
-            }
-            pg_sys::NUMERICOID => {
-                Decimal128Semantics::for_type(result_type).is_some()
-            }
-            _ => false,
-        }
     }
 
     #[inline]
