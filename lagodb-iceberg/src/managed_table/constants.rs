@@ -8,3 +8,6 @@
 /// keeps the SQL-level `CREATE ACCESS METHOD <name>` contract aligned with
 /// every Rust-side AM lookup and name check.
 pub const ICEBERG_AM_NAME: &std::ffi::CStr = c"iceberg";
+
+/// The schema holding the extension's catalog relations and SQL functions.
+pub const ICEBERG_SCHEMA: &std::ffi::CStr = c"iceberg";

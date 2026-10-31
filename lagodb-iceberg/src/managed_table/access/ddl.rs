@@ -19,7 +19,7 @@ impl AmDdl for IcebergTableAm {
         // abort cleanup, DROP deletion and TRUNCATE locator replacement; the AM
         // must not unlink this file itself. Object data remains remote.
         // Intentionally omit an init fork for UNLOGGED: see StorageContext's
-        // UNLOGGED contract. Partitioned roots do not enter this PG callback.
+        // UNLOGGED contract. `create_storage` WAL-logs the main fork instead.
         newrlocator.create_storage(persistence)?;
         if !rel.is_being_created_in_current_subtransaction() {
             ManagedTableTruncate::execute(rel, Some(*newrlocator))?;

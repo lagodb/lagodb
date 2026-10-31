@@ -2,7 +2,7 @@
 
 use std::ffi::CStr;
 
-use lagodb_core::catalog::range_var_get_relid;
+use lagodb_core::catalog::has_inheritance_children;
 use lagodb_core::handles::{RelationGuard, RelationHandle};
 use lagodb_core::hooks::{HookError, UtilityHookError};
 use lagodb_core::options::TableOptionAlterations;
@@ -18,8 +18,6 @@ use crate::managed_table::options::ICEBERG_TABLE_OPTIONS;
 
 #[derive(Debug, Default)]
 pub(super) struct AlterTableIcebergOperations {
-    pub(super) sets_access_method: bool,
-    pub(super) sets_access_method_to_iceberg: bool,
     pub(super) sets_tablespace: bool,
     pub(super) alters_table_options: bool,
     pub(super) schema_update: SchemaEvolutionUpdate,
@@ -75,62 +73,41 @@ impl IcebergStmtProbe {
     }
 
     /// True iff the user-supplied AM pointer (or the cluster default, if the
-    /// pointer is null) names the Iceberg AM.
+    /// pointer is null) names the Iceberg AM and that AM is installed. Without
+    /// it, PostgreSQL reports the missing access method itself.
     ///
     /// # Safety
     ///
     /// If `am` is non-null it must point to a NUL-terminated C string owned by
     /// the current parse-tree context.
     unsafe fn explicit_or_default_is_iceberg(am: *const std::ffi::c_char) -> bool {
-        if am.is_null() {
-            return Self::default_is_iceberg();
-        }
-        IcebergAccessMethod::matches_name(unsafe { CStr::from_ptr(am) })
+        let names_iceberg = if am.is_null() {
+            Self::default_is_iceberg()
+        } else {
+            IcebergAccessMethod::matches_name(unsafe { CStr::from_ptr(am) })
+        };
+        names_iceberg && IcebergAccessMethod::oid().is_some()
     }
 
-    pub(super) fn create_stmt_may_use_iceberg(
-        stmt: &pg_sys::CreateStmt,
-    ) -> Result<bool, UtilityHookError> {
+    pub(super) fn create_stmt_may_use_iceberg(stmt: &pg_sys::CreateStmt) -> bool {
+        // A declarative partition is never managed: core's provider hierarchy
+        // guard rejects an Iceberg child from pg_inherits. PG17 lets a child
+        // inherit its parent's AM, so neither the statement nor the default
+        // identifies it.
         if !stmt.partbound.is_null() {
-            if stmt.inhRelations.is_null()
-                || unsafe { pg_sys::list_length(stmt.inhRelations) } == 0
-            {
-                return Ok(false);
-            }
-            let parent = unsafe {
-                pg_sys::list_nth(stmt.inhRelations, 0) as *mut pg_sys::RangeVar
-            };
-            if parent.is_null() {
-                return Ok(false);
-            }
-
-            let parent_oid = unsafe {
-                range_var_get_relid(
-                    parent,
-                    pg_sys::AccessExclusiveLock as pg_sys::LOCKMODE,
-                    true,
-                )
-            }?;
-            if parent_oid == pg_sys::InvalidOid {
-                return Ok(false);
-            }
-
-            // A child of a managed partitioned table is forbidden regardless of an
-            // explicitly requested child AM. Checking the parent before the
-            // child accessMethod prevents `PARTITION OF ... USING heap` from
-            // bypassing the partitioned table topology invariant.
-            return Ok(IcebergAccessMethod::matches_oid(unsafe {
-                pg_sys::get_rel_relam(parent_oid)
-            }));
+            return false;
         }
 
-        if !stmt.accessMethod.is_null() {
-            return Ok(IcebergAccessMethod::matches_name(unsafe {
-                CStr::from_ptr(stmt.accessMethod)
-            }));
+        // PostgreSQL applies the default AM only to relations with storage, so
+        // a root without USING stays native. pg_restore relies on this: it
+        // leaves the previous table's default in place for a partitioned root.
+        if !stmt.partspec.is_null() && stmt.accessMethod.is_null() {
+            return false;
         }
 
-        Ok(Self::default_is_iceberg())
+        // SAFETY: `stmt.accessMethod` is owned by the same parse-tree node we
+        // were handed by the utility hook.
+        unsafe { Self::explicit_or_default_is_iceberg(stmt.accessMethod) }
     }
 
     pub(super) fn create_table_as_stmt_uses_iceberg(
@@ -184,20 +161,16 @@ impl AlterTableSchemaPlan {
 impl SchemaEvolutionTarget {
     pub(super) fn resolve(
         rel: &RelationHandle<'_>,
-        descendant_lockmode: pg_sys::LOCKMODE,
     ) -> Result<Option<Self>, UtilityHookError> {
         if !rel.is_iceberg() {
             return Ok(None);
         }
 
         match rel.relkind() as u8 {
-            pg_sys::RELKIND_RELATION | pg_sys::RELKIND_PARTITIONED_TABLE => {
-                let _ = descendant_lockmode;
-                Ok(Some(Self::ManagedRelation(rel.oid())))
-            }
+            pg_sys::RELKIND_RELATION => Ok(Some(Self::ManagedRelation(rel.oid()))),
             _ => Err(HookError::with_code(
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                "schema evolution is only supported for physical and partitioned Iceberg relations",
+                "schema evolution is only supported for physical Iceberg relations",
             )),
         }
     }
@@ -206,10 +179,10 @@ impl SchemaEvolutionTarget {
     where
         F: FnMut(&RelationHandle<'_>) -> Result<(), UtilityHookError>,
     {
-        // Callers acquire the target/descendant locks before constructing this
-        // target, matching PostgreSQL's ALTER TABLE recursion path. Open with
-        // NoLock here so we do not introduce a weaker pre-lock or a lock
-        // upgrade path that differs from tablecmds.c.
+        // Callers acquire the target lock before constructing this target,
+        // matching PostgreSQL's ALTER TABLE path. Open with NoLock here so we do
+        // not introduce a weaker pre-lock or a lock upgrade path that differs
+        // from tablecmds.c.
         let Self::ManagedRelation(relid) = self;
         let guard =
             RelationGuard::open_table(*relid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
@@ -217,10 +190,32 @@ impl SchemaEvolutionTarget {
         f(&rel)
     }
 
+    /// PostgreSQL recurses these commands into inheritance children, whose
+    /// Iceberg schemas would keep the old columns. Evolving them here would
+    /// repeat PostgreSQL's attinhcount, column-merge and multiple-parent rules.
+    fn reject_inheritance_children(&self) -> Result<(), UtilityHookError> {
+        let Self::ManagedRelation(relid) = self;
+        // Callers hold AccessExclusiveLock, which keeps new children out.
+        if has_inheritance_children(*relid)? {
+            return Err(HookError::with_code(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                "schema evolution is not supported on an Iceberg table with inheritance children",
+            ));
+        }
+        Ok(())
+    }
+
+    /// `recurse` is the statement's `RangeVar.inh`. ONLY leaves children alone:
+    /// PostgreSQL rejects ADD and RENAME there itself, and the DROP forms keep
+    /// the children's own columns and constraints.
     pub(super) fn preflight(
         &self,
         update: &SchemaEvolutionUpdate,
+        recurse: bool,
     ) -> Result<(), UtilityHookError> {
+        if recurse {
+            self.reject_inheritance_children()?;
+        }
         self.for_each_physical_relation(|rel| {
             ManagedSchemaEvolution::new(rel).preflight(update)?;
             Ok(())
@@ -305,16 +300,11 @@ impl AlterTableIcebergOperations {
             if unsafe { Self::is_create_table_expansion(&*cmd) } {
                 continue;
             }
-            let (subtype, name_ptr) = unsafe { ((*cmd).subtype, (*cmd).name) };
-            match subtype {
+            match unsafe { (*cmd).subtype } {
+                // Core's provider hierarchy guard rejects the change. Its lookup
+                // runs after this hook's, so this one must not take a weaker lock.
                 pg_sys::AlterTableType::AT_SetAccessMethod => {
                     result.require_lock(pg_sys::AccessExclusiveLock as _);
-                    result.sets_access_method = true;
-                    // SAFETY: `name_ptr` belongs to the same AlterTableCmd we
-                    // borrow from the parse tree.
-                    result.sets_access_method_to_iceberg |= unsafe {
-                        IcebergStmtProbe::explicit_or_default_is_iceberg(name_ptr)
-                    };
                 }
                 pg_sys::AlterTableType::AT_SetTableSpace => {
                     result.require_lock(pg_sys::AccessExclusiveLock as _);
@@ -380,18 +370,11 @@ impl AlterTableIcebergOperations {
                         "column constraints, identity, and generated columns are not supported for Iceberg relations",
                     );
                 }
+                #[cfg(any(feature = "pg17", feature = "pg18"))]
                 pg_sys::AlterTableType::AT_SetExpression => {
                     result.require_lock(pg_sys::AccessExclusiveLock as _);
                     result.reject_schema_operation(
                         "column constraints, identity, and generated columns are not supported for Iceberg relations",
-                    );
-                }
-                pg_sys::AlterTableType::AT_AttachPartition
-                | pg_sys::AlterTableType::AT_DetachPartition
-                | pg_sys::AlterTableType::AT_DetachPartitionFinalize => {
-                    result.require_lock(pg_sys::AccessExclusiveLock as _);
-                    result.reject_schema_operation(
-                        "managed Iceberg partitioned tables do not use PostgreSQL ATTACH or DETACH PARTITION",
                     );
                 }
                 _ => {}
@@ -402,7 +385,7 @@ impl AlterTableIcebergOperations {
         result
     }
 
-    /// The command must be a live PostgreSQL ALTER subcommand. In PG17's
+    /// The command must be a live PostgreSQL ALTER subcommand. In
     /// expandTableLikeClause, copied CHECK constraints carry cooked_expr;
     /// user-written ADD CONSTRAINT carries raw_expr instead.
     unsafe fn is_create_table_expansion(command: &pg_sys::AlterTableCmd) -> bool {
@@ -450,8 +433,7 @@ impl AlterTableIcebergOperations {
     }
 
     pub(super) fn has_guarded_operation(&self) -> bool {
-        self.sets_access_method
-            || self.sets_tablespace
+        self.sets_tablespace
             || self.alters_table_options
             || !self.schema_update.is_empty()
             || self.unsupported_schema_operation.is_some()

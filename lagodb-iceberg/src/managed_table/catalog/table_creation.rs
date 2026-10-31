@@ -5,6 +5,7 @@ use iceberg_lite::spec::SortOrder;
 use lagodb_core::handles::RelationHandle;
 use lagodb_core::object_cleanup::ObjectCleanupQueue;
 use lagodb_core::options::TableOptions;
+use pgrx::pg_sys;
 
 use super::bridge::{BootstrapWriter, IcebergTableId};
 use super::metadata_table::IcebergMetadata;
@@ -31,11 +32,12 @@ impl<'a> ManagedTableCreation<'a> {
     pub(crate) fn execute(
         rel: &'a RelationHandle<'a>,
         table_options: Option<TableOptions>,
+        partition_spec: Option<&pg_sys::PartitionSpec>,
     ) -> IcebergResult<()> {
         let mut table_options = table_options.unwrap_or_default();
         let resolved_options =
             ResolvedIcebergOptions::from_table_options(Some(&table_options))?;
-        let definition = ManagedTableDefinition::build(rel)?;
+        let definition = ManagedTableDefinition::build(rel, partition_spec)?;
         let operation = Self::prepare(rel)?;
         operation.location.persist_option(&mut table_options)?;
         table_options.persist_to_catalog(rel.oid())?;

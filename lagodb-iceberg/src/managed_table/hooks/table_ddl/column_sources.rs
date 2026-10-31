@@ -4,7 +4,7 @@
 //! Unchanged LIKE clauses stay with PostgreSQL, including all INCLUDING
 //! processing. Inheritance is never rewritten: PG requires matching types.
 
-use std::{ffi::CStr, ptr, slice};
+use std::{ffi::CStr, ptr};
 
 use lagodb_core::catalog::range_var_get_relid;
 use lagodb_core::datum::PgType;
@@ -81,11 +81,7 @@ impl ColumnSource {
     }
 
     fn attributes(&self) -> &[pg_sys::FormData_pg_attribute] {
-        let desc = self.0.as_handle().tuple_desc();
-        // The guard pins the descriptor and PG supplies its complete array.
-        unsafe {
-            slice::from_raw_parts((*desc).attrs.as_ptr(), (*desc).natts as usize)
-        }
+        self.0.as_handle().tuple_desc_handle().attributes()
     }
 
     fn needs_rewrite(&self) -> bool {

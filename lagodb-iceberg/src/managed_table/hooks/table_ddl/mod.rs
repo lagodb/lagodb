@@ -1,10 +1,12 @@
 mod column_sources;
 mod column_types;
-mod index;
+mod inheritance;
 mod planning;
-mod topology;
+
+pub(in crate::managed_table) use self::inheritance::PartitionedInheritance;
 
 use crate::create_command::CreateCommandStack;
+use crate::error::IcebergError;
 use crate::managed_table::catalog::schema_evolution::SchemaEvolutionUpdate;
 use crate::managed_table::catalog::table_creation::ManagedTableCreation;
 use crate::managed_table::catalog::table_properties::ManagedTablePropertyUpdate;
@@ -13,9 +15,9 @@ use crate::managed_table::hooks::column_drop_guard::ControlledColumnDrops;
 use crate::managed_table::options::{ICEBERG_TABLE_OPTIONS, ResolvedIcebergOptions};
 use lagodb_core::catalog::{
     CatalogRelation, CatalogScanKey, CatalogSnapshot, RelationCatalogEntry,
-    RenameColumnTarget, get_tablespace_oid, range_var_get_relid,
+    RenameColumnTarget, alter_table_lookup_relation, get_tablespace_oid,
+    range_var_get_relid,
 };
-use lagodb_core::diag::PgReportError;
 use lagodb_core::handles::RelationGuard;
 use lagodb_core::hooks::{
     AlterTableMoveAllStmtNode, AlterTableStmtNode, CreateStmtNode,
@@ -25,17 +27,15 @@ use lagodb_core::hooks::{
     register_object_access_hook, register_utility_hook,
 };
 use lagodb_core::options::{TableOptionAlterations, TableOptions};
+use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
-use pgrx::{PgTryBuilder, pg_sys};
 use std::ffi::CStr;
-use std::panic::AssertUnwindSafe;
+use std::ptr;
 
 use self::column_types::ManagedColumnTypes;
-use self::index::IcebergPartitionedTableIndexGuard;
 use self::planning::{
     AlterTableIcebergOperations, IcebergStmtProbe, SchemaEvolutionTarget,
 };
-use self::topology::IcebergPartitionTopologyGuard;
 
 struct IcebergTableHook;
 
@@ -55,15 +55,8 @@ impl UtilityHook for IcebergTableHook {
             .expect("Hook registered for T_CreateStmt");
         CreateCommandStack::begin();
 
-        if !IcebergStmtProbe::create_stmt_may_use_iceberg(stmt)? {
+        if !IcebergStmtProbe::create_stmt_may_use_iceberg(stmt) {
             return Ok(());
-        }
-
-        if !stmt.partbound.is_null() {
-            return Err(HookError::with_code(
-                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                "managed Iceberg partitioned tables do not use PostgreSQL child partitions",
-            ));
         }
 
         if stmt.oncommit == pg_sys::OnCommitAction::ONCOMMIT_DELETE_ROWS {
@@ -71,6 +64,20 @@ impl UtilityHook for IcebergTableHook {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
                 "Iceberg tables do not support ON COMMIT DELETE ROWS",
             ));
+        }
+
+        if !stmt.partspec.is_null() {
+            // transformCreateStmt() would have rejected this combination.
+            if unsafe { pg_sys::list_length(stmt.inhRelations) } > 0 {
+                return Err(HookError::with_code(
+                    PgSqlErrorCode::ERRCODE_INVALID_OBJECT_DEFINITION,
+                    "cannot create partitioned table as inheritance child",
+                ));
+            }
+            // Partitioning lives in Iceberg metadata, so PostgreSQL creates an
+            // ordinary relation. on_post reads the clause from the original
+            // statement, which was saved before this hook ran.
+            stmt.partspec = ptr::null_mut();
         }
 
         ManagedColumnTypes::create(stmt)?;
@@ -95,7 +102,13 @@ impl UtilityHook for IcebergTableHook {
 
         let table_options =
             TableOptions::read_from_stmt(stmt, ICEBERG_TABLE_OPTIONS)?;
-        ManagedTableCreation::execute(&rel, table_options)?;
+        // SAFETY: the saved statement outlives every post-hook.
+        let partition_spec = unsafe { stmt.partspec.as_ref() };
+        if partition_spec.is_some() {
+            PartitionedInheritance::validate_created(&rel)?;
+        }
+        ManagedTableCreation::execute(&rel, table_options, partition_spec)
+            .map_err(IcebergError::into_hook_error)?;
         Ok(())
     }
 }
@@ -130,21 +143,12 @@ impl ObjectAccessHook for IcebergTableHook {
         let relation =
             RelationCatalogEntry::find(*object_id, CatalogSnapshot::SelfVisible)?
                 .expect("PostgreSQL post-create event identifies a live relation");
-        if Self::is_managed_table_relkind(relation.relkind())
+        if relation.relkind() as u8 == pg_sys::RELKIND_RELATION
             && IcebergAccessMethod::matches_oid(relation.access_method_oid())
         {
             CreateCommandStack::record_created(*object_id);
         }
         Ok(())
-    }
-}
-
-impl IcebergTableHook {
-    fn is_managed_table_relkind(relkind: i8) -> bool {
-        matches!(
-            relkind as u8,
-            pg_sys::RELKIND_RELATION | pg_sys::RELKIND_PARTITIONED_TABLE
-        )
     }
 }
 
@@ -202,12 +206,8 @@ impl UtilityHook for IcebergAlterTableGuard {
 
         // Use PG's ALTER lookup callback: ownership and relation-kind checks
         // precede waiting for the DDL lock, including for ordinary heap tables.
-        let oid = PgTryBuilder::new(AssertUnwindSafe(|| {
-            // SAFETY: the utility dispatcher supplies a live AlterTableStmt.
-            Ok(unsafe { pg_sys::AlterTableLookupRelation(stmt, ops.lockmode()) })
-        }))
-        .catch_others(|error| Err(PgReportError::from_caught(error)))
-        .execute()?;
+        // SAFETY: the utility dispatcher supplies a live AlterTableStmt.
+        let oid = unsafe { alter_table_lookup_relation(stmt, ops.lockmode()) }?;
         if oid == pg_sys::InvalidOid {
             return Ok(());
         }
@@ -216,15 +216,6 @@ impl UtilityHook for IcebergAlterTableGuard {
             RelationGuard::open_table(oid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
         let rel = guard.as_handle();
         let current_is_iceberg = rel.is_iceberg();
-
-        if ops.sets_access_method_to_iceberg
-            || (ops.sets_access_method && current_is_iceberg)
-        {
-            return Err(HookError::with_code(
-                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                "cannot ALTER TABLE SET ACCESS METHOD for Iceberg relations: access-method migration needs an explicit Iceberg lifecycle design",
-            ));
-        }
 
         if ops.sets_tablespace && current_is_iceberg {
             return Err(HookError::with_code(
@@ -242,14 +233,12 @@ impl UtilityHook for IcebergAlterTableGuard {
             }
             ManagedColumnTypes::alter(stmt.cmds)?;
             if !ops.schema_update.is_empty() {
-                let Some(target) = SchemaEvolutionTarget::resolve(
-                    &rel,
-                    pg_sys::AccessExclusiveLock as pg_sys::LOCKMODE,
-                )?
-                else {
+                let Some(target) = SchemaEvolutionTarget::resolve(&rel)? else {
                     return Ok(());
                 };
-                target.preflight(&ops.schema_update)?;
+                // SAFETY: the parser always sets the statement's target.
+                let recurse = unsafe { (*stmt.relation).inh };
+                target.preflight(&ops.schema_update, recurse)?;
                 ControlledColumnDrops::authorize(
                     target.controlled_column_drop_keys(&ops.schema_update)?,
                 );
@@ -312,9 +301,7 @@ impl UtilityHook for IcebergAlterTableGuard {
         if ops.schema_update.is_empty() {
             return Ok(());
         }
-        let Some(target) =
-            SchemaEvolutionTarget::resolve(&rel, pg_sys::NoLock as pg_sys::LOCKMODE)?
-        else {
+        let Some(target) = SchemaEvolutionTarget::resolve(&rel)? else {
             return Ok(());
         };
         target.stage(&ops.schema_update)?;
@@ -374,14 +361,12 @@ impl UtilityHook for IcebergRenameColumnHook {
             return Ok(());
         };
         let rel = guard.as_handle();
-        let Some(target) = SchemaEvolutionTarget::resolve(
-            &rel,
-            pg_sys::AccessExclusiveLock as pg_sys::LOCKMODE,
-        )?
-        else {
+        let Some(target) = SchemaEvolutionTarget::resolve(&rel)? else {
             return Ok(());
         };
-        target.preflight(&update)?;
+        // SAFETY: a column rename always names its relation.
+        let recurse = unsafe { (*stmt.relation).inh };
+        target.preflight(&update, recurse)?;
         Ok(())
     }
 
@@ -402,9 +387,7 @@ impl UtilityHook for IcebergRenameColumnHook {
             return Ok(());
         };
         let rel = guard.as_handle();
-        let Some(target) =
-            SchemaEvolutionTarget::resolve(&rel, pg_sys::NoLock as pg_sys::LOCKMODE)?
-        else {
+        let Some(target) = SchemaEvolutionTarget::resolve(&rel)? else {
             return Ok(());
         };
         target.stage(&update)?;
@@ -516,7 +499,6 @@ impl IcebergAlterTableMoveAllGuard {
         match objtype {
             pg_sys::ObjectType::OBJECT_TABLE => {
                 relkind as u8 == pg_sys::RELKIND_RELATION
-                    || relkind as u8 == pg_sys::RELKIND_PARTITIONED_TABLE
             }
             pg_sys::ObjectType::OBJECT_MATVIEW => {
                 relkind as u8 == pg_sys::RELKIND_MATVIEW
@@ -541,8 +523,6 @@ fn optional_string_from_ptr(ptr: *const std::ffi::c_char) -> Option<String> {
 
 pub fn init_hook() {
     register_object_access_hook(Box::new(IcebergTableHook));
-    register_object_access_hook(Box::new(IcebergPartitionedTableIndexGuard));
-    register_object_access_hook(Box::new(IcebergPartitionTopologyGuard));
     register_utility_hook(pg_sys::NodeTag::T_CreateStmt, Box::new(IcebergTableHook));
     register_utility_hook(
         pg_sys::NodeTag::T_CreateTableAsStmt,

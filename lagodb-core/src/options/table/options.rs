@@ -144,34 +144,6 @@ impl TableOptions {
         self.get_str(definition.name)
     }
 
-    /// Replace an AM-owned value without changing the remaining options.
-    pub fn set_access_method_value(
-        &mut self,
-        definition: &OptionDef,
-        value: impl Into<String>,
-    ) -> Result<(), TableOptionError> {
-        if definition.access != OptionAccess::AccessMethodManaged {
-            return Err(TableOptionError::NotAccessMethodManaged(
-                definition.name.to_owned(),
-            ));
-        }
-        let value = schema::validate_option_value(
-            definition,
-            definition.name,
-            Some(value.into()),
-        )?;
-        if let Some((_, existing)) = self
-            .options
-            .iter_mut()
-            .find(|(name, _)| name == definition.name)
-        {
-            *existing = value;
-        } else {
-            self.options.push((definition.name.to_owned(), value));
-        }
-        Ok(())
-    }
-
     pub fn get_int(&self, key: &str) -> Option<i32> {
         self.get_str(key).and_then(|v| v.parse().ok())
     }

@@ -1,7 +1,10 @@
+use super::analyze::AnalyzeBlockDomain;
 use crate::error::IcebergResult;
 use crate::managed_table::catalog::metadata_tracker::TxMetadata;
 use crate::managed_table::storage::StorageContext;
-use crate::managed_table::{IcebergTableAm, IcebergTableProvider};
+use crate::managed_table::{
+    IcebergTableAm, IcebergTableProvider, ManagedTableReadView,
+};
 use lagodb_core::diag::PgReportError;
 use lagodb_core::diag::report_warning;
 use lagodb_core::prelude::*;
@@ -36,7 +39,8 @@ impl AmRelation for IcebergTableAm {
             return Ok(0);
         }
 
-        Ok(RelationStats::load_or_default(rel).representable_bytes())
+        let view = ManagedTableReadView::for_active_snapshot(rel.oid())?;
+        Ok(AnalyzeBlockDomain::relation_size(view.storage_bytes()?))
     }
 
     fn relation_vacuum(
@@ -44,24 +48,25 @@ impl AmRelation for IcebergTableAm {
         params: &VacuumParamsHandle,
         _bstrategy: &BufferAccessStrategyHandle,
     ) -> AmResult<()> {
-        if unsafe { pg_sys::MyBackendType == pg_sys::BackendType::B_AUTOVAC_WORKER } {
-            return Ok(());
-        }
-        let options = TableMaintenanceOptions::from_vacuum_params(params);
-        if !options.process_main {
-            return Ok(());
-        }
-        let command_time = TableMaintenanceCommandTime::now()
+        rel.with_vacuum_report(|| {
+            // The maintenance worker owns unattended Iceberg maintenance.
+            if unsafe {
+                pg_sys::MyBackendType == pg_sys::BackendType::B_AUTOVAC_WORKER
+            } {
+                return Ok(());
+            }
+            let command_time = TableMaintenanceCommandTime::now()
+                .map_err(PgReportError::from_domain_error)?;
+            IcebergTableProvider::execute_maintenance(TableMaintenanceRequest {
+                relation: rel,
+                mode: TableMaintenanceMode::Routine,
+                options: TableMaintenanceOptions::from_vacuum_params(params),
+                budget: TableMaintenanceBudget::configured(),
+                command_time,
+            })
             .map_err(PgReportError::from_domain_error)?;
-        IcebergTableProvider::execute_maintenance(TableMaintenanceRequest {
-            relation: rel,
-            mode: TableMaintenanceMode::Routine,
-            options,
-            budget: TableMaintenanceBudget::configured(),
-            command_time,
+            Ok(())
         })
-        .map_err(PgReportError::from_domain_error)?;
-        Ok(())
     }
 }
 
@@ -107,15 +112,7 @@ impl RelationStats {
     }
 
     fn pages(&self) -> pg_sys::BlockNumber {
-        let page_size = pg_sys::BLCKSZ as u64;
-        let pages = self.bytes.div_ceil(page_size);
-        pg_sys::BlockNumber::try_from(pages.min(u32::MAX as u64 - 1))
-            .expect("capped Iceberg page count fits PostgreSQL BlockNumber")
-    }
-
-    fn representable_bytes(&self) -> u64 {
-        let max = (u32::MAX as u64 - 1).saturating_mul(pg_sys::BLCKSZ as u64);
-        self.bytes.min(max)
+        AnalyzeBlockDomain::pages(self.bytes)
     }
 
     fn estimated_live_rows(&self, rel: &RelationHandle) -> f64 {

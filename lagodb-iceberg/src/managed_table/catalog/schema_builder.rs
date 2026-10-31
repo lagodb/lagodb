@@ -9,8 +9,8 @@ use iceberg_lite::spec::{
 use lagodb_core::datum::PgType;
 use lagodb_core::handles::RelationHandle;
 use pgrx::pg_sys;
+use std::ffi::CStr;
 use std::sync::Arc;
-use std::{ffi::CStr, slice};
 
 /// Builder for an Iceberg [`Schema`] from a sequence of PostgreSQL columns.
 ///
@@ -131,19 +131,10 @@ impl SchemaBuilder {
 ///
 /// This entry point owns
 /// the `TupleDesc` unsafe boundary so callers stay on safe Rust: the
-/// relation handle keeps the descriptor alive, and the descriptor's `attrs`
-/// array is laid out as a flat array of `natts` `FormData_pg_attribute`
-/// records.
+/// relation handle keeps the descriptor and its attributes alive.
 pub(crate) fn tuple_desc_to_schema(rel: &RelationHandle) -> IcebergResult<Schema> {
-    // SAFETY: `rel` is a live RelationHandle, so `tuple_desc()` returns a
-    // valid `TupleDesc`. PostgreSQL guarantees `attrs` is a contiguous array
-    // of length `natts` for the duration of the descriptor's lifetime, which
-    // is at least as long as `rel`.
-    let attrs = unsafe {
-        let tup_desc = rel.tuple_desc();
-        let natts = (*tup_desc).natts as usize;
-        slice::from_raw_parts((*tup_desc).attrs.as_ptr(), natts)
-    };
+    let tuple_desc = rel.tuple_desc_handle();
+    let attrs = tuple_desc.attributes();
 
     let mut builder = SchemaBuilder::new();
     for attr in attrs {
