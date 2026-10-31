@@ -1,10 +1,7 @@
 use crate::managed_table::catalog::table_drop::IcebergTableDrop;
 use crate::managed_table::catalog::{IcebergAccessMethod, IcebergRelationExt};
 use crate::managed_table::hooks::column_drop_guard::ControlledColumnDrops;
-use lagodb_core::catalog::{
-    CatalogSnapshot, RelationCatalogEntry, TypeDependencies,
-    record_tablespace_dependency,
-};
+use lagodb_core::catalog::{CatalogSnapshot, RelationCatalogEntry, TypeDependencies};
 use lagodb_core::handles::{RelationGuard, RelationHandle};
 use lagodb_core::hooks::{
     self, HookError, OBJECT_ACCESS_DROP, OBJECT_ACCESS_POST_ALTER,
@@ -39,7 +36,7 @@ impl ObjectAccessHook for IcebergObjectAccessHook {
                 sub_id: 0,
                 ..
             } if *class_id == pg_sys::RelationRelationId => {
-                Self::enforce_volume_tablespace_policy(*object_id, true)?;
+                Self::enforce_volume_tablespace_policy(*object_id)?;
             }
             ObjectAccessEvent::PostAlter {
                 class_id,
@@ -47,7 +44,7 @@ impl ObjectAccessHook for IcebergObjectAccessHook {
                 sub_id: 0,
                 ..
             } if *class_id == pg_sys::RelationRelationId => {
-                Self::enforce_volume_tablespace_policy(*object_id, false)?;
+                Self::enforce_volume_tablespace_policy(*object_id)?;
             }
             ObjectAccessEvent::Drop {
                 class_id,
@@ -155,7 +152,6 @@ impl IcebergObjectAccessHook {
 
     fn enforce_volume_tablespace_policy(
         oid: pg_sys::Oid,
-        record_missing_dependency: bool,
     ) -> Result<(), ObjectAccessHookError> {
         // PostgreSQL invokes both events before the next command-counter
         // increment. SnapshotSelf is therefore required to observe the
@@ -181,34 +177,17 @@ impl IcebergObjectAccessHook {
             return Ok(());
         }
 
-        let tablespace = relation.tablespace();
-        if !TablespaceStorage::is_object_backed(tablespace.resolved_oid())? {
+        if !TablespaceStorage::is_object_backed(relation.tablespace().resolved_oid())?
+        {
             return Ok(());
         }
-        let is_managed_iceberg =
-            matches!(
-                relkind,
-                pg_sys::RELKIND_RELATION | pg_sys::RELKIND_PARTITIONED_TABLE
-            ) && IcebergAccessMethod::matches_oid(relation.access_method_oid());
+        let is_managed_iceberg = relkind == pg_sys::RELKIND_RELATION
+            && IcebergAccessMethod::matches_oid(relation.access_method_oid());
         if !is_managed_iceberg {
             return Err(HookError::with_code(
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
                 "volume-backed tablespaces may only contain managed Iceberg tables",
             ));
-        }
-
-        // Ordinary tables are protected by their native main forks. PG records
-        // dependencies for partitioned roots with an explicit reltablespace;
-        // supplement only roots placed in the database's default tablespace.
-        if record_missing_dependency
-            && relkind == pg_sys::RELKIND_PARTITIONED_TABLE
-            && tablespace.is_database_default()
-        {
-            record_tablespace_dependency(
-                pg_sys::RelationRelationId,
-                relation.oid(),
-                tablespace.resolved_oid(),
-            )?;
         }
         Ok(())
     }
@@ -219,12 +198,7 @@ impl IcebergObjectAccessHook {
         // Check relation kind before opening to avoid "wrong object type"
         // errors when dropping indexes, sequences, etc.
         let relkind = unsafe { pg_sys::get_rel_relkind(oid) } as u8;
-        if !matches!(
-            relkind,
-            pg_sys::RELKIND_RELATION
-                | pg_sys::RELKIND_PARTITIONED_TABLE
-                | pg_sys::RELKIND_MATVIEW
-        ) {
+        if !matches!(relkind, pg_sys::RELKIND_RELATION | pg_sys::RELKIND_MATVIEW) {
             return Ok(None);
         }
 

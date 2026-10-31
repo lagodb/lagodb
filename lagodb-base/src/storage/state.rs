@@ -5,7 +5,6 @@ use pgrx::{PGRXSharedMemory, PgLwLock};
 use super::reconciler::ReconcileReport;
 use super::volume_config::UnixMillis;
 
-const STORAGE_MAGIC: u64 = 0x5047_4c42_5354_4f52;
 const MAX_ERROR_BYTES: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,8 +42,6 @@ impl StorageProcessState {
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub(crate) struct StorageSharedState {
-    magic: u64,
-    struct_size: u32,
     pid: i32,
     state: u8,
     reload_requested: u8,
@@ -71,9 +68,6 @@ pub(crate) struct StorageSharedState {
 impl Default for StorageSharedState {
     fn default() -> Self {
         Self {
-            magic: STORAGE_MAGIC,
-            struct_size: u32::try_from(std::mem::size_of::<Self>())
-                .expect("storage shared state exceeds u32"),
             pid: 0,
             state: StorageProcessState::Stopped as u8,
             reload_requested: 0,
@@ -100,18 +94,6 @@ impl Default for StorageSharedState {
 }
 
 impl StorageSharedState {
-    fn validate_layout(&self) -> bool {
-        self.magic == STORAGE_MAGIC
-            && usize::try_from(self.struct_size).ok()
-                == Some(std::mem::size_of::<Self>())
-    }
-
-    fn reset_if_invalid(&mut self) {
-        if !self.validate_layout() {
-            *self = Self::default();
-        }
-    }
-
     fn set_state(&mut self, state: StorageProcessState) {
         self.state = state as u8;
     }
@@ -179,7 +161,6 @@ impl StorageStatusStore {
 
     pub(super) fn mark_starting(&self, pid: i32) {
         let mut state = STORAGE_STATE.exclusive();
-        state.reset_if_invalid();
         state.pid = pid;
         state.reload_requested = 0;
         state.force_default_chain_reload = 0;
@@ -191,13 +172,11 @@ impl StorageStatusStore {
 
     pub(super) fn mark_running(&self) {
         let mut state = STORAGE_STATE.exclusive();
-        state.reset_if_invalid();
         state.set_state(StorageProcessState::Running);
     }
 
     pub(super) fn mark_reload(&self, report: &ReconcileReport) {
         let mut state = STORAGE_STATE.exclusive();
-        state.reset_if_invalid();
         state.last_reload_at_ms = timestamp_ms();
         state.reload_generation = state
             .reload_generation
@@ -225,32 +204,27 @@ impl StorageStatusStore {
 
     pub(super) fn record_error(&self, message: &str) {
         let mut state = STORAGE_STATE.exclusive();
-        state.reset_if_invalid();
         state.set_error(message);
     }
 
     pub(super) fn mark_failed(&self, message: &str) {
         let mut state = STORAGE_STATE.exclusive();
-        state.reset_if_invalid();
         state.set_state(StorageProcessState::Failed);
         state.set_error(message);
     }
 
     pub(super) fn mark_stopping(&self) {
         let mut state = STORAGE_STATE.exclusive();
-        state.reset_if_invalid();
         state.set_state(StorageProcessState::Stopping);
     }
 
     pub(super) fn finish_process(&self, pid: i32, code: i32) {
         let mut state = STORAGE_STATE.exclusive();
-        state.reset_if_invalid();
         state.finish_process(pid, code, timestamp_ms());
     }
 
     pub(super) fn take_reload_request(&self) -> Option<bool> {
         let mut state = STORAGE_STATE.exclusive();
-        state.reset_if_invalid();
         let requested = state.reload_requested != 0;
         let force_default_chain = state.force_default_chain_reload != 0;
         state.reload_requested = 0;
@@ -262,7 +236,6 @@ impl StorageStatusStore {
 pub(crate) fn request_reload(force_default_chain: bool) {
     let pid = {
         let mut state = STORAGE_STATE.exclusive();
-        state.reset_if_invalid();
         state.reload_requested = 1;
         if force_default_chain {
             state.force_default_chain_reload = 1;
@@ -309,11 +282,6 @@ pub(crate) fn snapshot(
     cache_dir: PathBuf,
 ) -> StorageRuntimeStatus {
     let state = *STORAGE_STATE.share();
-    let state = if state.validate_layout() {
-        state
-    } else {
-        StorageSharedState::default()
-    };
     let process_state = StorageProcessState::from_raw(state.state).as_str();
 
     StorageRuntimeStatus {

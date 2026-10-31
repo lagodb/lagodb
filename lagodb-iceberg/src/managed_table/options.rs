@@ -17,6 +17,7 @@ use lagodb_core::options::table::{
 };
 use lagodb_core::options::{OptionAccess, OptionDef, OptionKind};
 use parquet::basic::{Compression as ParquetCompression, ZstdLevel};
+use parquet::file::properties::{DEFAULT_MAX_ROW_GROUP_ROW_COUNT, WriterProperties};
 use std::collections::HashMap;
 
 // ============================================================================
@@ -90,16 +91,6 @@ pub const LOCATION_OPTION_DEF: OptionDef = OptionDef {
     description: "Iceberg table storage location managed by the access method",
 };
 
-/// PostgreSQL-allocated file-number reservation for a local provider-owned partitioned table.
-pub const OPT_RELFILENUMBER: &str = "relfilenumber";
-
-pub const RELFILENUMBER_OPTION_DEF: OptionDef = OptionDef {
-    name: OPT_RELFILENUMBER,
-    access: OptionAccess::AccessMethodManaged,
-    kind: OptionKind::String { default: None },
-    description: "Local Iceberg partitioned table storage file number managed by the access method",
-};
-
 // ============================================================================
 //  Option Definitions
 // ============================================================================
@@ -107,7 +98,6 @@ pub const RELFILENUMBER_OPTION_DEF: OptionDef = OptionDef {
 /// Iceberg-specific table options definition.
 pub static ICEBERG_TABLE_OPTIONS: &[OptionDef] = &[
     LOCATION_OPTION_DEF,
-    RELFILENUMBER_OPTION_DEF,
     OptionDef {
         name: OPT_FORMAT_VERSION,
         access: OptionAccess::UserCreateOnly,
@@ -686,6 +676,9 @@ unsafe impl AmCacheable for IcebergTableOptionCache {
     }
 }
 
+/// Row limit of every Parquet row group the managed-table writers produce.
+pub(crate) const MANAGED_ROW_GROUP_MAX_ROWS: usize = DEFAULT_MAX_ROW_GROUP_ROW_COUNT;
+
 /// Iceberg-specific safe access to this AM's single `rd_amcache` type.
 #[derive(Clone, Copy)]
 pub(crate) struct IcebergTableOptions<'a>(AmCacheRef<'a, IcebergTableOptionCache>);
@@ -701,8 +694,12 @@ impl<'a> IcebergTableOptions<'a> {
         Ok(Self(cached))
     }
 
-    pub(crate) fn parquet_compression(self) -> ParquetCompression {
-        self.0.header().compression.parquet()
+    /// Parquet writer settings for this relation's data files.
+    pub(crate) fn writer_properties(self) -> WriterProperties {
+        WriterProperties::builder()
+            .set_compression(self.0.header().compression.parquet())
+            .set_max_row_group_row_count(Some(MANAGED_ROW_GROUP_MAX_ROWS))
+            .build()
     }
 }
 
@@ -863,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_partitioned_table_rejects_location_and_gc_overrides() {
+    fn managed_table_rejects_location_and_gc_overrides() {
         for option in [
             "write.data.path",
             "write.metadata.path",

@@ -59,7 +59,19 @@ impl ScanRelation {
 
 enum ScanKind {
     Regular(IcebergReadSnapshot),
+    #[cfg(any(feature = "pg17", feature = "pg18"))]
     Analyze,
+    /// PostgreSQL 16 never passes the invocation's selected columns, `targrows`,
+    /// or inherited `childtargrows` to the callbacks, so this stores the
+    /// relation-local approximation while the relation is still borrowed. It
+    /// covers built-in non-inherited scans, but can overproduce for a column
+    /// list or underfill a child allocation made from its parent's targets.
+    /// Every admitted column type uses a built-in analyzer unless a superuser
+    /// replaces it with `ALTER TYPE ... SET (ANALYZE = ...)`.
+    #[cfg(feature = "pg16")]
+    Analyze {
+        sample_budget: u64,
+    },
 }
 
 impl ScanKind {
@@ -72,23 +84,44 @@ impl ScanKind {
             Self::Regular(snapshot) => Ok(IcebergScanState::Regular(
                 RegularScanState::begin(relation, keys, snapshot)?,
             )),
-            Self::Analyze => {
-                let view = ManagedTableReadView::load(relation.oid)?;
-                let storage_bytes = view.storage_bytes()?;
-                let snapshot = view.into_read_snapshot()?;
-                let prepared = PreparedRowScan::full(
-                    snapshot,
-                    ScanPredicates::unfiltered(),
-                    &relation.layout,
-                )?;
-                let preparation = AnalyzePreparation::try_new(
-                    prepared.analyze_input(storage_bytes)?,
-                )?;
-                Ok(IcebergScanState::Analyze(Box::new(
-                    AnalyzeScanState::pending(preparation),
-                )))
-            }
+            #[cfg(any(feature = "pg17", feature = "pg18"))]
+            Self::Analyze => Ok(IcebergScanState::Analyze(Box::new(
+                AnalyzeScanState::pending(Self::prepare_analyze(relation)?),
+            ))),
+            #[cfg(feature = "pg16")]
+            Self::Analyze { sample_budget } => Ok(IcebergScanState::Analyze(
+                Box::new(AnalyzeScanState::pending(
+                    Self::prepare_analyze(relation)?,
+                    sample_budget,
+                )),
+            )),
         }
+    }
+
+    #[cfg(any(feature = "pg17", feature = "pg18"))]
+    fn analyze(_relation: &RelationHandle) -> AmResult<Self> {
+        Ok(Self::Analyze)
+    }
+
+    #[cfg(feature = "pg16")]
+    fn analyze(relation: &RelationHandle) -> AmResult<Self> {
+        Ok(Self::Analyze {
+            sample_budget: relation.analyze_sample_budget()?,
+        })
+    }
+
+    fn prepare_analyze(relation: &ScanRelation) -> AmResult<AnalyzePreparation> {
+        let view = ManagedTableReadView::for_active_snapshot(relation.oid)?;
+        let storage_bytes = view.storage_bytes()?;
+        let snapshot = view.into_read_snapshot()?;
+        let prepared = PreparedRowScan::full(
+            snapshot,
+            ScanPredicates::unfiltered(),
+            &relation.layout,
+        )?;
+        Ok(AnalyzePreparation::try_new(
+            prepared.analyze_input(storage_bytes)?,
+        )?)
     }
 }
 
@@ -154,7 +187,7 @@ impl AmScanSession for IcebergScan {
         // Bind while the callback borrows PG's registered snapshot. Retain
         // only owned Iceberg state; no SnapshotHandle escapes this callback.
         let kind = if flags.is_analyze() {
-            ScanKind::Analyze
+            ScanKind::analyze(rel)?
         } else {
             let snapshot = snapshot.expect("regular AM scans have a PG snapshot");
             ScanKind::Regular(
@@ -224,6 +257,21 @@ impl AmScanSession for IcebergScan {
         Ok(())
     }
 
+    #[cfg(feature = "pg16")]
+    fn scan_analyze_next_block(
+        &mut self,
+        block: pg_sys::BlockNumber,
+    ) -> AmResult<bool> {
+        match &mut self.state {
+            IcebergScanState::Analyze(state) => state.next_block(block),
+            _ => Err(IcebergError::InvariantViolated(
+                "ANALYZE block callback used a non-ANALYZE scan",
+            )
+            .into()),
+        }
+    }
+
+    #[cfg(any(feature = "pg17", feature = "pg18"))]
     fn scan_analyze_next_block(
         &mut self,
         stream: &AnalyzeReadStreamHandle,

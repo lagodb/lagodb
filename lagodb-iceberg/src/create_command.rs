@@ -44,6 +44,21 @@ impl CreateCommandStack {
         })
     }
 
+    /// Whether a command created `oid` and has not finished, so its post-hook
+    /// has not written the relation's metadata. An event trigger's nested DDL
+    /// can still see the relation of every command below it on the stack.
+    pub(crate) fn is_creating(oid: pg_sys::Oid) -> bool {
+        CURRENT.with_borrow(|resource| {
+            resource.as_ref().is_some_and(|resource| {
+                resource
+                    .commands
+                    .borrow()
+                    .iter()
+                    .any(|command| command.created_relation == Some(oid))
+            })
+        })
+    }
+
     pub(crate) fn record_created(oid: pg_sys::Oid) {
         CURRENT.with_borrow(|resource| {
             let resource = resource

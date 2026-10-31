@@ -128,9 +128,7 @@ impl LocalTableRetirementBatch {
         }
         if let Some(lsn) = last_lsn {
             // The last record covers every earlier retirement record and any
-            // preceding async commit. Flush before removing directories and
-            // before handing reservations to PG's checkpoint unlink queue,
-            // so its next eligible REDO point excludes both deletion records.
+            // preceding async commit. Flush before removing directories.
             flush_wal(lsn);
         }
         for entry in &self.entries {

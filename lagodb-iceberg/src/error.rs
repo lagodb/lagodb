@@ -14,11 +14,13 @@
 //! perform the final conversion to PostgreSQL. FDW-specific errors wrap this
 //! type transparently and delegate [`SqlStateError`] to the source.
 
+use std::borrow::Cow;
 use std::error::Error as StdError;
 
 use iceberg_lite::catalog::rest::{RestError, RestErrorKind};
-use lagodb_core::diag::{PgError, SqlStateError, domain_error_report};
+use lagodb_core::diag::{PgError, PgReportError, SqlStateError, domain_error_report};
 use lagodb_core::extension_worker::WorkerNotificationError;
+use lagodb_core::hooks::HookError;
 use lagodb_core::object_cleanup::ObjectCleanupError;
 use lagodb_core::options::TableOptionError;
 use lagodb_core::storage::tablespace::TablespaceStorageError;
@@ -92,9 +94,6 @@ pub enum IcebergError {
     #[error("managed Iceberg table {relid} has no persisted storage location")]
     ManagedTableLocationMissing { relid: pg_sys::Oid },
 
-    #[error("local Iceberg partitioned table {relid} has no valid relfilenumber")]
-    InvalidLocalStorageIdentity { relid: pg_sys::Oid },
-
     #[error("invalid managed Iceberg table location {location:?}: {reason}")]
     InvalidManagedTableLocation { location: String, reason: String },
 
@@ -104,8 +103,11 @@ pub enum IcebergError {
     #[error("managed Iceberg table location {location:?} is still pending deletion")]
     ManagedTableLocationCleanupPending { location: String },
 
-    #[error("postgres error: {0}")]
-    PgError(#[from] PgError),
+    /// A captured PostgreSQL report. Only conversions that match this variant
+    /// keep its message, DETAIL and HINT structured; blanket and `provider`
+    /// conversions format it like any domain error.
+    #[error(transparent)]
+    Postgres(PgReportError),
 
     #[error("Arrow/Datum conversion error: {0}")]
     ArrowConversion(#[from] lagodb_arrow::ArrowConversionError),
@@ -123,10 +125,10 @@ pub enum IcebergError {
     SchemaBuildError(String),
 
     #[error("invalid managed Iceberg partition definition: {0}")]
-    InvalidPartitionDefinition(String),
+    InvalidPartitionDefinition(Cow<'static, str>),
 
     #[error("unsupported managed Iceberg partition definition: {0}")]
-    UnsupportedPartitionDefinition(String),
+    UnsupportedPartitionDefinition(Cow<'static, str>),
 
     #[error("column {0} is not found in source")]
     ColumnNotFound(String),
@@ -206,8 +208,7 @@ impl SqlStateError for IcebergError {
                 PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
             }
 
-            IcebergError::ManagedTableLocationMissing { .. }
-            | IcebergError::InvalidLocalStorageIdentity { .. } => {
+            IcebergError::ManagedTableLocationMissing { .. } => {
                 PgSqlErrorCode::ERRCODE_DATA_CORRUPTED
             }
 
@@ -227,7 +228,7 @@ impl SqlStateError for IcebergError {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
             }
 
-            IcebergError::PgError(error) => error.sql_error_code(),
+            IcebergError::Postgres(error) => error.sql_error_code(),
 
             IcebergError::ArrowConversion(conv) => conv.sql_error_code(),
 
@@ -303,9 +304,18 @@ impl SqlStateError for IcebergError {
     }
 }
 
+impl From<PgError> for IcebergError {
+    fn from(error: PgError) -> Self {
+        Self::Postgres(error.into())
+    }
+}
+
 impl From<IcebergError> for ErrorReport {
     fn from(value: IcebergError) -> Self {
-        domain_error_report(value)
+        match value {
+            IcebergError::Postgres(error) => error.into_report(),
+            error => domain_error_report(error),
+        }
     }
 }
 
@@ -320,6 +330,25 @@ impl From<IcebergError> for lagodb_core::table_maintenance::TableMaintenanceErro
 impl IcebergError {
     pub fn schema_evolution_conflict(source: iceberg_lite::Error) -> Self {
         Self::SchemaEvolutionConflict { source }
+    }
+
+    pub(crate) fn invalid_partition(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::InvalidPartitionDefinition(message.into())
+    }
+
+    pub(crate) fn unsupported_partition(
+        message: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        Self::UnsupportedPartitionDefinition(message.into())
+    }
+
+    /// Hook counterpart of `From<IcebergError> for ErrorReport`. The blanket
+    /// [`SqlStateError`] conversion cannot unwrap [`Self::Postgres`].
+    pub(crate) fn into_hook_error(self) -> HookError {
+        match self {
+            Self::Postgres(error) => error.into(),
+            error => HookError::with_source(error.sql_error_code(), error),
+        }
     }
 }
 

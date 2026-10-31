@@ -207,7 +207,7 @@ impl ForeignTransaction {
         // do not revoke this publication's admission; it finishes with its
         // retained catalog sessions. This is not serialization with concurrent
         // ALTER SERVER/USER MAPPING, and PG can still abort on preparation errors.
-        // PG17 postgres_fdw likewise lets an in-use invalidated connection
+        // postgres_fdw likewise lets an in-use invalidated connection
         // finish its transaction, then disconnects it (connection.c:
         // pgfdw_inval_callback, pgfdw_xact_callback, pgfdw_reset_xact_state).
         // LagoDB adds this entry check and publishes after local commit; do not

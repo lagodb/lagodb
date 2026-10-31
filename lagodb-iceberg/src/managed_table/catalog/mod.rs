@@ -14,6 +14,7 @@ pub(crate) mod table_truncate;
 
 // Managed type policy and schema construction remain provider-owned.
 pub(crate) mod numeric_type;
+mod partition_lowering;
 mod schema_builder;
 pub(crate) mod table_definition;
 mod type_mapping;

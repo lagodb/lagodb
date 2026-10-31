@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use iceberg_lite::spec::Schema as IcebergSchema;
+use iceberg_lite::spec::{Schema as IcebergSchema, TableMetadata};
 use iceberg_lite::table::Table;
 use lagodb_core::handles::{RelationGuard, SnapshotHandle};
 use pgrx::pg_sys;
@@ -21,7 +21,7 @@ use crate::write::PgTransactionIsolation;
 /// Managed-table metadata and transaction delta visible to one read operation.
 ///
 /// The Iceberg [`Table`] is built only when this view is consumed for scan
-/// execution. Planning-only callers can inspect the schema and properties
+/// execution. Planning-only callers can inspect the schema and metadata
 /// without constructing a table or its object cache.
 pub(crate) struct ManagedTableReadView {
     relation_oid: pg_sys::Oid,
@@ -47,6 +47,20 @@ impl ManagedTableReadView {
         Self::load_visible(relation_oid, Some(snapshot))
     }
 
+    /// Bind a read that receives no snapshot to PostgreSQL's active one, or the
+    /// current definition when none is active.
+    ///
+    /// ANALYZE computes `liverows / visited_blocks * totalblocks` from separate
+    /// `relation_size` calls and a scan. Reading all of them here keeps those
+    /// inputs on one population while writers commit concurrently.
+    pub(crate) fn for_active_snapshot(
+        relation_oid: pg_sys::Oid,
+    ) -> IcebergResult<Self> {
+        SnapshotHandle::with_active(|snapshot| {
+            Self::load_visible(relation_oid, snapshot)
+        })
+    }
+
     fn load_visible(
         relation_oid: pg_sys::Oid,
         snapshot: Option<&SnapshotHandle<'_>>,
@@ -65,8 +79,7 @@ impl ManagedTableReadView {
             Some(snapshot) => {
                 let local_root = context
                     .local_storage()
-                    .map(|_| LocalTableRoot::for_relation(&relation.as_handle()))
-                    .transpose()?;
+                    .map(|_| LocalTableRoot::for_relation(&relation.as_handle()));
                 tracker.table_metadata_at(
                     relation_oid,
                     context.file_io(),
@@ -95,8 +108,16 @@ impl ManagedTableReadView {
         self.read.loaded.metadata.properties()
     }
 
+    pub(crate) fn metadata(&self) -> &TableMetadata {
+        &self.read.loaded.metadata
+    }
+
     pub(crate) fn storage_bytes(&self) -> IcebergResult<u64> {
-        Ok(self.read.loaded.relation_stats(self.context.file_io())?.1)
+        self.read.storage_bytes(self.context.file_io())
+    }
+
+    pub(crate) fn pruning_units(&self) -> f64 {
+        self.read.pruning_units()
     }
 
     pub(crate) fn into_read_snapshot(self) -> IcebergResult<IcebergReadSnapshot> {

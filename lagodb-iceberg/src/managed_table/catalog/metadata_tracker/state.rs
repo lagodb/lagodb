@@ -47,10 +47,6 @@ impl ManagedTableState {
         self.rebuild_level.is_some()
     }
 
-    pub(super) fn owns_local_generation_at(&self, nest_level: i32) -> bool {
-        self.rebuild_level == Some(nest_level)
-    }
-
     pub(super) fn record_rebuild(&mut self, nest_level: i32, file_io: &FileIO) {
         let previous =
             mem::replace(&mut self.transaction, ManagedTableTransaction::new());

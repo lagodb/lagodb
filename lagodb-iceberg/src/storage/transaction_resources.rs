@@ -27,7 +27,7 @@
 //! - `ObjectFile(Staged)` → unlink the staging file.
 //! - `ObjectFile(Uploaded)` → delete the remote object, then unlink the staging file.
 //!
-//! Retired local generations and their reservations belong to
+//! Retired local generations belong to
 //! [`super::LocalTableRetirement`], whose savepoint-aware collection transfers
 //! one owned batch to core's committed cleanup at transaction commit, separate
 //! from this registry of created resources.

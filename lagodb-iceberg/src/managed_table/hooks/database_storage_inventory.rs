@@ -1,10 +1,8 @@
 //! Cluster-visible inventory used by database lifecycle guards.
 
-use std::{ffi::c_char, fs, io};
+use std::{fs, io};
 
-use lagodb_core::catalog::{
-    CatalogRelation, CatalogScanKey, CatalogSnapshot, database_path, get_relation_oid,
-};
+use lagodb_core::catalog::{CatalogRelation, CatalogSnapshot, database_path};
 use lagodb_core::hooks::{HookError, UtilityHookError};
 use lagodb_core::storage::tablespace::TablespaceStorage;
 use lagodb_core::wal::Checkpoint;
@@ -13,30 +11,12 @@ use pgrx::prelude::PgSqlErrorCode;
 
 use crate::managed_table::catalog::local_storage::LOCAL_TABLE_SUFFIX;
 
-const SHDEPEND_REFCLASSID: pg_sys::AttrNumber = 5;
-const SHDEPEND_REFOBJID: pg_sys::AttrNumber = 6;
-
-/// Fixed-width portion of PostgreSQL's `FormData_pg_shdepend`.
-///
-/// pgrx does not expose this catalog form, so keep the layout in sync with
-/// `catalog/pg_shdepend.h`. None of these fixed catalog fields are nullable.
-#[repr(C)]
-struct SharedDependencyForm {
-    dbid: pg_sys::Oid,
-    classid: pg_sys::Oid,
-    _objid: pg_sys::Oid,
-    _objsubid: i32,
-    _refclassid: pg_sys::Oid,
-    _refobjid: pg_sys::Oid,
-    deptype: c_char,
-}
-
 /// Storage owned by managed tables in one PostgreSQL database.
 ///
 /// Local ownership is represented by relation-file Iceberg directories in
 /// each local tablespace. Object-backed tablespaces contain only object-backed
 /// tables: native relation files identify ordinary tables without inspecting
-/// their AM. Shared dependencies cover storage-less partitioned roots.
+/// their AM.
 pub(super) struct ManagedDatabaseInventory {
     database_oid: pg_sys::Oid,
 }
@@ -91,52 +71,6 @@ impl ManagedDatabaseInventory {
         &self,
         object_tablespaces: &[pg_sys::Oid],
     ) -> Result<bool, UtilityHookError> {
-        if object_tablespaces.is_empty() {
-            return Ok(false);
-        }
-
-        let catalog_namespace = pg_sys::Oid::from(pg_sys::PG_CATALOG_NAMESPACE);
-        let relation_oid = get_relation_oid(c"pg_shdepend", catalog_namespace);
-        let index_oid =
-            get_relation_oid(c"pg_shdepend_reference_index", catalog_namespace);
-        let dependencies = CatalogRelation::open(
-            relation_oid,
-            pg_sys::AccessShareLock as pg_sys::LOCKMODE,
-        )?;
-
-        // Volume association is resolved first. The reference index then
-        // limits each scan to one object-backed tablespace rather than
-        // walking every shared dependency in the source database.
-        for tablespace_oid in object_tablespaces {
-            let mut scan = dependencies.begin_scan(
-                index_oid,
-                true,
-                CatalogSnapshot::Default,
-                [
-                    CatalogScanKey::oid_eq(
-                        SHDEPEND_REFCLASSID,
-                        pg_sys::TableSpaceRelationId,
-                    ),
-                    CatalogScanKey::oid_eq(SHDEPEND_REFOBJID, *tablespace_oid),
-                ],
-            )?;
-            while let Some(tuple) = scan.get_next()? {
-                // SAFETY: `tuple` comes from the live pg_shdepend scan. Its
-                // fixed-width, non-null fields remain valid until the scan
-                // advances.
-                let dependency = unsafe {
-                    &*(pg_sys::GETSTRUCT(tuple.as_raw())
-                        as *const SharedDependencyForm)
-                };
-                if dependency.dbid == self.database_oid
-                    && dependency.classid == pg_sys::RelationRelationId
-                    && dependency.deptype as u32
-                        == pg_sys::SharedDependencyType::SHARED_DEPENDENCY_TABLESPACE
-                {
-                    return Ok(true);
-                }
-            }
-        }
         if !self.contains_object_files_in(object_tablespaces)? {
             return Ok(false);
         }

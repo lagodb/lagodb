@@ -54,10 +54,7 @@ impl ManagedTableLocation {
                     cleanup_target,
                 })
             }
-            None => Ok(Self::Local(LocalTableRoot::for_create(
-                rel,
-                storage.local_storage().expect("local storage selected"),
-            )?)),
+            None => Ok(Self::Local(LocalTableRoot::for_relation(rel))),
         }
     }
 
@@ -66,7 +63,7 @@ impl ManagedTableLocation {
         let Some(tablespace) =
             TablespaceStorage::resolve(rel.tablespace().resolved_oid())?
         else {
-            return Ok(Self::Local(LocalTableRoot::for_relation(rel)?));
+            return Ok(Self::Local(LocalTableRoot::for_relation(rel)));
         };
         let options = TableOptions::load_from_catalog(rel.oid())?
             .ok_or(IcebergError::ManagedTableLocationMissing { relid: rel.oid() })?;
@@ -102,16 +99,13 @@ impl ManagedTableLocation {
         &self,
         options: &mut TableOptions,
     ) -> IcebergResult<()> {
-        match self {
-            Self::Local(root) => root.persist_identity(options),
-            Self::Remote { location, .. } => {
-                options.insert_access_method_value(
-                    &LOCATION_OPTION_DEF,
-                    location.as_str(),
-                )?;
-                Ok(())
-            }
+        if let Self::Remote { location, .. } = self {
+            options.insert_access_method_value(
+                &LOCATION_OPTION_DEF,
+                location.as_str(),
+            )?;
         }
+        Ok(())
     }
 
     pub(crate) fn as_str(&self) -> &str {

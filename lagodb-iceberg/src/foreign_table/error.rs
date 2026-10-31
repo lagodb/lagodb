@@ -185,7 +185,10 @@ impl From<iceberg_lite::Error> for IcebergFdwError {
 
 impl From<IcebergFdwError> for ForeignValidationError {
     fn from(error: IcebergFdwError) -> Self {
-        Self::provider(error)
+        match error {
+            IcebergFdwError::Iceberg(IcebergError::Postgres(error)) => error.into(),
+            error => Self::provider(error),
+        }
     }
 }
 

@@ -22,9 +22,9 @@ impl ForeignSchemaBinding {
     /// checked against the definition schema; later remote or local schema
     /// changes are detected when a scan or write binds the relation.
     ///
-    /// A local NOT NULL is the exception: PostgreSQL's planner trusts
-    /// `attnotnull` before any FDW callback runs (PG17 folds `IS NULL` on such
-    /// a column to constant false and drops `IS NOT NULL`), so execution-time
+    /// A local NOT NULL is the exception: PostgreSQL's planner trusts a valid
+    /// NOT NULL before any FDW callback runs (it folds `IS NULL` on such a
+    /// column to constant false and drops `IS NOT NULL`), so execution-time
     /// binding cannot detect a wrong declaration. At creation it must name a
     /// required field in both the definition schema and the current schema.
     /// After creation, keeping planner-visible constraints synchronized with

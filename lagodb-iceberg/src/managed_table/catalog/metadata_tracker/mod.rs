@@ -211,19 +211,18 @@ impl TxMetadata {
         })
     }
 
-    /// Check exclusivity and return whether the current subtransaction owns
-    /// the local generation, allowing it to be cleared in place on TRUNCATE.
+    /// Check that no exclusive action conflicts with a local rebuild.
     pub(crate) fn prepare_local_rebuild(
         &self,
         relid: pg_sys::Oid,
-    ) -> IcebergResult<bool> {
+    ) -> IcebergResult<()> {
         self.register_table(relid);
         let inner = self.inner.borrow();
         let state = inner.tables.get(&relid).expect("registered table");
         if let Some(error) = state.transaction.actions.exclusive_conflict_error() {
             return Err(error);
         }
-        Ok(state.owns_local_generation_at(current_nest_level()))
+        Ok(())
     }
 
     /// A rebuilt table is already published in the transactional PG catalog.

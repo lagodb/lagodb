@@ -48,16 +48,13 @@ fn valid_filter(event_mask: u32) -> bool {
 }
 
 fn valid_descriptor(descriptor: &ObjectAccessHookDescriptor) -> bool {
-    descriptor.struct_size == std::mem::size_of::<ObjectAccessHookDescriptor>() as u32
-        && valid_filter(descriptor.event_mask)
+    valid_filter(descriptor.event_mask)
         && !descriptor.context.is_null()
         && descriptor.on_access.is_some()
 }
 
 fn valid_str_descriptor(descriptor: &ObjectAccessStrHookDescriptor) -> bool {
-    descriptor.struct_size
-        == std::mem::size_of::<ObjectAccessStrHookDescriptor>() as u32
-        && valid_filter(descriptor.event_mask)
+    valid_filter(descriptor.event_mask)
         && !descriptor.context.is_null()
         && descriptor.on_access.is_some()
 }
@@ -275,7 +272,6 @@ mod tests {
         class_id: pg_sys::Oid,
     ) -> ObjectAccessHookDescriptor {
         ObjectAccessHookDescriptor {
-            struct_size: std::mem::size_of::<ObjectAccessHookDescriptor>() as u32,
             event_mask,
             class_id,
             context: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
@@ -288,7 +284,6 @@ mod tests {
         class_id: pg_sys::Oid,
     ) -> ObjectAccessStrHookDescriptor {
         ObjectAccessStrHookDescriptor {
-            struct_size: std::mem::size_of::<ObjectAccessStrHookDescriptor>() as u32,
             event_mask,
             class_id,
             context: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
@@ -311,13 +306,6 @@ mod tests {
         )));
 
         let mut candidate = descriptor(OBJECT_ACCESS_DROP, class_id);
-        candidate.struct_size = 0;
-        assert!(!valid_descriptor(&candidate));
-        candidate.struct_size =
-            std::mem::size_of::<ObjectAccessHookDescriptor>() as u32 + 1;
-        assert!(!valid_descriptor(&candidate));
-        candidate.struct_size =
-            std::mem::size_of::<ObjectAccessHookDescriptor>() as u32;
         candidate.on_access = None;
         assert!(!valid_descriptor(&candidate));
         candidate.on_access = Some(object_callback);

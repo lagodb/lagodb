@@ -8,7 +8,6 @@ use lagodb_core::table_maintenance::{
     TableMaintenanceMode, TableMaintenanceReport, TableMaintenanceRequest,
     TableMaintenanceStats,
 };
-use parquet::file::properties::WriterProperties;
 
 use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::catalog::bridge::IcebergTableId;
@@ -105,12 +104,8 @@ impl IcebergTableMaintenance {
         let starting_sequence_number = plan.starting_sequence_number;
         let materialized_delete_identities = plan.materialized_delete_identities;
         let planning_metrics = plan.metrics;
-        let writer_properties = WriterProperties::builder()
-            .set_compression(
-                IcebergTableOptions::for_relation(request.relation)?
-                    .parquet_compression(),
-            )
-            .build();
+        let writer_properties =
+            IcebergTableOptions::for_relation(request.relation)?.writer_properties();
         let mut report = TableMaintenanceReport::default();
         for (name, value) in [
             (c"scanned_manifests", planning_metrics.scanned_manifests),

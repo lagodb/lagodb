@@ -77,8 +77,7 @@ fn maintain_relation(
         return Ok(MaintenanceAttempt::LockSkipped);
     }
     let relation =
-        RelationGuard::open_table(relid, pg_sys::NoLock as pg_sys::LOCKMODE)
-            .map_err(PgReportError::from_domain_error)?;
+        RelationGuard::open_table(relid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
     let relation = relation.as_handle();
     if !relation.is_iceberg() {
         IcebergMetadata::finish_maintenance(
@@ -95,11 +94,7 @@ fn maintain_relation(
         TableMaintenanceRequest {
             relation: &relation,
             mode: TableMaintenanceMode::Routine,
-            options: TableMaintenanceOptions {
-                skip_locked: true,
-                process_main: true,
-                ..TableMaintenanceOptions::default()
-            },
+            options: TableMaintenanceOptions::default(),
             budget: TableMaintenanceBudget::configured(),
             command_time,
         },

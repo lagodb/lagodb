@@ -7,7 +7,6 @@ use iceberg_lite::spec::{DataFile, FormatVersion};
 use iceberg_lite::transaction::{RowDeltaValidation, RowLevelCommand};
 use lagodb_core::handles::RelationHandle;
 use lagodb_core::prelude::*;
-use parquet::file::properties::WriterProperties;
 use pgrx::pg_sys;
 
 use super::plan::{ModifyCommand, TargetDependency, ValidationPlan};
@@ -236,10 +235,8 @@ impl IcebergModifyState {
             transaction_isolation,
             scan_context.as_ref(),
         )?;
-        let write_options = IcebergTableOptions::for_relation(rel)?;
-        let writer_properties = WriterProperties::builder()
-            .set_compression(write_options.parquet_compression())
-            .build();
+        let writer_properties =
+            IcebergTableOptions::for_relation(rel)?.writer_properties();
 
         let data_sink = if actions.writes_rows() {
             // The shared relation layout drives the read and write column

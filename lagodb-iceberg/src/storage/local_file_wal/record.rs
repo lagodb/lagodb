@@ -14,8 +14,8 @@ use lagodb_core::wal::{WalRecordBuilder, XLogRecPtr};
 ///   offset is 0)
 /// - DeleteDirectory: Remove a directory and its contents after the PostgreSQL
 ///   transaction has committed
-/// - DeleteFiles: Remove canceled transaction-created files, VACUUM cleanup
-///   files, or retired partitioned-table reservations after commit
+/// - DeleteFiles: Remove canceled transaction-created files or VACUUM cleanup
+///   files after commit
 /// - TruncateDirectory: Clear a disposable transaction-local storage generation
 ///
 /// Invariants:

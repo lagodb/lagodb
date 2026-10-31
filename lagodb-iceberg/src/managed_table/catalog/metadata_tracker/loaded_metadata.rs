@@ -11,8 +11,10 @@ use iceberg_lite::spec::{
 use pgrx::pg_sys;
 
 use crate::error::IcebergResult;
+use crate::managed_table::options::MANAGED_ROW_GROUP_MAX_ROWS;
 
 const TOTAL_RECORDS: &str = "total-records";
+const TOTAL_DATA_FILES: &str = "total-data-files";
 const TOTAL_FILES_SIZE: &str = "total-files-size";
 const TOTAL_DELETE_FILES: &str = "total-delete-files";
 
@@ -49,6 +51,40 @@ impl LoadedTableRead {
             loaded,
         }
     }
+
+    /// Storage bytes this read observes. Without a committed baseline, the
+    /// snapshot summary in `loaded` describes rows outside this read.
+    pub(crate) fn storage_bytes(&self, file_io: &FileIO) -> IcebergResult<u64> {
+        let committed = self
+            .snapshot_id
+            .map_or((0, 0), |_| self.loaded.committed_stats());
+        Ok(self.loaded.stats_with_delta(committed, file_io)?.1)
+    }
+
+    /// Estimated units that file and row-group statistics keep or skip
+    /// whole: every data file holds at least one row group of at most
+    /// [`MANAGED_ROW_GROUP_MAX_ROWS`] rows.
+    pub(crate) fn pruning_units(&self) -> f64 {
+        let (mut rows, mut files) = self
+            .snapshot_id
+            .map_or((0, 0), |_| self.loaded.committed_layout());
+        if let Some(delta) = self.loaded.delta.as_ref() {
+            let stats = delta.stats();
+            if stats.truncates_base {
+                rows = 0;
+                files = 0;
+            } else if !stats.removed_data_paths.is_empty() {
+                // The committed rows still count the removed files, which only
+                // their manifests tell apart. One unit prices statistics
+                // pruning as skipping nothing.
+                return 1.0;
+            }
+            // Added files are counted through their rows.
+            rows = rows.saturating_add(stats.added_data_records);
+        }
+        let row_groups = rows.div_ceil(MANAGED_ROW_GROUP_MAX_ROWS as u64);
+        files.max(row_groups).max(1) as f64
+    }
 }
 
 impl LoadedTableMetadata {
@@ -63,10 +99,29 @@ impl LoadedTableMetadata {
         &self,
         file_io: &FileIO,
     ) -> IcebergResult<(u64, u64)> {
-        let mut rows = Self::summary_u64(&self.metadata, TOTAL_RECORDS).unwrap_or(0);
-        let mut bytes =
-            Self::summary_u64(&self.metadata, TOTAL_FILES_SIZE).unwrap_or(0);
+        self.stats_with_delta(self.committed_stats(), file_io)
+    }
 
+    /// Committed rows and data files.
+    fn committed_layout(&self) -> (u64, u64) {
+        (
+            Self::summary_u64(&self.metadata, TOTAL_RECORDS).unwrap_or(0),
+            Self::summary_u64(&self.metadata, TOTAL_DATA_FILES).unwrap_or(0),
+        )
+    }
+
+    fn committed_stats(&self) -> (u64, u64) {
+        (
+            Self::summary_u64(&self.metadata, TOTAL_RECORDS).unwrap_or(0),
+            Self::summary_u64(&self.metadata, TOTAL_FILES_SIZE).unwrap_or(0),
+        )
+    }
+
+    fn stats_with_delta(
+        &self,
+        (mut rows, mut bytes): (u64, u64),
+        file_io: &FileIO,
+    ) -> IcebergResult<(u64, u64)> {
         let Some(delta) = self.delta.as_ref() else {
             return Ok((rows, bytes));
         };
@@ -91,6 +146,10 @@ impl LoadedTableMetadata {
         }
 
         Ok((rows, bytes))
+    }
+
+    pub(crate) fn is_partitioned(&self) -> bool {
+        !self.metadata.default_partition_spec().is_unpartitioned()
     }
 
     /// Whether the captured snapshot may contain row-level delete files.

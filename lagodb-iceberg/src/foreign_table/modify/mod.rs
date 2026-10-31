@@ -36,12 +36,6 @@ impl FdwModify for LagodbIceberg {
         context: &mut ForeignUpdateTargetContext<'_>,
     ) -> Result<(), ForeignModifyError> {
         context.add_item_pointer_identity()?;
-        if matches!(context.operation(), ForeignModifyOperation::Delete) {
-            let returning = context.returning_columns().to_vec();
-            for attno in returning {
-                context.add_returning_column(attno)?;
-            }
-        }
         Ok(())
     }
 

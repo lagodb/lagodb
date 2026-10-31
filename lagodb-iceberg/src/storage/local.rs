@@ -133,22 +133,6 @@ impl LocalStorage {
         self.needs_wal
     }
 
-    /// Reserve a PostgreSQL-allocated number with an AM-owned empty file.
-    /// Creation and abort cleanup use VFD storage rather than smgr. Committed
-    /// WAL-enabled retirement keeps this empty file until PostgreSQL's checkpoint
-    /// unlink queue can safely release the number. WAL-free files, including
-    /// temporary reservations, are unlinked directly.
-    pub(crate) fn reserve_file(&self, path: &str) -> Result<()> {
-        let mut writer = self.writer(path)?;
-        writer.close()?;
-        if self.needs_wal {
-            // Empty writes normally produce no WAL. An explicit offset-zero
-            // record creates this empty reservation on standby/archive replay.
-            log_write_file(path, 0, &[]);
-        }
-        Ok(())
-    }
-
     /// Clear a transaction-local generation selected by PostgreSQL's
     /// nontransactional-truncate callback. Abort discards this whole generation.
     pub(crate) fn truncate_directory(&self, path: &str) -> Result<()> {

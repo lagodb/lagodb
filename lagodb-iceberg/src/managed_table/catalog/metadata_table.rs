@@ -27,6 +27,7 @@ use pgrx::prelude::TimestampWithTimeZone;
 use pgrx::{FromDatum, IntoDatum, pg_sys};
 
 use crate::error::{IcebergError, IcebergResult};
+use crate::managed_table::constants::ICEBERG_SCHEMA;
 
 use super::error::{MetadataCatalogError, MetadataCatalogOperation as CatalogOp};
 
@@ -34,7 +35,6 @@ use super::error::{MetadataCatalogError, MetadataCatalogOperation as CatalogOp};
 // Internal constants
 // ---------------------------------------------------------------------------
 
-const ICEBERG_SCHEMA: &CStr = c"iceberg";
 const ICEBERG_METADATA_TABLE: &CStr = c"iceberg_metadata";
 const ICEBERG_METADATA_PKEY: &CStr = c"iceberg_metadata_pkey";
 const ICEBERG_METADATA_MAINTENANCE_DUE_IDX: &CStr =

@@ -15,7 +15,9 @@ use crate::managed_table::access::mutation::{
     PreparedManagedMutationScan,
 };
 use crate::predicate::{BoundIcebergPredicate, IcebergFilterError};
-use crate::scan::{PreparedRowScan, ScanPredicates};
+use crate::scan::{
+    PreparedRowScan, ReaderPredicate, ScanPredicates, StablePruningPredicate,
+};
 use crate::schema::projection::{ProjectedAttribute, SlotProjection};
 
 use super::{IcebergScan, IcebergScanState, ScanRelation};
@@ -57,16 +59,23 @@ impl IcebergScan {
             }
         };
         BoundIcebergPredicate::validate_schema(filters.iter(), prepared.schema_id())?;
-        // PG17 SeqScan supplies no quals to TableAM. ModifyTable's explicit
+        // PostgreSQL SeqScan supplies no quals to TableAM. ModifyTable's explicit
         // channel binds constants and external parameters for this execution.
-        // Both remain valid across rescans and serve pruning and reader filtering.
+        // Both remain valid across rescans and serve pruning and reader filtering,
+        // except a set, which only prunes files.
         // PG intentionally retains even exact quals for native SeqScan's EPQ
         // contract (see LagodbCustomModifyProvider::prepare_modify_seq_scan).
         // Reader filtering reduces rows sent through Datum conversion and PG
         // qualification; repeated evaluation on surviving rows alone is not
         // evidence that disabling reader filtering would improve performance.
-        let scan_filter = BoundIcebergPredicate::conjoin(filters.rescan_stable());
-        prepared.replace_predicates(ScanPredicates::same(scan_filter));
+        prepared.replace_predicates(ScanPredicates::new(
+            StablePruningPredicate::new(BoundIcebergPredicate::conjoin(
+                filters.rescan_stable(),
+            )),
+            ReaderPredicate::new(BoundIcebergPredicate::conjoin_row_filter(
+                filters.rescan_stable(),
+            )),
+        ));
         // Match CustomScan's conflict policy: external parameters may narrow
         // the scan, but only static predicates narrow conflict validation.
         let conflict_filter = BoundIcebergPredicate::conjoin(filters.static_values())

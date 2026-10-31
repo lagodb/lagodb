@@ -263,8 +263,13 @@ impl<'data> WalRecordBuilder<'data> {
     /// during [`insert`](Self::insert), so `data` must stay alive until then.
     pub fn register_data(&mut self, data: &'data [u8]) -> &mut Self {
         unsafe {
-            // XLogRegisterData expects mutable pointer even though it doesn't modify
-            pg_sys::XLogRegisterData(data.as_ptr() as *mut i8, data.len() as u32);
+            #[cfg(any(feature = "pg16", feature = "pg17"))]
+            pg_sys::XLogRegisterData(
+                data.as_ptr().cast_mut().cast(),
+                data.len() as u32,
+            );
+            #[cfg(feature = "pg18")]
+            pg_sys::XLogRegisterData(data.as_ptr().cast(), data.len() as u32);
         }
         self
     }
@@ -320,9 +325,16 @@ impl<'data> WalRecordBuilder<'data> {
         data: &'data [u8],
     ) -> &mut Self {
         unsafe {
+            #[cfg(any(feature = "pg16", feature = "pg17"))]
             pg_sys::XLogRegisterBufData(
                 block_id,
-                data.as_ptr() as *mut i8,
+                data.as_ptr().cast_mut().cast(),
+                data.len() as u32,
+            );
+            #[cfg(feature = "pg18")]
+            pg_sys::XLogRegisterBufData(
+                block_id,
+                data.as_ptr().cast(),
                 data.len() as u32,
             );
         }
@@ -397,5 +409,6 @@ pub mod buffer_flags {
     pub const REGBUF_KEEP_DATA: u8 = pg_sys::REGBUF_KEEP_DATA as u8;
 
     /// Intentionally register a clean buffer
+    #[cfg(any(feature = "pg17", feature = "pg18"))]
     pub const REGBUF_NO_CHANGE: u8 = pg_sys::REGBUF_NO_CHANGE as u8;
 }

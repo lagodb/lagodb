@@ -18,7 +18,7 @@ use crate::foreign_table::error::IcebergFdwError;
 /// monotonic for this transaction. They include ACL-only updates such as a
 /// GRANT to another role, even when the captured runtime options are unchanged.
 /// Later binds and publication admission reject that state; callbacks neither
-/// reread catalogs nor compare individual options. PG17 postgres_fdw uses the
+/// reread catalogs nor compare individual options. postgres_fdw uses the
 /// same coarse matching in contrib/postgres_fdw/connection.c's
 /// pgfdw_inval_callback, explicitly avoiding option-by-option comparison.
 /// Its response differs: it lets an in-use connection finish its transaction

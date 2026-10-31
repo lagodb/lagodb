@@ -23,11 +23,11 @@ use crate::storage::{LocalStorage, ObjectStorage};
 /// # UNLOGGED contract
 ///
 /// `CREATE UNLOGGED TABLE` disables local Iceberg file WAL through PostgreSQL's
-/// `RelationNeedsWAL`, including writes, partitioned-table reservations,
-/// TRUNCATE and post-commit deletion. File sync, transaction-local
+/// `RelationNeedsWAL`, including writes, TRUNCATE and post-commit deletion. File sync, transaction-local
 /// overlays, catalog publication and commit/abort cleanup keep their ordinary
-/// behavior. The shared `iceberg.iceberg_metadata` table remains logged, so
-/// UNLOGGED does not mean that the whole operation produces no PostgreSQL WAL.
+/// behavior. The shared `iceberg.iceberg_metadata` table remains logged and
+/// creating the empty native main fork is WAL-logged, so UNLOGGED does not mean
+/// that the whole operation produces no PostgreSQL WAL.
 ///
 /// This intentionally differs from PostgreSQL heap UNLOGGED semantics. PostgreSQL
 /// `ResetUnloggedRelations` identifies storage by native init forks and copies

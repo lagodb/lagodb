@@ -4,11 +4,8 @@
 //! parser they happen to call:
 //!
 //! - `table_ddl` — `CREATE TABLE` lifecycle plus guards against DDL forms we
-//!   do not support yet (`CREATE TABLE AS`,
-//!   `ALTER TABLE SET ACCESS METHOD/TABLESPACE`,
+//!   do not support yet (`CREATE TABLE AS`, `ALTER TABLE SET TABLESPACE`,
 //!   `ALTER TABLE ALL IN TABLESPACE`).
-//!   Its topology guard uses pg_inherits object-access events under PG's locks
-//!   to keep managed partitioned tables out of PostgreSQL partition hierarchies.
 //! - `enum_ddl` — prevents label renames while managed columns depend on the
 //!   enum's text representation, including through native containers.
 //! - `database_storage_policy` — rejects database-template cloning and
@@ -26,7 +23,6 @@
 //! Iceberg catalog.
 
 mod column_drop_guard;
-mod copy;
 mod database_storage_inventory;
 mod database_storage_policy;
 mod enum_ddl;
@@ -34,7 +30,6 @@ pub mod object_access;
 pub mod table_ddl;
 
 pub fn init_hooks() {
-    copy::init();
     database_storage_policy::init_hook();
     table_ddl::init_hook();
     enum_ddl::init_hook();

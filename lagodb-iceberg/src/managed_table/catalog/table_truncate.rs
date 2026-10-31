@@ -3,8 +3,6 @@
 use iceberg_lite::catalog::TableCreation;
 use lagodb_core::catalog::CatalogRelation;
 use lagodb_core::handles::{RelFileLocator, RelationHandle};
-use lagodb_core::options::TableOptions;
-use pgrx::pg_sys;
 
 use super::bridge::{BootstrapWriter, IcebergTableId};
 use super::local_storage::LocalTableRoot;
@@ -29,27 +27,18 @@ impl ManagedTableTruncate {
         let local_storage = storage.local_storage().expect("local storage selected");
 
         let tracker = TxMetadata::current();
-        let owns_current_generation = tracker.prepare_local_rebuild(rel.oid())?;
+        tracker.prepare_local_rebuild(rel.oid())?;
         let metadata =
             tracker.begin_table_definition_change(rel.oid(), storage.file_io())?;
-        let previous = LocalTableRoot::for_relation(rel)?;
-        let partitioned = rel.relkind() == pg_sys::RELKIND_PARTITIONED_TABLE as i8;
-        let new_root = if partitioned {
-            if owns_current_generation {
-                None
-            } else {
-                Some(LocalTableRoot::for_create(rel, local_storage)?)
-            }
-        } else {
-            new_locator.map(|locator| LocalTableRoot::for_locator(rel, locator))
-        };
+        let previous = LocalTableRoot::for_relation(rel);
+        let new_root =
+            new_locator.map(|locator| LocalTableRoot::for_locator(rel, locator));
         let replacement = new_root.as_ref().unwrap_or(&previous);
         let same_directory = previous.as_str() == replacement.as_str();
         if same_directory {
-            // PostgreSQL selects this path for ordinary tables only when the table
-            // or locator belongs to this subtransaction. The tracker supplies
-            // the same ownership rule for partitioned tables. Rollback discards
-            // the generation, so no old file set needs to be retained.
+            // PostgreSQL selects this path only when the table or locator
+            // belongs to this subtransaction. Rollback discards the generation,
+            // so no old file set needs to be retained.
             local_storage.truncate_directory(previous.as_str())?;
         } else {
             storage.ensure_location_is_empty(replacement.as_str())?;
@@ -76,12 +65,6 @@ impl ManagedTableTruncate {
                 creation,
             )?;
         IcebergMetadata::publish_rebuilt_table(rel.oid(), &table)?;
-        if partitioned && !same_directory {
-            let mut options =
-                TableOptions::load_from_catalog(rel.oid())?.unwrap_or_default();
-            replacement.persist_identity(&mut options)?;
-            options.replace_in_catalog(rel.oid())?;
-        }
         tracker.record_local_rebuild(rel.oid(), storage.file_io());
         // Bootstrap resets Iceberg schema and field IDs even when the PG
         // locator and table options stay unchanged. Complete every local
