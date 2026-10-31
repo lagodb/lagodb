@@ -112,6 +112,11 @@ impl AnalyzeBatchCursor {
         })
     }
 
+    #[cfg(feature = "pg16")]
+    pub(super) const fn candidate_count(&self) -> u64 {
+        self.candidate_count
+    }
+
     pub(super) fn next_ticket(&mut self) -> AmResult<bool> {
         if self.next_ticket == self.tickets {
             return Ok(false);

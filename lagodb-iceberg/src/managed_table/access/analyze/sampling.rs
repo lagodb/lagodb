@@ -247,6 +247,7 @@ impl AnalyzeSampler {
         Ok(sampled)
     }
 
+    #[cfg(any(feature = "pg17", feature = "pg18"))]
     pub(super) fn desired_candidate_count(
         physical_rows: u64,
         virtual_blocks: u64,
@@ -439,6 +440,7 @@ mod tests {
         assert_eq!(sample.files[0].positions[0].multiplicity, 20);
     }
 
+    #[cfg(any(feature = "pg17", feature = "pg18"))]
     #[test]
     fn desired_candidates_are_bounded_by_postgresql_sample_target() {
         assert_eq!(
