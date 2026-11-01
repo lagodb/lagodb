@@ -2,6 +2,7 @@
 
 pub(crate) mod batch;
 pub(crate) mod columnar;
+mod cost;
 mod error;
 pub(crate) mod parallel;
 mod read;
@@ -9,6 +10,7 @@ mod row_cursor;
 mod task_metrics;
 
 pub(crate) use columnar::{ScanSourceBinding, ScanTaskPlanner};
+pub(crate) use cost::{ReaderScanCost, ScanVolume};
 pub(crate) use error::ScanError;
 pub(crate) use read::{
     AnalyzeScanInput, CountRowsRead, IcebergReadSnapshot, PreparedIcebergRead,

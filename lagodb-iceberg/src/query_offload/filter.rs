@@ -24,9 +24,11 @@ pub(super) struct FilterPlanner(IcebergFilterPlanner);
 impl FilterPlanner {
     pub(super) fn managed(context: &FilterPlanningContext) -> Result<Self, Error> {
         let view = ManagedTableReadView::load(context.relation_oid())?;
-        Ok(Self(IcebergFilterPlanner::from_schema(
+        Ok(Self(IcebergFilterPlanner::new(
             context,
             view.schema(),
+            view.metadata(),
+            Some(view.pruning_units()),
         )?))
     }
 
@@ -34,9 +36,14 @@ impl FilterPlanner {
         context: &FilterPlanningContext,
         source: &ForeignPlanningSource,
     ) -> Result<Self, Error> {
-        Ok(Self(IcebergFilterPlanner::from_schema(
+        let metadata = source.table()?.metadata();
+        // Foreign scans price layout pruning alone (`ScanVolume::foreign`),
+        // which needs no unit count.
+        Ok(Self(IcebergFilterPlanner::new(
             context,
-            source.table()?.metadata().current_schema(),
+            metadata.current_schema(),
+            metadata,
+            None,
         )?))
     }
 }
@@ -50,6 +57,10 @@ impl FilterPushdownPlanner for FilterPlanner {
         fragment: &PredicateFragment,
     ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
         Ok(self.0.try_plan_filter(fragment)?)
+    }
+
+    fn pruning_units(&self) -> Option<f64> {
+        self.0.pruning_units()
     }
 }
 

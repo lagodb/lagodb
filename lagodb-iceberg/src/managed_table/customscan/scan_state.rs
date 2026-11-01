@@ -126,8 +126,9 @@ impl IcebergScanState {
     pub(super) fn start(
         ctx: StartContext<'_, IcebergCustomScanProvider>,
     ) -> Result<(), CustomScanError> {
-        let predicate =
-            ReaderPredicate::new(BoundIcebergPredicate::conjoin(ctx.filters.iter()));
+        let predicate = ReaderPredicate::new(
+            BoundIcebergPredicate::conjoin_row_filter(ctx.filters.iter()),
+        );
         let prepared =
             mem::replace(&mut ctx.state.execution, ScanExecutionState::Finished);
         ctx.state.execution = match prepared {
@@ -246,7 +247,7 @@ impl IcebergScanState {
     ) -> Result<(), CustomScanError> {
         let replacement = ctx
             .filters_changed
-            .then(|| BoundIcebergPredicate::conjoin(ctx.filters.iter()))
+            .then(|| BoundIcebergPredicate::conjoin_row_filter(ctx.filters.iter()))
             .map(ReaderPredicate::new);
 
         match &mut ctx.state.execution {

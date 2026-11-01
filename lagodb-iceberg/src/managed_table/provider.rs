@@ -2,6 +2,7 @@
 
 use std::ffi::CStr;
 
+use lagodb_core::hooks::HookError;
 use lagodb_core::prelude::*;
 use lagodb_core::runtime_api::TableCopyCallbacks;
 use lagodb_core::table_maintenance::{
@@ -18,6 +19,7 @@ use super::access::mutation::{IcebergModifyQueryState, IcebergModifyState};
 use super::access::scan::IcebergScan;
 use super::catalog::IcebergAccessMethod;
 use super::constants::ICEBERG_AM_NAME;
+use super::hooks::table_ddl::PartitionedInheritance;
 use super::maintenance::{IcebergTableMaintenance, MaintenanceExecution};
 
 /// Get the cached Iceberg `TableAmRoutine` pointer.
@@ -44,8 +46,6 @@ impl TableAccessMethod for IcebergTableAm {
     type ModifyState = IcebergModifyState;
     type CopySession = IcebergModifyState;
 
-    const OWNS_PARTITIONED_TABLE: bool = true;
-
     fn access_method_oid() -> Option<pg_sys::Oid> {
         IcebergAccessMethod::oid()
     }
@@ -58,19 +58,20 @@ impl LagodbTableProvider for IcebergTableProvider {
         Some(&CALLBACKS)
     }
 
-    const OWNS_PARTITIONED_TABLE: bool = IcebergTableAm::OWNS_PARTITIONED_TABLE;
     const NAME: &'static CStr = c"iceberg";
     const EXTENSION_NAME: &'static CStr = c"lagodb_iceberg";
     const LIBRARY_NAME: &'static CStr = c"lagodb_iceberg";
     const ACCESS_METHOD_NAME: &'static CStr = ICEBERG_AM_NAME;
-    const SUPPORTS_ANALYZE: bool = true;
 
     fn access_method_oid() -> Option<pg_sys::Oid> {
         IcebergAccessMethod::oid()
     }
 
-    fn truncate_partitioned_table(rel: &RelationHandle<'_>) -> AmResult<()> {
-        IcebergTableAm::truncate(rel)
+    fn validate_inheritance_edge(
+        child: pg_sys::Oid,
+        parent: pg_sys::Oid,
+    ) -> Result<(), HookError> {
+        PartitionedInheritance::validate(child, parent)
     }
 
     fn execute_maintenance(

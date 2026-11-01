@@ -20,15 +20,14 @@ use lagodb_core::runtime_api::{
 };
 use pgrx::pg_sys;
 
-use crate::config::scan_fraction;
 use crate::error::IcebergError;
 use crate::foreign_table::{
     ForeignPlanningSource, ForeignSchemaBinding, LagodbIceberg, PlanSourceIdentity,
 };
 use crate::managed_table::{ICEBERG_AM_NAME, ManagedTableReadView};
-use crate::scan::ScanError;
 use crate::scan::columnar::PlannedScan as PlannedQueryScan;
 use crate::scan::parallel::WorkerSource;
+use crate::scan::{ScanError, ScanVolume};
 use crate::schema::projection::StorageProjection;
 
 use super::error::Error;
@@ -65,16 +64,18 @@ impl Provider {
         &self,
         context: &ScanPlanningContext<'_>,
     ) -> Result<ScanCost, Error> {
-        let fraction = scan_fraction(context.pruning_selectivity());
-        let startup_cost = if context.relation_kind() == pg_sys::RELKIND_FOREIGN_TABLE
-        {
-            FOREIGN_REST_SCAN_STARTUP_COST
-        } else {
-            0.0
-        };
+        let (volume, startup_cost) =
+            if context.relation_kind() == pg_sys::RELKIND_FOREIGN_TABLE {
+                (
+                    ScanVolume::foreign(context.layout_fraction()),
+                    FOREIGN_REST_SCAN_STARTUP_COST,
+                )
+            } else {
+                (ScanVolume::managed(context.pruning()), 0.0)
+            };
         ScanCost::try_new(
-            context.relation_rows() * fraction,
-            context.relation_physical_bytes() * fraction,
+            context.relation_rows() * volume.fraction(),
+            context.relation_physical_bytes() * volume.fraction(),
             startup_cost,
         )
         .map_err(Into::into)
@@ -288,9 +289,6 @@ impl TableScanWorkerProvider for Provider {
         let work_count = u32::try_from(grouped.group_count()).map_err(|_| {
             ScanError::WorkerPayload("worker group count exceeds u32".to_owned())
         })?;
-        if work_count == 0 {
-            return Ok(ScanSupport::Unsupported);
-        }
         let mut task_metrics = planned.metrics();
         task_metrics.planned_tasks = grouped.range_count() as u64;
         let prefix = worker.encode_prefix()?;

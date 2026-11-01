@@ -235,8 +235,4 @@ pub(super) enum PlanError {
     UnknownPlan { found: i32 },
     #[error("Iceberg scan projection kind {found} is unsupported")]
     UnknownProjection { found: i32 },
-    #[error("Iceberg scan column projection is empty")]
-    EmptyProjection,
-    #[error("Iceberg scan column projection contains an invalid attribute")]
-    InvalidAttribute,
 }

@@ -10,7 +10,6 @@ mod pg_test;
 use core::ffi::CStr;
 
 use lagodb_core::access::mutation::ModifyScanBinding;
-use lagodb_core::api::TableAccessMethod;
 use lagodb_core::customscan::modify::{
     LagodbCustomModifyProvider, ModifyBindContext, ModifyCapabilities,
     PreparedModifyScan, register_provider as register_modify_provider,
@@ -19,7 +18,7 @@ use lagodb_core::customscan::provider::{
     BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
     CustomScanError, EndContext, LagodbCustomScanProvider, NeededColumns,
     NextSlotContext, NextSlotResult, NoPrivateData, PathContext, PathVariant,
-    ReScanContext, RelationContext, StartContext,
+    ReScanContext, RelationContext, StartContext, TableAmSeqScan,
     register_provider as register_scan_provider,
 };
 use lagodb_core::expr::RuntimeValueBindings;
@@ -31,7 +30,6 @@ use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 use lagodb_core::runtime_api::TableScanTaskMetrics;
 use pgrx::pg_sys;
 
-use crate::config::scan_fraction;
 use crate::error::IcebergError;
 use crate::managed_table::IcebergTableAm;
 use crate::managed_table::ManagedTableReadView;
@@ -45,6 +43,7 @@ use crate::predicate::{
     BoundIcebergPredicate, IcebergFilterError, IcebergFilterPlanner,
     PlannedIcebergPredicate,
 };
+use crate::scan::{ReaderScanCost, ScanVolume};
 
 use scan_state::IcebergScanState;
 
@@ -61,7 +60,12 @@ impl FilterPushdown for IcebergCustomScanProvider {
         context: &FilterPlanningContext,
     ) -> Result<Self::Planner, Self::Error> {
         let view = ManagedTableReadView::load(context.relation_oid())?;
-        IcebergFilterPlanner::from_schema(context, view.schema())
+        IcebergFilterPlanner::new(
+            context,
+            view.schema(),
+            view.metadata(),
+            Some(view.pruning_units()),
+        )
     }
 
     fn encode_planned(
@@ -102,8 +106,9 @@ impl From<crate::scan::ScanError> for CustomScanError {
 impl LagodbCustomScanProvider for IcebergCustomScanProvider {
     const NAME: &'static CStr = c"lagodb-iceberg";
     const NATIVE_PARALLEL: bool = true;
-    const SUPPRESS_TABLE_AM_PARALLEL_SCAN: bool = true;
-    const OWNS_PARTITIONED_TABLE: bool = IcebergTableAm::OWNS_PARTITIONED_TABLE;
+    /// The table AM SeqScan reads through the same reader without the
+    /// projection and pushed filters this path applies.
+    const TABLE_AM_SEQ_SCAN: TableAmSeqScan = TableAmSeqScan::ReplaceWhenProvided;
 
     type PrivateData = NoPrivateData;
     type State = IcebergScanState;
@@ -121,12 +126,16 @@ impl LagodbCustomScanProvider for IcebergCustomScanProvider {
         variant: &PathVariant<'_>,
         builder: CustomPathBuilder<Self>,
     ) -> Option<CustomPathPlan<Self>> {
-        let fraction = scan_fraction(variant.pushdown.pruning_selectivity);
+        let volume = ScanVolume::managed(variant.filters.pruning());
+        let reader =
+            ReaderScanCost::new(volume, ctx.baserel_tuples(), &variant.filters);
 
         let worker_reconstructible = !TxMetadata::has_local_actions(ctx.rel_oid());
         let builder = builder
-            .scanned_pages(ctx.baserel_pages() * fraction)
-            .scanned_tuples(ctx.baserel_tuples() * fraction)
+            .scanned_pages(ctx.baserel_pages() * volume.fraction())
+            .provider_run_cost(reader.run)
+            .returned_tuples(reader.returned_tuples)
+            .extra_startup_cost(reader.startup)
             // A complete path has no DSM callback. It is safe in a PG worker
             // only when that worker can reconstruct the committed view without
             // losing this backend's transaction-local Iceberg actions.
@@ -230,10 +239,8 @@ impl LagodbCustomModifyProvider for IcebergCustomScanProvider {
     }
 
     fn supports_modify_target(ctx: &RelationContext<'_>) -> bool {
-        matches!(
-            ctx.relkind(),
-            pg_sys::RELKIND_RELATION | pg_sys::RELKIND_PARTITIONED_TABLE
-        ) && IcebergAccessMethod::matches_oid(ctx.access_method_oid())
+        ctx.relkind() == pg_sys::RELKIND_RELATION
+            && IcebergAccessMethod::matches_oid(ctx.access_method_oid())
     }
 
     fn modify_scan_context(state: &Self::State) -> Option<IcebergModifyScanContext> {

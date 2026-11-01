@@ -87,14 +87,10 @@ pub(crate) struct ScanPredicates {
 
 impl ScanPredicates {
     pub(crate) fn unfiltered() -> Self {
-        Self::same(None)
-    }
-
-    pub(crate) fn same(predicate: Option<Predicate>) -> Self {
-        Self {
-            stable_pruning: StablePruningPredicate::new(predicate.clone()),
-            current_reader: ReaderPredicate::new(predicate),
-        }
+        Self::new(
+            StablePruningPredicate::new(None),
+            ReaderPredicate::new(None),
+        )
     }
 
     pub(crate) fn new(

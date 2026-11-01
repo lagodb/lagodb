@@ -16,9 +16,8 @@ use crate::scan::ScanError;
 
 use super::error::Error;
 
-const MAGIC: &[u8; 8] = b"LAGOQWK\0";
-const VERSION: u32 = 1;
-const HEADER_BYTES: usize = 24;
+/// Little-endian length of the reopen plan that precedes the task inventory.
+const HEADER_BYTES: usize = size_of::<u64>();
 
 #[derive(Debug, Clone)]
 pub(super) enum ReopenPlan {
@@ -92,29 +91,19 @@ impl ReopenPlan {
                 "query worker reopen plan exceeds u64".to_owned(),
             ))
         })?;
-        let mut prefix = vec![0_u8; HEADER_BYTES];
-        prefix[..MAGIC.len()].copy_from_slice(MAGIC);
-        prefix[8..12].copy_from_slice(&VERSION.to_le_bytes());
-        prefix[16..24].copy_from_slice(&payload_len.to_le_bytes());
+        let mut prefix = Vec::with_capacity(HEADER_BYTES + payload.len());
+        prefix.extend_from_slice(&payload_len.to_le_bytes());
         prefix.extend_from_slice(&payload);
         Ok(prefix)
     }
 
     pub(super) fn decode(data: &[u8]) -> Result<(Self, &[u8]), Error> {
-        if data.len() < HEADER_BYTES || data.get(..MAGIC.len()) != Some(MAGIC) {
+        let Some((header, _)) = data.split_first_chunk::<HEADER_BYTES>() else {
             return Err(Self::payload_error(
-                "query worker payload has an invalid header",
+                "query worker payload header is truncated",
             ));
-        }
-        let version =
-            u32::from_le_bytes(data[8..12].try_into().expect("fixed slice"));
-        if version != VERSION {
-            return Err(Self::payload_error(
-                "query worker payload has an unsupported version",
-            ));
-        }
-        let encoded_len =
-            u64::from_le_bytes(data[16..24].try_into().expect("fixed slice"));
+        };
+        let encoded_len = u64::from_le_bytes(*header);
         let encoded_len = usize::try_from(encoded_len).map_err(|_| {
             Self::payload_error("query worker reopen plan exceeds this platform")
         })?;

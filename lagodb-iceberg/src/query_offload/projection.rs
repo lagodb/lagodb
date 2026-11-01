@@ -69,20 +69,12 @@ impl PlanProjection {
         match reader.read_i32()? {
             PROJECTION_COUNT_ROWS => Ok(Self::CountRows),
             PROJECTION_COLUMNS => {
+                // `encode` widened the nonempty user-attno projection.
                 let count = reader.read_count()?;
-                if count == 0 {
-                    return Err(PlanError::EmptyProjection);
-                }
-                let mut attnos = Vec::with_capacity(count);
-                for _ in 0..count {
-                    let attno = pg_sys::AttrNumber::try_from(reader.read_i32()?)
-                        .map_err(|_| PlanError::InvalidAttribute)?;
-                    if attno <= 0 {
-                        return Err(PlanError::InvalidAttribute);
-                    }
-                    attnos.push(attno);
-                }
-                Ok(Self::Columns(attnos.into_boxed_slice()))
+                let attnos = (0..count)
+                    .map(|_| Ok(reader.read_i32()? as pg_sys::AttrNumber))
+                    .collect::<Result<Box<[_]>, PlanError>>()?;
+                Ok(Self::Columns(attnos))
             }
             found => Err(PlanError::UnknownProjection { found }),
         }
