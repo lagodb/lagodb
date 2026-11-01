@@ -126,6 +126,16 @@ impl<'predicate>
         IcebergPredicatePlanner::starts_with(self, value, prefix)
     }
 
+    // Query offload keeps `IN` in DataFusion; see `table_scan_predicate`.
+    fn in_set(
+        &self,
+        _operator: &RuntimeComparisonOperator,
+        _value: &RuntimePredicateScalar<'predicate>,
+        _set: &RuntimePredicateScalar<'predicate>,
+    ) -> IcebergResult<PredicatePlan<Predicate>> {
+        Ok(PredicatePlan::Unsupported)
+    }
+
     fn conjunction(&self, predicates: Vec<Predicate>) -> Predicate {
         predicates
             .into_iter()

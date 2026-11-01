@@ -85,4 +85,8 @@ impl IcebergPredicateBuilder {
             prefix,
         ))
     }
+
+    pub(crate) fn in_set(self, literals: Vec<Datum>) -> Predicate {
+        self.reference.is_in(literals)
+    }
 }

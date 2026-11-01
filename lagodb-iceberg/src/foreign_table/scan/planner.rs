@@ -13,7 +13,7 @@ use lagodb_core::fdw::{
 use lagodb_core::runtime_api::TableScanTaskMetrics;
 use pgrx::pg_sys;
 
-use crate::config::scan_fraction;
+use crate::scan::{ReaderScanCost, ScanVolume};
 
 use super::super::error::IcebergFdwError;
 use super::super::filter::IcebergFdwFilterPlanner;
@@ -92,15 +92,16 @@ impl FdwScan for LagodbIceberg {
         paths: &mut ForeignPathBuilder<Self::PrivateData>,
     ) -> Result<(), ForeignScanError> {
         let rows = context.rows();
-        let pruning = context.pruning_estimate();
-        let scanned_pages = state.pages * scan_fraction(pruning.selectivity);
-        let retrieved_rows = (state.base_tuples * pruning.selectivity).max(rows);
-        let startup = REST_SCAN_STARTUP_COST + pruning.startup_cost;
+        let filters = context.filter_estimates();
+        let volume = ScanVolume::foreign(filters.layout_fraction());
+        let reader = ReaderScanCost::new(volume, state.base_tuples, &filters);
+        let scanned_pages = state.pages * volume.fraction();
+        let retrieved_rows = reader.returned_tuples.max(rows);
+        let startup = REST_SCAN_STARTUP_COST + reader.startup;
         // SAFETY: PostgreSQL initializes planner cost GUCs before invoking
         // GetForeignPaths, matching the existing Parquet FDW cost path.
-        let total = startup
-            + scanned_pages * unsafe { pg_sys::seq_page_cost }
-            + state.base_tuples * pruning.per_tuple_cost;
+        let total =
+            startup + scanned_pages * unsafe { pg_sys::seq_page_cost } + reader.run;
         let mut path = ForeignPathSpec::new(
             rows,
             startup,

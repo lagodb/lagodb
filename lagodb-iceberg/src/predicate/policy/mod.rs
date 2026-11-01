@@ -45,13 +45,14 @@ pub(crate) enum PredicateValueKind {
 
 /// Pure Iceberg predicate policy used by planned-predicate construction.
 ///
-/// Set membership is deliberately not part of this policy. iceberg-lite's
-/// current Arrow row filter evaluates one full-batch equality and OR per
-/// literal, giving `O(batch_rows * literals)` work and intermediate Boolean
-/// arrays. PostgreSQL can select hashed ScalarArrayOp execution, and DataFusion
-/// builds a hash-based static filter. Compact temporal arrays also cannot be
-/// costed until plan-time admission can prove that every value will remain
-/// representable when the predicate binds.
+/// Set membership stays out of the Arrow row filter. iceberg-lite's current
+/// row filter evaluates one full-batch equality and OR per literal, giving
+/// `O(batch_rows * literals)` work and intermediate Boolean arrays. `= ANY` is
+/// therefore a Conservative file-pruning predicate, and PostgreSQL keeps the
+/// exact qual, for which it can select hashed ScalarArrayOp execution. A set
+/// prices only the files its partition values prune, as its equalities would;
+/// the rows of every selected file still reach PostgreSQL, which path costing
+/// follows from the filter's evaluation rather than from its pruning.
 pub(crate) struct PredicatePushdownPolicy;
 
 impl PredicatePushdownPolicy {
@@ -244,19 +245,6 @@ impl PredicatePushdownPolicy {
             // Every other comparison type is intentionally unsupported.
             _ => None,
         }
-    }
-
-    /// Types whose const literals lack plan-time datum inspection
-    /// (ConservativePruning is uncosted).
-    pub(crate) fn is_value_sensitive_type(type_oid: pg_sys::Oid) -> bool {
-        matches!(
-            PgOid::from(type_oid),
-            PgOid::BuiltIn(
-                PgBuiltInOids::DATEOID
-                    | PgBuiltInOids::TIMESTAMPOID
-                    | PgBuiltInOids::TIMESTAMPTZOID
-            )
-        )
     }
 
     /// `(opcollid, inputcollid) == (InvalidOid, InvalidOid)` — integer Exact guard.

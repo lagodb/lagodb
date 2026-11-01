@@ -22,7 +22,7 @@ impl FormatFilterPlanner for ParquetFilterPlanner {
         };
         Ok(FilterPlan::exact(
             Box::new(predicate),
-            PushdownCosting::CostedPruning,
+            PushdownCosting::StatisticsPruning,
         ))
     }
 }

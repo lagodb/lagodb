@@ -1,5 +1,6 @@
 //! Runtime value binding for already-planned Iceberg predicates.
 
+mod set;
 mod value;
 
 use iceberg_lite::expr::{Predicate, PredicateOperator};
@@ -20,6 +21,17 @@ use super::temporal::TimestampComparison;
 pub(crate) struct BoundIcebergPredicate {
     schema_id: i32,
     predicate: Predicate,
+    row_filter: RowFilter,
+}
+
+/// What the Arrow reader evaluates for one bound predicate.
+enum RowFilter {
+    /// The pruning predicate as a whole; the tree holds no set.
+    Pruning,
+    /// The tree with its sets projected out.
+    Projected(Predicate),
+    /// Nothing safe remains once its sets are projected out.
+    Skipped,
 }
 
 impl BoundIcebergPredicate {
@@ -41,11 +53,32 @@ impl BoundIcebergPredicate {
     pub(crate) fn conjoin<'a>(
         predicates: impl IntoIterator<Item = &'a Self>,
     ) -> Option<Predicate> {
-        let mut predicates = predicates.into_iter();
-        let first = predicates.next()?.predicate.clone();
-        Some(predicates.fold(first, |left, right| {
-            Predicate::and(left, right.predicate.clone())
-        }))
+        Self::conjoin_predicates(predicates.into_iter().map(|bound| &bound.predicate))
+    }
+
+    /// Conjoin the predicates the Arrow reader evaluates. A set stays with file
+    /// pruning; `PredicatePushdownPolicy` records why.
+    pub(crate) fn conjoin_row_filter<'a>(
+        predicates: impl IntoIterator<Item = &'a Self>,
+    ) -> Option<Predicate> {
+        Self::conjoin_predicates(predicates.into_iter().filter_map(Self::row_filter))
+    }
+
+    fn row_filter(&self) -> Option<&Predicate> {
+        match &self.row_filter {
+            RowFilter::Pruning => Some(&self.predicate),
+            RowFilter::Projected(predicate) => Some(predicate),
+            RowFilter::Skipped => None,
+        }
+    }
+
+    fn conjoin_predicates<'a>(
+        mut predicates: impl Iterator<Item = &'a Predicate>,
+    ) -> Option<Predicate> {
+        let first = predicates.next()?.clone();
+        Some(
+            predicates.fold(first, |left, right| Predicate::and(left, right.clone())),
+        )
     }
 }
 
@@ -58,9 +91,18 @@ impl PlannedIcebergPredicate {
         let Some(predicate) = binder.bind_node(self.root(), false)? else {
             return Ok(FilterBindResult::ValueNotRepresentable);
         };
+        let row_filter = if self.root().contains_in_set() {
+            binder
+                .bind_row_filter(self.root())?
+                .into_predicate()
+                .map_or(RowFilter::Skipped, RowFilter::Projected)
+        } else {
+            RowFilter::Pruning
+        };
         Ok(FilterBindResult::Bound(BoundIcebergPredicate {
             schema_id: self.schema_id(),
             predicate,
+            row_filter,
         }))
     }
 }
@@ -117,6 +159,12 @@ impl IcebergFilterBinder<'_> {
             PlannedIcebergNode::StartsWith { column, prefix } => {
                 self.bind_starts_with(column, self.values.value(*prefix), negated)
             }
+            // Negation refuses Conservative plans, so `negated` is false here.
+            PlannedIcebergNode::InSet {
+                column,
+                set,
+                value_type,
+            } => Self::bind_in_set(column, *value_type, self.values.value(*set)),
             PlannedIcebergNode::And(children) => self.bind_logical(
                 children,
                 negated,

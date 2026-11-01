@@ -5,13 +5,17 @@ use lagodb_core::expr::pushdown::{
     FilterPlan, FilterPlanningContext, FilterPushdownPlanner, PredicateFragment,
     PredicatePlan, PredicatePlanner, ScalarExpr,
 };
-use lagodb_core::expr::{BooleanTestKind, RuntimeValueSource};
+use lagodb_core::expr::{
+    BooleanTestKind, ColumnRef, RuntimeValueSource, RuntimeValueSpec,
+};
 use lagodb_core::expr::{PgComparisonOp, PushdownCosting};
 use lagodb_core::handles::RelationGuard;
 use pgrx::pg_sys;
 use std::sync::Arc;
 
-use iceberg_lite::spec::{PrimitiveType, Schema as IcebergSchema, Type};
+use iceberg_lite::spec::{
+    PrimitiveType, Schema as IcebergSchema, TableMetadata, Transform, Type,
+};
 
 use crate::error::IcebergError;
 use crate::schema::relation::RelationLayout;
@@ -22,21 +26,63 @@ use super::plan::{
     PlannedIcebergPredicate, PlannedValueType,
 };
 use super::policy::{
-    ComparisonOpClass, PgPredicatePushdownPolicy, PredicatePushdownPolicy,
+    ComparisonOpClass, PgPredicatePushdownPolicy, SupportedComparison,
     SupportedPredicateCapability,
 };
+
+/// What a pruning filter needs from a partition transform to keep only the
+/// files whose partition values can match it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PartitionMatch {
+    /// Equality and null tests, which every transform projects.
+    Value,
+    /// Ranges and prefixes, which a bucket hash does not project.
+    Order,
+}
+
+impl PartitionMatch {
+    /// The filters `transform` projects onto partition values, `None` for a
+    /// transform that projects none.
+    fn of(transform: Transform) -> Option<Self> {
+        match transform {
+            Transform::Void | Transform::Unknown => None,
+            Transform::Bucket(_) => Some(Self::Value),
+            Transform::Identity
+            | Transform::Truncate(_)
+            | Transform::Year
+            | Transform::Month
+            | Transform::Day
+            | Transform::Hour => Some(Self::Order),
+        }
+    }
+}
+
+/// One policy-accepted comparison resolved against the planner schema.
+struct ResolvedComparison {
+    supported: SupportedComparison,
+    column: PlannedIcebergColumn,
+    value_type: PlannedValueType,
+}
 
 pub(crate) struct IcebergFilterPlanner {
     schema: Arc<IcebergSchema>,
     layout: RelationLayout,
     utf8: Option<Utf8ServerEncoding>,
+    /// Field ids that every partition spec derives a partition value from,
+    /// each with the filters all of those specs project.
+    layout_sources: Vec<(i32, PartitionMatch)>,
+    pruning_units: Option<f64>,
 }
 
 impl IcebergFilterPlanner {
-    /// Bind predicate planning to an adapter-supplied Iceberg schema.
-    pub(crate) fn from_schema(
+    /// Bind predicate planning to an adapter-supplied Iceberg schema, the
+    /// partition specs of the table it reads and that read's
+    /// [`FilterPushdownPlanner::pruning_units`].
+    pub(crate) fn new(
         context: &FilterPlanningContext,
         schema: &Arc<IcebergSchema>,
+        metadata: &TableMetadata,
+        pruning_units: Option<f64>,
     ) -> Result<Self, IcebergFilterError> {
         let relation = RelationGuard::open_table(
             context.relation_oid(),
@@ -48,7 +94,132 @@ impl IcebergFilterPlanner {
             schema: Arc::clone(schema),
             layout,
             utf8: Utf8ServerEncoding::resolve().ok(),
+            layout_sources: Self::layout_sources(metadata),
+            pruning_units,
         })
+    }
+
+    /// Source fields whose partition values prune every file. A scan projects
+    /// a filter by each file's own spec, so a field missing from one spec,
+    /// such as that of files written before the table was partitioned, leaves
+    /// those files to file metrics. The specs of the table metadata include
+    /// every spec its files can carry.
+    fn layout_sources(metadata: &TableMetadata) -> Vec<(i32, PartitionMatch)> {
+        // A spec holds a few fields, so lists searched in order suffice, as
+        // partprune.c matches clauses to partition keys.
+        let mut specs = metadata.partition_specs_iter().map(|spec| {
+            let mut sources: Vec<(i32, PartitionMatch)> = Vec::new();
+            for field in spec.fields() {
+                let Some(matched) = PartitionMatch::of(field.transform) else {
+                    continue;
+                };
+                match sources.iter_mut().find(|(id, _)| *id == field.source_id) {
+                    Some((_, best)) => *best = (*best).max(matched),
+                    None => sources.push((field.source_id, matched)),
+                }
+            }
+            sources
+        });
+        let Some(mut common) = specs.next() else {
+            return Vec::new();
+        };
+        for sources in specs {
+            common.retain_mut(|(source_id, matched)| {
+                Self::layout_match(&sources, *source_id).is_some_and(|other| {
+                    *matched = (*matched).min(other);
+                    true
+                })
+            });
+        }
+        common
+    }
+
+    fn layout_match(
+        sources: &[(i32, PartitionMatch)],
+        field_id: i32,
+    ) -> Option<PartitionMatch> {
+        sources.iter().find_map(|&(source_id, matched)| {
+            (source_id == field_id).then_some(matched)
+        })
+    }
+
+    /// Costing of a pruning filter on `column` that needs `needed` from a
+    /// partition transform. Partition values prune whole files when every spec
+    /// projects the filter; file metrics prune it otherwise.
+    fn pruning_costing(
+        &self,
+        column: &PlannedIcebergColumn,
+        needed: PartitionMatch,
+    ) -> PushdownCosting {
+        match Self::layout_match(&self.layout_sources, column.field_id) {
+            Some(matched) if matched >= needed => PushdownCosting::LayoutPruning,
+            _ => PushdownCosting::StatisticsPruning,
+        }
+    }
+
+    /// Costing of a comparison of `column` with a value from `source`.
+    fn comparison_costing(
+        &self,
+        supported: SupportedComparison,
+        source: RuntimeValueSource,
+        value_type: PlannedValueType,
+        column: &PlannedIcebergColumn,
+    ) -> PushdownCosting {
+        // A constant temporal literal prunes at its PostgreSQL selectivity.
+        // An infinite one is not representable in Iceberg and leaves its rows
+        // unpruned at bind time, a documented costing limit.
+        if supported.capability == SupportedPredicateCapability::Conservative
+            && (source != RuntimeValueSource::Constant
+                || matches!(value_type, PlannedValueType::FixedBinary(_)))
+        {
+            return PushdownCosting::UncostedBestEffort;
+        }
+        match supported.operator {
+            // A bucket hash projects only equality onto partition values.
+            ComparisonOpClass::Equal => {
+                self.pruning_costing(column, PartitionMatch::Value)
+            }
+            // Truncate and temporal transforms do not project `<>`.
+            ComparisonOpClass::NotEqual => PushdownCosting::StatisticsPruning,
+            ComparisonOpClass::Less
+            | ComparisonOpClass::LessEqual
+            | ComparisonOpClass::Greater
+            | ComparisonOpClass::GreaterEqual => {
+                self.pruning_costing(column, PartitionMatch::Order)
+            }
+        }
+    }
+
+    fn resolve_comparison(
+        &self,
+        column: &ColumnRef,
+        value: &RuntimeValueSpec,
+        operator: PgComparisonOp,
+    ) -> Result<Option<ResolvedComparison>, IcebergFilterError> {
+        let Some((supported, value_type)) =
+            PgPredicatePushdownPolicy::plan_comparison(
+                column,
+                value,
+                operator.identity(),
+                self.utf8,
+            )
+        else {
+            return Ok(None);
+        };
+        let Some(planned_column) = self.column(column.attno)? else {
+            return Ok(None);
+        };
+        let field = self
+            .schema
+            .field_by_id(planned_column.field_id)
+            .expect("relation field binding belongs to the planner schema");
+        Ok(value_type
+            .with_source_type(&field.field_type)
+            .map(|value_type| ResolvedComparison {
+                supported,
+                column: planned_column,
+                value_type,
+            }))
     }
 
     fn plan_comparison(
@@ -68,24 +239,12 @@ impl IcebergFilterPlanner {
             _ => return Ok(PredicatePlan::Unsupported),
         };
         let value_slot = fragment.value(value);
-        let Some((mut supported, value_type)) =
-            PgPredicatePushdownPolicy::plan_comparison(
-                column,
-                value_slot,
-                operator.identity(),
-                self.utf8,
-            )
+        let Some(ResolvedComparison {
+            mut supported,
+            column: planned_column,
+            value_type,
+        }) = self.resolve_comparison(column, value_slot, operator)?
         else {
-            return Ok(PredicatePlan::Unsupported);
-        };
-        let Some(planned_column) = self.column(column.attno)? else {
-            return Ok(PredicatePlan::Unsupported);
-        };
-        let field = self
-            .schema
-            .field_by_id(planned_column.field_id)
-            .expect("relation field binding belongs to the planner schema");
-        let Some(value_type) = value_type.with_source_type(&field.field_type) else {
             return Ok(PredicatePlan::Unsupported);
         };
         if matches!(value_type, PlannedValueType::FixedBinary(_)) {
@@ -98,18 +257,12 @@ impl IcebergFilterPlanner {
         if mirrored {
             planned_operator = planned_operator.mirrored();
         }
-        let source_kind = value_slot.source_kind;
-        let costing = if supported.capability
-            == SupportedPredicateCapability::Conservative
-            && (source_kind != RuntimeValueSource::Constant
-                || matches!(value_type, PlannedValueType::FixedBinary(_))
-                || PredicatePushdownPolicy::is_value_sensitive_type(
-                    column.declared_type.type_oid,
-                )) {
-            PushdownCosting::UncostedBestEffort
-        } else {
-            PushdownCosting::CostedPruning
-        };
+        let costing = self.comparison_costing(
+            supported,
+            value_slot.source_kind,
+            value_type,
+            &planned_column,
+        );
         let planned = PlannedNode {
             node: PlannedIcebergNode::Comparison {
                 operator: planned_operator,
@@ -125,6 +278,66 @@ impl IcebergFilterPlanner {
                 PredicatePlan::Conservative(planned)
             }
         })
+    }
+
+    fn plan_in_set(
+        &self,
+        fragment: &PredicateFragment,
+        operator: PgComparisonOp,
+        value: &ScalarExpr,
+        set: &ScalarExpr,
+    ) -> Result<PredicatePlan<PlannedNode>, IcebergFilterError> {
+        let (ScalarExpr::Column(column), ScalarExpr::Value(set)) = (value, set)
+        else {
+            return Ok(PredicatePlan::Unsupported);
+        };
+        let set_slot = fragment.value(*set);
+        // A set only prunes files, and file planning sees only rescan-stable
+        // values.
+        if !set_slot.source_kind.is_rescan_stable() {
+            return Ok(PredicatePlan::Unsupported);
+        }
+        let Some(element) = set_slot.array_element() else {
+            return Ok(PredicatePlan::Unsupported);
+        };
+        let Some(resolved) = self.resolve_comparison(column, &element, operator)?
+        else {
+            return Ok(PredicatePlan::Unsupported);
+        };
+        if resolved.supported.operator != ComparisonOpClass::Equal
+            || !PgPredicatePushdownPolicy::supports_set_membership(
+                resolved.value_type,
+            )
+        {
+            return Ok(PredicatePlan::Unsupported);
+        }
+        // A set prunes as the OR of its equalities, as `partprune.c` expands
+        // a ScalarArrayOpExpr. Partition values match a set of any size, but
+        // file metrics skip one of more than 200 values (iceberg-lite's
+        // `IN_PREDICATE_LIMIT`), a size planning does not know, so only
+        // layout pruning carries over. That every row of a selected file
+        // reaches PostgreSQL is priced by the filter's evaluation
+        // (`PlannedIcebergNode::evaluation`), not by its costing.
+        let costing = match self.comparison_costing(
+            resolved.supported,
+            set_slot.source_kind,
+            resolved.value_type,
+            &resolved.column,
+        ) {
+            PushdownCosting::LayoutPruning => PushdownCosting::LayoutPruning,
+            PushdownCosting::StatisticsPruning
+            | PushdownCosting::UncostedBestEffort => {
+                PushdownCosting::UncostedBestEffort
+            }
+        };
+        Ok(PredicatePlan::Conservative(PlannedNode {
+            node: PlannedIcebergNode::InSet {
+                column: resolved.column,
+                set: *set,
+                value_type: resolved.value_type,
+            },
+            costing,
+        }))
     }
 
     fn plan_null_test(
@@ -143,13 +356,14 @@ impl IcebergFilterPlanner {
         let Some(column) = self.column(column.attno)? else {
             return Ok(PredicatePlan::Unsupported);
         };
+        let costing = self.pruning_costing(&column, PartitionMatch::Value);
         Ok(PredicatePlan::Exact(PlannedNode {
             node: if is_not_null {
                 PlannedIcebergNode::IsNotNull(column)
             } else {
                 PlannedIcebergNode::IsNull(column)
             },
-            costing: PushdownCosting::CostedPruning,
+            costing,
         }))
     }
 
@@ -167,13 +381,14 @@ impl IcebergFilterPlanner {
         let Some(column) = self.column(column.attno)? else {
             return Ok(PredicatePlan::Unsupported);
         };
+        let costing = self.pruning_costing(&column, PartitionMatch::Value);
         let planned = PlannedNode {
             node: if is_not_nan {
                 PlannedIcebergNode::IsNotNan(column)
             } else {
                 PlannedIcebergNode::IsNan(column)
             },
-            costing: PushdownCosting::CostedPruning,
+            costing,
         };
         // Negation remains semantic until binding. The binder therefore swaps
         // these nodes directly and adds the NotNull guard required by NotNan,
@@ -203,12 +418,13 @@ impl IcebergFilterPlanner {
         let Some(column) = self.column(column.attno)? else {
             return Ok(PredicatePlan::Unsupported);
         };
+        let costing = self.pruning_costing(&column, PartitionMatch::Order);
         Ok(PredicatePlan::ExactNoComplement(PlannedNode {
             node: PlannedIcebergNode::StartsWith {
                 column,
                 prefix: *prefix,
             },
-            costing: PushdownCosting::CostedPruning,
+            costing,
         }))
     }
 
@@ -252,13 +468,14 @@ impl RelationPredicateAdapter<'_> {
     fn logical(
         &self,
         children: Vec<PlannedNode>,
+        combine: fn(PushdownCosting, PushdownCosting) -> PushdownCosting,
         build: impl FnOnce(Box<[PlannedIcebergNode]>) -> PlannedIcebergNode,
     ) -> PlannedNode {
-        let costing = if children.iter().all(|child| child.costing.is_costed()) {
-            PushdownCosting::CostedPruning
-        } else {
-            PushdownCosting::UncostedBestEffort
-        };
+        let costing = children
+            .iter()
+            .map(|child| child.costing)
+            .reduce(combine)
+            .unwrap_or(PushdownCosting::StatisticsPruning);
         let children = children
             .into_iter()
             .map(|child| child.node)
@@ -278,14 +495,14 @@ impl PredicatePlanner<ScalarExpr, PgComparisonOp> for RelationPredicateAdapter<'
     fn always_true(&self) -> Result<PredicatePlan<PlannedNode>, Self::Error> {
         Ok(PredicatePlan::Exact(PlannedNode {
             node: PlannedIcebergNode::AlwaysTrue,
-            costing: PushdownCosting::CostedPruning,
+            costing: PushdownCosting::StatisticsPruning,
         }))
     }
 
     fn always_false(&self) -> Result<PredicatePlan<PlannedNode>, Self::Error> {
         Ok(PredicatePlan::Exact(PlannedNode {
             node: PlannedIcebergNode::AlwaysFalse,
-            costing: PushdownCosting::CostedPruning,
+            costing: PushdownCosting::StatisticsPruning,
         }))
     }
 
@@ -299,9 +516,10 @@ impl PredicatePlanner<ScalarExpr, PgComparisonOp> for RelationPredicateAdapter<'
         let Some(column) = self.planner.column(column.attno)? else {
             return Ok(PredicatePlan::Unsupported);
         };
+        let costing = self.planner.pruning_costing(&column, PartitionMatch::Value);
         Ok(PredicatePlan::ExactNoComplement(PlannedNode {
             node: PlannedIcebergNode::IsNotNull(column),
-            costing: PushdownCosting::CostedPruning,
+            costing,
         }))
     }
 
@@ -312,12 +530,12 @@ impl PredicatePlanner<ScalarExpr, PgComparisonOp> for RelationPredicateAdapter<'
         let ScalarExpr::Column(column) = value else {
             return Ok(PredicatePlan::Unsupported);
         };
-        if self.planner.column(column.attno)?.is_none() {
+        let Some(column) = self.planner.column(column.attno)? else {
             return Ok(PredicatePlan::Unsupported);
-        }
+        };
         Ok(PredicatePlan::ExactNoComplement(PlannedNode {
             node: PlannedIcebergNode::AlwaysFalse,
-            costing: PushdownCosting::CostedPruning,
+            costing: self.planner.pruning_costing(&column, PartitionMatch::Value),
         }))
     }
 
@@ -342,9 +560,10 @@ impl PredicatePlanner<ScalarExpr, PgComparisonOp> for RelationPredicateAdapter<'
         let Some(column) = self.planner.column(column.attno)? else {
             return Ok(PredicatePlan::Unsupported);
         };
+        let costing = self.planner.pruning_costing(&column, PartitionMatch::Value);
         Ok(PredicatePlan::Exact(PlannedNode {
             node: PlannedIcebergNode::BooleanTest { kind, column },
-            costing: PushdownCosting::CostedPruning,
+            costing,
         }))
     }
 
@@ -384,12 +603,30 @@ impl PredicatePlanner<ScalarExpr, PgComparisonOp> for RelationPredicateAdapter<'
         self.planner.plan_starts_with(self.fragment, value, prefix)
     }
 
+    fn in_set(
+        &self,
+        operator: &PgComparisonOp,
+        value: &ScalarExpr,
+        set: &ScalarExpr,
+    ) -> Result<PredicatePlan<PlannedNode>, Self::Error> {
+        self.planner
+            .plan_in_set(self.fragment, *operator, value, set)
+    }
+
     fn conjunction(&self, children: Vec<PlannedNode>) -> PlannedNode {
-        self.logical(children, PlannedIcebergNode::And)
+        self.logical(
+            children,
+            PushdownCosting::conjunction,
+            PlannedIcebergNode::And,
+        )
     }
 
     fn disjunction(&self, children: Vec<PlannedNode>) -> PlannedNode {
-        self.logical(children, PlannedIcebergNode::Or)
+        self.logical(
+            children,
+            PushdownCosting::disjunction,
+            PlannedIcebergNode::Or,
+        )
     }
 
     fn negate(&self, child: PlannedNode) -> PlannedNode {
@@ -423,11 +660,20 @@ impl FilterPushdownPlanner for IcebergFilterPlanner {
                 PlannedIcebergPredicate::new(self.schema.schema_id(), planned.node),
                 planned.costing,
             ),
-            PredicatePlan::Conservative(planned) => FilterPlan::conservative(
-                PlannedIcebergPredicate::new(self.schema.schema_id(), planned.node),
-                planned.costing,
-            ),
+            // A set plans conservatively, so no exact tree holds one.
+            PredicatePlan::Conservative(planned) => {
+                let evaluation = planned.node.evaluation();
+                let predicate = PlannedIcebergPredicate::new(
+                    self.schema.schema_id(),
+                    planned.node,
+                );
+                FilterPlan::conservative(predicate, planned.costing, evaluation)
+            }
         })
+    }
+
+    fn pruning_units(&self) -> Option<f64> {
+        self.pruning_units
     }
 }
 

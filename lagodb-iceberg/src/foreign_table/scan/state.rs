@@ -70,9 +70,9 @@ impl IcebergFdwScanState {
         &mut self,
         context: StartForeignScanContext<'_, LagodbIceberg>,
     ) -> Result<(), ForeignScanError> {
-        let row_filter = ReaderPredicate::new(BoundIcebergPredicate::conjoin(
-            context.filters.iter(),
-        ));
+        let row_filter = ReaderPredicate::new(
+            BoundIcebergPredicate::conjoin_row_filter(context.filters.iter()),
+        );
         let phase = mem::replace(&mut self.phase, ForeignScanPhase::Transitioning);
         self.phase = match phase {
             ForeignScanPhase::PreparedQuery { mut prepared } => {
@@ -199,7 +199,9 @@ impl IcebergFdwScanState {
     ) -> Result<(), ForeignScanError> {
         let replacement = context
             .filters_changed
-            .then(|| BoundIcebergPredicate::conjoin(context.filters.iter()))
+            .then(|| {
+                BoundIcebergPredicate::conjoin_row_filter(context.filters.iter())
+            })
             .map(ReaderPredicate::new);
         match &mut self.phase {
             ForeignScanPhase::SerialQuery { cursor, prepared } => {

@@ -87,7 +87,8 @@ impl ParquetFilterPlanner {
             | PredicateExpr::StrictFalse(_)
             | PredicateExpr::IsNan(_)
             | PredicateExpr::IsNotNan(_)
-            | PredicateExpr::StartsWith { .. } => None,
+            | PredicateExpr::StartsWith { .. }
+            | PredicateExpr::InSet { .. } => None,
             // Boolean tests are null-safe, unlike the strict comparisons
             // implemented here. Keep them as PostgreSQL residual quals.
             PredicateExpr::BooleanTest { .. } => None,

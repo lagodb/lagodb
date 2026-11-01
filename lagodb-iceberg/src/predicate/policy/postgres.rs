@@ -70,6 +70,26 @@ impl PgPredicatePushdownPolicy {
         Some(value_type)
     }
 
+    /// Value types a set admits. Decoding each element yields a plain literal,
+    /// an integer outside the column's range that no row can match, or nothing
+    /// for an infinite date.
+    pub(crate) const fn supports_set_membership(
+        value_type: PlannedValueType,
+    ) -> bool {
+        matches!(
+            value_type,
+            PlannedValueType::Int2
+                | PlannedValueType::Int4
+                | PlannedValueType::Int8
+                | PlannedValueType::Int2ToLong
+                | PlannedValueType::Int4ToLong
+                | PlannedValueType::Int8ToInt
+                | PlannedValueType::Date
+                | PlannedValueType::String
+                | PlannedValueType::Uuid
+        )
+    }
+
     pub(crate) fn supports_nan_test(column: &ColumnRef) -> bool {
         let declared = PgOid::from(column.declared_type.type_oid);
         let effective = PgOid::from(column.value_type.type_oid);

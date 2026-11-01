@@ -71,6 +71,9 @@ impl FdwPlannedPredicate {
                 column.debug_name,
                 values.value(*prefix)
             ),
+            PlannedIcebergNode::InSet { column, set, .. } => {
+                format!("{} = ANY ({})", column.debug_name, values.value(*set))
+            }
             PlannedIcebergNode::And(children) => {
                 Self::explain_logical(children, values, " AND ")
             }
@@ -137,9 +140,13 @@ impl IcebergFdwFilterPlanner {
         if let Some((context, planning_source)) = pending {
             let table = planning_source.table()?;
             let source = PlanSourceIdentity::from_metadata(table.metadata());
-            let planner = IcebergFilterPlanner::from_schema(
+            // Foreign scans price layout pruning alone
+            // (`ScanVolume::foreign`), which needs no unit count.
+            let planner = IcebergFilterPlanner::new(
                 &context,
                 table.metadata().current_schema(),
+                table.metadata(),
+                None,
             )?;
             self.state = IcebergFdwFilterPlannerState::Ready { source, planner };
         }
@@ -163,23 +170,12 @@ impl FilterPushdownPlanner for IcebergFdwFilterPlanner {
         fragment: &PredicateFragment,
     ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
         let (source, planner) = self.ready()?;
-        let plan = planner.try_plan_filter(fragment)?;
-        let wrap = |predicate| FdwPlannedPredicate {
-            source: source.clone(),
-            predicate,
-        };
-        Ok(match plan {
-            FilterPlan::Unsupported => FilterPlan::Unsupported,
-            FilterPlan::Partial(planned) => {
-                FilterPlan::partial(wrap(planned.predicate), planned.costing)
-            }
-            FilterPlan::Exact(planned) => {
-                FilterPlan::exact(wrap(planned.predicate), planned.costing)
-            }
-            FilterPlan::Conservative(planned) => {
-                FilterPlan::conservative(wrap(planned.predicate), planned.costing)
-            }
-        })
+        Ok(planner
+            .try_plan_filter(fragment)?
+            .map(|predicate| FdwPlannedPredicate {
+                source: source.clone(),
+                predicate,
+            }))
     }
 }
 

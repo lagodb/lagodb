@@ -97,11 +97,13 @@ impl IcebergFdwScanState {
                 })
                 .collect(),
         );
-        let planning_filter =
-            BoundIcebergPredicate::conjoin(context.filters.rescan_stable());
         let predicates = ScanPredicates::new(
-            StablePruningPredicate::new(planning_filter.clone()),
-            ReaderPredicate::new(planning_filter),
+            StablePruningPredicate::new(BoundIcebergPredicate::conjoin(
+                context.filters.rescan_stable(),
+            )),
+            ReaderPredicate::new(BoundIcebergPredicate::conjoin_row_filter(
+                context.filters.rescan_stable(),
+            )),
         );
         let (key, table, delta) = view.into_parts();
         let mutation_table = mutation.then(|| table.clone());

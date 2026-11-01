@@ -1,5 +1,8 @@
 //! Owned, copyObject-serializable Iceberg predicate plans.
 
+use std::convert::Infallible;
+
+use lagodb_core::expr::pushdown::{FilterEvaluation, PredicatePlan};
 use lagodb_core::expr::{BooleanTestKind, PgComparisonKind, RuntimeValueId};
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 
@@ -21,6 +24,7 @@ const NODE_IS_NAN: i32 = 8;
 const NODE_IS_NOT_NAN: i32 = 9;
 const NODE_STARTS_WITH: i32 = 10;
 const NODE_BOOLEAN_TEST: i32 = 11;
+const NODE_IN_SET: i32 = 12;
 
 const OP_EQ: i32 = 0;
 const OP_NOT_EQ: i32 = 1;
@@ -89,12 +93,88 @@ pub(crate) enum PlannedIcebergNode {
         column: PlannedIcebergColumn,
         prefix: RuntimeValueId,
     },
+    InSet {
+        column: PlannedIcebergColumn,
+        set: RuntimeValueId,
+        value_type: PlannedValueType,
+    },
     And(Box<[Self]>),
     Or(Box<[Self]>),
     Not(Box<Self>),
 }
 
 impl PlannedIcebergNode {
+    pub(crate) fn contains_in_set(&self) -> bool {
+        match self {
+            Self::InSet { .. } => true,
+            Self::And(children) | Self::Or(children) => {
+                children.iter().any(Self::contains_in_set)
+            }
+            _ => false,
+        }
+    }
+
+    /// How much of this tree the reader evaluates on each row it reads: all
+    /// of it, the part [`Self::row_filter`] keeps, or none. Every leaf other
+    /// than a set counts as kept, which a value its binding cannot represent
+    /// only makes an upper bound.
+    pub(crate) fn evaluation(&self) -> FilterEvaluation {
+        let Ok(plan) = self.row_filter::<(), Infallible>(
+            &|_| Ok(PredicatePlan::Exact(())),
+            |_| (),
+            |_| (),
+        );
+        match plan {
+            PredicatePlan::Unsupported => FilterEvaluation::PruningOnly,
+            PredicatePlan::Partial(()) => FilterEvaluation::Projected,
+            PredicatePlan::Exact(())
+            | PredicatePlan::ExactNoComplement(())
+            | PredicatePlan::Conservative(()) => FilterEvaluation::PerRow,
+        }
+    }
+
+    /// The tree the reader evaluates on each row, with `leaf` planning every
+    /// leaf but a set. Sets only prune files, so the row filter keeps what
+    /// the shared AND-widening and complete-OR rules keep without them, the
+    /// rules by which core derives a [`FilterEvaluation::Projected`] part.
+    /// Only AND and OR can hold a set: negation refuses Conservative plans.
+    ///
+    /// This is the only place that decides which leaves stay out of the
+    /// reader's row filter. Execution binding
+    /// (`IcebergFilterBinder::bind_row_filter`) and planning
+    /// ([`Self::evaluation`], the `FilterEvaluation` declared to core) share
+    /// it. Sets stay out for the cost of iceberg-lite's current
+    /// row filter ([`PredicatePushdownPolicy`]), not for correctness. Once it
+    /// evaluates sets efficiently, removing the `InSet` arm makes every
+    /// set-bearing filter a per-row filter in both places, and path costing
+    /// follows with no core change; the set check in
+    /// `PlannedIcebergPredicate::bind` then only rebuilds the same tree.
+    ///
+    /// [`PredicatePushdownPolicy`]: crate::predicate::policy::PredicatePushdownPolicy
+    pub(crate) fn row_filter<T, E>(
+        &self,
+        leaf: &impl Fn(&Self) -> Result<PredicatePlan<T>, E>,
+        conjunction: fn(Vec<T>) -> T,
+        disjunction: fn(Vec<T>) -> T,
+    ) -> Result<PredicatePlan<T>, E> {
+        let children = |nodes: &[Self]| {
+            nodes
+                .iter()
+                .map(|child| child.row_filter(leaf, conjunction, disjunction))
+                .collect::<Result<Vec<_>, E>>()
+        };
+        Ok(match self {
+            Self::InSet { .. } => PredicatePlan::Unsupported,
+            Self::And(nodes) => {
+                PredicatePlan::conjunction(children(&nodes[..])?, conjunction)
+            }
+            Self::Or(nodes) => {
+                PredicatePlan::disjunction(children(&nodes[..])?, disjunction)
+            }
+            node => leaf(node)?,
+        })
+    }
+
     fn encode(&self, writer: &mut PlanDataWriter) {
         match self {
             Self::AlwaysTrue => {
@@ -142,6 +222,16 @@ impl PlannedIcebergNode {
                 writer.append_i32(NODE_STARTS_WITH);
                 column.encode(writer);
                 writer.append_count(prefix.index());
+            }
+            Self::InSet {
+                column,
+                set,
+                value_type,
+            } => {
+                writer.append_i32(NODE_IN_SET);
+                column.encode(writer);
+                writer.append_count(set.index());
+                value_type.encode(writer);
             }
             Self::And(children) => {
                 Self::encode_children(writer, NODE_AND, children);
@@ -215,6 +305,21 @@ impl PlannedIcebergNode {
                         binding_count,
                     })?;
                 Ok(Self::StartsWith { column, prefix })
+            }
+            NODE_IN_SET => {
+                let column = PlannedIcebergColumn::decode(reader)?;
+                let index = reader.read_count()?;
+                let set = RuntimeValueId::from_plan_data(index, binding_count)
+                    .ok_or(IcebergFilterError::BindingSlotOutOfBounds {
+                        index,
+                        binding_count,
+                    })?;
+                let value_type = PlannedValueType::decode(reader)?;
+                Ok(Self::InSet {
+                    column,
+                    set,
+                    value_type,
+                })
             }
             NODE_AND => Ok(Self::And(Self::decode_children(
                 reader,
