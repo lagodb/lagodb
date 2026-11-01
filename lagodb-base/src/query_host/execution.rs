@@ -21,6 +21,7 @@ use super::explain::{ExplainOptions, QueryOffloadExplain};
 use super::methods;
 use super::parallel::PgParallelHost;
 use super::table_scan_registry::TableScanRegistry;
+use crate::gucs;
 use owner::QueryExecutionCell;
 
 enum QueryPhase {
@@ -92,27 +93,35 @@ impl Drop for QueryOffloadScanState {
     }
 }
 
-struct WorkMemBudget;
+pub(super) struct WorkMemBudget;
 
 impl WorkMemBudget {
+    /// PostgreSQL defines `work_mem` in KiB and enforces its positive GUC range
+    /// before planning or executor startup.
+    pub(super) fn bytes() -> Result<usize, QueryHostError> {
+        // SAFETY: `work_mem` is a backend-local PostgreSQL GUC read on the
+        // backend main thread.
+        usize::try_from(unsafe { pg_sys::work_mem })
+            .ok()
+            .and_then(|kib| kib.checked_mul(1_024))
+            .ok_or(QueryHostError::MemoryBudgetOverflow)
+    }
+
+    /// The complete budget belongs to the DataFusion execution pool; provider
+    /// libraries are outside the engine's memory-accounting contract.
     fn execution_limits(
         execution: ExecutionProfile,
     ) -> Result<QueryExecutionLimits, QueryHostError> {
-        // PostgreSQL defines work_mem in KiB and enforces its positive GUC
-        // range before executor startup. The complete budget belongs to the
-        // DataFusion execution pool; provider libraries are outside the
-        // engine's memory-accounting contract.
-        // SAFETY: `work_mem` is a backend-local PostgreSQL GUC read on the
-        // backend main thread.
-        let work_mem_bytes = usize::try_from(unsafe { pg_sys::work_mem })
-            .ok()
-            .and_then(|kib| kib.checked_mul(1_024))
-            .ok_or(QueryHostError::MemoryBudgetOverflow)?;
         // SAFETY: PostgreSQL derives this backend-local limit from work_mem and
         // hash_mem_multiplier with the same size_t clamp used by its executor.
         let hash_memory_bytes = unsafe { pg_sys::get_hash_memory_limit() };
-        QueryExecutionLimits::try_new(work_mem_bytes, hash_memory_bytes, execution)
-            .map_err(QueryHostError::from)
+        QueryExecutionLimits::try_new(
+            Self::bytes()?,
+            hash_memory_bytes,
+            execution,
+            gucs::query_offload_spill(),
+        )
+        .map_err(QueryHostError::from)
     }
 }
 
@@ -182,7 +191,7 @@ unsafe fn begin_scan(
     }
     let parallel_safe = selected.parallel_safe()
         && selected.largest_scan_rows()
-            >= crate::gucs::query_offload_parallel_min_scan_rows();
+            >= gucs::query_offload_parallel_min_scan_rows();
     let (query, execution_profile, scans) = selected.into_parts();
 
     let limits = WorkMemBudget::execution_limits(execution_profile)?;
@@ -206,8 +215,8 @@ unsafe fn begin_scan(
                 host,
                 &scans,
                 workers,
-                crate::gucs::query_offload_parallel_queue_size(),
-                crate::gucs::query_offload_parallel_debug(),
+                gucs::query_offload_parallel_queue_size(),
+                gucs::query_offload_parallel_debug(),
             )
         })
     } else {

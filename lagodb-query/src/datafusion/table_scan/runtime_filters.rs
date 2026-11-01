@@ -1,7 +1,7 @@
 //! Dynamic filters installed on one physical table-scan node.
 
 use std::ffi::c_void;
-use std::ptr;
+use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
@@ -231,10 +231,10 @@ impl ActiveRuntimeFilters {
         Ok(active)
     }
 
-    pub(super) fn fixed_provider_predicate(&self) -> *const c_void {
+    pub(super) fn fixed_provider_predicate(&self) -> Option<NonNull<c_void>> {
         self.provider_fixed
             .as_ref()
-            .map_or(ptr::null_mut(), NegotiatedTableScanPredicate::as_ptr)
+            .map(NegotiatedTableScanPredicate::handle)
     }
 
     pub(super) fn evolving_provider_predicate(

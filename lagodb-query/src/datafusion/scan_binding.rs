@@ -15,12 +15,48 @@ use crate::plan::QueryFragment;
 use super::parallel::ParallelTableProvider;
 use super::table_scan::ExternalTableProvider;
 
+/// Projected column positions indexed by `attno - 1`, the dense layout
+/// PostgreSQL uses for attribute maps.
+///
+/// Query planning lowers only user attributes, so every attno is `>= 1`.
+#[derive(Debug, Clone)]
+pub(in crate::datafusion) struct AttnoPositions(Arc<[Option<usize>]>);
+
+impl AttnoPositions {
+    /// Map each attno to its position in `attnos`.
+    pub(in crate::datafusion) fn from_attnos(
+        attnos: impl IntoIterator<Item = pg_sys::AttrNumber>,
+    ) -> Self {
+        let mut positions = Vec::new();
+        for (position, attno) in attnos.into_iter().enumerate() {
+            let index = Self::index(attno);
+            if positions.len() <= index {
+                positions.resize(index + 1, None);
+            }
+            positions[index] = Some(position);
+        }
+        Self(positions.into())
+    }
+
+    /// Position of `attno`, or `None` when this scan does not project it.
+    pub(in crate::datafusion) fn position(
+        &self,
+        attno: pg_sys::AttrNumber,
+    ) -> Option<usize> {
+        self.0.get(Self::index(attno)).copied().flatten()
+    }
+
+    const fn index(attno: pg_sys::AttrNumber) -> usize {
+        (attno - 1) as usize
+    }
+}
+
 enum ScanProvider {
     Serial(Arc<ExternalTableProvider>),
     Parallel(Arc<ParallelTableProvider>),
     Planning {
         schema: SchemaRef,
-        positions: Box<[Option<usize>]>,
+        positions: AttnoPositions,
     },
 }
 
@@ -41,9 +77,7 @@ impl ScanProvider {
             Self::Serial(provider) => provider.column_name(attno),
             Self::Parallel(provider) => provider.column_name(attno),
             Self::Planning { schema, positions } => {
-                let position =
-                    positions.get(attno as usize - 1).copied().flatten()?;
-                Some(schema.field(position).name())
+                Some(schema.field(positions.position(attno)?).name())
             }
         }
     }
@@ -128,21 +162,13 @@ impl ScanBindings {
                 let scan = fragment
                     .scan(scan_id)
                     .expect("validated query references every planned scan");
-                let width = scan
-                    .columns()
-                    .iter()
-                    .map(|column| column.attno as usize)
-                    .max()
-                    .unwrap_or(0);
-                let mut positions = vec![None; width];
-                for (position, column) in scan.columns().iter().enumerate() {
-                    positions[column.attno as usize - 1] = Some(position);
-                }
                 ScanBinding::new(
                     scan_id,
                     ScanProvider::Planning {
                         schema: Arc::clone(schema),
-                        positions: positions.into_boxed_slice(),
+                        positions: AttnoPositions::from_attnos(
+                            scan.columns().iter().map(|column| column.attno),
+                        ),
                     },
                 )
             })

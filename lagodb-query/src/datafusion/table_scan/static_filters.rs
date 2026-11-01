@@ -1,6 +1,7 @@
 //! Statement-stable DataFusion filters negotiated by the bound provider.
 
 use std::ffi::c_void;
+use std::ptr::NonNull;
 use std::sync::Arc;
 
 use arrow_schema::Schema;
@@ -86,10 +87,10 @@ impl StaticFilterSet {
         })
     }
 
-    pub(in crate::datafusion) fn handles(&self) -> Vec<*const c_void> {
+    pub(in crate::datafusion) fn handles(&self) -> Vec<NonNull<c_void>> {
         self.predicates
             .iter()
-            .map(NegotiatedTableScanPredicate::as_ptr)
+            .map(NegotiatedTableScanPredicate::handle)
             .collect()
     }
 }

@@ -6,6 +6,7 @@ mod expression;
 mod expression_validation;
 mod join;
 mod limit;
+mod ordering;
 mod postgres_fallback;
 mod project;
 mod semantics;
@@ -13,7 +14,7 @@ mod sort;
 
 pub use aggregate::{
     AggCall, AggregateArguments, AggregateKind, AggregateNode, AggregateOrderExpr,
-    GroupExpr, SortDirection,
+    GroupExpr,
 };
 pub use distinct::{DistinctExpr, DistinctNode};
 pub use expression::{
@@ -23,6 +24,7 @@ pub use expression::{
 pub(in crate::plan) use expression_validation::PlanExpressionValidator;
 pub use join::{JoinKey, JoinNode, JoinType, MarkFilter};
 pub use limit::{LimitEstimate, LimitNode};
+pub use ordering::SortDirection;
 pub use project::{ProjectExpr, ProjectNode};
 pub use semantics::{ComparisonKind, Decimal128Semantics, ScalarSemantics};
 pub use sort::{SortExpr, SortNode};
@@ -97,6 +99,8 @@ pub struct ScanNode {
     scan: ScanId,
     columns: Box<[ColumnRef]>,
     filter: Option<ExecutionExpr>,
+    estimated_rows: RowEstimate,
+    estimated_width: i32,
 }
 
 impl ScanNode {
@@ -104,12 +108,16 @@ impl ScanNode {
         scan: ScanId,
         columns: Box<[ColumnRef]>,
         filter: Option<ExecutionExpr>,
-    ) -> Self {
-        Self {
+        estimated_rows: f64,
+        estimated_width: i32,
+    ) -> Result<Self, QueryPlanError> {
+        Ok(Self {
             scan,
             columns,
             filter,
-        }
+            estimated_rows: RowEstimate::try_new(estimated_rows)?,
+            estimated_width,
+        })
     }
 
     #[inline]
@@ -125,6 +133,18 @@ impl ScanNode {
     #[inline]
     pub const fn filter(&self) -> Option<&ExecutionExpr> {
         self.filter.as_ref()
+    }
+
+    /// PostgreSQL's estimate of rows leaving this scan's restrictions.
+    #[inline]
+    pub const fn estimated_rows(&self) -> f64 {
+        self.estimated_rows.get()
+    }
+
+    /// PostgreSQL's estimate of the average projected row width in bytes.
+    #[inline]
+    pub const fn estimated_width(&self) -> i32 {
+        self.estimated_width
     }
 }
 

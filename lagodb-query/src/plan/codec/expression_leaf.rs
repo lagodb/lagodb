@@ -73,12 +73,8 @@ impl ExecutionLeafCodec {
         reader: &mut PlanDataReader<'_>,
     ) -> Result<ColumnRef, QueryPlanDataError> {
         let scan = ScanId::from_index(reader.read_count()?);
-        let raw_attno = reader.read_i32()?;
-        let attno = pg_sys::AttrNumber::try_from(raw_attno)
-            .map_err(|_| ExpressionCodecError::InvalidAttribute(raw_attno))?;
-        if attno <= 0 {
-            return Err(ExpressionCodecError::InvalidAttribute(raw_attno).into());
-        }
+        // `encode_column` widened a planner-validated user attno (>= 1).
+        let attno = reader.read_i32()? as pg_sys::AttrNumber;
         Ok(ColumnRef {
             scan,
             attno,

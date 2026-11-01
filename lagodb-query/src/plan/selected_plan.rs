@@ -9,7 +9,7 @@ use lagodb_core::query_contract::{
 };
 use pgrx::pg_sys;
 
-use crate::{ExecutionProfile, ExecutionProfileError};
+use crate::ExecutionProfile;
 
 use super::codec::{QueryPlanData, QueryPlanDataError};
 use super::table_scan_filter::TableScanFilterExplain;
@@ -264,7 +264,8 @@ impl<'plan> SelectedQueryPlan<'plan> {
                 });
             }
             let parallel_safe = reader.read_bool()?;
-            let execution = ExecutionProfile::try_new(reader.read_count()?)?;
+            // Encoded from the selected plan's validated profile.
+            let execution = ExecutionProfile::restore(reader.read_count()?);
             let scan_count = reader.read_count()?;
             let (runtime_expr_count, runtime_exprs, scan_target_exprs) =
                 if payload_kind == PATH_PAYLOAD {
@@ -511,6 +512,4 @@ pub enum SelectedQueryPlanError {
     WrongPayloadKind { expected: i32, found: i32 },
     #[error("table scan cost facts are invalid: {0}")]
     InvalidScanCost(#[from] ScanCostError),
-    #[error("query execution profile is invalid: {0}")]
-    InvalidExecutionProfile(#[from] ExecutionProfileError),
 }

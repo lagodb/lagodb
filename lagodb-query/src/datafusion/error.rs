@@ -9,6 +9,11 @@ use lagodb_core::diag::{PgReportError, SqlStateError};
 use lagodb_core::expr::RuntimeValueStateError;
 use pgrx::prelude::PgSqlErrorCode;
 
+/// Hash tables and a few other operators cannot spill, so they can still fail
+/// when PostgreSQL's estimate led to a plan that needs more memory.
+const MEMORY_BUDGET_HINT: &str =
+    "Increase work_mem or hash_mem_multiplier for this query.";
+
 #[derive(Debug, thiserror::Error)]
 pub enum QueryExecutionError {
     #[error("query execution limits must all be non-zero")]
@@ -94,6 +99,12 @@ impl QueryExecutionError {
         }
     }
 
+    /// A cancel or termination that a parallel participant must defer: the
+    /// error ends the stream, and the guard's exit services the interrupt.
+    pub(in crate::datafusion) fn interrupted() -> DataFusionError {
+        DataFusionError::Execution("parallel query interrupted".to_owned())
+    }
+
     fn datafusion_sqlstate(error: &DataFusionError) -> PgSqlErrorCode {
         if matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)) {
             return PgSqlErrorCode::ERRCODE_OUT_OF_MEMORY;
@@ -113,7 +124,18 @@ impl QueryExecutionError {
                 provider.hint().map(str::to_owned),
             );
         }
-        PgReportError::from_domain_error(Self::DataFusion(error))
+        let exhausted =
+            matches!(error.find_root(), DataFusionError::ResourcesExhausted(_));
+        let report = PgReportError::from_domain_error(Self::DataFusion(error));
+        if !exhausted {
+            return report;
+        }
+        PgReportError::from_parts(
+            report.sql_error_code(),
+            report.message(),
+            report.detail().map(str::to_owned),
+            Some(MEMORY_BUDGET_HINT.to_owned()),
+        )
     }
 
     fn provider_error(error: &DataFusionError) -> Option<&PgReportError> {
@@ -122,7 +144,15 @@ impl QueryExecutionError {
             if let Some(provider) = error.downcast_ref::<PgReportError>() {
                 return Some(provider);
             }
-            current = error.source();
+            // `io::Error::source` skips the error it wraps. Spill writes reach
+            // Arrow through `io::Write`, so their cause sits one level inside.
+            let wrapped = error
+                .downcast_ref::<io::Error>()
+                .and_then(io::Error::get_ref);
+            current = match wrapped {
+                Some(wrapped) => Some(wrapped as &(dyn Error + 'static)),
+                None => error.source(),
+            };
         }
         None
     }

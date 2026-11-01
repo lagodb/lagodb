@@ -1,40 +1,13 @@
 //! PostgreSQL executor state owned by one physical UDF expression.
 
-use std::cell::Cell;
 use std::ffi::c_void;
 use std::ptr;
 use std::thread;
 
+use lagodb_core::resource::pg_cleanup_suppressed;
 use pgrx::{pg_guard, pg_sys};
 
 use crate::plan::{PostgresEvalExpr, PostgresEvalInput};
-
-thread_local! {
-    static SUPPRESS_EXPLICIT_CLEANUP: Cell<bool> = const { Cell::new(false) };
-}
-
-pub(in crate::datafusion) fn without_pg_cleanup<R>(
-    operation: impl FnOnce() -> R,
-) -> R {
-    struct Restore(bool);
-
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            SUPPRESS_EXPLICIT_CLEANUP.set(self.0);
-        }
-    }
-
-    SUPPRESS_EXPLICIT_CLEANUP.with(|suppressed| {
-        let restore = Restore(suppressed.replace(true));
-        let result = operation();
-        drop(restore);
-        result
-    })
-}
-
-fn explicit_cleanup_is_suppressed() -> bool {
-    SUPPRESS_EXPLICIT_CLEANUP.get()
-}
 
 struct SyntheticExpressionValidator<'a> {
     inputs: &'a [PostgresEvalInput],
@@ -122,7 +95,8 @@ impl PgExprRuntime {
     /// `parent` must be a live PostgreSQL `PlanState`. The resulting runtime
     /// handle must not be used to initialize an evaluator after the plan
     /// state's executor context begins teardown. Physical expressions dropped
-    /// during abort teardown must use [`without_pg_cleanup`].
+    /// during abort teardown must use
+    /// [`lagodb_core::resource::without_pg_cleanup`].
     pub(in crate::datafusion) unsafe fn from_plan_state(
         parent: *mut pg_sys::PlanState,
     ) -> Self {
@@ -298,7 +272,7 @@ impl Drop for PgExprState {
         // ResourceOwner abort path also suppresses this normal-close sequence
         // after the unwind has ended. The outer executor's statement context
         // remains the abort-cleanup owner in either case.
-        if thread::panicking() || explicit_cleanup_is_suppressed() {
+        if thread::panicking() || pg_cleanup_suppressed() {
             return;
         }
         unsafe {

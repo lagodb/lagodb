@@ -4,18 +4,18 @@ mod entry;
 mod workers;
 
 use std::ffi::c_void;
-use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use lagodb_core::backend_process::BackendProcess;
 use lagodb_core::diag::PgReportError;
 use lagodb_core::query_contract::TableScanRoute;
 use lagodb_query::datafusion::{
     InterruptHoldState, ParallelExecutionHost, ParallelWorkerHost, ParallelWorkers,
     WorkerTableScanCallbacks,
 };
-use pgrx::{PgSqlErrorCode, PgTryBuilder, pg_sys};
+use pgrx::{PgSqlErrorCode, pg_sys};
 
 use super::table_scan_registry::TableScanRegistry;
 use workers::{PgParallelWorkers, WorkerMapping};
@@ -35,9 +35,7 @@ impl PgParallelHost {
     }
 
     fn capture<T>(operation: impl FnOnce() -> T) -> Result<T, PgReportError> {
-        PgTryBuilder::new(AssertUnwindSafe(|| Ok(operation())))
-            .catch_others(|error| Err(PgReportError::from_caught(error)))
-            .execute()
+        PgReportError::capture(operation)
     }
 
     fn worker(&self) -> &WorkerMapping {
@@ -75,11 +73,9 @@ impl ParallelExecutionHost for PgParallelHost {
     }
 
     fn receiver_token(&self) -> u64 {
-        // SAFETY: PG assigns MyProcNumber before calling a query or worker entrypoint.
-        unsafe {
-            ((pg_sys::MyProcPid as u32 as u64) << 32)
-                | (pg_sys::MyProcNumber as u32 as u64)
-        }
+        // SAFETY: PG assigns MyProcPid before calling a query or worker entrypoint.
+        let pid = unsafe { pg_sys::MyProcPid };
+        ((pid as u32 as u64) << 32) | (BackendProcess::proc_number() as u32 as u64)
     }
 
     fn wake(&self, token: u64) {
@@ -100,8 +96,7 @@ impl ParallelExecutionHost for PgParallelHost {
     }
 
     fn interrupt_pending(&self) -> bool {
-        // SAFETY: signal flags are read only on the backend main thread.
-        unsafe { pg_sys::QueryCancelPending != 0 || pg_sys::ProcDiePending != 0 }
+        BackendProcess::query_interrupt_pending()
     }
 
     fn hold_interrupts(&self) -> InterruptHoldState {

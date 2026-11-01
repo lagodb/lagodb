@@ -76,12 +76,12 @@ impl QueryPlanData {
             function_oid,
             AggregateArguments::None,
             false,
-            Box::new([]),
             None,
             result,
             output,
         )?;
-        let scan = QueryNode::Scan(ScanNode::new(scan, Box::new([]), None));
+        // Only join decisions read scan estimates, and this shape has no join.
+        let scan = QueryNode::Scan(ScanNode::new(scan, Box::new([]), None, 0.0, 0)?);
         let aggregate = QueryNode::Aggregate(AggregateNode::new(
             scan,
             Box::new([]),

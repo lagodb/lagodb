@@ -9,6 +9,11 @@ use pgrx::pg_sys;
 
 use super::QueryExpressionPlanner;
 
+#[cfg(any(feature = "pg16", feature = "pg17"))]
+const REVERSE_TEXT_FUNCTION_OID: u32 = pg_sys::F_REVERSE;
+#[cfg(feature = "pg18")]
+const REVERSE_TEXT_FUNCTION_OID: u32 = pg_sys::F_REVERSE_TEXT;
+
 pub(super) struct NativeScalarCall {
     pub(super) kind: ScalarFunctionKind,
     pub(super) arguments: Vec<*mut pg_sys::Node>,
@@ -177,7 +182,7 @@ impl FunctionSignature {
                     pg_sys::TEXTOID,
                     CollationPolicy::Ignored,
                 ),
-                pg_sys::F_REVERSE => (
+                REVERSE_TEXT_FUNCTION_OID => (
                     ScalarFunctionKind::Reverse,
                     &[pg_sys::TEXTOID][..],
                     pg_sys::TEXTOID,

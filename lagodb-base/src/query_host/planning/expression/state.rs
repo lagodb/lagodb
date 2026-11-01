@@ -267,10 +267,9 @@ impl QueryExpressionPlanner {
         &mut self,
         column: ColumnRef,
     ) -> ExpressionPlanResult<()> {
-        let index = usize::try_from(column.attno)
-            .ok()
-            .and_then(|attno| attno.checked_sub(1))
-            .ok_or(ExpressionDecline::InvalidShape)?;
+        // Var lowering and join-key inspection decline attnos <= 0, so every
+        // recorded column is a user attribute.
+        let index = (column.attno - 1) as usize;
         if self.columns_by_scan.len() <= column.scan.index() {
             self.columns_by_scan
                 .resize_with(column.scan.index() + 1, Vec::new);

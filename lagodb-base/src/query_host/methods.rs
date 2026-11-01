@@ -17,7 +17,6 @@ pub(super) fn tables() -> &'static CustomScanMethodTables {
             QUERY_NAME,
             SerialCustomScanCallbacks {
                 plan: planning::plan_custom_path,
-                reparameterize: None,
                 create_state: execution::create_state,
                 begin: execution::begin,
                 execute: execution::exec,

@@ -32,7 +32,7 @@ use crate::plan::PostgresEvalExpr;
 use state::PgExprState;
 
 pub(super) use signature::PgExprSignature;
-pub(super) use state::{PgExprRuntime, without_pg_cleanup};
+pub(super) use state::PgExprRuntime;
 
 pub(super) struct PgExprUdf {
     contract: PgExprSignature,

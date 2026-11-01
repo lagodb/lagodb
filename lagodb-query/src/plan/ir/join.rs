@@ -345,4 +345,14 @@ impl JoinNode {
     pub const fn estimated_rows(&self) -> f64 {
         self.estimated_rows.get()
     }
+
+    /// Output tuple width over inputs of the given widths.
+    #[inline]
+    pub const fn output_width(&self, left: i32, right: i32) -> i32 {
+        if self.join_type.emits_right() {
+            left.saturating_add(right)
+        } else {
+            left
+        }
+    }
 }

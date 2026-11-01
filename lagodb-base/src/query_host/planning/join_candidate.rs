@@ -206,7 +206,7 @@ impl JoinCandidate {
     ) -> Option<*mut pg_sys::ParamPathInfo> {
         let paths = unsafe { (*relation).pathlist };
         let count = unsafe { pg_sys::list_length(paths) };
-        let mut selected = None;
+        let mut selected: *mut pg_sys::Path = ptr::null_mut();
         for index in 0..count {
             let path =
                 unsafe { pg_sys::list_nth(paths, index) }.cast::<pg_sys::Path>();
@@ -218,11 +218,18 @@ impl JoinCandidate {
             {
                 continue;
             }
-            let total_cost = unsafe { (*path).total_cost };
-            if selected.is_none_or(|(_, best_cost)| total_cost < best_cost) {
-                selected = Some((parameter_info, total_cost));
+            if selected.is_null()
+                || unsafe {
+                    pg_sys::compare_path_costs(
+                        path,
+                        selected,
+                        pg_sys::CostSelector::TOTAL_COST,
+                    ) < 0
+                }
+            {
+                selected = path;
             }
         }
-        selected.map(|(parameter_info, _)| parameter_info)
+        (!selected.is_null()).then(|| unsafe { (*selected).param_info })
     }
 }

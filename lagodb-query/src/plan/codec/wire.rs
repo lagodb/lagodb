@@ -37,6 +37,8 @@ impl QueryPlanData {
                 writer
                     .append_i32(NODE_SCAN)
                     .append_count(scan.scan().index())
+                    .append_i64(scan.estimated_rows().to_bits() as i64)
+                    .append_i32(scan.estimated_width())
                     .append_count(scan.columns().len());
                 for column in scan.columns() {
                     writer.append_nested(|record| {
@@ -188,6 +190,8 @@ impl QueryPlanData {
         match reader.read_i32()? {
             NODE_SCAN => {
                 let scan = ScanId::from_index(reader.read_count()?);
+                let estimated_rows = f64::from_bits(reader.read_i64()? as u64);
+                let estimated_width = reader.read_i32()?;
                 let count = reader.read_count()?;
                 let mut columns = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -205,7 +209,9 @@ impl QueryPlanData {
                     scan,
                     columns.into_boxed_slice(),
                     filter,
-                )))
+                    estimated_rows,
+                    estimated_width,
+                )?))
             }
             NODE_AGGREGATE => {
                 let estimated_rows = f64::from_bits(reader.read_i64()? as u64);
@@ -532,15 +538,15 @@ impl QueryPlanData {
         } else {
             None
         };
-        Ok(AggCall::try_new(
+        let aggregate = AggCall::try_new(
             function_oid,
             arguments,
             distinct,
-            order_by.into_boxed_slice(),
             filter,
             ExprType::decode_plan_data(reader, ())?,
             OutputId::from_index(reader.read_count()?),
-        )?)
+        )?;
+        Ok(aggregate.try_with_order_by(order_by.into_boxed_slice())?)
     }
 
     pub(super) fn encode_layout(

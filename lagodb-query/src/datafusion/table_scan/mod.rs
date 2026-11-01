@@ -29,7 +29,7 @@ use datafusion::physical_plan::{
     ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan,
     Partitioning, PlanProperties, ReplaceChildrenOptions,
 };
-use lagodb_core::query_contract::{ScanCost, ScanId};
+use lagodb_core::query_contract::ScanId;
 use pgrx::pg_sys;
 
 use self::metrics::ScanExecMetrics;
@@ -37,27 +37,8 @@ use self::runtime_filters::RuntimeFilterSet;
 use self::static_filters::StaticFilterSet;
 use self::stream::ExternalTableScanStream;
 use super::metrics::ExecutionMetrics;
+use super::scan_binding::AttnoPositions;
 use super::scan_callbacks::BoundTableScanHandle;
-
-#[derive(Debug, Clone, Copy)]
-pub(super) struct ExternalTableStatistics {
-    pub estimated_rows: usize,
-    exact_rows: Option<usize>,
-}
-
-impl ExternalTableStatistics {
-    pub(super) fn from_scan_cost(cost: ScanCost) -> Self {
-        Self {
-            estimated_rows: cost.rows_read().min(usize::MAX as f64) as usize,
-            exact_rows: None,
-        }
-    }
-
-    pub(super) fn with_exact_rows(mut self, rows: Option<usize>) -> Self {
-        self.exact_rows = rows;
-        self
-    }
-}
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ExternalTableScanLimits {
@@ -69,8 +50,8 @@ pub(super) struct ExternalTableScanLimits {
 pub(super) struct ExternalTableProvider {
     scan: ScanId,
     schema: SchemaRef,
-    positions_by_attno: Arc<[Option<usize>]>,
-    statistics: ExternalTableStatistics,
+    positions_by_attno: AttnoPositions,
+    exact_rows: Option<usize>,
     limits: ExternalTableScanLimits,
     bound: Arc<BoundTableScanHandle>,
     metrics: Option<Arc<ExecutionMetrics>>,
@@ -81,7 +62,7 @@ impl ExternalTableProvider {
         scan: ScanId,
         schema: SchemaRef,
         projected_attnos: Box<[pg_sys::AttrNumber]>,
-        statistics: ExternalTableStatistics,
+        exact_rows: Option<usize>,
         limits: ExternalTableScanLimits,
         bound: Arc<BoundTableScanHandle>,
         metrics: Option<Arc<ExecutionMetrics>>,
@@ -99,20 +80,11 @@ impl ExternalTableProvider {
                 projected_attnos.len(),
             )));
         }
-        let mut positions_by_attno = Vec::new();
-        for (position, attno) in projected_attnos.into_vec().into_iter().enumerate() {
-            debug_assert!(attno > 0, "query-plan validation rejects invalid attnos");
-            let index = (attno - 1) as usize;
-            if positions_by_attno.len() <= index {
-                positions_by_attno.resize(index + 1, None);
-            }
-            positions_by_attno[index] = Some(position);
-        }
         Ok(Self {
             scan,
             schema,
-            positions_by_attno: positions_by_attno.into(),
-            statistics,
+            positions_by_attno: AttnoPositions::from_attnos(projected_attnos),
+            exact_rows,
             limits,
             bound,
             metrics,
@@ -120,11 +92,8 @@ impl ExternalTableProvider {
     }
 
     pub(super) fn column_name(&self, attno: pg_sys::AttrNumber) -> Option<&str> {
-        usize::try_from(attno)
-            .ok()
-            .and_then(|attno| attno.checked_sub(1))
-            .and_then(|index| self.positions_by_attno.get(index))
-            .and_then(|position| *position)
+        self.positions_by_attno
+            .position(attno)
             .map(|position| self.schema.field(position).name().as_str())
     }
 }
@@ -137,22 +106,6 @@ impl TableProvider for ExternalTableProvider {
 
     fn table_type(&self) -> TableType {
         TableType::Base
-    }
-
-    fn statistics(&self) -> Option<Statistics> {
-        let statistics =
-            Statistics::default().with_num_rows(self.statistics.exact_rows.map_or(
-                Precision::Inexact(self.statistics.estimated_rows),
-                Precision::Exact,
-            ));
-        // DataFusion defines total_byte_size as Arrow output size, not the
-        // provider's physical scan bytes. Only a genuinely empty output schema
-        // has a proven exact size here; projected column sizes remain unknown.
-        Some(if self.schema.fields().is_empty() {
-            statistics.with_total_byte_size(Precision::Exact(0))
-        } else {
-            statistics
-        })
     }
 
     fn supports_filters_pushdown(
@@ -235,7 +188,7 @@ impl ExternalTableScanExec {
             schema,
             projection,
             static_filters,
-            exact_rows: provider.statistics.exact_rows,
+            exact_rows: provider.exact_rows,
             limits: provider.limits,
             bound: Arc::clone(&provider.bound),
             metrics: provider.metrics.as_ref().map(Arc::clone),
@@ -243,6 +196,11 @@ impl ExternalTableScanExec {
             scan_metrics: provider.metrics.as_ref().map(|_| ScanExecMetrics::new()),
             properties,
         }
+    }
+
+    #[inline]
+    pub(super) const fn scan(&self) -> ScanId {
+        self.scan
     }
 
     fn with_runtime_filters(

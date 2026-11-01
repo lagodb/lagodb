@@ -36,6 +36,15 @@ impl ExecutionProfile {
         Ok(Self { maximum_batch_rows })
     }
 
+    /// Rebuild a profile from `maximum_batch_rows()` of a validated profile,
+    /// as carried by selected-plan data and the parallel bootstrap.
+    pub(crate) const fn restore(maximum_batch_rows: usize) -> Self {
+        Self {
+            maximum_batch_rows: NonZeroUsize::new(maximum_batch_rows)
+                .expect("restored from a validated execution profile"),
+        }
+    }
+
     #[inline]
     pub const fn maximum_batch_rows(self) -> NonZeroUsize {
         self.maximum_batch_rows
