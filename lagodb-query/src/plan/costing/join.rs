@@ -1,14 +1,18 @@
 //! DataFusion-aligned join input roles and operator cost.
 
-use super::{CostingContext, PlanCost, PlanEstimate, QueryCostError};
+use super::{
+    CostingContext, HashBuildEstimate, PlanCost, PlanEstimate, QueryCostError,
+};
 use crate::plan::ir::JoinNode;
 
 /// Physical input roles selected by DataFusion's join optimizer.
 ///
 /// LagoDB leaves `optimizer.join_reordering` at DataFusion's enabled default.
-/// This cost-side decision mirrors JoinSelection's smaller-input policy using
-/// the IR cardinalities owned by the estimator and places that input in the
-/// first/left build role. Null-aware anti joins are the explicit non-swappable
+/// This cost-side decision mirrors JoinSelection's smaller-input policy and
+/// places that input in the first/left build role. JoinSelection compares
+/// `total_byte_size`, which `PlanStatisticsProvider` derives from these same IR
+/// sizes, so a pruning projection above a nested join is the only input it can
+/// see as narrower. Null-aware anti joins are the explicit non-swappable
 /// exception.
 #[derive(Debug, Clone, Copy)]
 struct JoinCostInputs {
@@ -18,7 +22,7 @@ struct JoinCostInputs {
 
 impl JoinCostInputs {
     fn select(join: &JoinNode, left: PlanEstimate, right: PlanEstimate) -> Self {
-        if !join.null_aware() && right.rows < left.rows {
+        if !join.null_aware() && right.byte_size() < left.byte_size() {
             Self {
                 build: right,
                 probe: left,
@@ -94,9 +98,19 @@ impl<'join> JoinCostStrategy<'join> {
             // and one outer-column NULL test for every logical left row.
             self.context.expression_cost(self.left.rows, 2)
         });
+        let fallback_sorts = if pairwise_join {
+            None
+        } else {
+            self.fallback_sort_cost(inputs)
+        };
+        // A hash join emits while probing. Sorts read the probe input first.
+        let (probe_startup, sort_cost) = fallback_sorts
+            .map_or((inputs.probe.cost.startup, 0.0), |cost| {
+                (inputs.probe.cost.total, cost)
+            });
         let rows = self.join.estimated_rows();
         let startup =
-            inputs.build.cost.total + build_cost + inputs.probe.cost.startup;
+            inputs.build.cost.total + build_cost + probe_startup + sort_cost;
         let total = self.left.cost.total
             + self.right.cost.total
             + build_cost
@@ -104,11 +118,36 @@ impl<'join> JoinCostStrategy<'join> {
             + residual_cost
             + pairwise_cost
             + mark_filter_cost
+            + sort_cost
             + rows * self.context.cpu_tuple_cost;
         PlanEstimate::try_new(
             rows,
             self.context.batches(rows),
+            self.join.output_width(self.left.width, self.right.width),
             PlanCost::try_new(startup, total)?,
+        )
+    }
+
+    /// The sorts both inputs need when PostgreSQL's sizing expects the build to
+    /// outgrow `hash_mem`, which makes the join continue as a sort-merge join at
+    /// run time. Charging them keeps Auto mode from offloading a join that
+    /// PostgreSQL would run with batches, at hash-join prices. Each sort still
+    /// decides for itself whether it spills: PostgreSQL sizes the hash table with
+    /// per-tuple overhead a sort's input does not carry.
+    ///
+    /// The task count comes from scan task planning at execution, so a path is
+    /// costed with its whole build in one `hash_mem`. A run with more tasks can
+    /// only do better than this.
+    fn fallback_sort_cost(&self, inputs: JoinCostInputs) -> Option<f64> {
+        let memory = self.context.spill_sort_memory_bytes?;
+        let build = HashBuildEstimate::new(inputs.build.rows, inputs.build.width);
+        if self.join.null_aware() || build.fits_hash_memory() {
+            return None;
+        }
+        let keys = self.join.keys().len();
+        Some(
+            self.context.spillable_sort_cost(inputs.build, keys, memory)
+                + self.context.spillable_sort_cost(inputs.probe, keys, memory),
         )
     }
 }
