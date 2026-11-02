@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use lagodb_core::customscan::custom_exprs::PgExpressionSections;
 use lagodb_core::expr::RuntimeValueState;
+use lagodb_core::resource::without_pg_cleanup;
 use pgrx::pg_sys;
 
 use super::prepared_execution::{PreparedQueryExecution, QueryPreparation};
@@ -16,7 +17,7 @@ use crate::datafusion::execution::{
 use crate::datafusion::memory::QueryExecutionLimits;
 use crate::datafusion::metrics::ExecutionMetrics;
 use crate::datafusion::parallel::ParallelQueryOptions;
-use crate::datafusion::postgres_eval::{PgExprRuntime, without_pg_cleanup};
+use crate::datafusion::postgres_eval::PgExprRuntime;
 use crate::plan::{QueryFragment, QueryTupleLayout};
 
 /// Begin-owned bindings, consumed once to create the row-producing execution.

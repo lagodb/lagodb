@@ -45,8 +45,10 @@ use pgrx::{PgTryBuilder, pg_guard};
 
 use crate::diag::{PgErrorReport, report_warning};
 
+mod cleanup_suppression;
 mod committed_cleanup;
 
+pub use cleanup_suppression::{pg_cleanup_suppressed, without_pg_cleanup};
 pub use committed_cleanup::CommittedCleanup;
 
 /// A handle to a registered resource.

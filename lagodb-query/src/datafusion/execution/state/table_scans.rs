@@ -1,9 +1,7 @@
 //! Statement-scoped provider bindings shared by physical-plan rebuilds.
 
-use std::ptr;
 use std::sync::Arc;
 
-use lagodb_core::query_contract::ScanCost;
 use lagodb_core::query_contract::ScanId;
 use pgrx::pg_sys;
 
@@ -16,14 +14,11 @@ use crate::datafusion::parallel::{
 use crate::datafusion::scan_callbacks::{
     BoundTableScanHandle, TableScanCallbacks, WorkerTableScanCallbacks,
 };
-use crate::datafusion::table_scan::{
-    ExternalTableProvider, ExternalTableScanLimits, ExternalTableStatistics,
-};
+use crate::datafusion::table_scan::{ExternalTableProvider, ExternalTableScanLimits};
 use crate::plan::{PlannedTableScan, QueryFragment};
 
 struct BoundScan {
     scan: ScanId,
-    cost: ScanCost,
     handle: Arc<BoundTableScanHandle>,
 }
 
@@ -86,7 +81,6 @@ impl BoundTableScans {
                 };
             entries.push(BoundScan {
                 scan,
-                cost: planned_scan.cost(),
                 handle: Arc::new(handle),
             });
         }
@@ -114,10 +108,9 @@ impl BoundTableScans {
                     entry.scan,
                     schema,
                     projected_attnos,
-                    ExternalTableStatistics::from_scan_cost(entry.cost)
-                        .with_exact_rows(exact_rows.and_then(|(scan, rows)| {
-                            (scan == entry.scan).then_some(rows)
-                        })),
+                    exact_rows.and_then(|(scan, rows)| {
+                        (scan == entry.scan).then_some(rows)
+                    }),
                     ExternalTableScanLimits {
                         maximum_batch_rows: limits.maximum_batch_rows() as u64,
                     },
@@ -139,7 +132,7 @@ impl BoundTableScans {
     ) -> Result<Option<usize>, QueryExecutionError> {
         let (planned, task_metrics) = self.entries[scan.index()]
             .handle
-            .plan_tasks(&[], &[], ptr::null(), true)
+            .plan_tasks(&[], &[], None, true)
             .map_err(QueryExecutionError::ScanPlan)?;
         // DataFusion COUNT and PostgreSQL COUNT both return signed int8.
         // Statistics outside that representation cannot use this optimization.
@@ -182,7 +175,6 @@ impl BoundTableScans {
                         scan: entry.scan,
                         schema,
                         projected_attnos: entry.projected_attnos(fragment)?,
-                        cost: entry.cost,
                         bound: Arc::clone(&entry.handle),
                         worker: *worker,
                     },

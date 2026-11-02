@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use datafusion::common::DataFusionError;
 use datafusion::execution::SendableRecordBatchStream;
-use datafusion::execution::context::{SessionConfig, SessionContext};
+use datafusion::execution::context::SessionContext;
 use datafusion::execution::memory_pool::PeakRecordingPool;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::execution::session_state::SessionStateBuilder;
@@ -13,6 +13,7 @@ use lagodb_core::query_contract::ScanId;
 use tokio::runtime::Runtime;
 
 use crate::datafusion::compiler::{DataFusionPlanCompiler, DataFusionPlanError};
+use crate::datafusion::join_planning::QuerySessionRules;
 use crate::datafusion::memory::QueryExecutionLimits;
 use crate::datafusion::metrics::ExecutionMetrics;
 use crate::datafusion::parallel::{
@@ -165,31 +166,14 @@ impl PhysicalPlanPreparation<'_> {
         &self,
         exact_rows: Option<(ScanId, usize)>,
     ) -> Result<PreparedSerialPlan, QueryExecutionError> {
-        let config = SessionConfig::new()
-            .with_target_partitions(1)
-            .with_batch_size(self.limits.maximum_batch_rows());
         let state = SessionStateBuilder::new()
-            .with_config(config)
+            .with_config(self.limits.session_config(1))
             .with_runtime_env(Arc::clone(&self.environment))
             .with_default_features()
             .build();
-        // `push_down_filter` can move HAVING below Aggregate. Keep that
-        // semantic boundary in LagoDB's validated IR and leave all other
-        // DataFusion rewrites enabled.
-        let state = if self.fragment.has_having_filter() {
-            let rules = state
-                .optimizers()
-                .iter()
-                .filter(|rule| rule.name() != "push_down_filter")
-                .cloned()
-                .collect();
-            SessionStateBuilder::new_from_existing(state)
-                .with_optimizer_rules(rules)
-                .build()
-        } else {
-            state
-        };
-        let session = SessionContext::new_with_state(state);
+        let session = SessionContext::new_with_state(
+            QuerySessionRules::new(self.fragment, self.limits).apply(state),
+        );
         let providers = self.bound_scans.providers(
             self.fragment,
             self.limits,
@@ -228,10 +212,10 @@ impl PhysicalPlanPreparation<'_> {
         let sources = Arc::new(ParallelSourceCatalog::new(options.callbacks.len()));
         let session = ParallelSession::build(
             Arc::clone(&self.environment),
-            self.limits.maximum_batch_rows(),
+            self.limits,
             worker_cap as usize,
             self.metrics.is_some(),
-            self.fragment.has_having_filter(),
+            Some(self.fragment),
         )?;
         let providers = self.bound_scans.parallel_providers(
             self.fragment,

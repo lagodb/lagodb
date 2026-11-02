@@ -11,6 +11,7 @@ use std::mem;
 
 use datafusion::execution::SendableRecordBatchStream;
 use lagodb_arrow::BoundBatch;
+use lagodb_core::resource::without_pg_cleanup;
 use pgrx::pg_sys;
 
 use super::output::QueryOutputDecoder;
@@ -176,13 +177,17 @@ impl QueryExecutionState {
     pub(super) fn abort(self) {
         // PG transaction cleanup owns termination after ERROR. Drop the mesh
         // owner without the normal completion wait, then close serial bindings.
+        // The run's streams own spill files the ResourceOwner has already
+        // closed, so suppression covers them as well as the prepared state.
         let Self {
             run_state,
             prepared,
             output: _,
         } = self;
-        drop(run_state);
-        prepared.abort();
+        without_pg_cleanup(|| {
+            drop(run_state);
+            prepared.abort();
+        });
     }
 
     pub(super) fn physical_plan_analyze(

@@ -1,10 +1,13 @@
 use pgrx::{
-    pg_sys::panic::{
-        CaughtError, ErrorReport, ErrorReportWithLevel, ErrorReportable,
+    PgTryBuilder,
+    pg_sys::{
+        self,
+        panic::{CaughtError, ErrorReport, ErrorReportWithLevel, ErrorReportable},
     },
     prelude::*,
 };
 use std::fmt::{Display, Formatter};
+use std::panic::AssertUnwindSafe;
 use thiserror::Error;
 
 /// Small owning handle for a PostgreSQL [`ErrorReport`].
@@ -27,6 +30,23 @@ impl PgReportError {
     /// travel through the provider Result path to the single outer report.
     pub fn from_caught(err: CaughtError) -> Self {
         Self::from_pg_error(PgError::from_caught(err))
+    }
+
+    /// Run a PostgreSQL operation and return any ERROR it raises as a value.
+    ///
+    /// `errfinish` clears `InterruptHoldoffCount` on the assumption that the
+    /// handler sits outside every holdoff. This caller keeps running inside the
+    /// holdoff it entered with, so the count is restored before returning.
+    pub fn capture<T>(operation: impl FnOnce() -> T) -> Result<T, Self> {
+        // SAFETY: the counter is backend-local and read on the backend thread.
+        let holdoff = unsafe { pg_sys::InterruptHoldoffCount };
+        PgTryBuilder::new(AssertUnwindSafe(|| Ok(operation())))
+            .catch_others(|error| {
+                // SAFETY: as above; this is the value the caller entered with.
+                unsafe { pg_sys::InterruptHoldoffCount = holdoff };
+                Err(Self::from_caught(error))
+            })
+            .execute()
     }
 
     /// Build from a domain error with a single SQLSTATE and full `source` chain in DETAIL.
@@ -145,10 +165,6 @@ impl PgReportError {
     }
 
     /// Preserve a PostgreSQL error's structured SQLSTATE, DETAIL, and HINT.
-    ///
-    /// This is deliberately a named conversion rather than `From<PgError>`:
-    /// the blanket domain-error conversion below also applies to `PgError`,
-    /// and Rust does not permit overlapping `From` implementations.
     pub fn from_pg_error(error: PgError) -> Self {
         match error {
             PgError::PostgresError(report) => Self::from_parts(
@@ -172,6 +188,13 @@ where
     #[inline]
     fn from(value: E) -> Self {
         Self::from_domain_error(value)
+    }
+}
+
+impl From<PgError> for PgReportError {
+    #[inline]
+    fn from(error: PgError) -> Self {
+        Self::from_pg_error(error)
     }
 }
 
@@ -477,6 +500,12 @@ impl Display for PgErrorReport {
     }
 }
 
+/// PostgreSQL diagnostics captured at the FFI boundary.
+///
+/// This is not a domain error, so it deliberately does not implement
+/// [`SqlStateError`]: the blanket conversions for that trait would format the
+/// captured report into a new primary message. It converts to [`PgReportError`]
+/// instead, which keeps PostgreSQL's own message.
 #[derive(Error, Debug)]
 pub enum PgError {
     #[error("Invalid string (contains null byte): {0}")]
@@ -493,6 +522,14 @@ impl PgError {
     }
 
     #[inline]
+    pub fn sql_error_code(&self) -> PgSqlErrorCode {
+        match self {
+            Self::PostgresError(report) => report.sql_error_code(),
+            Self::NulError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+        }
+    }
+
+    #[inline]
     pub(crate) fn is_tuple_concurrency_conflict(&self) -> bool {
         match self {
             Self::PostgresError(report) => report.is_tuple_concurrency_conflict(),
@@ -501,8 +538,7 @@ impl PgError {
     }
 }
 
-/// Convert a PostgreSQL error captured by `PgTryBuilder` into the structured
-/// domain error used below PostgreSQL callback boundaries.
+/// Capture a PostgreSQL error caught by `PgTryBuilder` as [`PgError`].
 ///
 /// The report constructor remains private; dependent crates only need this
 /// stable diagnostic bridge and must not construct or reclassify reports.
@@ -510,15 +546,6 @@ impl From<CaughtError> for PgError {
     #[inline]
     fn from(err: CaughtError) -> Self {
         Self::from_caught(err)
-    }
-}
-
-impl SqlStateError for PgError {
-    fn sql_error_code(&self) -> PgSqlErrorCode {
-        match self {
-            Self::PostgresError(report) => report.sql_error_code(),
-            Self::NulError(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-        }
     }
 }
 

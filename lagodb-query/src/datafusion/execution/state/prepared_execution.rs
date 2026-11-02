@@ -7,6 +7,7 @@ use datafusion::execution::SendableRecordBatchStream;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use futures::StreamExt;
 use lagodb_core::expr::RuntimeValueState;
+use lagodb_core::resource::without_pg_cleanup;
 use pgrx::pg_sys;
 use tokio::runtime::{Builder, Runtime};
 
@@ -16,10 +17,10 @@ use super::prepared_plan::{PhysicalPlanPreparation, PreparedPhysicalPlan};
 use super::table_scans::BoundTableScans;
 use crate::datafusion::error::QueryExecutionError;
 use crate::datafusion::memory::QueryExecutionLimits;
-use crate::datafusion::metrics::ExecutionMetrics;
+use crate::datafusion::metrics::{ExecutionMetrics, SetupPhase};
 use crate::datafusion::parallel::{ParallelQueryOptions, ParallelRun};
 use crate::datafusion::physical_plan::PhysicalPlanMetricsAccumulator;
-use crate::datafusion::postgres_eval::{PgExprRuntime, without_pg_cleanup};
+use crate::datafusion::postgres_eval::PgExprRuntime;
 use crate::plan::{PlanExplainNode, QueryFragment, QueryTupleLayout};
 
 pub(super) struct QueryPreparation<'a> {
@@ -69,38 +70,42 @@ impl PreparedQueryExecution {
             parallel,
         } = preparation;
         let parallel = parallel.filter(|_| fragment.postgres_fallback_count() == 0);
-        let result: Result<_, QueryExecutionError> = (|| {
-            let runtime = Builder::new_current_thread()
-                .enable_time()
-                .build()
-                .map_err(QueryExecutionError::Runtime)?;
-            let runtime_resources = limits.planning_runtime_env()?;
-            let environment = runtime_resources.environment;
-            // Preparation runs at first execution, after PG has supplied outer
-            // parameters. Replace Begin's placeholders before compiling, so the
-            // first run can use this plan without an immediate rebuild. Refresh
-            // the complete layout: a pre-start rescan can reset the expression
-            // context that held statement-stable by-reference values as well.
-            if runtime_values.has_dynamic_values() {
-                let econtext = unsafe { (*parent).ps_ExprContext };
-                unsafe { runtime_values.rebind_complete(econtext) };
-            }
-            let prepared_plan =
-                PreparedPhysicalPlan::prepare(PhysicalPlanPreparation {
-                    runtime: &runtime,
-                    environment: Arc::clone(&environment),
-                    fragment,
-                    limits,
-                    metrics,
-                    bound_scans: &bound_scans,
-                    postgres,
-                    runtime_values: &runtime_values,
-                    parallel: parallel.as_ref(),
-                })?;
-            let output =
-                QueryOutputDecoder::try_new(layout, &prepared_plan.plan().schema())?;
-            Ok((prepared_plan, runtime, environment, output))
-        })();
+        let setup_metrics = metrics.map(Arc::as_ref);
+        let result: Result<_, QueryExecutionError> =
+            ExecutionMetrics::time_setup(setup_metrics, SetupPhase::Engine, || {
+                let runtime = Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .map_err(QueryExecutionError::Runtime)?;
+                let runtime_resources = limits.planning_runtime_env()?;
+                let environment = runtime_resources.environment;
+                // Preparation runs at first execution, after PG has supplied outer
+                // parameters. Replace Begin's placeholders before compiling, so the
+                // first run can use this plan without an immediate rebuild. Refresh
+                // the complete layout: a pre-start rescan can reset the expression
+                // context that held statement-stable by-reference values as well.
+                if runtime_values.has_dynamic_values() {
+                    let econtext = unsafe { (*parent).ps_ExprContext };
+                    unsafe { runtime_values.rebind_complete(econtext) };
+                }
+                let prepared_plan =
+                    PreparedPhysicalPlan::prepare(PhysicalPlanPreparation {
+                        runtime: &runtime,
+                        environment: Arc::clone(&environment),
+                        fragment,
+                        limits,
+                        metrics,
+                        bound_scans: &bound_scans,
+                        postgres,
+                        runtime_values: &runtime_values,
+                        parallel: parallel.as_ref(),
+                    })?;
+                let output = QueryOutputDecoder::try_new(
+                    layout,
+                    &prepared_plan.plan().schema(),
+                )?;
+                Ok((prepared_plan, runtime, environment, output))
+            });
         match result {
             Ok((prepared_plan, runtime, environment, output)) => Ok((
                 Self {
@@ -159,8 +164,11 @@ impl PreparedQueryExecution {
         self.completed_peak_memory_bytes = self
             .completed_peak_memory_bytes
             .max(self.prepared_plan.peak_reserved());
-        let prepared_plan =
-            PreparedPhysicalPlan::prepare(self.physical_plan_preparation())?;
+        let prepared_plan = ExecutionMetrics::time_setup(
+            self.metrics.as_deref(),
+            SetupPhase::Engine,
+            || PreparedPhysicalPlan::prepare(self.physical_plan_preparation()),
+        )?;
         self.prepared_plan = prepared_plan;
         self.dynamic_rebind_required = false;
         self.physical_plan_rebuild_required = false;
@@ -171,11 +179,17 @@ impl PreparedQueryExecution {
         self.rebuild_plan_if_required()?;
         let parallel_run =
             match (self.prepared_plan.parallel_mut(), self.parallel.as_ref()) {
-                (Some(prepared), Some(options)) => ParallelRun::launch(
-                    prepared,
-                    options,
-                    self.limits,
-                    self.metrics.as_ref(),
+                (Some(prepared), Some(options)) => ExecutionMetrics::time_setup(
+                    self.metrics.as_deref(),
+                    SetupPhase::ParallelStartup,
+                    || {
+                        ParallelRun::launch(
+                            prepared,
+                            options,
+                            self.limits,
+                            self.metrics.as_ref(),
+                        )
+                    },
                 )?,
                 (None, _) => None,
                 (Some(_), None) => {
@@ -195,8 +209,14 @@ impl PreparedQueryExecution {
             }
             None => {
                 if self.prepared_plan.parallel().is_some() {
-                    self.prepared_plan = PreparedPhysicalPlan::prepare_serial(
-                        self.physical_plan_preparation(),
+                    self.prepared_plan = ExecutionMetrics::time_setup(
+                        self.metrics.as_deref(),
+                        SetupPhase::Engine,
+                        || {
+                            PreparedPhysicalPlan::prepare_serial(
+                                self.physical_plan_preparation(),
+                            )
+                        },
                     )?;
                 }
                 let stream = self.prepared_plan.execute_serial()?;
