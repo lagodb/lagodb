@@ -72,7 +72,7 @@ impl PostgresParallelExecution {
         coordinate: *mut core::ffi::c_void,
         read: &PreparedRowScan,
     ) -> Result<(), ScanError> {
-        unsafe { self.coordinator.attach(coordinate) }?;
+        unsafe { self.coordinator.attach(coordinate) };
         self.attach_source(read)
     }
 
@@ -83,7 +83,7 @@ impl PostgresParallelExecution {
         coordinate: *mut core::ffi::c_void,
         read: &PreparedRowScan,
     ) -> Result<(), ScanError> {
-        unsafe { self.coordinator.attach(coordinate) }?;
+        unsafe { self.coordinator.attach(coordinate) };
         self.coordinator.reinitialize()?;
         self.attach_source(read)
     }

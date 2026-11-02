@@ -23,5 +23,6 @@ pub use host::{
 pub(super) use provider::{ParallelTableProvider, ParallelTableScanBinding};
 pub use run::ParallelQueryOptions;
 pub(super) use run::{ParallelRun, PreparedParallelPlan};
+pub(super) use scan_exec::ParallelTableScanExec;
 pub(in crate::datafusion) use session::ParallelSession;
 pub use worker::run_parallel_worker;

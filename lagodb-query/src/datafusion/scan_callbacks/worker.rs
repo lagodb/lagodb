@@ -3,7 +3,6 @@
 use std::ffi::c_void;
 use std::fmt;
 use std::marker::PhantomData;
-use std::mem::size_of;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -112,45 +111,23 @@ impl WorkerTableScanCallbacks {
                 ));
             }
         }
-        let payload = NonNull::new(output.payload).ok_or_else(|| {
-            PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "table scan worker source preparation returned a null payload",
-            )
-        })?;
-        let result = if output.struct_size
-            != size_of::<PreparedWorkerSourceResult>() as u32
-            || output.data_len == 0
-            || output.data.is_null()
-            || output.work_count == 0
-        {
-            Err(PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "table scan worker source preparation returned an invalid result",
-            ))
-        } else {
-            // SAFETY: READY lends this nonempty range from the still-owned
-            // provider handle. The FFI boundary requires one copy before the
-            // handle is released; statement ownership remains unique after it.
-            let bytes =
-                unsafe { core::slice::from_raw_parts(output.data, output.data_len) }
-                    .to_vec()
-                    .into_boxed_slice();
-            Ok(PreparedWorkerSource {
-                bytes,
-                work_count: output.work_count,
-                task_metrics: output.task_metrics,
-            })
+        // SAFETY: READY is returned only after the provider adapter stores a
+        // `Box::into_raw` release handle, which is never null.
+        let payload = unsafe { NonNull::new_unchecked(output.payload) };
+        // SAFETY: READY lends this nonempty range from the still-owned
+        // provider handle. The FFI boundary requires one copy before the
+        // handle is released; statement ownership remains unique after it.
+        let bytes =
+            unsafe { core::slice::from_raw_parts(output.data, output.data_len) }
+                .to_vec()
+                .into_boxed_slice();
+        let prepared = PreparedWorkerSource {
+            bytes,
+            work_count: output.work_count,
+            task_metrics: output.task_metrics,
         };
-        let cleanup = self.release_prepared(payload).err();
-        match (result, cleanup) {
-            (Err(primary), Some(cleanup)) => Err(primary.contextualize(
-                "invalid worker source payload",
-                Some(format!("payload release also failed: {cleanup}")),
-            )),
-            (Err(error), None) | (Ok(_), Some(error)) => Err(error),
-            (Ok(prepared), None) => Ok(Some(prepared)),
-        }
+        self.release_prepared(payload)?;
+        Ok(Some(prepared))
     }
 
     fn release_prepared(self, payload: NonNull<c_void>) -> Result<(), PgReportError> {
@@ -177,30 +154,13 @@ impl WorkerTableScanCallbacks {
             (self.decode_source)(self.context, &request, &mut output, &mut error)
         };
         self.operation_result(status, &error, "table scan worker source decode")?;
-        let handle = NonNull::new(output.source).ok_or_else(|| {
-            PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "table scan worker source decode returned a null source",
-            )
-        })?;
-        let mut source = WorkerTableScanSource {
+        // SAFETY: success is returned only after the provider adapter stores a
+        // `Box::into_raw` source handle, which is never null.
+        let handle = unsafe { NonNull::new_unchecked(output.source) };
+        Ok(WorkerTableScanSource {
             callbacks: self,
             handle: Some(handle),
-        };
-        if output.struct_size != size_of::<WorkerTableScanSourceResult>() as u32 {
-            let primary = PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "table scan worker source decode returned an incompatible result",
-            );
-            return match source.release() {
-                Ok(()) => Err(primary),
-                Err(cleanup) => Err(primary.contextualize(
-                    "invalid decoded worker source",
-                    Some(format!("source release also failed: {cleanup}")),
-                )),
-            };
-        }
-        Ok(source)
+        })
     }
 }
 
@@ -256,7 +216,7 @@ impl WorkerTableScanSource {
         let request = TableScanWorkerStreamRequest::new(
             work_ids,
             maximum_batch_rows,
-            error_slot.as_mut_ptr(),
+            error_slot.as_non_null(),
         );
         let mut stream = FFI_ArrowArrayStream::empty();
         let mut error = CallbackErrorReport::default();

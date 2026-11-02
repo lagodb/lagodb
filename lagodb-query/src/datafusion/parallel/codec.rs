@@ -21,22 +21,19 @@ use prost::Message;
 use super::catalog::WorkerSourceCatalog;
 use super::scan_exec::ParallelTableScanExec;
 use crate::datafusion::integer_abs::PgIntegerAbsUdf;
-use crate::datafusion::{numeric_aggregate, real_sum};
+use crate::datafusion::join_planning::AdaptiveHashJoinExec;
+use crate::datafusion::{real_sum, udaf_by_name};
 use lagodb_core::query_contract::ScanId;
-
-const SOURCE_CODEC_VERSION: u32 = 1;
 
 #[derive(Clone, PartialEq, Message)]
 struct ParallelScanProto {
-    #[prost(uint32, tag = "1")]
-    version: u32,
-    #[prost(uint64, tag = "2")]
+    #[prost(uint64, tag = "1")]
     scan: u64,
-    #[prost(message, optional, tag = "3")]
+    #[prost(message, optional, tag = "2")]
     schema: Option<protobuf::Schema>,
-    #[prost(message, repeated, tag = "4")]
+    #[prost(message, repeated, tag = "3")]
     assignments: Vec<WorkAssignmentProto>,
-    #[prost(uint64, tag = "5")]
+    #[prost(uint64, tag = "4")]
     maximum_batch_rows: u64,
 }
 
@@ -44,6 +41,12 @@ struct ParallelScanProto {
 struct WorkAssignmentProto {
     #[prost(uint32, repeated, tag = "1")]
     work_ids: Vec<u32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct AdaptiveHashJoinProto {
+    #[prost(uint64, tag = "1")]
+    hash_memory_bytes: u64,
 }
 
 /// User codec installed at position one after the fork's distributed codec.
@@ -59,6 +62,34 @@ impl fmt::Debug for LagoPhysicalCodec {
             .debug_struct("LagoPhysicalCodec")
             .field("worker_sources", &self.sources.is_some())
             .finish()
+    }
+}
+
+impl AdaptiveHashJoinProto {
+    fn decode_plan(
+        buf: &[u8],
+        join: &Arc<dyn ExecutionPlan>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let proto = Self::decode(buf).map_err(|error| {
+            proto_error(format!("failed to decode adaptive hash join: {error}"))
+        })?;
+        // Leader and workers share this build and platform; the u64 field
+        // carries a `usize` written by `encode_plan`.
+        AdaptiveHashJoinExec::try_new(
+            Arc::clone(join),
+            proto.hash_memory_bytes as usize,
+        )
+        .map(|plan| Arc::new(plan) as Arc<dyn ExecutionPlan>)
+    }
+
+    fn encode_plan(join: &AdaptiveHashJoinExec, buf: &mut Vec<u8>) -> Result<()> {
+        Self {
+            hash_memory_bytes: join.hash_memory_bytes() as u64,
+        }
+        .encode(buf)
+        .map_err(|error| {
+            proto_error(format!("failed to encode adaptive hash join: {error}"))
+        })
     }
 }
 
@@ -89,29 +120,24 @@ impl PhysicalExtensionCodec for LagoPhysicalCodec {
         ctx: &TaskContext,
         _proto_converter: &dyn PhysicalProtoConverterExtension,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        if !inputs.is_empty() {
-            return Err(proto_error(format!(
-                "ParallelTableScanExec is a leaf but received {} inputs",
-                inputs.len(),
-            )));
+        // The two nodes this codec owns differ by arity: the scan is a leaf and
+        // the adaptive join has its hash join as the only child.
+        match inputs {
+            [] => {}
+            [join] => return AdaptiveHashJoinProto::decode_plan(buf, join),
+            _ => {
+                return Err(proto_error(format!(
+                    "LagoDB physical codec received {} inputs",
+                    inputs.len(),
+                )));
+            }
         }
         let proto = ParallelScanProto::decode(buf).map_err(|error| {
             proto_error(format!("failed to decode parallel table scan: {error}"))
         })?;
-        if proto.version != SOURCE_CODEC_VERSION {
-            return Err(proto_error(format!(
-                "unsupported parallel table scan codec version {}",
-                proto.version,
-            )));
-        }
-        let scan = usize::try_from(proto.scan)
-            .map(ScanId::from_index)
-            .map_err(|_| {
-                proto_error(format!(
-                    "parallel source id {} exceeds this platform",
-                    proto.scan
-                ))
-            })?;
+        // The u64 field carries a same-platform `usize` written by
+        // `try_encode`.
+        let scan = ScanId::from_index(proto.scan as usize);
         let schema = proto
             .schema
             .as_ref()
@@ -149,22 +175,21 @@ impl PhysicalExtensionCodec for LagoPhysicalCodec {
         buf: &mut Vec<u8>,
         _proto_converter: &dyn PhysicalProtoConverterExtension,
     ) -> Result<()> {
+        if let Some(join) = node.downcast_ref::<AdaptiveHashJoinExec>() {
+            return AdaptiveHashJoinProto::encode_plan(join, buf);
+        }
         let Some(scan) = node.downcast_ref::<ParallelTableScanExec>() else {
             return Err(DataFusionError::NotImplemented(format!(
                 "LagoDB physical codec does not encode {}",
                 node.name(),
             )));
         };
-        let scan_id = u64::try_from(scan.scan().index()).map_err(|_| {
-            DataFusionError::Internal("parallel source id exceeds u64".to_owned())
-        })?;
         let schema =
             protobuf::Schema::try_from(scan.schema().as_ref()).map_err(|error| {
                 proto_error(format!("failed to encode parallel scan schema: {error}"))
             })?;
         ParallelScanProto {
-            version: SOURCE_CODEC_VERSION,
-            scan: scan_id,
+            scan: scan.scan().index() as u64,
             schema: Some(schema),
             assignments: scan
                 .assignments()
@@ -212,22 +237,21 @@ impl PhysicalExtensionCodec for LagoPhysicalCodec {
     }
 
     fn try_decode_udaf(&self, name: &str, _buf: &[u8]) -> Result<Arc<AggregateUDF>> {
-        match name {
-            numeric_aggregate::SUM_NAME => Ok(numeric_aggregate::sum()),
-            numeric_aggregate::AVG_NAME => Ok(numeric_aggregate::avg()),
-            _ => Err(DataFusionError::NotImplemented(format!(
+        udaf_by_name(name).ok_or_else(|| {
+            DataFusionError::NotImplemented(format!(
                 "LagoDB UDAF {name:?} has no physical codec",
-            ))),
-        }
+            ))
+        })
     }
 
     fn try_encode_udaf(&self, node: &AggregateUDF, _buf: &mut Vec<u8>) -> Result<()> {
-        match node.name() {
-            numeric_aggregate::SUM_NAME | numeric_aggregate::AVG_NAME => Ok(()),
-            name => Err(DataFusionError::NotImplemented(format!(
-                "LagoDB UDAF codec does not encode {name}",
-            ))),
+        if udaf_by_name(node.name()).is_some() {
+            return Ok(());
         }
+        Err(DataFusionError::NotImplemented(format!(
+            "LagoDB UDAF codec does not encode {}",
+            node.name(),
+        )))
     }
 }
 
@@ -269,13 +293,9 @@ impl PhysicalExtensionCodec for DistributedCodecHostingLagoFunctions {
     }
 
     fn try_encode_udaf(&self, node: &AggregateUDF, _buf: &mut Vec<u8>) -> Result<()> {
-        if matches!(
-            node.name(),
-            numeric_aggregate::SUM_NAME | numeric_aggregate::AVG_NAME
-        ) {
+        if udaf_by_name(node.name()).is_some() {
             return Err(DataFusionError::NotImplemented(
-                "PostgreSQL NUMERIC aggregate is encoded by the LagoDB codec"
-                    .to_owned(),
+                "LagoDB aggregate is encoded by the LagoDB codec".to_owned(),
             ));
         }
         Ok(())

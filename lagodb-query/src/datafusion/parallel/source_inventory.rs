@@ -35,23 +35,17 @@ impl PreparedSourceInventory {
             .into_iter()
             .map(|source| {
                 let route = &routes[source.scan.index()];
-                let payload_offset = u64::try_from(byte_len).map_err(|_| {
-                    DataFusionError::Plan(
-                        "parallel source inventory exceeds the transport address space"
-                            .to_owned(),
-                    )
-                })?;
-                let payload_len = u64::try_from(source.payload.len()).map_err(|_| {
-                    DataFusionError::Plan(
-                        "parallel source payload exceeds the transport address space"
-                            .to_owned(),
-                    )
-                })?;
-                byte_len = byte_len.checked_add(source.payload.len()).ok_or_else(|| {
-                    DataFusionError::Plan(
-                        "parallel source inventory size overflowed usize".to_owned(),
-                    )
-                })?;
+                // `usize` is at most 64 bits on every Rust target, so widening
+                // to the transport's `u64` fields is lossless.
+                let payload_offset = byte_len as u64;
+                let payload_len = source.payload.len() as u64;
+                byte_len =
+                    byte_len.checked_add(source.payload.len()).ok_or_else(|| {
+                        DataFusionError::Plan(
+                            "parallel source inventory size overflowed usize"
+                                .to_owned(),
+                        )
+                    })?;
                 task_metrics.push((source.scan, source.task_metrics));
                 payloads.push(source.payload);
                 Ok(ParallelSource {
@@ -76,15 +70,6 @@ impl PreparedSourceInventory {
 
     pub(super) const fn byte_len(&self) -> usize {
         self.byte_len
-    }
-
-    pub(super) fn encoded_byte_len(&self) -> Result<u64> {
-        u64::try_from(self.byte_len).map_err(|_| {
-            DataFusionError::Plan(
-                "parallel source inventory exceeds the transport address space"
-                    .to_owned(),
-            )
-        })
     }
 
     /// Commit task-planning facts only after this inventory belongs to a live
@@ -124,53 +109,33 @@ pub(super) struct MappedSourceInventory<'a> {
 impl<'a> MappedSourceInventory<'a> {
     /// # Safety
     ///
-    /// `base` must name a live `mapping_len` byte DSM mapping. Its transport
-    /// prefix must occupy `transport_len` bytes, and the mapping must remain
-    /// attached for `'a`.
-    pub(super) unsafe fn try_new(
+    /// `base` must name the live `mapping_len` byte DSM mapping published by
+    /// the leader's activation, whose final `inventory_len` bytes hold the
+    /// inventory written by [`PreparedSourceInventory::write_to`], and the
+    /// mapping must remain attached for `'a`.
+    pub(super) unsafe fn new(
         base: NonNull<c_void>,
         mapping_len: usize,
-        transport_len: usize,
         inventory_len: usize,
-    ) -> Result<Self> {
-        let inventory_offset = mapping_len
-            .checked_sub(inventory_len)
-            .filter(|offset| *offset >= transport_len)
-            .ok_or_else(|| {
-                DataFusionError::Plan(
-                    "parallel source inventory lies outside its DSM mapping"
-                        .to_owned(),
-                )
-            })?;
+    ) -> Self {
+        // The leader activates the mapping with `transport_allocation +
+        // inventory_len` bytes and writes the inventory at
+        // `transport_allocation`. The actual transport prefix is sized for the
+        // attached width, which never exceeds the requested width, so this
+        // tail never overlaps it.
         let bytes = unsafe {
             core::slice::from_raw_parts(
-                base.as_ptr().cast::<u8>().add(inventory_offset),
+                base.as_ptr().cast::<u8>().add(mapping_len - inventory_len),
                 inventory_len,
             )
         };
-        Ok(Self { bytes })
+        Self { bytes }
     }
 
-    pub(super) fn payload(&self, source: &ParallelSource) -> Result<&'a [u8]> {
-        let offset = usize::try_from(source.payload_offset).map_err(|_| {
-            DataFusionError::Plan(
-                "parallel source offset exceeds this platform".to_owned(),
-            )
-        })?;
-        let len = usize::try_from(source.payload_len).map_err(|_| {
-            DataFusionError::Plan(
-                "parallel source length exceeds this platform".to_owned(),
-            )
-        })?;
-        let end = offset.checked_add(len).ok_or_else(|| {
-            DataFusionError::Plan(
-                "parallel source byte range overflowed usize".to_owned(),
-            )
-        })?;
-        self.bytes.get(offset..end).ok_or_else(|| {
-            DataFusionError::Plan(
-                "parallel source lies outside the shared inventory".to_owned(),
-            )
-        })
+    /// Borrow one provider payload. Descriptors come from the same leader
+    /// inventory, so every range lies inside the shared tail.
+    pub(super) fn payload(&self, source: &ParallelSource) -> &'a [u8] {
+        let offset = source.payload_offset as usize;
+        &self.bytes[offset..offset + source.payload_len as usize]
     }
 }

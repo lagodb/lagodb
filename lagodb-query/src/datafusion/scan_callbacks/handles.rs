@@ -5,7 +5,6 @@ mod stream;
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::fmt;
-use std::mem::size_of;
 use std::ptr::{self, NonNull};
 use std::sync::{Arc, Mutex};
 
@@ -29,8 +28,10 @@ impl StreamErrorSlot {
         Self(UnsafeCell::new(CallbackErrorReport::default()))
     }
 
-    pub(super) fn as_mut_ptr(&self) -> *mut CallbackErrorReport {
-        self.0.get()
+    pub(super) fn as_non_null(&self) -> NonNull<CallbackErrorReport> {
+        // `UnsafeCell` is `repr(transparent)` and permits mutation through
+        // this shared-borrow provenance.
+        NonNull::from(&self.0).cast()
     }
 
     fn is_set(&self) -> bool {
@@ -87,12 +88,6 @@ impl TableScanCallbacks {
             (self.bind_scan)(self.context, &request, &mut output, &mut error)
         };
         self.operation_result(status, &error, "table scan bind")?;
-        if output.struct_size != size_of::<BoundTableScanResult>() as u32 {
-            return Err(PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "table scan bind returned an incompatible result",
-            ));
-        }
         let handle = NonNull::new(output.bound).ok_or_else(|| {
             PgReportError::from_message(
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
@@ -145,10 +140,9 @@ impl NegotiatedTableScanPredicate {
         self.support
     }
 
-    pub(in crate::datafusion) fn as_ptr(&self) -> *const c_void {
+    pub(in crate::datafusion) fn handle(&self) -> NonNull<c_void> {
         self.handle
             .expect("negotiated table-scan predicate is open")
-            .as_ptr()
     }
 
     fn release(&mut self) -> Result<(), PgReportError> {
@@ -247,8 +241,8 @@ impl BoundTableScanHandle {
     pub(in crate::datafusion) fn plan_tasks(
         &self,
         projection: &[usize],
-        static_predicates: &[*const c_void],
-        fixed_predicate: *const c_void,
+        static_predicates: &[NonNull<c_void>],
+        fixed_predicate: Option<NonNull<c_void>>,
         request_exact_rows: bool,
     ) -> Result<(PlannedTableScanHandle, TableScanTaskMetrics), PgReportError> {
         let mut request = TableScanTaskPlanningRequest::new(
@@ -273,12 +267,6 @@ impl BoundTableScanHandle {
             &error,
             "table scan task planning",
         )?;
-        if output.struct_size != size_of::<PlannedTableScanTasks>() as u32 {
-            return Err(PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "table scan task planning returned an incompatible result",
-            ));
-        }
         let handle = NonNull::new(output.planned).ok_or_else(|| {
             PgReportError::from_message(
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
@@ -318,12 +306,6 @@ impl BoundTableScanHandle {
             &error,
             "table scan predicate negotiation",
         )?;
-        if output.struct_size != size_of::<TableScanPredicateResult>() as u32 {
-            return Err(PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                "table scan predicate negotiation returned an incompatible result",
-            ));
-        }
         let support = PredicateSupport::from_code(output.support);
         let handle = NonNull::new(output.predicate);
         match (support, handle) {

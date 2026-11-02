@@ -1,21 +1,20 @@
 //! Parallel catalog provider using the shared predicate-lowering contract.
 
 use std::fmt;
-use std::ptr;
 use std::sync::Arc;
 
 use arrow_schema::SchemaRef;
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
-use datafusion::common::stats::Precision;
-use datafusion::common::{DataFusionError, Result, Statistics};
+use datafusion::common::{DataFusionError, Result};
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion::physical_plan::ExecutionPlan;
-use lagodb_core::query_contract::{ScanCost, ScanId};
+use lagodb_core::query_contract::ScanId;
 use pgrx::pg_sys;
 
 use super::catalog::ParallelSourceCatalog;
 use super::scan_exec::ParallelTableScanExec;
+use crate::datafusion::scan_binding::AttnoPositions;
 use crate::datafusion::scan_callbacks::{
     BoundTableScanHandle, WorkerTableScanCallbacks,
 };
@@ -26,7 +25,6 @@ pub(in crate::datafusion) struct ParallelTableScanBinding {
     pub scan: ScanId,
     pub schema: SchemaRef,
     pub projected_attnos: Box<[pg_sys::AttrNumber]>,
-    pub cost: ScanCost,
     pub bound: Arc<BoundTableScanHandle>,
     pub worker: WorkerTableScanCallbacks,
 }
@@ -50,8 +48,7 @@ unsafe impl Sync for BackendParallelScan {}
 pub(in crate::datafusion) struct ParallelTableProvider {
     scan: ScanId,
     schema: SchemaRef,
-    positions_by_attno: Arc<[Option<usize>]>,
-    estimated_rows: usize,
+    positions_by_attno: AttnoPositions,
     maximum_batch_rows: u64,
     backend: BackendParallelScan,
     sources: Arc<ParallelSourceCatalog>,
@@ -67,7 +64,6 @@ impl ParallelTableProvider {
             scan,
             schema,
             projected_attnos,
-            cost,
             bound,
             worker,
         } = binding;
@@ -79,20 +75,10 @@ impl ParallelTableProvider {
                 projected_attnos.len(),
             )));
         }
-        let mut positions_by_attno = Vec::new();
-        for (position, attno) in projected_attnos.into_vec().into_iter().enumerate() {
-            debug_assert!(attno > 0, "query-plan validation rejects invalid attnos");
-            let index = (attno - 1) as usize;
-            if positions_by_attno.len() <= index {
-                positions_by_attno.resize(index + 1, None);
-            }
-            positions_by_attno[index] = Some(position);
-        }
         Ok(Self {
             scan,
             schema,
-            positions_by_attno: positions_by_attno.into(),
-            estimated_rows: cost.rows_read().min(usize::MAX as f64) as usize,
+            positions_by_attno: AttnoPositions::from_attnos(projected_attnos),
             maximum_batch_rows,
             backend: BackendParallelScan { bound, worker },
             sources,
@@ -103,11 +89,8 @@ impl ParallelTableProvider {
         &self,
         attno: pg_sys::AttrNumber,
     ) -> Option<&str> {
-        usize::try_from(attno)
-            .ok()
-            .and_then(|attno| attno.checked_sub(1))
-            .and_then(|index| self.positions_by_attno.get(index))
-            .and_then(|position| *position)
+        self.positions_by_attno
+            .position(attno)
             .map(|position| self.schema.field(position).name().as_str())
     }
 }
@@ -118,7 +101,6 @@ impl fmt::Debug for ParallelTableProvider {
             .debug_struct("ParallelTableProvider")
             .field("scan", &self.scan)
             .field("schema", &self.schema)
-            .field("estimated_rows", &self.estimated_rows)
             .field("maximum_batch_rows", &self.maximum_batch_rows)
             .finish_non_exhaustive()
     }
@@ -132,13 +114,6 @@ impl TableProvider for ParallelTableProvider {
 
     fn table_type(&self) -> TableType {
         TableType::Base
-    }
-
-    fn statistics(&self) -> Option<Statistics> {
-        Some(
-            Statistics::default()
-                .with_num_rows(Precision::Inexact(self.estimated_rows)),
-        )
     }
 
     fn supports_filters_pushdown(
@@ -189,7 +164,7 @@ impl TableProvider for ParallelTableProvider {
         let (planned, _) = self
             .backend
             .bound
-            .plan_tasks(&projection, &predicate_handles, ptr::null(), false)
+            .plan_tasks(&projection, &predicate_handles, None, false)
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
         let prepared = self.backend.worker.prepare(&self.backend.bound, &planned);
         let cleanup = planned.close();

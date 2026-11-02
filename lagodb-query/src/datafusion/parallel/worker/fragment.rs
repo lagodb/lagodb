@@ -181,12 +181,9 @@ impl WorkerPartitionSink {
                 proc_for_task(self.mesh.n_workers(), *consumer)
             }
         };
-        let partition = u32::try_from(partition).map_err(|_| {
-            DataFusionError::Plan(
-                "parallel partition exceeds the transport address space".to_owned(),
-            )
-        })?;
-        let key = ParallelDataStreamKey::new(self.stage.stage_id, task, partition);
+        // Same u32 narrowing as the fork's SHM worker sink for this key.
+        let key =
+            ParallelDataStreamKey::new(self.stage.stage_id, task, partition as u32);
         if destination == self.mesh.this_proc {
             return Ok(self.mesh.open_local_partition_sink(key));
         }

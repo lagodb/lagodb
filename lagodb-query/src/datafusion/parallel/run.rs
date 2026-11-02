@@ -163,9 +163,10 @@ impl ParallelRun {
             work_mem_bytes: limits.work_mem_bytes() as u64,
             maximum_batch_rows: limits.maximum_batch_rows() as u32,
             collect_metrics: execution_metrics.is_some(),
-            source_inventory_bytes: source_inventory.encoded_byte_len()?,
+            source_inventory_bytes: source_inventory.byte_len() as u64,
             debug_deadlock_detector: options.debug_deadlock_detector,
             hash_memory_bytes: limits.hash_memory_bytes() as u64,
+            spill_enabled: limits.spill_enabled(),
         }
         .encode_to_vec();
         let transport_allocation =

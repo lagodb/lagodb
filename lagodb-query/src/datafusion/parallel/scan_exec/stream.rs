@@ -12,6 +12,7 @@ use futures::Stream;
 
 use super::super::host::ParallelWorkerHost;
 use super::super::scan_metrics::ParallelScanMetrics;
+use crate::datafusion::error::QueryExecutionError;
 use crate::datafusion::scan_callbacks::WorkerProviderStreamReader;
 
 pub(super) struct ParallelTableScanStream {
@@ -41,8 +42,7 @@ impl ParallelTableScanStream {
     fn poll_cancellation(&mut self) -> Option<Poll<Option<Result<RecordBatch>>>> {
         if self.host.interrupt_pending() {
             self.finished = true;
-            let primary =
-                DataFusionError::Execution("parallel query interrupted".to_owned());
+            let primary = QueryExecutionError::interrupted();
             let error = match self.reader.close() {
                 Ok(()) => primary,
                 Err(cleanup) => primary.context(format!(

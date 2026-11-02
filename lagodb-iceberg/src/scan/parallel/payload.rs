@@ -2,7 +2,7 @@
 //!
 //! File-level data is stored once in the DSM-backed byte image, byte ranges are
 //! fixed-size records, and groups contain only range identifiers. Worker entry
-//! validates the section layout and decodes shared task metadata; file records
+//! decodes shared task metadata; file records
 //! become owned `FileScanTask`s only when that worker claims their group.
 
 use std::collections::HashMap;
@@ -138,12 +138,7 @@ impl WorkerSourcePayload {
             task_file_ids.push(file_id);
         }
         for range in grouped.ranges.iter_mut() {
-            range.file_id =
-                *task_file_ids.get(range.file_id as usize).ok_or_else(|| {
-                    ScanError::WorkerPayload(
-                        "grouping references a missing source task".to_owned(),
-                    )
-                })?;
+            range.file_id = task_file_ids[range.file_id as usize];
         }
         flat::FlatPayloadEncoder::encode(
             prefix,

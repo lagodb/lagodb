@@ -3,7 +3,7 @@
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use datafusion::common::{DataFusionError, Result};
+use datafusion::common::Result;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use datafusion_distributed::shm::proc_for_task;
 use datafusion_distributed::{NetworkBoundaryExt, NetworkCoalesceExec};
@@ -66,17 +66,12 @@ impl ParallelStageCatalog {
         if let Some(boundary) = plan.as_network_boundary() {
             let stage = boundary.input_stage();
             if let Some(producer) = stage.local_plan() {
-                let stage_id = u32::try_from(stage.num()).map_err(|_| {
-                    DataFusionError::Plan(format!(
-                        "parallel stage id {} exceeds the transport address space",
-                        stage.num(),
-                    ))
-                })?;
-                let task_count = u32::try_from(stage.task_count()).map_err(|_| {
-                    DataFusionError::Plan(format!(
-                        "parallel stage {stage_id} task count exceeds the transport address space",
-                    ))
-                })?;
+                // The SHM transport identifies stages, tasks and consumer tasks
+                // as u32; narrow exactly as the fork's `collect_stages` does so
+                // stream keys match its dispatch. Task counts are capped by the
+                // u32 worker count through `max_tasks_per_stage`.
+                let stage_id = stage.num() as u32;
+                let task_count = stage.task_count() as u32;
                 let routing = if !nested {
                     ParallelStageRouting::Leader
                 } else if plan.is::<NetworkCoalesceExec>() {
@@ -84,20 +79,17 @@ impl ParallelStageCatalog {
                 } else {
                     ParallelStageRouting::NestedPartitioned
                 };
-                let consumer_tasks = if routing
-                    == ParallelStageRouting::NestedPartitioned
-                {
-                    (0..producer.output_partitioning().partition_count())
-                        .map(|partition| {
-                            let task = boundary.route_partition(partition)?.consumer_task;
-                            u32::try_from(task).map_err(|_| DataFusionError::Plan(
-                                "parallel consumer task exceeds the transport address space".to_owned(),
-                            ))
-                        })
-                        .collect::<Result<Vec<_>>>()?
-                } else {
-                    Vec::new()
-                };
+                let consumer_tasks =
+                    if routing == ParallelStageRouting::NestedPartitioned {
+                        (0..producer.output_partitioning().partition_count())
+                            .map(|partition| {
+                                Ok(boundary.route_partition(partition)?.consumer_task
+                                    as u32)
+                            })
+                            .collect::<Result<Vec<_>>>()?
+                    } else {
+                        Vec::new()
+                    };
                 stages.push(ParallelStage {
                     stage_id,
                     task_count,

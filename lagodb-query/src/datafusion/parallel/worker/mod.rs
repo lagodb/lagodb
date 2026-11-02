@@ -78,46 +78,30 @@ pub unsafe fn run_parallel_worker<H: ParallelWorkerHost + 'static>(
                 "failed to decode parallel source inventory: {error}"
             ))
         })?;
-    let inventory_len =
-        usize::try_from(bootstrap.source_inventory_bytes).map_err(|_| {
-            DataFusionError::Plan(
-                "parallel source inventory exceeds this platform".to_owned(),
-            )
-        })?;
+    // The leader encodes every bootstrap size from a `usize` of this same
+    // build and platform, so narrowing back to `usize` is lossless.
+    let inventory_len = bootstrap.source_inventory_bytes as usize;
     // SAFETY: activation publishes the complete mapping length only after the
     // leader has initialized both the transport prefix and inventory tail.
     let source_inventory = unsafe {
-        MappedSourceInventory::try_new(
-            host.region(),
-            host.region_bytes(),
-            transport_bytes,
-            inventory_len,
-        )
-    }?;
-    let profile = ExecutionProfile::try_new(bootstrap.maximum_batch_rows as usize)
-        .map_err(|error| DataFusionError::Plan(error.to_string()))?;
-    let work_mem_bytes = usize::try_from(bootstrap.work_mem_bytes).map_err(|_| {
-        DataFusionError::Plan(
-            "parallel participant memory budget exceeds this platform".to_owned(),
-        )
-    })?;
-    let hash_memory_bytes =
-        usize::try_from(bootstrap.hash_memory_bytes).map_err(|_| {
-            DataFusionError::Plan(
-                "parallel hash memory budget exceeds this platform".to_owned(),
-            )
-        })?;
-    let limits =
-        QueryExecutionLimits::try_new(work_mem_bytes, hash_memory_bytes, profile)?;
+        MappedSourceInventory::new(host.region(), host.region_bytes(), inventory_len)
+    };
+    // The bootstrap carries the leader's validated `QueryExecutionLimits`.
+    let limits = QueryExecutionLimits::restore(
+        bootstrap.work_mem_bytes as usize,
+        bootstrap.hash_memory_bytes as usize,
+        ExecutionProfile::restore(bootstrap.maximum_batch_rows as usize),
+        bootstrap.spill_enabled,
+    );
     // The shared session is used for plan decoding. Each executable fragment
     // installs its own plan-sized RuntimeEnv below.
     let memory = limits.planning_runtime_env()?;
     let session = ParallelSession::build(
         memory.environment,
-        limits.maximum_batch_rows(),
+        limits,
         transport.mesh.n_workers() as usize,
         bootstrap.collect_metrics,
-        false,
+        None,
     )?;
     let session = ParallelSession::attach(session, Arc::clone(&transport.mesh));
     let runtime = Builder::new_current_thread()
@@ -145,7 +129,7 @@ pub unsafe fn run_parallel_worker<H: ParallelWorkerHost + 'static>(
                 .map_err(|error| DataFusionError::External(Box::new(error)))?;
             sources.push(Arc::new(
                 callbacks
-                    .decode(source_inventory.payload(&source)?)
+                    .decode(source_inventory.payload(&source))
                     .map_err(|error| DataFusionError::External(Box::new(error)))?,
             ));
         }

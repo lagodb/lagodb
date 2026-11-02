@@ -127,7 +127,7 @@ impl ParallelTableScanExec {
         })
     }
 
-    pub(super) const fn scan(&self) -> ScanId {
+    pub(in crate::datafusion) const fn scan(&self) -> ScanId {
         self.scan
     }
 

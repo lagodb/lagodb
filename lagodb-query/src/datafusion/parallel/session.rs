@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use datafusion::common::{DataFusionError, Result};
-use datafusion::execution::context::{SessionConfig, SessionContext};
+use datafusion::common::Result;
+use datafusion::execution::context::SessionContext;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion_distributed::shm::{
@@ -17,20 +17,37 @@ use datafusion_distributed::{
 use super::codec::{LagoPhysicalCodec, LagoStagePlanDispatch};
 use super::host::ParallelExecutionHost;
 use super::scan_exec::ParallelTableScanExec;
+use crate::datafusion::error::QueryExecutionError;
+use crate::datafusion::join_planning::QuerySessionRules;
+use crate::datafusion::memory::QueryExecutionLimits;
+use crate::plan::QueryFragment;
 
 pub(in crate::datafusion) struct ParallelSession;
 
 impl ParallelSession {
+    /// `fragment` is the query being planned; a worker only decodes finished
+    /// stage plans and passes `None`.
     pub(in crate::datafusion) fn build(
         environment: Arc<RuntimeEnv>,
-        maximum_batch_rows: usize,
+        limits: QueryExecutionLimits,
         worker_cap: usize,
         collect_metrics: bool,
-        has_having: bool,
+        fragment: Option<&QueryFragment>,
     ) -> Result<SessionContext> {
-        let config = SessionConfig::new()
-            .with_target_partitions(worker_cap)
-            .with_batch_size(maximum_batch_rows);
+        let mut config = limits.session_config(worker_cap);
+        // Zero thresholds keep JoinSelection from promoting a Partitioned hash
+        // join to CollectLeft. PostgreSQL's estimates reach it through
+        // `QuerySessionRules` to pick build sides, and a broadcast sized from
+        // them would have no way back from an estimate that proves too small.
+        //
+        // Join dynamic filters stay off here. Parallel scans accept none, and a
+        // Partitioned filter waits for a report from every partition, which
+        // `AdaptiveHashJoinExec` cannot give once a partition leaves the hash
+        // join.
+        let optimizer = &mut config.options_mut().optimizer;
+        optimizer.hash_join_single_partition_threshold = 0;
+        optimizer.hash_join_single_partition_threshold_rows = 0;
+        optimizer.enable_join_dynamic_filter_pushdown = false;
         let state = SessionStateBuilder::new()
             .with_config(config)
             .with_runtime_env(environment)
@@ -53,20 +70,10 @@ impl ParallelSession {
             .with_distributed_broadcast_joins(true)?
             .with_distributed_planner()
             .build();
-        let state = if has_having {
-            let rules = state
-                .optimizers()
-                .iter()
-                .filter(|rule| rule.name() != "push_down_filter")
-                .cloned()
-                .collect();
-            SessionStateBuilder::new_from_existing(state)
-                .with_optimizer_rules(rules)
-                .build()
-        } else {
-            state
-        };
-        Ok(SessionContext::new_with_state(state))
+        Ok(SessionContext::new_with_state(match fragment {
+            Some(fragment) => QuerySessionRules::new(fragment, limits).apply(state),
+            None => state,
+        }))
     }
 
     pub(in crate::datafusion) fn attach(
@@ -95,9 +102,7 @@ impl<H: ParallelExecutionHost + ?Sized> Interrupt for TransportHost<H> {
         // `ParallelMessagePending` is then serviced at the idle-runtime boundary in
         // `ParallelRun::next_batch`.
         if self.0.interrupt_pending() {
-            return Err(DataFusionError::Execution(
-                "parallel query interrupted".to_owned(),
-            ));
+            return Err(QueryExecutionError::interrupted());
         }
         Ok(())
     }

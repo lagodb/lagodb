@@ -8,7 +8,9 @@ use super::super::{
     TaskRange, WorkerFileRecord, WorkerTaskMetadata, WorkerTaskMetadataCodec, codec,
 };
 use super::{
-    DESCRIPTOR_BYTES, HEADER_BYTES, MAGIC, PayloadLayout, RANGE_BYTES, SPLIT,
+    DESCRIPTOR_BYTES, FILES_DIRECTORY, GROUP_COUNT, GROUPS_DIRECTORY, HEADER_BYTES,
+    METADATA_COUNT, METADATA_DIRECTORY, PayloadLayout, RANGE_BYTES, RANGES_DIRECTORY,
+    SCHEMA_DESCRIPTOR, SPLIT,
 };
 use crate::scan::ScanError;
 
@@ -59,18 +61,15 @@ impl FlatPayloadEncoder {
             base,
             ranges: ranges_offset,
         };
-        encoder.bytes[base..base + MAGIC.len()].copy_from_slice(MAGIC);
-        encoder.put_count(24, metadata.len(), "metadata")?;
-        encoder.put_count(28, files.len(), "file")?;
-        encoder.put_count(32, ranges.len(), "range")?;
-        encoder.put_count(36, groups.len(), "group")?;
-        encoder.put_u64(40, metadata_directory as u64);
-        encoder.put_u64(48, files_directory as u64);
-        encoder.put_u64(56, ranges_offset as u64);
-        encoder.put_u64(64, groups_directory as u64);
+        encoder.put_count(METADATA_COUNT, metadata.len(), "metadata")?;
+        encoder.put_count(GROUP_COUNT, groups.len(), "group")?;
+        encoder.put_u64(METADATA_DIRECTORY, metadata_directory as u64);
+        encoder.put_u64(FILES_DIRECTORY, files_directory as u64);
+        encoder.put_u64(RANGES_DIRECTORY, ranges_offset as u64);
+        encoder.put_u64(GROUPS_DIRECTORY, groups_directory as u64);
 
         let descriptor = encoder.append_binary(schema)?;
-        encoder.put_descriptor(8, descriptor);
+        encoder.put_descriptor(SCHEMA_DESCRIPTOR, descriptor);
         for (index, metadata) in metadata.iter().enumerate() {
             let descriptor = encoder.append_metadata(metadata)?;
             encoder.put_descriptor(

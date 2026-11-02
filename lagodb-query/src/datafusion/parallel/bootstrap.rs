@@ -22,6 +22,8 @@ pub(super) struct ParallelBootstrap {
     pub debug_deadlock_detector: bool,
     #[prost(uint64, tag = "8")]
     pub hash_memory_bytes: u64,
+    #[prost(bool, tag = "9")]
+    pub spill_enabled: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]

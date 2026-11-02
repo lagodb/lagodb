@@ -49,8 +49,7 @@ impl WorkerMemoryMetrics {
                 value: Some(proto::metric::Value::PeakMemoryUsage(
                     proto::PeakMemoryUsage {
                         name: FRAGMENT_PEAK_MEMORY.to_owned(),
-                        value: u64::try_from(self.fragment.peak_reserved())
-                            .expect("DataFusion memory usage fits in u64"),
+                        value: self.fragment.peak_reserved() as u64,
                     },
                 )),
             },
@@ -60,8 +59,7 @@ impl WorkerMemoryMetrics {
                 value: Some(proto::metric::Value::PeakMemoryUsage(
                     proto::PeakMemoryUsage {
                         name: PARTICIPANT_PEAK_MEMORY.to_owned(),
-                        value: u64::try_from(self.participant.peak_reserved())
-                            .expect("DataFusion memory usage fits in u64"),
+                        value: self.participant.peak_reserved() as u64,
                     },
                 )),
             },

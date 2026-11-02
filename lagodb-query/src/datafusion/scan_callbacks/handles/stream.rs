@@ -1,6 +1,7 @@
 //! Stream opening under the bound-scan lifecycle owner.
 
 use std::ffi::c_void;
+use std::ptr::NonNull;
 use std::sync::Arc;
 
 use arrow_array::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
@@ -18,9 +19,9 @@ impl BoundTableScanHandle {
     pub(in crate::datafusion) fn open_stream(
         &self,
         projection: &[usize],
-        static_predicates: &[*const c_void],
+        static_predicates: &[NonNull<c_void>],
         maximum_batch_rows: u64,
-        fixed_predicate: *const c_void,
+        fixed_predicate: Option<NonNull<c_void>>,
         evolving_predicate: *const TableScanRuntimePredicate,
     ) -> Result<(ProviderStreamReader, TableScanTaskMetrics), PgReportError> {
         let mut active_plan = self.active_plan.lock().map_err(|_| {
@@ -39,7 +40,7 @@ impl BoundTableScanHandle {
             self.plan_tasks(projection, static_predicates, fixed_predicate, false)?;
         let request = TableScanStreamRequest::new(
             maximum_batch_rows,
-            planned.stream_error.as_mut_ptr(),
+            planned.stream_error.as_non_null(),
             evolving_predicate,
         );
         let mut stream = FFI_ArrowArrayStream::empty();
