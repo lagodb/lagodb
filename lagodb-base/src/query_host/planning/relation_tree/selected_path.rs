@@ -174,22 +174,27 @@ impl RelationTreePlanner {
         }
         let path = unsafe { Self::selected_standard_join_path(relation) }?;
         let join_path = unsafe { &*path.cast::<pg_sys::JoinPath>() };
-        // RIGHT_ANTI is PostgreSQL's physical orientation alternative. The IR
-        // keeps one invariant: semi/anti always emit their left input.
-        let (left_path, right_path, join_type) =
-            if join_path.jointype == pg_sys::JoinType::JOIN_RIGHT_ANTI {
-                (
-                    join_path.innerjoinpath,
-                    join_path.outerjoinpath,
-                    JoinType::LeftAnti,
-                )
-            } else {
-                (
-                    join_path.outerjoinpath,
-                    join_path.innerjoinpath,
-                    Self::join_type(join_path.jointype)?,
-                )
-            };
+        // PostgreSQL's right-oriented physical alternatives are normalized by
+        // swapping inputs. The IR keeps one invariant: semi/anti always emit
+        // their left input.
+        let (left_path, right_path, join_type) = match join_path.jointype {
+            #[cfg(feature = "pg18")]
+            pg_sys::JoinType::JOIN_RIGHT_SEMI => (
+                join_path.innerjoinpath,
+                join_path.outerjoinpath,
+                JoinType::LeftSemi,
+            ),
+            pg_sys::JoinType::JOIN_RIGHT_ANTI => (
+                join_path.innerjoinpath,
+                join_path.outerjoinpath,
+                JoinType::LeftAnti,
+            ),
+            join_type => (
+                join_path.outerjoinpath,
+                join_path.innerjoinpath,
+                Self::join_type(join_type)?,
+            ),
+        };
         let left = unsafe {
             self.build_selected_subtree(root, (*left_path).parent, allow_mark)
         }?;
@@ -375,9 +380,8 @@ impl RelationTreePlanner {
             pg_sys::JoinType::JOIN_FULL => Some(JoinType::Full),
             pg_sys::JoinType::JOIN_SEMI => Some(JoinType::LeftSemi),
             pg_sys::JoinType::JOIN_ANTI => Some(JoinType::LeftAnti),
-            // RIGHT SEMI is introduced after the PG17 target used by LagoDB.
-            // When PG18 support is added it must be normalized by swapping
-            // inputs, just like the RIGHT_ANTI alternative above.
+            // Right-oriented physical alternatives are normalized before
+            // reaching this logical mapping.
             _ => None,
         }
     }
@@ -387,7 +391,8 @@ impl RelationTreePlanner {
     ) -> Option<*mut pg_sys::Path> {
         let paths = unsafe { (*relation).pathlist };
         let count = unsafe { pg_sys::list_length(paths) };
-        let mut selected = None;
+        let mut selected_candidate: *mut pg_sys::Path = ptr::null_mut();
+        let mut selected_join: *mut pg_sys::Path = ptr::null_mut();
         for index in 0..count {
             let candidate =
                 unsafe { pg_sys::list_nth(paths, index) }.cast::<pg_sys::Path>();
@@ -413,12 +418,20 @@ impl RelationTreePlanner {
             ) {
                 continue;
             }
-            let total_cost = unsafe { (*candidate).total_cost };
-            if selected.is_none_or(|(_, best_cost)| total_cost < best_cost) {
-                selected = Some((join, total_cost));
+            if selected_candidate.is_null()
+                || unsafe {
+                    pg_sys::compare_path_costs(
+                        candidate,
+                        selected_candidate,
+                        pg_sys::CostSelector::TOTAL_COST,
+                    ) < 0
+                }
+            {
+                selected_candidate = candidate;
+                selected_join = join;
             }
         }
-        selected.map(|(path, _)| path)
+        (!selected_join.is_null()).then_some(selected_join)
     }
 
     unsafe fn unwrap_path(mut path: *mut pg_sys::Path) -> Option<*mut pg_sys::Path> {

@@ -6,6 +6,7 @@ mod renderer;
 
 use std::ffi::CStr;
 use std::ptr;
+use std::time::Duration;
 
 use lagodb_query::ExecutionProfile;
 use lagodb_query::datafusion::{ExecutionMetricsSnapshot, QueryExecutionMode};
@@ -25,6 +26,8 @@ const PROP_MAX_WORKER_FRAGMENT_PEAK_MEMORY: &CStr =
     c"Maximum Worker Fragment Peak Memory Bytes";
 const PROP_MAX_WORKER_PARTICIPANT_PEAK_MEMORY: &CStr =
     c"Maximum Worker Participant Peak Memory Bytes";
+const PROP_ENGINE_SETUP_TIME: &CStr = c"Engine Setup Time";
+const PROP_PARALLEL_STARTUP_TIME: &CStr = c"Parallel Startup Time";
 const PROP_PARALLEL_WORKERS: &CStr = c"Maximum Launched Workers";
 const PROP_PARALLEL_RUNS: &CStr = c"Parallel Runs";
 const PROP_WORKER_METRIC_REPORTS: &CStr = c"Worker Metric Reports";
@@ -209,6 +212,22 @@ impl QueryOffloadExplain {
                     metrics.local_peak_memory_bytes,
                     explain,
                 );
+                // Like PostgreSQL's JIT timing, setup durations vary per run
+                // and appear only when EXPLAIN collects timing.
+                if options.timing {
+                    Self::emit_duration(
+                        PROP_ENGINE_SETUP_TIME,
+                        metrics.engine_setup_time,
+                        explain,
+                    );
+                    if !metrics.parallel_startup_time.is_zero() {
+                        Self::emit_duration(
+                            PROP_PARALLEL_STARTUP_TIME,
+                            metrics.parallel_startup_time,
+                            explain,
+                        );
+                    }
+                }
             }
             PgExplainTree::new(&logical_plan).emit_plan(explain)?;
             if let Some(physical_plan) = physical_plan {
@@ -217,5 +236,24 @@ impl QueryOffloadExplain {
             }
         }
         Ok(())
+    }
+
+    /// # Safety
+    ///
+    /// `explain` must be the live `ExplainState` of the current callback.
+    unsafe fn emit_duration(
+        label: &CStr,
+        duration: Duration,
+        explain: *mut pg_sys::ExplainState,
+    ) {
+        unsafe {
+            pg_sys::ExplainPropertyFloat(
+                label.as_ptr(),
+                c"ms".as_ptr(),
+                duration.as_secs_f64() * 1000.0,
+                3,
+                explain,
+            );
+        }
     }
 }

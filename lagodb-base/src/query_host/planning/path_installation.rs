@@ -4,10 +4,7 @@ use std::ffi::CStr;
 use std::{mem, ptr};
 
 use lagodb_core::diag::log_debug1;
-use lagodb_core::runtime_api::{
-    TABLE_SCAN_PROJECTION_COLUMNS, TABLE_SCAN_PROJECTION_ROW_COUNT,
-    TableScanPlanningRequest,
-};
+use lagodb_core::runtime_api::{AbiSlice, TableScanPlanningRequest};
 use lagodb_query::ExecutionProfile;
 use lagodb_query::datafusion::DataFusionPlanAdmission;
 use lagodb_query::plan::{
@@ -16,8 +13,12 @@ use lagodb_query::plan::{
 };
 use pgrx::pg_sys;
 
-use crate::gucs::{QueryOffloadMode, query_execution_profile, query_offload_mode};
+use crate::gucs::{
+    QueryOffloadMode, query_execution_profile, query_offload_cpu_cost_multiplier,
+    query_offload_mode, query_offload_setup_cost, query_offload_spill,
+};
 use crate::query_host::error::QueryHostError;
+use crate::query_host::execution::WorkMemBudget;
 
 use super::materialize;
 use super::planned_query::{PlannedQuery, PlannedScanInput};
@@ -104,26 +105,17 @@ impl QueryPathInstallation {
             && self.planned.query.fragment().postgres_fallback_count() != 0
     }
 
-    fn provider_request(&self, input: &PlannedScanInput) -> TableScanPlanningRequest {
+    fn provider_request<'a>(
+        &self,
+        input: &'a PlannedScanInput,
+    ) -> TableScanPlanningRequest<'a> {
         let predicate_expression = input
             .table_scan_filter
             .as_ref()
             .map_or(ptr::null_mut(), |filter| filter.source_expression());
         let check_as_user_id = unsafe { (*input.input_rel).userid };
-        let (projection_kind, projected_attnos) =
-            if input.projected_columns.is_empty() {
-                (TABLE_SCAN_PROJECTION_ROW_COUNT, ptr::null())
-            } else {
-                (
-                    TABLE_SCAN_PROJECTION_COLUMNS,
-                    input.projected_columns.as_ptr(),
-                )
-            };
         TableScanPlanningRequest {
-            struct_size: TableScanPlanningRequest::STRUCT_SIZE,
-            projection_kind,
-            projected_attnos,
-            projected_attno_count: input.projected_columns.len(),
+            projected_attnos: AbiSlice::new(&input.projected_columns),
             predicate_expression,
             check_as_user_id,
             scan_index: input.scan.index(),
@@ -152,12 +144,18 @@ impl QueryPathInstallation {
                     .iter()
                     .map(|scan| scan.input.estimated_rows)
                     .collect::<Vec<_>>();
+                let spill_sort_memory_bytes = query_offload_spill()
+                    .then(WorkMemBudget::bytes)
+                    .transpose()?;
+                let cpu_cost_multiplier = query_offload_cpu_cost_multiplier();
                 let context = CostingContext::try_new(
                     execution,
-                    unsafe { pg_sys::cpu_tuple_cost },
-                    unsafe { pg_sys::cpu_operator_cost },
+                    unsafe { pg_sys::cpu_tuple_cost } * cpu_cost_multiplier,
+                    unsafe { pg_sys::cpu_operator_cost } * cpu_cost_multiplier,
                     unsafe { pg_sys::seq_page_cost },
                     pg_sys::BLCKSZ as usize,
+                    query_offload_setup_cost(),
+                    spill_sort_memory_bytes,
                 )
                 .map_err(QueryHostError::invalid_plan)?;
                 QueryCostEstimator::new(
@@ -244,7 +242,7 @@ impl QueryPathInstallation {
                 self.output_rel,
                 self.path_target,
                 selected_plan,
-                cost,
+                materialize::PathRankingCost::new(cost),
                 self.output_rows,
                 self.parameter_info,
                 ptr::null_mut(),

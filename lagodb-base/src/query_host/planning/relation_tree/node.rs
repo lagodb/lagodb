@@ -133,6 +133,10 @@ impl RelationNode {
                 let columns = expressions.columns_for_scan(scan.scan);
                 let projected_columns =
                     columns.iter().map(|column| column.attno).collect();
+                // SAFETY: planning owns the live RelOptInfo, and PostgreSQL gives
+                // every base relation a reltarget in build_simple_rel.
+                let estimated_width =
+                    unsafe { (*(*scan.relation.input_rel).reltarget).width };
                 let (exact_filter, table_scan_filter) = match scan.filter {
                     Some(filter) => (
                         Some(filter.exact),
@@ -154,11 +158,16 @@ impl RelationNode {
                 if destination.replace(planned).is_some() {
                     return None;
                 }
-                Some(QueryNode::Scan(ScanNode::new(
-                    scan.scan,
-                    columns.into_boxed_slice(),
-                    exact_filter,
-                )))
+                Some(QueryNode::Scan(
+                    ScanNode::new(
+                        scan.scan,
+                        columns.into_boxed_slice(),
+                        exact_filter,
+                        scan.estimated_rows,
+                        estimated_width,
+                    )
+                    .ok()?,
+                ))
             }
             Self::Join {
                 join_type,

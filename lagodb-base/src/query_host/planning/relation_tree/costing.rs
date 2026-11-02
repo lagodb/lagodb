@@ -21,18 +21,7 @@ impl RelationTreePlanner {
     ) -> f64 {
         let left_relids = unsafe { left.add_relids(ptr::null_mut()) };
         let right_relids = unsafe { right.add_relids(ptr::null_mut()) };
-        // This is the field contract of PostgreSQL's init_dummy_sjinfo().
-        // Initialize it locally because that symbol is public only from PG17,
-        // while LagoDB also builds against PG16.
-        let mut join_info = pg_sys::SpecialJoinInfo {
-            type_: pg_sys::NodeTag::T_SpecialJoinInfo,
-            min_lefthand: left_relids,
-            min_righthand: right_relids,
-            syn_lefthand: left_relids,
-            syn_righthand: right_relids,
-            jointype: pg_sys::JoinType::JOIN_INNER,
-            ..Default::default()
-        };
+        let mut join_info = Self::dummy_join_info(left_relids, right_relids);
         let selectivity = restrictions.iter().fold(1.0, |value, restriction| {
             value
                 * unsafe {
@@ -55,6 +44,40 @@ impl RelationTreePlanner {
             pg_sys::bms_free(right_relids);
         }
         rows
+    }
+
+    /// Build the placeholder inner-join descriptor selectivity estimation
+    /// expects. PostgreSQL 16 keeps `init_dummy_sjinfo` private; the zeroed
+    /// remainder matches what it assigns.
+    #[cfg(feature = "pg16")]
+    fn dummy_join_info(
+        left_relids: pg_sys::Relids,
+        right_relids: pg_sys::Relids,
+    ) -> pg_sys::SpecialJoinInfo {
+        pg_sys::SpecialJoinInfo {
+            type_: pg_sys::NodeTag::T_SpecialJoinInfo,
+            min_lefthand: left_relids,
+            min_righthand: right_relids,
+            syn_lefthand: left_relids,
+            syn_righthand: right_relids,
+            jointype: pg_sys::JoinType::JOIN_INNER,
+            ..Default::default()
+        }
+    }
+
+    /// Build the placeholder inner-join descriptor selectivity estimation
+    /// expects.
+    #[cfg(any(feature = "pg17", feature = "pg18"))]
+    fn dummy_join_info(
+        left_relids: pg_sys::Relids,
+        right_relids: pg_sys::Relids,
+    ) -> pg_sys::SpecialJoinInfo {
+        let mut join_info = pg_sys::SpecialJoinInfo::default();
+        // SAFETY: PostgreSQL only records the relid pointers it receives here.
+        unsafe {
+            pg_sys::init_dummy_sjinfo(&mut join_info, left_relids, right_relids);
+        }
+        join_info
     }
 
     pub(super) fn pre_filter_rows(

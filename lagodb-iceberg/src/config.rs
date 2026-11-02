@@ -12,11 +12,23 @@ static MUTATION_BUFFER_FLUSH_MB: GucSetting<i32> = GucSetting::<i32>::new(64);
 /// model assumes will be read.
 ///
 /// At path stage both the managed-table and FDW adapters estimate physical
-/// scan volume from the selectivity of costed-pruning predicates. PostgreSQL
+/// scan volume from the costed-pruning predicates (see
+/// [`crate::scan::ScanVolume`]). PostgreSQL
 /// selectivity can become implausibly small when statistics are absent or
 /// weak, so the floor prevents those estimates from making an Iceberg scan
 /// look almost free. It is a costing guard, not an output-row correction.
 static SCAN_MIN_FRACTION: GucSetting<f64> = GucSetting::<f64>::new(0.02);
+
+/// Multiple of PostgreSQL's CPU unit prices charged for each row the Iceberg
+/// reader decodes and filters before it returns rows to PostgreSQL.
+///
+/// Measured on PostgreSQL 18 against query offload: selective scans of 1-4
+/// million rows ran 15-30% slower through this reader than through the
+/// offload engine. Of 0.1, 0.3 and 1.0, 0.3 matched the faster path on the
+/// most evaluated points in 6 of 8 combinations of offload setup cost
+/// (20-90) and CPU multiplier (0.05-0.1), and on at most 3 fewer in the
+/// others; at the offload defaults it matched 11 more points than 0.1.
+static SCAN_CPU_COST_MULTIPLIER: GucSetting<f64> = GucSetting::<f64>::new(0.3);
 
 pub(crate) fn init() {
     GucRegistry::define_int_guc(
@@ -32,10 +44,20 @@ pub(crate) fn init() {
     GucRegistry::define_float_guc(
         c"lagodb_iceberg.scan_min_fraction",
         c"Floor on the estimated fraction read by Iceberg scan cost models",
-        c"The managed-table and foreign-table path cost models multiply their relation baseline by the selectivity of costed-pruning predicates. This GUC clamps that fraction from below so weak or absent PostgreSQL statistics cannot make a scan look almost free. Raise it for more conservative costing; lower it toward 0.0 to trust raw selectivity.",
+        c"The managed-table and foreign-table path cost models multiply their relation baseline by the share costed-pruning predicates leave to scan. This GUC clamps that fraction from below so weak or absent PostgreSQL statistics cannot make a scan look almost free. Raise it for more conservative costing; lower it toward 0.0 to trust raw selectivity.",
         &SCAN_MIN_FRACTION,
         0.0,
         1.0,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_float_guc(
+        c"lagodb_iceberg.scan_cpu_cost_multiplier",
+        c"Multiple of cpu_tuple_cost and cpu_operator_cost charged per row the Iceberg reader reads",
+        c"Managed-table and foreign-table scan paths charge each row the reader decodes, and the pushed filters it evaluates, at this multiple of the session's PostgreSQL CPU costs; rows returned to PostgreSQL keep the full cpu_tuple_cost.",
+        &SCAN_CPU_COST_MULTIPLIER,
+        0.0,
+        1_000.0,
         GucContext::Userset,
         GucFlags::default(),
     );
@@ -46,44 +68,12 @@ pub(crate) fn mutation_buffer_flush_bytes() -> usize {
     MUTATION_BUFFER_FLUSH_MB.get() as usize * 1024 * 1024
 }
 
-/// Clamp a costed-pruning selectivity into the physical scan fraction shared
-/// by the managed-table and FDW cost models.
-///
-/// `selectivity` is expected in `[0.0, 1.0]`; the result is always in that
-/// range and is floored by `lagodb_iceberg.scan_min_fraction`.
-pub(crate) fn scan_fraction(selectivity: f64) -> f64 {
-    clamp_scan_fraction(selectivity, SCAN_MIN_FRACTION.get())
+/// `lagodb_iceberg.scan_min_fraction`.
+pub(crate) fn scan_min_fraction() -> f64 {
+    SCAN_MIN_FRACTION.get()
 }
 
-fn clamp_scan_fraction(selectivity: f64, min_fraction: f64) -> f64 {
-    let selectivity = selectivity.clamp(0.0, 1.0);
-    let min_fraction = min_fraction.clamp(0.0, 1.0);
-    selectivity.clamp(min_fraction, 1.0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::clamp_scan_fraction;
-
-    #[test]
-    fn selectivity_passes_through_above_floor() {
-        assert!((clamp_scan_fraction(0.4, 0.02) - 0.4).abs() < 1e-9);
-    }
-
-    #[test]
-    fn floor_clamps_tiny_selectivity() {
-        assert!((clamp_scan_fraction(1e-7, 0.02) - 0.02).abs() < 1e-9);
-    }
-
-    #[test]
-    fn zero_floor_trusts_raw_selectivity() {
-        assert!((clamp_scan_fraction(1e-7, 0.0) - 1e-7).abs() < 1e-12);
-    }
-
-    #[test]
-    fn out_of_range_inputs_are_clamped() {
-        assert!((clamp_scan_fraction(2.0, 0.02) - 1.0).abs() < 1e-9);
-        assert!(clamp_scan_fraction(-1.0, 0.02) >= 0.0);
-        assert!(clamp_scan_fraction(0.5, 2.0) <= 1.0);
-    }
+/// `lagodb_iceberg.scan_cpu_cost_multiplier`.
+pub(crate) fn scan_cpu_cost_multiplier() -> f64 {
+    SCAN_CPU_COST_MULTIPLIER.get()
 }

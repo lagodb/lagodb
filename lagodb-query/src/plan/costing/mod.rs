@@ -1,5 +1,6 @@
 //! Central PostgreSQL-scaled cost estimation for the executable operator tree.
 
+mod hash_build;
 mod join;
 mod limit;
 mod scan_costs;
@@ -7,6 +8,7 @@ mod scan_costs;
 pub use scan_costs::ScanCostTable;
 
 use lagodb_core::query_contract::ScanId;
+use pgrx::pg_sys;
 
 use crate::ExecutionProfile;
 
@@ -14,12 +16,9 @@ use super::ir::{
     AggregateNode, DistinctNode, FilterNode, JoinNode, LimitNode, ProjectNode,
     QueryFragment, QueryNode, ScanNode, SortNode,
 };
+use hash_build::HashBuildEstimate;
 use join::JoinCostStrategy;
 use limit::LimitCostStrategy;
-
-// Charge a fixed PostgreSQL startup-cost unit for constructing the DataFusion
-// execution state. Operator work remains estimated separately.
-const ENGINE_SETUP_COST: f64 = 10.0;
 
 /// PostgreSQL `Cost` pair for one complete offload path or operator subtree.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -74,15 +73,27 @@ pub struct CostingContext {
     sequential_page_cost: f64,
     block_size: usize,
     engine_setup_cost: f64,
+    spill_sort_memory_bytes: Option<usize>,
 }
 
 impl CostingContext {
+    /// `cpu_tuple_cost` and `cpu_operator_cost` are the engine's own unit
+    /// prices: the host scales PostgreSQL's by a measured multiplier, because
+    /// vectorized operators cost far less per row than PostgreSQL's. Page I/O
+    /// keeps PostgreSQL's price. `engine_setup_cost` is charged once to the
+    /// startup of every offload path for constructing the DataFusion execution
+    /// state.
+    ///
+    /// `spill_sort_memory_bytes` is the memory of one sort when a hash join can
+    /// continue as a sort-merge join, `None` when it cannot.
     pub fn try_new(
         execution: ExecutionProfile,
         cpu_tuple_cost: f64,
         cpu_operator_cost: f64,
         sequential_page_cost: f64,
         block_size: usize,
+        engine_setup_cost: f64,
+        spill_sort_memory_bytes: Option<usize>,
     ) -> Result<Self, QueryCostError> {
         Self::validate_component("cpu_tuple_cost", cpu_tuple_cost)?;
         Self::validate_component("cpu_operator_cost", cpu_operator_cost)?;
@@ -90,7 +101,6 @@ impl CostingContext {
         if block_size == 0 {
             return Err(QueryCostError::InvalidBlockSize);
         }
-        let engine_setup_cost = ENGINE_SETUP_COST;
         Self::validate_component("engine_setup_cost", engine_setup_cost)?;
         Ok(Self {
             execution,
@@ -99,6 +109,7 @@ impl CostingContext {
             sequential_page_cost,
             block_size,
             engine_setup_cost,
+            spill_sort_memory_bytes,
         })
     }
 
@@ -124,6 +135,49 @@ impl CostingContext {
     fn expression_cost(self, rows: f64, units: usize) -> f64 {
         rows * units as f64 * self.cpu_operator_cost
     }
+
+    /// Comparison work of sorting `rows` on `keys` key units.
+    fn sort_cost(self, rows: f64, keys: usize) -> f64 {
+        if rows <= 1.0 {
+            0.0
+        } else {
+            self.expression_cost(rows * rows.log2(), keys)
+        }
+    }
+
+    /// A full sort of `input` that spills once it outgrows `sort_memory_bytes`.
+    /// A spilled sort follows `cost_tuplesort`'s merge passes: runs of
+    /// `sort_memory_bytes` merge `tuplesort_merge_order` at a time, and each
+    /// pass writes and rereads the input. Execution bounds DataFusion's spill
+    /// merges by the same order.
+    ///
+    /// DataFusion spills when the memory pool refuses a reservation, so
+    /// `sort_memory_bytes` only approximates that point. It is close for one
+    /// partition, and an input split across partitions spills later.
+    fn spillable_sort_cost(
+        self,
+        input: PlanEstimate,
+        keys: usize,
+        sort_memory_bytes: usize,
+    ) -> f64 {
+        let comparisons = self.sort_cost(input.rows, keys);
+        let bytes = input.byte_size();
+        if bytes <= sort_memory_bytes as f64 {
+            return comparisons;
+        }
+        let runs = bytes / sort_memory_bytes as f64;
+        // SAFETY: a pure calculation over its argument.
+        let merge_order =
+            unsafe { pg_sys::tuplesort_merge_order(sort_memory_bytes as i64) };
+        let merge_order = f64::from(merge_order);
+        let passes = if runs > merge_order {
+            (runs.ln() / merge_order.ln()).ceil()
+        } else {
+            1.0
+        };
+        let pages = bytes / self.block_size as f64;
+        comparisons + 2.0 * pages * passes * self.sequential_page_cost
+    }
 }
 
 /// Estimated cardinality and cumulative cost of one operator subtree.
@@ -131,6 +185,7 @@ impl CostingContext {
 pub struct PlanEstimate {
     rows: f64,
     batches: f64,
+    width: i32,
     cost: PlanCost,
 }
 
@@ -138,6 +193,7 @@ impl PlanEstimate {
     fn try_new(
         rows: f64,
         batches: f64,
+        width: i32,
         cost: PlanCost,
     ) -> Result<Self, QueryCostError> {
         for (field, value) in [("rows", rows), ("batches", batches)] {
@@ -148,8 +204,14 @@ impl PlanEstimate {
         Ok(Self {
             rows,
             batches,
+            width,
             cost,
         })
+    }
+
+    /// Estimated output size, without PostgreSQL's per-tuple overhead.
+    fn byte_size(self) -> f64 {
+        self.rows * f64::from(self.width)
     }
 
     #[inline]
@@ -200,7 +262,7 @@ impl<'a> QueryCostEstimator<'a> {
             estimate.cost.startup + self.context.engine_setup_cost,
             estimate.cost.total + self.context.engine_setup_cost,
         )?;
-        PlanEstimate::try_new(estimate.rows, estimate.batches, cost)
+        PlanEstimate::try_new(estimate.rows, estimate.batches, estimate.width, cost)
     }
 
     fn estimate_node(
@@ -244,6 +306,7 @@ impl<'a> QueryCostEstimator<'a> {
         PlanEstimate::try_new(
             rows,
             self.context.batches(rows),
+            scan.estimated_width(),
             PlanCost::try_new(
                 scan_cost.startup_cost(),
                 scan_cost.startup_cost() + total,
@@ -291,18 +354,14 @@ impl<'a> QueryCostEstimator<'a> {
             .iter()
             .filter(|call| !call.order_by().is_empty())
             .count();
-        let ordered_cost = if input.rows <= 1.0 {
-            0.0
-        } else {
-            self.context
-                .expression_cost(input.rows * input.rows.log2(), ordered_states)
-        };
+        let ordered_cost = self.context.sort_cost(input.rows, ordered_states);
         let rows = aggregate.estimated_rows();
         let startup = input.cost.total + aggregate_cost + ordered_cost;
         let total = startup + rows * self.context.cpu_tuple_cost;
         PlanEstimate::try_new(
             rows,
             self.context.batches(rows),
+            input.width,
             PlanCost::try_new(startup, total)?,
         )
     }
@@ -324,6 +383,7 @@ impl<'a> QueryCostEstimator<'a> {
         PlanEstimate::try_new(
             rows,
             self.context.batches(rows),
+            input.width,
             PlanCost::try_new(startup, total)?,
         )
     }
@@ -341,6 +401,7 @@ impl<'a> QueryCostEstimator<'a> {
         PlanEstimate::try_new(
             rows,
             self.context.batches(rows),
+            input.width,
             PlanCost::try_new(input.cost.startup, total)?,
         )
     }
@@ -361,23 +422,20 @@ impl<'a> QueryCostEstimator<'a> {
         PlanEstimate::try_new(
             input.rows,
             input.batches,
+            input.width,
             PlanCost::try_new(input.cost.startup, total)?,
         )
     }
 
     fn estimate_sort(&self, sort: &SortNode) -> Result<PlanEstimate, QueryCostError> {
         let input = self.estimate_node(sort.input())?;
-        let comparisons = if input.rows <= 1.0 {
-            0.0
-        } else {
-            input.rows * input.rows.log2()
-        };
-        let sort_cost = self.context.expression_cost(comparisons, sort.keys().len());
+        let sort_cost = self.context.sort_cost(input.rows, sort.keys().len());
         let startup = input.cost.total + sort_cost;
         let total = startup + input.rows * self.context.cpu_tuple_cost;
         PlanEstimate::try_new(
             input.rows,
             input.batches,
+            input.width,
             PlanCost::try_new(startup, total)?,
         )
     }

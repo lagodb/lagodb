@@ -50,6 +50,7 @@ impl<'limit> LimitCostStrategy<'limit> {
         PlanEstimate::try_new(
             rows,
             self.context.batches(rows),
+            self.input.width,
             PlanCost::try_new(startup, total)?,
         )
     }

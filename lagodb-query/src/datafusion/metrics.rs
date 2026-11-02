@@ -1,6 +1,7 @@
 //! Statement-cumulative metrics collected at scan batch boundaries.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use arrow_array::RecordBatch;
 use lagodb_core::query_contract::ScanId;
@@ -16,9 +17,24 @@ struct ScanExecutionMetrics {
     planned_bytes: AtomicU64,
 }
 
+/// Engine work that precedes the first row and is not attributed to any
+/// physical operator.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum SetupPhase {
+    /// Runtime, session and physical-plan construction: the first prepare, a
+    /// rescan rebuild, or the serial plan prepared after a parallel launch
+    /// returned no workers.
+    Engine,
+    /// One complete parallel launch attempt, including DSM and worker start,
+    /// whether or not it attached any worker.
+    ParallelStartup,
+}
+
 #[derive(Debug)]
 pub(super) struct ExecutionMetrics {
     scans: Box<[ScanExecutionMetrics]>,
+    engine_setup_nanos: AtomicU64,
+    parallel_startup_nanos: AtomicU64,
     serial_runs: AtomicU64,
     parallel_runs: AtomicU64,
     maximum_workers: AtomicU64,
@@ -35,6 +51,8 @@ impl ExecutionMetrics {
                 .map(|_| ScanExecutionMetrics::default())
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
+            engine_setup_nanos: AtomicU64::new(0),
+            parallel_startup_nanos: AtomicU64::new(0),
             serial_runs: AtomicU64::new(0),
             parallel_runs: AtomicU64::new(0),
             maximum_workers: AtomicU64::new(0),
@@ -43,6 +61,28 @@ impl ExecutionMetrics {
             maximum_worker_fragment_peak_memory_bytes: AtomicU64::new(0),
             maximum_worker_participant_peak_memory_bytes: AtomicU64::new(0),
         }
+    }
+
+    /// Run `work`, adding its elapsed time to `phase` when metrics are
+    /// collected. Without metrics no clock is read.
+    pub(super) fn time_setup<T>(
+        metrics: Option<&Self>,
+        phase: SetupPhase,
+        work: impl FnOnce() -> T,
+    ) -> T {
+        let Some(metrics) = metrics else {
+            return work();
+        };
+        let started = Instant::now();
+        let result = work();
+        let elapsed = u64::try_from(started.elapsed().as_nanos())
+            .expect("setup duration fits in u64 nanoseconds");
+        let counter = match phase {
+            SetupPhase::Engine => &metrics.engine_setup_nanos,
+            SetupPhase::ParallelStartup => &metrics.parallel_startup_nanos,
+        };
+        counter.fetch_add(elapsed, Ordering::Relaxed);
+        result
     }
 
     pub(super) fn record_serial_run(&self) {
@@ -149,6 +189,12 @@ impl ExecutionMetrics {
             scans,
             local_peak_memory_bytes: u64::try_from(local_peak_memory_bytes)
                 .expect("DataFusion memory usage fits in u64"),
+            engine_setup_time: Duration::from_nanos(
+                self.engine_setup_nanos.load(Ordering::Relaxed),
+            ),
+            parallel_startup_time: Duration::from_nanos(
+                self.parallel_startup_nanos.load(Ordering::Relaxed),
+            ),
             serial_runs: self.serial_runs.load(Ordering::Relaxed),
             parallel_runs: self.parallel_runs.load(Ordering::Relaxed),
             maximum_workers: self.maximum_workers.load(Ordering::Relaxed),
@@ -182,6 +228,10 @@ pub struct ExecutionMetricsSnapshot {
     /// Peak memory reserved by execution pools owned by the backend running the
     /// CustomScan, across both serial and parallel-coordinator executions.
     pub local_peak_memory_bytes: u64,
+    /// Cumulative engine setup across the statement's prepares and rebuilds.
+    pub engine_setup_time: Duration,
+    /// Cumulative time spent in parallel launch attempts.
+    pub parallel_startup_time: Duration,
     pub serial_runs: u64,
     pub parallel_runs: u64,
     pub maximum_workers: u64,

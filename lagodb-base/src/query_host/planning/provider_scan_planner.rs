@@ -1,11 +1,11 @@
 //! Planning adapter for one storage-routed provider table scan.
 
 use std::ffi::CStr;
-use std::mem::size_of;
 use std::sync::Arc;
 
 use arrow_schema::ffi::FFI_ArrowSchema;
 use arrow_schema::{Schema, SchemaRef};
+use lagodb_core::catalog::RelationCatalogEntry;
 use lagodb_core::diag::PgReportError;
 use lagodb_core::query_contract::{ScanCost, TableScanRoute};
 use lagodb_core::runtime_api::{
@@ -33,7 +33,7 @@ pub(super) struct ProviderScanPlanner;
 
 impl ProviderScanPlanner {
     pub(super) fn plan(
-        request: TableScanPlanningRequest,
+        request: TableScanPlanningRequest<'_>,
     ) -> Result<Option<PlannedScanRecord>, PgReportError> {
         let registered = Self::resolve_provider(&request)?;
         let Some(registered) = registered else {
@@ -56,7 +56,8 @@ impl ProviderScanPlanner {
                         ),
                     )
                 })?;
-                if schema.fields().len() != request.projected_attno_count {
+                if schema.fields().len() != request.projected_attnos.as_slice().len()
+                {
                     return Err(PgReportError::from_message(
                         PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
                         "table scan schema does not match its requested projection",
@@ -86,12 +87,13 @@ impl ProviderScanPlanner {
     }
 
     fn resolve_provider(
-        request: &TableScanPlanningRequest,
+        request: &TableScanPlanningRequest<'_>,
     ) -> Result<Option<ResolvedTableScan>, PgReportError> {
         let rte = unsafe { &*request.range_table_entry };
         match rte.relkind as u8 {
             pg_sys::RELKIND_RELATION => {
-                let access_method_oid = unsafe { pg_sys::get_rel_relam(rte.relid) };
+                let access_method_oid =
+                    RelationCatalogEntry::access_method_of_locked(rte.relid);
                 // PostgreSQL returns a palloc-owned copy of the AM name.
                 let access_method_name =
                     unsafe { pg_sys::get_am_name(access_method_oid) };
@@ -117,16 +119,13 @@ impl ProviderScanPlanner {
 
     fn decode_planned(
         route: TableScanRoute<'static>,
-        request: &TableScanPlanningRequest,
+        request: &TableScanPlanningRequest<'_>,
         output: PlannedTableScanResult,
         schema: SchemaRef,
     ) -> Result<PlannedScanRecord, PgReportError> {
-        let expected_size = u32::try_from(size_of::<PlannedTableScanResult>())
-            .expect("planned table-scan result size exceeds u32");
         // SAFETY: each node pointer is checked for null before its tag is read;
         // provider output remains live in the planner context.
-        if output.struct_size != expected_size
-            || output.plan_data.is_null()
+        if output.plan_data.is_null()
             || unsafe { (*output.plan_data).type_ } != pg_sys::NodeTag::T_List
             || (request.predicate_expression.is_null()
                 && !output.pruning_expression.is_null())

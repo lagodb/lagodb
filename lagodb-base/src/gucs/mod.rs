@@ -1,13 +1,19 @@
 use std::time::Duration;
 
-use lagodb_query::{
-    DEFAULT_MAXIMUM_BATCH_ROWS, ExecutionProfile, MAXIMUM_BATCH_ROWS_LIMIT,
-};
 use lagodb_storage::{
     DEFAULT_CONNECTION_DRAIN_TIMEOUT_MS, LIST_CURSOR_IDLE_TTL_MS,
     MAX_BULK_DELETE_OBJECT_KEYS, MAX_LIST_PAGE_SIZE,
 };
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting, PostgresGucEnum};
+
+mod query_offload;
+
+pub(crate) use query_offload::{
+    QueryOffloadMode, query_execution_profile, query_offload_cpu_cost_multiplier,
+    query_offload_mode, query_offload_parallel_debug,
+    query_offload_parallel_min_scan_rows, query_offload_parallel_queue_size,
+    query_offload_setup_cost, query_offload_spill,
+};
 
 static SUPERVISOR_NAPTIME_MS: GucSetting<i32> = GucSetting::<i32>::new(1_000);
 static RECONCILE_INTERVAL_MS: GucSetting<i32> = GucSetting::<i32>::new(30_000);
@@ -33,26 +39,9 @@ static VACUUM_MAX_GROUP_OBJECTS: GucSetting<i32> = GucSetting::<i32>::new(10_000
 static VACUUM_MAX_GROUP_MB: GucSetting<i32> = GucSetting::<i32>::new(4_096);
 static CUSTOMSCAN_MODE: GucSetting<CustomScanMode> =
     GucSetting::<CustomScanMode>::new(CustomScanMode::Auto);
-static QUERY_OFFLOAD_MODE: GucSetting<QueryOffloadMode> =
-    GucSetting::<QueryOffloadMode>::new(QueryOffloadMode::Off);
-static QUERY_BATCH_ROWS: GucSetting<i32> =
-    GucSetting::<i32>::new(DEFAULT_MAXIMUM_BATCH_ROWS);
-static QUERY_OFFLOAD_PARALLEL_MIN_SCAN_ROWS: GucSetting<i32> =
-    GucSetting::<i32>::new(500_000);
-static QUERY_OFFLOAD_PARALLEL_QUEUE_SIZE: GucSetting<i32> =
-    GucSetting::<i32>::new(8 * 1_024 * 1_024);
-static QUERY_OFFLOAD_PARALLEL_DEBUG: GucSetting<bool> =
-    GucSetting::<bool>::new(false);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PostgresGucEnum)]
 enum CustomScanMode {
-    Off,
-    Auto,
-    Force,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PostgresGucEnum)]
-pub(crate) enum QueryOffloadMode {
     Off,
     Auto,
     Force,
@@ -64,30 +53,6 @@ pub(crate) fn customscan_mode_code() -> u32 {
         CustomScanMode::Auto => 1,
         CustomScanMode::Force => 2,
     }
-}
-
-pub(crate) fn query_offload_mode() -> QueryOffloadMode {
-    QUERY_OFFLOAD_MODE.get()
-}
-
-pub(crate) fn query_execution_profile() -> ExecutionProfile {
-    let maximum_batch_rows = usize::try_from(QUERY_BATCH_ROWS.get())
-        .expect("query_batch_rows GUC enforces a positive i32 value");
-    ExecutionProfile::try_new(maximum_batch_rows)
-        .expect("query_batch_rows GUC range matches ExecutionProfile")
-}
-
-pub(crate) fn query_offload_parallel_min_scan_rows() -> f64 {
-    f64::from(QUERY_OFFLOAD_PARALLEL_MIN_SCAN_ROWS.get())
-}
-
-pub(crate) fn query_offload_parallel_queue_size() -> usize {
-    usize::try_from(QUERY_OFFLOAD_PARALLEL_QUEUE_SIZE.get())
-        .expect("query_offload_parallel_queue_size GUC enforces a positive i32 value")
-}
-
-pub(crate) fn query_offload_parallel_debug() -> bool {
-    QUERY_OFFLOAD_PARALLEL_DEBUG.get()
 }
 
 pub(crate) fn maintenance_config()
@@ -166,57 +131,14 @@ fn init_shared_framework_gucs() {
     GucRegistry::define_enum_guc(
         c"lagodb.customscan_mode",
         c"Path-emission mode for the LagoDB CustomScan framework",
-        c"off disables paths, auto uses cost, and force biases legal paths for tests.",
+        c"off disables paths; auto ranks them by cost, except that a provider may \
+          replace the table AM's SeqScan of a read scan, leaving cost to choose \
+          among its own paths; force biases legal paths for tests.",
         &CUSTOMSCAN_MODE,
         GucContext::Userset,
         GucFlags::default(),
     );
-    GucRegistry::define_enum_guc(
-        c"lagodb.query_offload_mode",
-        c"Path-emission mode for LagoDB query-subtree offload",
-        c"off disables query offload, auto uses cost, and force only biases otherwise legal paths for tests.",
-        &QUERY_OFFLOAD_MODE,
-        GucContext::Userset,
-        GucFlags::default(),
-    );
-    GucRegistry::define_int_guc(
-        c"lagodb.query_batch_rows",
-        c"Maximum rows in one LagoDB query-engine batch",
-        c"The value is captured when an offload path is planned and remains fixed for execution of that plan.",
-        &QUERY_BATCH_ROWS,
-        1,
-        MAXIMUM_BATCH_ROWS_LIMIT,
-        GucContext::Userset,
-        GucFlags::default(),
-    );
-    GucRegistry::define_int_guc(
-        c"lagodb.query_offload_parallel_min_scan_rows",
-        c"Minimum estimated table-scan row count for parallel query-offload execution",
-        c"Parallel query offload engages only when the largest table scan is estimated to examine at least this many rows after provider pruning; set to 0 to disable the size gate.",
-        &QUERY_OFFLOAD_PARALLEL_MIN_SCAN_ROWS,
-        0,
-        i32::MAX,
-        GucContext::Userset,
-        GucFlags::default(),
-    );
-    GucRegistry::define_int_guc(
-        c"lagodb.query_offload_parallel_queue_size",
-        c"Per-inbox ring size for parallel query-offload shuffles",
-        c"Each parallel query-offload run allocates one inbox per participant; frames larger than an inbox stream through it in chunks.",
-        &QUERY_OFFLOAD_PARALLEL_QUEUE_SIZE,
-        64 * 1_024,
-        1_024 * 1_024 * 1_024,
-        GucContext::Userset,
-        GucFlags::UNIT_BYTE,
-    );
-    GucRegistry::define_bool_guc(
-        c"lagodb.query_offload_parallel_debug",
-        c"Enable diagnostic safeguards for parallel query-offload execution",
-        c"Enables the 30-second worker fragment deadlock detector; intended for diagnosis, not normal query timeouts.",
-        &QUERY_OFFLOAD_PARALLEL_DEBUG,
-        GucContext::Userset,
-        GucFlags::default(),
-    );
+    query_offload::define();
     GucRegistry::define_bool_guc(
         c"lagodb.maintenance_worker_enabled",
         c"Start the LagoDB maintenance background worker",
