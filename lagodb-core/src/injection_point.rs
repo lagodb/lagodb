@@ -4,13 +4,12 @@ use std::ffi::CStr;
 
 /// A statically named PostgreSQL injection point.
 ///
-/// PostgreSQL 17 executes the point only when the target server was built with
-/// injection-point support. On PostgreSQL 16 and standard PostgreSQL 17
-/// builds, [`run`](Self::run) is compiled to an inline no-op.
+/// PostgreSQL executes the point only when the target server was
+/// built with injection-point support. On standard PostgreSQL builds,
+/// [`run`](Self::run) is compiled to an inline no-op.
 ///
-/// The C compatibility boundary also records PostgreSQL 18's two-argument
-/// injection-point ABI, but the workspace intentionally has no PG18 Cargo
-/// feature and rejects PG18 until the complete C framework port is audited.
+/// The C compatibility boundary owns PostgreSQL 17's one-argument and
+/// PostgreSQL 18's two-argument injection-point ABIs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InjectionPoint {
     name: &'static CStr,

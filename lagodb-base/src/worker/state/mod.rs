@@ -1,3 +1,4 @@
+use lagodb_core::backend_process::BackendProcess;
 use pgrx::{PGRXSharedMemory, pg_sys};
 
 mod coordinator;
@@ -44,7 +45,7 @@ impl Default for SharedState {
     fn default() -> Self {
         Self {
             supervisor_pid: 0,
-            supervisor_proc_number: pg_sys::INVALID_PROC_NUMBER,
+            supervisor_proc_number: BackendProcess::INVALID_PROC_NUMBER,
             rescan_all: 1,
             _padding: [0; 3],
         }

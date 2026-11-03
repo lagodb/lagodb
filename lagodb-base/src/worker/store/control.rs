@@ -1,3 +1,4 @@
+use lagodb_core::backend_process::BackendProcess;
 use pgrx::pg_sys;
 
 use crate::worker::state::WorkerKey;
@@ -75,7 +76,7 @@ impl Store {
         coordinator.request_handoff();
         let proc_number = coordinator.proc_number;
         assert!(COORDINATOR_TABLE.replace(coordinator));
-        if proc_number != pg_sys::INVALID_PROC_NUMBER {
+        if proc_number != BackendProcess::INVALID_PROC_NUMBER {
             // SAFETY: the coordinator publishes this ProcNumber under the same
             // shared-state lock. Its exit callback cannot clear or recycle the
             // identity until this lock is released. This is a reconciliation

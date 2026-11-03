@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use pgrx::pg_sys;
 
+use crate::backend_process::BackendProcess;
+
 /// Result of one teardown latch wait.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[must_use = "handle PostmasterDied or call exit_on_postmaster_death"]
@@ -25,10 +27,9 @@ impl TeardownLatchWait {
     /// Exit the current backend if the wait observed postmaster death.
     pub fn exit_on_postmaster_death(self) {
         if matches!(self, Self::PostmasterDied) {
-            // SAFETY: after postmaster death, bgworkers must stop using
-            // PostgreSQL services. `proc_exit` follows PostgreSQL's normal
-            // process-exit path for this backend.
-            unsafe { pg_sys::proc_exit(1) };
+            // After postmaster death, this process must stop using PostgreSQL
+            // services instead of continuing teardown.
+            BackendProcess::exit(1);
         }
     }
 }

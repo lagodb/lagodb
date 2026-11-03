@@ -1,3 +1,4 @@
+use lagodb_core::backend_process::BackendProcess;
 use pgrx::pg_sys;
 
 use crate::worker::INVALID_OID;
@@ -136,9 +137,10 @@ impl CoordinatorFixtures {
                 slot.reserve();
                 // SAFETY: this runs in a PostgreSQL backend with a published
                 // PID and ProcNumber. Cleanup happens under the same lock.
-                assert!(slot.mark_running(unsafe { pg_sys::MyProcPid }, unsafe {
-                    pg_sys::MyProcNumber
-                }));
+                assert!(slot.mark_running(
+                    unsafe { pg_sys::MyProcPid },
+                    BackendProcess::proc_number(),
+                ));
             }
             _ => panic!("unsupported test coordinator state: {process:?}"),
         }
@@ -172,12 +174,17 @@ impl Drop for CoordinatorFixtures {
     }
 }
 
-#[pgrx::pg_test(schema = "tests")]
-fn coordination_notifications_route_to_one_control_process() {
-    CoordinatorFixtures::new().assert_coordination_routing();
-}
+#[pgrx::pg_schema]
+mod tests {
+    use super::CoordinatorFixtures;
 
-#[pgrx::pg_test(schema = "tests")]
-fn coordinator_exit_routes_handoff_and_failure_by_disposition() {
-    CoordinatorFixtures::new().assert_exit_dispositions();
+    #[pgrx::pg_test]
+    fn coordination_notifications_route_to_one_control_process() {
+        CoordinatorFixtures::new().assert_coordination_routing();
+    }
+
+    #[pgrx::pg_test]
+    fn coordinator_exit_routes_handoff_and_failure_by_disposition() {
+        CoordinatorFixtures::new().assert_exit_dispositions();
+    }
 }

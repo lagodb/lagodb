@@ -1,4 +1,5 @@
-use pgrx::{PGRXSharedMemory, pg_sys};
+use lagodb_core::backend_process::BackendProcess;
+use pgrx::PGRXSharedMemory;
 
 use super::ProcessState;
 
@@ -34,7 +35,7 @@ impl CoordinatorSlot {
         Self {
             database_oid,
             pid: 0,
-            proc_number: pg_sys::INVALID_PROC_NUMBER,
+            proc_number: BackendProcess::INVALID_PROC_NUMBER,
             process_state: ProcessState::Stopped,
             stop_requested: 0,
             needs_restart: 0,
@@ -65,7 +66,7 @@ impl CoordinatorSlot {
 
     pub(crate) fn reserve(&mut self) {
         self.pid = 0;
-        self.proc_number = pg_sys::INVALID_PROC_NUMBER;
+        self.proc_number = BackendProcess::INVALID_PROC_NUMBER;
         self.process_state = ProcessState::Starting;
         self.stop_requested = 0;
         self.needs_restart = 0;
@@ -129,13 +130,13 @@ impl CoordinatorSlot {
         };
         self.process_state = ProcessState::Stopped;
         self.pid = 0;
-        self.proc_number = pg_sys::INVALID_PROC_NUMBER;
+        self.proc_number = BackendProcess::INVALID_PROC_NUMBER;
         Some(disposition)
     }
 
     pub(crate) fn reset_after_registration_failure(&mut self) {
         self.pid = 0;
-        self.proc_number = pg_sys::INVALID_PROC_NUMBER;
+        self.proc_number = BackendProcess::INVALID_PROC_NUMBER;
         self.process_state = ProcessState::Stopped;
         self.stop_requested = 0;
         self.needs_restart = 1;

@@ -12,7 +12,8 @@ mod extension;
 mod injection;
 mod lifecycle;
 mod lock;
-#[cfg(feature = "pg_test")]
+// The lifecycle harness drives workers through PostgreSQL injection points.
+#[cfg(all(feature = "pg_test", any(feature = "pg17", feature = "pg18")))]
 mod pg_test;
 mod registry;
 mod scheduler;

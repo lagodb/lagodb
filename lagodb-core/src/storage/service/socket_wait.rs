@@ -133,11 +133,16 @@ struct PgWaitEventSet {
 impl PgWaitEventSet {
     fn new(socket_fd: RawFd, interest: SocketInterest) -> io::Result<Self> {
         let latch = Self::current_latch()?;
-        // A NULL ResourceOwner gives the set session lifetime. Rust owns the
+        // A NULL ResourceOwner, or TopMemoryContext where PostgreSQL 16 takes
+        // a context instead, gives the set session lifetime. Rust owns the
         // returned set and frees it when this connection generation ends.
+        #[cfg(feature = "pg16")]
+        let owner = unsafe { pg_sys::TopMemoryContext };
+        #[cfg(any(feature = "pg17", feature = "pg18"))]
+        let owner = ptr::null_mut();
         // SAFETY: PostgreSQL owns the allocation and returns either a valid
         // opaque pointer or raises ERROR through pgrx's guarded FFI boundary.
-        let raw = unsafe { pg_sys::CreateWaitEventSet(ptr::null_mut(), 3) };
+        let raw = unsafe { pg_sys::CreateWaitEventSet(owner, 3) };
         let raw = NonNull::new(raw).ok_or_else(|| {
             io::Error::other("PostgreSQL failed to create a socket wait event set")
         })?;

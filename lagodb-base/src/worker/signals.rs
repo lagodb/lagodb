@@ -30,19 +30,36 @@ impl BackgroundWorkerSignals {
         // SAFETY: PostgreSQL starts background-worker entrypoints with signals
         // blocked. Install every final handler before unblocking once.
         unsafe {
-            pg_sys::pqsignal(pg_sys::SIGHUP as i32, Some(background_worker_sighup));
+            Self::install_handler(
+                pg_sys::SIGHUP as i32,
+                Some(background_worker_sighup),
+            );
             if ignore_sigint {
-                pg_sys::pqsignal(
+                Self::install_handler(
                     pg_sys::SIGINT as i32,
                     Some(background_worker_sigint_ignored),
                 );
             }
-            pg_sys::pqsignal(pg_sys::SIGTERM as i32, Some(background_worker_sigterm));
+            Self::install_handler(
+                pg_sys::SIGTERM as i32,
+                Some(background_worker_sigterm),
+            );
             pg_sys::BackgroundWorkerUnblockSignals();
         }
         // A pending SIGTERM may be delivered synchronously by the unblock.
         // Consume PostgreSQL's die flags before the entrypoint starts any work.
         check_for_interrupts();
+    }
+
+    unsafe fn install_handler(signal: i32, handler: pg_sys::pqsigfunc) {
+        #[cfg(any(feature = "pg16", feature = "pg17"))]
+        unsafe {
+            pg_sys::pqsignal(signal, handler);
+        }
+        #[cfg(feature = "pg18")]
+        unsafe {
+            pg_sys::pqsignal_be(signal, handler);
+        }
     }
 
     pub(super) fn process_config_reload() -> bool {

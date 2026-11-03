@@ -154,8 +154,8 @@ impl<K, E: Copy + PGRXSharedMemory> PostgresSharedHash<K, E> {
     /// Must run from PostgreSQL's shared-memory startup hook.
     unsafe fn initialize(&self) {
         let (initial_entries, maximum_entries) = Self::entry_limits();
-        // SAFETY: index 21 is PostgreSQL 17's AddinShmemInitLock, matching the
-        // pgrx shared-memory implementation used by this build.
+        // SAFETY: index 21 is AddinShmemInitLock in the audited PostgreSQL 17
+        // and 18 lwlocknames.h layouts, matching pgrx's shared-memory code.
         let lock = unsafe { &raw mut (*pg_sys::MainLWLockArray.add(21)).lock };
         // SAFETY: startup hook context permits acquiring AddinShmemInitLock.
         unsafe { pg_sys::LWLockAcquire(lock, pg_sys::LWLockMode::LW_EXCLUSIVE) };

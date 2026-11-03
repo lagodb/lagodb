@@ -5,6 +5,7 @@ use pgrx::prelude::*;
 
 use crate::worker::state::WorkerKey;
 
+use lagodb_core::backend_process::BackendProcess;
 use lagodb_core::diag::{PgReportError, log_info, report_warning};
 use lagodb_core::extension_worker::{
     WorkerContextRaw, WorkerSchedule, WorkerTransaction,
@@ -125,7 +126,7 @@ impl Worker {
                     ));
                     // Entry-point preparation errors must reach the single FFI
                     // exit classifier as a nonzero process exit.
-                    unsafe { pg_sys::proc_exit(1) };
+                    BackendProcess::exit(1);
                 }
             };
 

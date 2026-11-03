@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use lagodb_core::backend_process::BackendProcess;
 use pgrx::PgLwLock;
 use pgrx::prelude::*;
 
@@ -68,7 +69,7 @@ impl Store {
 
     pub(super) fn signal_supervisor(&self) {
         let proc_number = SHARED_STATE.share().supervisor_proc_number;
-        if proc_number != pg_sys::INVALID_PROC_NUMBER {
+        if proc_number != BackendProcess::INVALID_PROC_NUMBER {
             // SAFETY: the supervisor publishes a ProcNumber while alive. A stale
             // value can only produce a harmless spurious latch wakeup.
             unsafe { pg_sys::ProcSendSignal(proc_number) };
@@ -78,14 +79,14 @@ impl Store {
     pub(super) fn claim_supervisor(&self) {
         let mut state = SHARED_STATE.exclusive();
         state.supervisor_pid = unsafe { pg_sys::MyProcPid };
-        state.supervisor_proc_number = unsafe { pg_sys::MyProcNumber };
+        state.supervisor_proc_number = BackendProcess::proc_number();
         state.rescan_all = 1;
     }
 
     pub(super) fn clear_supervisor(&self) {
         let mut state = SHARED_STATE.exclusive();
         state.supervisor_pid = 0;
-        state.supervisor_proc_number = pg_sys::INVALID_PROC_NUMBER;
+        state.supervisor_proc_number = BackendProcess::INVALID_PROC_NUMBER;
     }
 
     pub(super) fn take_full_scan_request(&self) -> bool {

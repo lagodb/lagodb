@@ -1,3 +1,4 @@
+use lagodb_core::backend_process::BackendProcess;
 use pgrx::prelude::*;
 
 use crate::worker::bgworker::DynamicWorkerRegistration;
@@ -46,9 +47,10 @@ impl Store {
     pub(in crate::worker) fn begin_coordinator(&self, database_oid: u32) -> bool {
         let state = SHARED_STATE.exclusive();
         let result = COORDINATOR_TABLE.with_mut(database_oid, |slot| {
-            slot.mark_running(unsafe { pg_sys::MyProcPid }, unsafe {
-                pg_sys::MyProcNumber
-            })
+            slot.mark_running(
+                unsafe { pg_sys::MyProcPid },
+                BackendProcess::proc_number(),
+            )
         });
         let Some(result) = result else {
             return false;
