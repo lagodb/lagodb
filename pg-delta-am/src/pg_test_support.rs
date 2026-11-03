@@ -1,8 +1,6 @@
 //! Backend-only probes for the cross-DSO runtime regression suite.
 
 use std::cell::Cell;
-use std::mem::size_of;
-use std::ptr;
 
 use lagodb_core::hooks::{
     OBJECT_ACCESS_DROP, ObjectAccessEvent, ObjectAccessFilter, ObjectAccessHook,
@@ -69,11 +67,6 @@ unsafe extern "C-unwind" fn duplicate_am_oid() -> pg_sys::Oid {
     pg_sys::InvalidOid
 }
 
-unsafe extern "C-unwind" fn duplicate_truncate_partitioned_table(
-    _relation: pg_sys::Relation,
-) {
-}
-
 unsafe extern "C-unwind" fn duplicate_execute(
     _request: *const MaintenanceRequest,
     _report: *mut MaintenanceReport,
@@ -99,42 +92,21 @@ mod delta {
     fn duplicate_iceberg_registration_rejected() -> bool {
         let runtime =
             RuntimeClient::connect().expect("runtime API must be published");
-        let descriptor = TableProvider {
-            struct_size: u32::try_from(size_of::<TableProvider>())
-                .expect("table provider descriptor size exceeds u32"),
-            name: c"delta-duplicate".as_ptr(),
-            access_method_name: c"iceberg".as_ptr(),
-            owns_partitioned_table: false,
-            supports_analyze: false,
-            copy: std::ptr::null(),
-            access_method_oid: duplicate_am_oid,
-            truncate_partitioned_table: duplicate_truncate_partitioned_table,
-            execute_maintenance: duplicate_execute,
-            inspect_maintenance: duplicate_inspect,
-        };
+        let descriptor = TableProvider::new(
+            c"delta-duplicate",
+            c"iceberg",
+            None,
+            duplicate_am_oid,
+            duplicate_execute,
+            duplicate_inspect,
+        );
         let identity = ProviderIdentity::access_method(
             c"delta-duplicate",
             c"pg_delta_am",
             c"pg_delta_am",
         );
-        let registration = ProviderRegistration {
-            struct_size: u32::try_from(size_of::<ProviderRegistration>())
-                .expect("provider registration size exceeds u32"),
-            provider: &identity,
-            table_provider: &descriptor,
-            utility_hooks: ptr::null(),
-            utility_hook_count: 0,
-            utility_consumers: ptr::null(),
-            utility_consumer_count: 0,
-            object_access_hooks: ptr::null(),
-            object_access_hook_count: 0,
-            object_access_str_hooks: ptr::null(),
-            object_access_str_hook_count: 0,
-            relation_scan_planner: ptr::null(),
-            modify_planner: ptr::null(),
-            table_scan: ptr::null(),
-            table_scan_worker: ptr::null(),
-        };
+        let registration = ProviderRegistration::new(&identity)
+            .with_table_provider(Some(&descriptor));
         // SAFETY: this test registration uses current ABI values backed by
         // local descriptors that remain live for the synchronous call. The
         // duplicate registration is rejected and publishes no context.

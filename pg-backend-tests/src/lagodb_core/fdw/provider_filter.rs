@@ -6,8 +6,9 @@ use std::fmt::{self, Display, Formatter};
 use lagodb_core::diag::SqlStateError;
 use lagodb_core::expr::PushdownCosting;
 use lagodb_core::expr::pushdown::{
-    FilterBindResult, FilterPlan, FilterPlanningContext, FilterPushdown,
-    FilterPushdownPlanner, PredicateExpr, PredicateFragment, ScalarExpr,
+    FilterBindResult, FilterEvaluation, FilterPlan, FilterPlanningContext,
+    FilterPushdown, FilterPushdownPlanner, PredicateExpr, PredicateFragment,
+    ScalarExpr,
 };
 use lagodb_core::expr::{RuntimeValueBindings, RuntimeValueId};
 use lagodb_core::plan_data::{PlanDataError, PlanDataReader, PlanDataWriter};
@@ -136,10 +137,14 @@ impl FilterPushdownPlanner for TestFilterPlanner {
         if column.attno == 2 {
             Ok(FilterPlan::conservative(
                 predicate,
-                PushdownCosting::CostedPruning,
+                PushdownCosting::StatisticsPruning,
+                FilterEvaluation::PerRow,
             ))
         } else {
-            Ok(FilterPlan::exact(predicate, PushdownCosting::CostedPruning))
+            Ok(FilterPlan::exact(
+                predicate,
+                PushdownCosting::StatisticsPruning,
+            ))
         }
     }
 }

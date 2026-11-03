@@ -66,12 +66,6 @@ impl FdwModify for FrameworkTestFdw {
             IdentityMode::Attribute => ctx.add_attribute_identity(1)?,
             IdentityMode::ItemPointer => ctx.add_item_pointer_identity()?,
         }
-        if matches!(ctx.operation(), ForeignModifyOperation::Delete) {
-            let returning_columns = ctx.returning_columns().to_vec();
-            for attno in returning_columns {
-                ctx.add_returning_column(attno)?;
-            }
-        }
         Ok(())
     }
 

@@ -248,6 +248,10 @@ COPY lagodb_connectors_regress.copy_typmod_sink FROM :'copy_json'
 WITH (server 'lagodb_connectors_regress_s3', format 'json');
 \set VERBOSITY default
 SELECT count(*) AS rows_after_error FROM lagodb_connectors_regress.copy_typmod_sink;
+
+-- PostgreSQL 17 introduced ON_ERROR; _1.out is the PostgreSQL 16 output.
+SELECT current_setting('server_version_num')::int >= 170000 AS has_copy_on_error \gset
+\if :has_copy_on_error
 SET client_min_messages = notice;
 COPY lagodb_connectors_regress.copy_typmod_sink FROM :'copy_json'
 WITH (server 'lagodb_connectors_regress_s3', format 'json', on_error ignore);
@@ -274,6 +278,7 @@ SELECT id, payload, octet_length(padded) AS padded_bytes, amount,
        clock = time '12:34:56.124' AS time_rounded,
        happened = timestamp '2000-01-01' AS timestamp_rounded
 FROM lagodb_connectors_regress.copy_typmod_sink ORDER BY id;
+\endif
 
 \set copy_json 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/rls.json'
 \set copy_avro 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/rls.avro'

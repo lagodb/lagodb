@@ -96,10 +96,8 @@ CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_read_limits (
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'parquet_exact_path', format 'parquet');
 \set VERBOSITY sqlstate
-SET client_min_messages = notice;
 COPY parquet_domain_sink FROM :'parquet_exact_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet', on_error ignore);
-RESET client_min_messages;
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 SELECT numeric_array FROM lagodb_connectors_regress.parquet_read_limits;
 \set VERBOSITY default
 
@@ -132,6 +130,15 @@ COPY parquet_json_sink FROM :'json_input_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 \set VERBOSITY default
 SELECT count(*) AS rows_after_error FROM parquet_json_sink;
+
+-- PostgreSQL 17 introduced ON_ERROR; _1.out is the PostgreSQL 16 output.
+SELECT current_setting('server_version_num')::int >= 170000 AS has_copy_on_error \gset
+\if :has_copy_on_error
+-- Schema admission precedes every row, so ON_ERROR cannot skip its failure.
+\set VERBOSITY sqlstate
+COPY parquet_domain_sink FROM :'parquet_exact_path'
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet', on_error ignore);
+\set VERBOSITY default
 
 -- Four bad rows exercise scalar, array and recursive JSON conversion.
 -- Valid rows after the failures also check reuse of partially filled buffers.
@@ -166,6 +173,7 @@ SELECT coalesce(actual.id, expected.id) AS id,
 FROM parquet_jsonb_sink AS actual
 FULL JOIN parquet_json_sink AS expected USING (id)
 ORDER BY id;
+\endif
 
 -- Named PG types determine nested storage, including dropped attribute positions.
 \set nested_path :parquet_base 'nested/'

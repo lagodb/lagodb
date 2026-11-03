@@ -221,7 +221,7 @@ impl FilterPushdownPlanner for HookFilterPlanner {
         if let Some((_, value)) = Self::equality_value(fragment.root()) {
             return Ok(FilterPlan::exact(
                 self.planned(vec![value]),
-                PushdownCosting::CostedPruning,
+                PushdownCosting::StatisticsPruning,
             ));
         }
 
@@ -248,7 +248,7 @@ impl FilterPushdownPlanner for HookFilterPlanner {
         }
         Ok(FilterPlan::exact(
             self.planned(values),
-            PushdownCosting::CostedPruning,
+            PushdownCosting::StatisticsPruning,
         ))
     }
 }
@@ -341,7 +341,7 @@ impl LagodbCustomScanProvider for HookIntegrationProvider {
     ) -> Option<CustomPathPlan<Self>> {
         let rel_name = relation_name(ctx.rel_oid())?;
         let mode = HookTestMode::for_relation_name(&rel_name)?;
-        if !variant.pushdown.has_planned_filters() {
+        if variant.pushdown.is_empty() {
             return None;
         }
 

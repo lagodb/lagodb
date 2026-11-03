@@ -14,9 +14,11 @@
 //! Adding a new framework `rlib` does **not** require a new test crate: add a
 //! sibling module here and depend on the crate. See `README.md`.
 //!
-//! Run with:
+//! Install `lagodb_base` into the target PostgreSQL first (see `README.md`),
+//! then run:
 //! ```bash
 //! cargo pgrx test pg17 --package pg-backend-tests
+//! cargo pgrx test pg18 --package pg-backend-tests
 //! ```
 
 use pgrx::prelude::*;

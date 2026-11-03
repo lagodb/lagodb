@@ -10,6 +10,7 @@ use pgrx::IntoDatum;
 use pgrx::pg_sys;
 use std::cmp::Reverse;
 
+use lagodb_core::expr::PgOrderingDirection;
 use lagodb_core::fdw::{ForeignPrivateReader, ForeignPrivateWriter};
 
 use super::fixture::{TestRow, TestStore, TestTrace, TraceEvent};
@@ -171,11 +172,6 @@ impl FdwScan for FrameworkTestFdw {
                 if candidate.data_type() == pg_sys::INT4OID
                     && candidate.collation() == pg_sys::InvalidOid
                     && candidate.opfamily() != pg_sys::InvalidOid
-                    && matches!(
-                        candidate.strategy(),
-                        value if value == pg_sys::BTLessStrategyNumber as i32
-                            || value == pg_sys::BTGreaterStrategyNumber as i32
-                    )
                     && sort_var_attno(candidate.expression()).is_some()
                 {
                     selected = Some(candidate_index);
@@ -330,8 +326,8 @@ fn sort_var_attno(expression: *mut pg_sys::Expr) -> Option<pg_sys::AttrNumber> {
 
 fn first_pathkey_is_descending(pathkeys: *mut pg_sys::List) -> bool {
     let pathkey = unsafe { pg_sys::list_nth(pathkeys, 0) } as *mut pg_sys::PathKey;
-    !pathkey.is_null()
-        && unsafe { (*pathkey).pk_strategy == pg_sys::BTGreaterStrategyNumber as i32 }
+    PgOrderingDirection::from_path_key(unsafe { &*pathkey })
+        == Some(PgOrderingDirection::Descending)
 }
 
 fn trace_filters(

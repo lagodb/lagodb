@@ -101,14 +101,14 @@ mod tests {
                         && filter.1.start == 0
                         && filter.1.end == 1
                         && filter.2 == PushdownContract::ExactRowFilter
-                        && filter.3 == PushdownCosting::CostedPruning
+                        && filter.3 == PushdownCosting::StatisticsPruning
                         && filter.4 == ForeignPlanQualLocation::Recheck { index: 0 }
                 }) && filters.iter().any(|filter| {
                     filter.0 == 2
                         && filter.1.start == 1
                         && filter.1.end == 2
                         && filter.2 == PushdownContract::ConservativePruning
-                        && filter.3 == PushdownCosting::CostedPruning
+                        && filter.3 == PushdownCosting::StatisticsPruning
                         && filter.4 == ForeignPlanQualLocation::Local { index: 0 }
                 })
             )),

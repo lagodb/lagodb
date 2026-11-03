@@ -62,19 +62,25 @@ of shared `lagodb.*` GUCs and the cross-DSO runtime ABI. The full workspace
 runner installs that extension before starting the test cluster:
 
 ```bash
+cargo xtask test-all pg16
 cargo xtask test-all pg17
+cargo xtask test-all pg18
 ```
 
 To run only this crate, install the current runtime build first:
 
 ```bash
-cargo pgrx install --package lagodb-base \
-  --pg-config "$(cargo pgrx info pg-config pg17)"
-cargo pgrx test pg17 --package pg-backend-tests
+for pg in pg16 pg17 pg18; do
+  cargo pgrx install --package lagodb-base \
+    --pg-config "$(cargo pgrx info pg-config "${pg}")"
+  cargo pgrx test "${pg}" --package pg-backend-tests
+done
 ```
 
 ## Prerequisites
 
-- pgrx initialized: `cargo pgrx init --pg17=/path/to/pg_config`
+- pgrx initialized for every major in the loop, for example
+  `cargo pgrx init --pg18=/path/to/pg_config`; with one major initialized, run
+  only that major
 - No Docker required for these tests (unlike the full `cargo xtask test-all`
   suite, which also runs Docker-based regress tests for `lagodb-iceberg`)

@@ -176,7 +176,7 @@ mod tests {
         let name = unsafe { CStr::from_ptr(table.CustomName) };
         assert_eq!(name, GlueProviderA::NAME);
         assert!(table.PlanCustomPath.is_some());
-        assert!(table.ReparameterizeCustomPathByChild.is_some());
+        assert!(table.ReparameterizeCustomPathByChild.is_none());
     }
 
     /// `emit_custom_path` emptiness uses `bms_membership == BMS_EMPTY_SET`

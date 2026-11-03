@@ -345,7 +345,7 @@ CREATE TEMP TABLE parquet_integer_array_mismatch (bigint_array smallint[]);
 SELECT bigint_col FROM lagodb_connectors_regress.parquet_integer_mismatch
 WHERE bigint_col = 1;
 COPY parquet_integer_array_mismatch FROM :'parquet_exact_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet', on_error ignore);
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 \set VERBOSITY default
 
 -- Native Int16 predicates use the same mapping as scan and COPY.
