@@ -2,6 +2,7 @@
 
 use std::ffi::{CStr, CString, c_void};
 
+use lagodb_core::datum::PgEncodingNames;
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
@@ -127,10 +128,7 @@ impl<'a> DelimitedOptionsBuilder<'a> {
                 "must be a valid encoding name",
             )
         })?;
-        // SAFETY: CString guarantees a NUL-terminated encoding name and the
-        // pointer remains live for this call.
-        let encoding = unsafe { pg_sys::pg_char_to_encoding_private(value.as_ptr()) };
-        if encoding < 0 {
+        if !PgEncodingNames::contains(&value) {
             return Err(ConnectorError::invalid_option(
                 "encoding",
                 "must be a valid encoding name",

@@ -5,6 +5,7 @@ use std::ffi::CStr;
 use pgrx::pg_sys;
 
 use super::error::CopyError;
+use crate::handles::TupleDescHandle;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CopyColumn {
@@ -76,14 +77,15 @@ impl CopyColumnLayout {
         descriptor: pg_sys::TupleDesc,
         attnums: *mut pg_sys::List,
     ) -> Result<Self, CopyError> {
+        // SAFETY: guaranteed by this method's contract.
+        let descriptor = unsafe { TupleDescHandle::from_raw(descriptor) };
         let count = unsafe { pg_sys::list_length(attnums) };
         let mut columns = Vec::with_capacity(count as usize);
         for index in 0..count {
             let attno = unsafe { pg_sys::list_nth_int(attnums, index) };
-            debug_assert!(attno > 0 && attno <= unsafe { (*descriptor).natts });
+            debug_assert!(attno > 0 && attno as usize <= descriptor.len());
             let relation_index = (attno - 1) as usize;
-            let attribute =
-                unsafe { &*(*descriptor).attrs.as_ptr().add(relation_index) };
+            let attribute = &descriptor.attributes()[relation_index];
             let name = unsafe {
                 CStr::from_ptr(attribute.attname.data.as_ptr())
                     .to_owned()

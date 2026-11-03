@@ -5,11 +5,8 @@ use std::panic::AssertUnwindSafe;
 
 use pgrx::{PgTryBuilder, pg_sys};
 
-use crate::access::mutation::RelationTriggerPolicy;
 use crate::diag::PgError;
-use crate::handles::RelationHandle;
 
-use super::route::CopyTargetRoute;
 use super::{CopyColumnLayout, CopyEndpoint, CopyError, pg};
 
 #[derive(Clone, Copy, Debug)]
@@ -367,8 +364,7 @@ impl<'a> CopyContext<'a> {
     /// # Errors
     ///
     /// Returns [`CopyError`] when PostgreSQL rejects relation resolution,
-    /// permissions, expression transformation, or row-security policy, or when
-    /// the partitioned table trigger policy rejects an AFTER INSERT ROW trigger.
+    /// permissions, expression transformation, or row-security policy.
     pub fn prepare_from<'statement, 'parse>(
         &'statement self,
         parse_state: &'parse CopyParseState,
@@ -396,23 +392,11 @@ impl<'a> CopyContext<'a> {
 
         // The C preparation function writes every field before returning.
         let raw = unsafe { raw.assume_init() };
-        let mut preparation = CopyFromPreparation {
+        Ok(CopyFromPreparation {
             raw,
-            target_route: CopyTargetRoute::PostgreSql,
             _statement_lifetime: PhantomData,
             _parse_lifetime: PhantomData,
-        };
-        // Keep the relation guard alive before fallible provider discovery and
-        // capability validation, so rejection releases the opened reference.
-        preparation.target_route =
-            unsafe { CopyTargetRoute::for_relation(preparation.relation()) }?;
-        let relation = unsafe { RelationHandle::from_raw(preparation.relation()) };
-        RelationTriggerPolicy::new(
-            &relation,
-            preparation.target_route.provider_owned_partitioned_table(),
-        )
-        .validate_copy_from()?;
-        Ok(preparation)
+        })
     }
 
     /// Prepare a standard PostgreSQL `COPY TO` relation or query execution.
@@ -532,16 +516,11 @@ impl Drop for CopyParseState {
 /// PostgreSQL-owned preparation for one COPY FROM execution.
 pub struct CopyFromPreparation<'statement, 'parse> {
     raw: pg::LagodbCopyPreparation,
-    target_route: CopyTargetRoute,
     _statement_lifetime: PhantomData<&'statement pg_sys::CopyStmt>,
     _parse_lifetime: PhantomData<&'parse CopyParseState>,
 }
 
 impl CopyFromPreparation<'_, '_> {
-    pub(super) fn target_route(&self) -> CopyTargetRoute {
-        self.target_route
-    }
-
     pub(super) fn relation(&self) -> pg_sys::Relation {
         self.raw.relation
     }
@@ -587,16 +566,6 @@ pub struct CopyToPreparation<'statement, 'parse> {
 }
 
 impl CopyToPreparation<'_, '_> {
-    pub(super) fn target_route(&self) -> Result<CopyTargetRoute, CopyError> {
-        // PG prepares query, RLS, and foreign-table exports as queries and
-        // closes their relation. Only a relation export needs AM routing.
-        if !self.raw.raw_query.is_null() {
-            return Ok(CopyTargetRoute::PostgreSql);
-        }
-        // SAFETY: relation-mode preparation retains the opened relation.
-        unsafe { CopyTargetRoute::for_relation(self.raw.relation) }
-    }
-
     pub(super) fn relation(&self) -> pg_sys::Relation {
         self.raw.relation
     }

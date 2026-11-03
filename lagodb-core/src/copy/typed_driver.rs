@@ -12,7 +12,6 @@ use super::context::{
     CopyFromPreparation, CopyParseState, CopyStatement, CopyToPreparation,
 };
 use super::pg::CopyToShutdown;
-use super::route::CopyTargetRoute;
 use super::typed_callback::{
     TypedDestinationGuard, TypedSourceGuard, destination_callback, source_callback,
 };
@@ -47,7 +46,6 @@ impl<'statement, 'parse> TypedCopyFromSpec<'statement, 'parse> {
 
 pub struct TypedCopyFromDriver<'statement, 'parse> {
     execution: CopyFromExecution,
-    target_route: CopyTargetRoute,
     _preparation: CopyFromPreparation<'statement, 'parse>,
     _statement: PhantomData<&'statement pg_sys::CopyStmt>,
     _parse: PhantomData<&'parse CopyParseState>,
@@ -59,7 +57,6 @@ impl<'statement, 'parse> TypedCopyFromDriver<'statement, 'parse> {
         spec: TypedCopyFromSpec<'statement, 'parse>,
     ) -> Result<Self, CopyError> {
         let relation = spec.preparation.relation();
-        let target_route = spec.preparation.target_route();
         let state = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(|| {
                 Ok(pg::CopyBridge::begin_routed_from(
@@ -79,7 +76,6 @@ impl<'statement, 'parse> TypedCopyFromDriver<'statement, 'parse> {
         }?;
         Ok(Self {
             execution: CopyFromExecution::new(state),
-            target_route,
             _preparation: spec.preparation,
             _statement: PhantomData,
             _parse: PhantomData,
@@ -106,8 +102,6 @@ impl<'statement, 'parse> TypedCopyFromDriver<'statement, 'parse> {
         }?;
         let mut source = open_source(&layout)?;
         let mut source_guard = TypedSourceGuard::install(source.as_mut(), layout);
-        let provider_owned_partitioned_table =
-            self.target_route.provider_owned_partitioned_table();
         let source_context = source_guard.callback_context();
         let result = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(|| {
@@ -115,7 +109,6 @@ impl<'statement, 'parse> TypedCopyFromDriver<'statement, 'parse> {
                     state,
                     source_callback(),
                     source_context,
-                    provider_owned_partitioned_table,
                     &bridge,
                 ))
             }))
@@ -189,7 +182,6 @@ impl<'statement, 'parse, 'destination>
         spec: TypedCopyToSpec<'statement, 'parse, 'destination>,
     ) -> Result<Self, CopyError> {
         let relation = spec.preparation.relation();
-        let target_route = spec.preparation.target_route()?;
         let state = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(|| {
                 Ok(pg::CopyBridge::begin_routed_to(
@@ -202,7 +194,6 @@ impl<'statement, 'parse, 'destination>
                     None,
                     spec.statement.attlist(),
                     spec.options,
-                    target_route.provider_owned_partitioned_table(),
                     true,
                 ))
             }))

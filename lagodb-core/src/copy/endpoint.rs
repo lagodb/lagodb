@@ -10,7 +10,7 @@ use crate::storage::profile::ObjectUri;
 /// require PostgreSQL's privileged roles during preparation. Native formats
 /// retain that permission contract while a provider owns the file I/O.
 /// The representation matches `LagodbCopyEndpoint` in `lagodb_copy.h`.
-#[repr(u32)]
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CopyEndpoint {
     ClientStream = 0,

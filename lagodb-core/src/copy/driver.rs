@@ -14,7 +14,6 @@ use super::io::{
 };
 use super::pg::CopyToShutdown;
 use super::progress::CopyOutputProgressGuard;
-use super::route::CopyTargetRoute;
 use super::{CopyColumnLayout, CopyDataDestination, CopyDataSource, CopyError, pg};
 
 /// Parameters for a standard PostgreSQL COPY FROM execution.
@@ -52,7 +51,6 @@ impl<'statement, 'parse> CopyFromSpec<'statement, 'parse> {
 /// RAII wrapper around PostgreSQL's `CopyFromState`.
 pub struct CopyFromDriver<'statement, 'parse> {
     execution: CopyFromExecution,
-    target_route: CopyTargetRoute,
     _preparation: CopyFromPreparation<'statement, 'parse>,
     _statement_lifetime: PhantomData<&'statement pg_sys::CopyStmt>,
     _parse_lifetime: PhantomData<&'parse CopyParseState>,
@@ -82,7 +80,6 @@ impl<'statement, 'parse> CopyFromDriver<'statement, 'parse> {
         let where_clause = preparation.where_clause();
         let attlist = statement.attlist();
         let options = spec.options;
-        let target_route = preparation.target_route();
 
         let state = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(move || {
@@ -106,7 +103,6 @@ impl<'statement, 'parse> CopyFromDriver<'statement, 'parse> {
 
         Ok(Self {
             execution: CopyFromExecution::new(state),
-            target_route,
             _preparation: preparation,
             _statement_lifetime: PhantomData,
             _parse_lifetime: PhantomData,
@@ -123,15 +119,9 @@ impl<'statement, 'parse> CopyFromDriver<'statement, 'parse> {
         let mut source_guard = SourceGuard::new(source.as_mut());
         let state = self.execution.state;
         let bridge = self.execution.bridge();
-        let provider_owned_partitioned_table =
-            self.target_route.provider_owned_partitioned_table();
         let result = source_guard.with_active(|| unsafe {
             PgTryBuilder::new(AssertUnwindSafe(move || {
-                Ok(pg::CopyBridge::execute_routed_from_bytes(
-                    state,
-                    provider_owned_partitioned_table,
-                    &bridge,
-                ))
+                Ok(pg::CopyBridge::execute_routed_from_bytes(state, &bridge))
             }))
             .catch_others(|error| Err(PgError::from_caught(error)))
             .execute()
@@ -220,7 +210,6 @@ impl<'statement, 'parse, 'destination>
         let mut destination_guard = DestinationGuard::install(spec.data_destination);
         let attlist = statement.attlist();
         let options = spec.options;
-        let target_route = preparation.target_route()?;
 
         let state = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(move || {
@@ -237,7 +226,6 @@ impl<'statement, 'parse, 'destination>
                     destination_callback(),
                     attlist,
                     options,
-                    target_route.provider_owned_partitioned_table(),
                     false,
                 ))
             }))

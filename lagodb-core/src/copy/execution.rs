@@ -11,7 +11,7 @@ use pgrx::pg_sys;
 
 use crate::diag::{PgReportError, report_warning};
 use crate::resource::{ResourceHandle, forget_resource, remember_resource};
-use crate::runtime_api::{CallbackErrorReport, TableCopyCallbacks};
+use crate::runtime_api::{CallbackErrorReport, TableCopyCallbacks, TableProvider};
 use crate::table_provider::TableProviderRouter;
 
 use super::CopyError;
@@ -42,7 +42,9 @@ enum Phase {
 
 pub(super) struct CopyExecution {
     // Boxes keep borrowed C handles stable across map growth and nested COPY.
-    bindings: HashMap<pg_sys::Oid, Box<CopyBinding>>,
+    // None records a relation that writes through its table AM: C rebinds a
+    // leaf each time routing switches to it, as often as every row.
+    bindings: HashMap<pg_sys::Oid, Option<Box<CopyBinding>>>,
     command_id: Option<pg_sys::CommandId>,
     phase: Phase,
 }
@@ -57,13 +59,16 @@ impl CopyExecution {
         let cid = *self.command_id.get_or_insert(cid);
         let oid = unsafe { (*relation).rd_id };
         if let Some(binding) = self.bindings.get_mut(&oid) {
-            return Ok(ptr::from_mut(binding.as_mut()).cast());
+            return Ok(binding
+                .as_deref_mut()
+                .map_or_else(ptr::null_mut, |binding| {
+                    ptr::from_mut(binding).cast()
+                }));
         }
         let am = unsafe { (*(*relation).rd_rel).relam };
-        let Some(provider) = TableProviderRouter::provider_for_am(am)? else {
-            return Ok(ptr::null_mut());
-        };
-        let Some(callbacks) = (unsafe { provider.copy.as_ref() }) else {
+        let provider = TableProviderRouter::provider_for_am(am)?;
+        let Some(callbacks) = provider.and_then(TableProvider::copy) else {
+            self.bindings.insert(oid, None);
             return Ok(ptr::null_mut());
         };
         let mut handle = ptr::null_mut();
@@ -73,14 +78,14 @@ impl CopyExecution {
         unsafe { error.into_result(status, "COPY bind") }?;
         let mut binding = Box::new(CopyBinding { callbacks, handle });
         let pointer = ptr::from_mut(binding.as_mut()).cast();
-        self.bindings.insert(oid, binding);
+        self.bindings.insert(oid, Some(binding));
         Ok(pointer)
     }
 
     pub(super) fn publish(&mut self) -> Result<(), PgReportError> {
         // Exactly one executor completion event, after the final PG batch.
         debug_assert!(self.phase == Phase::Writing);
-        for binding in self.bindings.values_mut() {
+        for binding in self.bindings.values_mut().flatten() {
             let mut error = CallbackErrorReport::default();
             let status =
                 unsafe { (binding.callbacks.publish)(binding.handle, &mut error) };
@@ -92,7 +97,7 @@ impl CopyExecution {
 
     fn complete(&mut self) -> Result<(), PgReportError> {
         debug_assert!(self.phase == Phase::Published);
-        for binding in self.bindings.values_mut() {
+        for binding in self.bindings.values_mut().flatten() {
             let mut error = CallbackErrorReport::default();
             let status =
                 unsafe { (binding.callbacks.complete)(binding.handle, &mut error) };

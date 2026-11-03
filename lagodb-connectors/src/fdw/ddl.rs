@@ -352,8 +352,15 @@ impl ForeignTableDefinitionPolicy {
                         ),
                     );
                 }
-                pg_sys::AlterTableType::AT_SetExpression
-                | pg_sys::AlterTableType::AT_AddIdentity
+                #[cfg(any(feature = "pg17", feature = "pg18"))]
+                pg_sys::AlterTableType::AT_SetExpression => {
+                    return Err(
+                        ConnectorError::unsupported_foreign_table_definition(
+                            "generated or identity columns",
+                        ),
+                    );
+                }
+                pg_sys::AlterTableType::AT_AddIdentity
                 | pg_sys::AlterTableType::AT_SetIdentity => {
                     return Err(
                         ConnectorError::unsupported_foreign_table_definition(

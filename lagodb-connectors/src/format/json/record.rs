@@ -146,9 +146,6 @@ impl JsonColumnPlan {
                         "type with a one-way JSON cast",
                     ));
                 }
-                JsonDatumKind::Unsupported => {
-                    return Err(Self::unsupported_type(name, type_oid, "pseudo"));
-                }
             };
             let index = columns.len();
             indexes.insert(Box::<str>::from(name), index);

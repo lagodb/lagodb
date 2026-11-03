@@ -8,6 +8,7 @@ use std::ptr::NonNull;
 use pgrx::{pg_guard, pg_sys};
 
 use super::io::report;
+use super::pg::LagodbTypedCopyRowResult;
 use super::{
     CopyColumnLayout, CopyDatumSource, CopyError, CopyInputRow, CopyOutputRow,
     CopyRowOutcome, CopyRowRejection, CopyTupleDestination,
@@ -190,7 +191,7 @@ unsafe extern "C-unwind" fn typed_source_callback(
     rejection_location: *mut *const c_char,
     rejection_column: *mut std::ffi::c_int,
     rejection_sql_error_code: *mut std::ffi::c_int,
-) -> std::ffi::c_int {
+) -> LagodbTypedCopyRowResult {
     // SAFETY: the routed executor passes the unique context pointer borrowed
     // from its live TypedSourceGuard and invokes this callback synchronously.
     let context = unsafe { &mut *context.cast::<TypedSourceContext>() };
@@ -214,8 +215,8 @@ unsafe extern "C-unwind" fn typed_source_callback(
         );
     }
     match outcome {
-        CopyRowOutcome::Row => 0,
-        CopyRowOutcome::End => 1,
+        CopyRowOutcome::Row => LagodbTypedCopyRowResult::Row,
+        CopyRowOutcome::End => LagodbTypedCopyRowResult::End,
         CopyRowOutcome::Rejected(rejection) => {
             context.rejection = Some(OwnedRejection::new(rejection));
             let rejection = context.rejection.as_ref().expect("just stored");
@@ -230,7 +231,7 @@ unsafe extern "C-unwind" fn typed_source_callback(
                 *rejection_column = rejection.column;
                 *rejection_sql_error_code = rejection.sql_error_code;
             }
-            2
+            LagodbTypedCopyRowResult::Rejected
         }
     }
 }

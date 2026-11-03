@@ -1,9 +1,8 @@
 //! Narrow C bridge for PostgreSQL COPY states and local opaque adapters.
 //!
-//! The Rust-facing symbols remain version-neutral. The current C implementation
-//! is audited for PostgreSQL 17; the build configuration and local
-//! `LAGODB_PG17` gates reject other majors until their corresponding source
-//! branches have been ported and reviewed.
+//! The Rust-facing symbols remain version-neutral. The C implementation owns
+//! the audited PostgreSQL 17/18 source differences behind its local version
+//! predicates.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -12,6 +11,15 @@ use pgrx::pg_sys::{self, ffi::pg_guard_ffi_boundary};
 
 use super::CopyEndpoint;
 use super::write_bridge::CopyWriteBridge;
+
+/// Mirrors `LagodbTypedCopyRowResult` in `lagodb_copy.h`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum LagodbTypedCopyRowResult {
+    Row = 0,
+    End = 1,
+    Rejected = 2,
+}
 
 pub(crate) type TypedCopySourceCallback =
     unsafe extern "C-unwind" fn(
@@ -24,7 +32,7 @@ pub(crate) type TypedCopySourceCallback =
         *mut *const std::ffi::c_char,
         *mut std::ffi::c_int,
         *mut std::ffi::c_int,
-    ) -> std::ffi::c_int;
+    ) -> LagodbTypedCopyRowResult;
 pub(crate) type TypedCopyDestinationCallback =
     unsafe extern "C-unwind" fn(*mut c_void, *mut pg_sys::TupleTableSlot, *mut u64);
 
@@ -98,7 +106,6 @@ unsafe extern "C-unwind" {
         state: pg_sys::CopyFromState,
         typed_source: Option<TypedCopySourceCallback>,
         typed_source_context: *mut c_void,
-        provider_owned_partitioned_table: bool,
         write_bridge: *const CopyWriteBridge,
     ) -> u64;
     fn lagodb_end_routed_copy_from(state: pg_sys::CopyFromState);
@@ -139,7 +146,6 @@ unsafe extern "C-unwind" {
         data_dest_cb: pg_sys::copy_data_dest_cb,
         attnamelist: *mut pg_sys::List,
         options: *mut pg_sys::List,
-        provider_owned_partitioned_table: bool,
         typed_output: bool,
     ) -> pg_sys::CopyToState;
     fn lagodb_execute_routed_copy_to(
@@ -278,7 +284,6 @@ impl CopyBridge {
 
     pub(crate) unsafe fn execute_routed_from_bytes(
         state: pg_sys::CopyFromState,
-        provider_owned_partitioned_table: bool,
         write_bridge: &CopyWriteBridge,
     ) -> u64 {
         unsafe {
@@ -287,7 +292,6 @@ impl CopyBridge {
                     state,
                     None,
                     std::ptr::null_mut(),
-                    provider_owned_partitioned_table,
                     write_bridge,
                 )
             })
@@ -298,7 +302,6 @@ impl CopyBridge {
         state: pg_sys::CopyFromState,
         typed_source: TypedCopySourceCallback,
         typed_source_context: NonNull<c_void>,
-        provider_owned_partitioned_table: bool,
         write_bridge: &CopyWriteBridge,
     ) -> u64 {
         unsafe {
@@ -307,7 +310,6 @@ impl CopyBridge {
                     state,
                     Some(typed_source),
                     typed_source_context.as_ptr(),
-                    provider_owned_partitioned_table,
                     write_bridge,
                 )
             })
@@ -342,7 +344,6 @@ impl CopyBridge {
         data_dest_cb: pg_sys::copy_data_dest_cb,
         attnamelist: *mut pg_sys::List,
         options: *mut pg_sys::List,
-        provider_owned_partitioned_table: bool,
         typed_output: bool,
     ) -> pg_sys::CopyToState {
         unsafe {
@@ -357,7 +358,6 @@ impl CopyBridge {
                     data_dest_cb,
                     attnamelist,
                     options,
-                    provider_owned_partitioned_table,
                     typed_output,
                 )
             })

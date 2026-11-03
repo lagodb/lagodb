@@ -45,10 +45,10 @@ pub use progress::CopyOutputProgress;
 pub use raw_fields::{
     CopyRawFieldReader, CopyRawFields, CopyRawRecord, CopyTextInputValidator,
 };
-pub use route::{CopyTargetProbe, PartitionedTableCopyToPreparation};
+pub use route::CopyTargetProbe;
 pub use row::CopyRowEncoder;
 pub use scan::{CopyDocumentSource, CopyFromScan};
-pub use standard_driver::{RoutedCopyFromDriver, RoutedCopyToDriver};
+pub use standard_driver::RoutedCopyFromDriver;
 pub use typed_driver::{
     TypedCopyFromDriver, TypedCopyFromSpec, TypedCopyToDriver, TypedCopyToSpec,
 };

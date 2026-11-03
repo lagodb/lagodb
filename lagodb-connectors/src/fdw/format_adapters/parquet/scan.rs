@@ -54,7 +54,7 @@ impl FormatScanPlanner for ParquetScanPlanner {
         paths: &mut ForeignPathBuilder<FormatScanPrivate>,
     ) -> Result<(), ConnectorError> {
         let rows = context.rows();
-        let pruning = context.pruning_estimate();
+        let pruning = context.filter_estimates().costed_filters();
         let retrieved_rows = (self.base_tuples * pruning.selectivity).max(rows);
         let provider_startup_cost = PARQUET_STARTUP_COST + pruning.startup_cost;
         // PostgreSQL initializes planner cost GUCs before invoking FDW callbacks.
