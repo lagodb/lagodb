@@ -1,13 +1,9 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
-use std::process::Command;
 
-use crate::{
-    CONNECTORS_NAME, CONNECTORS_PACKAGE, DELTA_AM_NAME, DELTA_AM_PACKAGE,
-    EXTENSION_NAME, EXTENSION_PACKAGE, RUNTIME_NAME, cargo_pgrx_info,
-    install_runtime, pg_config_value, pg_major, prepend_path_env, run_command,
-    usage_error,
-};
+use crate::extension::Extension;
+use crate::pg::PgInstallation;
+use crate::process::{cargo_pgrx, prepend_path_env, run_command};
 
 #[derive(Clone, Copy)]
 pub(crate) enum RegressionSuite {
@@ -16,40 +12,34 @@ pub(crate) enum RegressionSuite {
 }
 
 impl RegressionSuite {
-    fn package(self) -> &'static str {
+    const fn extension(self) -> Extension {
         match self {
-            Self::Iceberg => EXTENSION_PACKAGE,
-            Self::Connectors => CONNECTORS_PACKAGE,
+            Self::Iceberg => Extension::Iceberg,
+            Self::Connectors => Extension::Connectors,
         }
     }
 
     fn provider_libraries(self) -> String {
         match self {
-            Self::Iceberg => format!("{EXTENSION_NAME},{DELTA_AM_NAME}"),
-            Self::Connectors => CONNECTORS_NAME.to_owned(),
+            Self::Iceberg => format!(
+                "{},{}",
+                Extension::Iceberg.library(),
+                Extension::DeltaAm.library()
+            ),
+            Self::Connectors => Extension::Connectors.library().to_owned(),
         }
     }
 }
 
-pub(crate) struct RegressionRunner {
-    pg_version: OsString,
-    pg_config: PathBuf,
+pub(crate) struct RegressionRunner<'a> {
+    pg: &'a PgInstallation,
     bindir: PathBuf,
 }
 
-impl RegressionRunner {
-    pub(crate) fn prepare(pg_version: &OsStr) -> Result<Self, String> {
-        pg_major(pg_version)?;
-        install_runtime(pg_version)?;
-
-        let pg_config = cargo_pgrx_info(pg_version, "pg-config")?;
-        let bindir = pg_config_value(&pg_config, "--bindir")?;
-
-        Ok(Self {
-            pg_version: pg_version.to_owned(),
-            pg_config,
-            bindir,
-        })
+impl<'a> RegressionRunner<'a> {
+    pub(crate) fn new(pg: &'a PgInstallation) -> Result<Self, String> {
+        let bindir = pg.config_value("--bindir")?;
+        Ok(Self { pg, bindir })
     }
 
     pub(crate) fn run(
@@ -58,29 +48,21 @@ impl RegressionRunner {
         test: Option<&OsStr>,
     ) -> Result<(), String> {
         if matches!(suite, RegressionSuite::Iceberg) {
-            run_command(
-                Command::new("cargo")
-                    .arg("pgrx")
-                    .arg("install")
-                    .arg("--package")
-                    .arg(DELTA_AM_PACKAGE)
-                    .arg("--features")
-                    .arg("pg_test")
-                    .arg("--pg-config")
-                    .arg(&self.pg_config),
-            )?;
+            self.pg.install_pg_test(Extension::DeltaAm)?;
         }
 
-        let mut command = Command::new("cargo");
+        let mut command = cargo_pgrx();
         command
-            .arg("pgrx")
             .arg("regress")
-            .arg(&self.pg_version)
+            .arg(self.pg.label())
             .arg("--package")
-            .arg(suite.package())
+            .arg(suite.extension().package())
             .arg("--resetdb")
             .arg("--postgresql-conf")
-            .arg(format!("shared_preload_libraries='{RUNTIME_NAME}'"))
+            .arg(format!(
+                "shared_preload_libraries='{}'",
+                Extension::Runtime.library()
+            ))
             .arg("--postgresql-conf")
             .arg(format!(
                 "lagodb.provider_libraries='{}'",
@@ -114,35 +96,35 @@ impl RegressionTarget {
         let suite = match suite_name.to_str() {
             Some("all") => {
                 if let Some(test) = args.next() {
-                    return Err(usage_error(&format!(
+                    return Err(format!(
                         "test '{}' requires an explicit regression suite",
                         test.to_string_lossy()
-                    )));
+                    ));
                 }
                 return Ok(Self::All);
             }
             Some("iceberg") => RegressionSuite::Iceberg,
             Some("connectors") => RegressionSuite::Connectors,
             _ => {
-                return Err(usage_error(&format!(
+                return Err(format!(
                     "unknown regression suite '{}'",
                     suite_name.to_string_lossy()
-                )));
+                ));
             }
         };
 
         let test = args.next();
         if let Some(extra) = args.next() {
-            return Err(usage_error(&format!(
+            return Err(format!(
                 "cargo pgrx regress accepts one test name; unexpected '{}'",
                 extra.to_string_lossy()
-            )));
+            ));
         }
 
         Ok(Self::Suite { suite, test })
     }
 
-    pub(crate) fn includes_iceberg(&self) -> bool {
+    fn includes_iceberg(&self) -> bool {
         matches!(
             self,
             Self::All
@@ -153,7 +135,13 @@ impl RegressionTarget {
         )
     }
 
-    pub(crate) fn run(self, runner: &RegressionRunner) -> Result<(), String> {
+    pub(crate) fn execute(self, pg: &PgInstallation) -> Result<(), String> {
+        if self.includes_iceberg() {
+            pg.prepare_injection_points()?;
+        }
+        pg.install(Extension::Runtime)?;
+        let runner = RegressionRunner::new(pg)?;
+
         match self {
             Self::All => {
                 println!("=== lagodb-iceberg SQL regression (PostgreSQL) ===\n");

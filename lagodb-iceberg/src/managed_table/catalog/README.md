@@ -32,7 +32,7 @@ row-level isolation policy to Iceberg `Serializable`, but metadata visibility
 remains statement-scoped and the AM does not yet participate in PostgreSQL's
 SSI predicate-lock/read-write dependency tracking. This is an explicitly
 incomplete PostgreSQL `SERIALIZABLE` implementation; see
-`access::isolation::PgTransactionIsolation`.
+`write::isolation::PgTransactionIsolation`.
 
 `write.delete.isolation-level`, `write.update.isolation-level`, and
 `write.merge.isolation-level` are accepted as Iceberg table options with

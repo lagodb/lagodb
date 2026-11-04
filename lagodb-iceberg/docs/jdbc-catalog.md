@@ -32,7 +32,7 @@ interface, not a general-purpose writable JDBC catalog.
 
 Both views use PostgreSQL's implicit `pg_catalog` search path. Clients need no
 custom search path. Local managed tables and foreign tables are excluded.
-Iceberg partitioned roots are included. Empty managed tables already have an
+Empty managed tables already have an
 initial metadata file and are discoverable before their first insert.
 
 The catalog name must match the database name. Table and schema renames follow

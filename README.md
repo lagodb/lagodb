@@ -2,17 +2,17 @@
 
 [![Build Status](https://github.com/lagodb/lagodb/actions/workflows/ci.yml/badge.svg)](https://github.com/lagodb/lagodb/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-1.97.1%2B-blue.svg)](https://www.rust-lang.org)
-[![PostgreSQL](https://img.shields.io/badge/postgresql-17-blue.svg)](https://www.postgresql.org)
+[![PostgreSQL](https://img.shields.io/badge/postgresql-17%20%7C%2018-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 **A lakehouse database built on PostgreSQL.**
 
-LagoDB lets you create, query, and modify open lakehouse tables with ordinary
-PostgreSQL SQL and transactions. Your data stays in open formats on local disk
-or object storage, and engines such as Apache Spark can read the same tables
-from object storage.
+LagoDB brings PostgreSQL's SQL, transactions, and ecosystem to open lakehouse
+tables. Your data stays in open formats on local disk or object storage, and
+engines such as Apache Spark can read the same tables from object storage.
 
-Apache Iceberg is supported today. Delta Lake and Apache Hudi are planned.
+[Apache Iceberg](https://iceberg.apache.org/) is supported today.
+[Delta Lake](https://delta.io/) and [Apache Hudi](https://hudi.apache.org/) are planned.
 
 > [!WARNING]
 > LagoDB is under active development and is not ready for production
@@ -24,19 +24,22 @@ Apache Iceberg is supported today. Delta Lake and Apache Hudi are planned.
 ## Why LagoDB?
 
 - **PostgreSQL is the interface.** Use the SQL, transactions, drivers, and
-  tools you already know. There is no separate query language or client to
-  learn.
+  tools you already know instead of adopting a separate interface for
+  lakehouse data.
+- **Transactional Iceberg tables.** `USING iceberg` tables support `INSERT`,
+  `UPDATE`, `DELETE`, and `MERGE` with PostgreSQL commit, rollback, and
+  savepoints.
 - **Open tables that other engines can use.** Tables are stored as Iceberg
   metadata and Parquet files. Spark can read the tables that LagoDB manages in
   object storage, and both engines can read and modify tables in an Iceberg
-  REST catalog. Regression tests cover this interoperability for Iceberg format
-  versions 1, 2, and 3.
+  REST catalog.
 - **Analytics run in a vectorized engine.** Eligible filters, joins, and
   aggregations run in an embedded [Apache DataFusion](https://datafusion.apache.org/)
   engine instead of PostgreSQL's row-at-a-time executor.
-- **Query data where it already lives.** Connect to Iceberg tables in an external
-  catalog, or query Parquet, CSV, JSON, Avro, and text files in S3, GCS, or
-  Azure Blob Storage without loading them first.
+- **Work with data where it already lives.** Query Iceberg tables in an external
+  catalog as foreign tables, query Parquet, CSV, JSON, Avro, and text files in
+  S3, GCS, or Azure Blob Storage without loading them first, and import or
+  export them with `COPY`.
 
 ## Current capabilities
 
@@ -45,14 +48,14 @@ except where the boundary column says otherwise.
 Format versions follow the
 [Iceberg table specification](https://iceberg.apache.org/spec/#format-versioning),
 and isolation levels follow
-[PostgreSQL's documentation](https://www.postgresql.org/docs/17/transaction-iso.html).
+[PostgreSQL's documentation](https://www.postgresql.org/docs/current/transaction-iso.html).
 
 | Area | What works today | Current boundary |
 |---|---|---|
 | Managed tables | `USING iceberg` tables with `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and `COPY` | Stored in a PostgreSQL-backed Iceberg catalog. |
 | Iceberg format versions | v1, v2, and v3 tables | `UPDATE` and `DELETE` need v2 or later. They write position deletes in v2 and deletion vectors in v3. |
-| Transactions | Statement-level snapshots under `READ COMMITTED`, read-your-own-writes, commit, rollback, and savepoints | `SERIALIZABLE` adds stricter write-conflict checks but is not full PostgreSQL SSI. `REPEATABLE READ` is not supported. |
-| Partitioned tables | PostgreSQL `PARTITION BY RANGE` and `LIST` syntax | Each partitioned table is stored as one partitioned Iceberg table. LagoDB manages its partitions, so `ATTACH PARTITION` and `DETACH PARTITION` are not supported. |
+| Transactions | Statement-level snapshots under `READ COMMITTED`, read-your-own-writes, commit, rollback, and savepoints | `SERIALIZABLE` adds stricter write-conflict checks but is not full PostgreSQL SSI. `REPEATABLE READ` support is partial: DDL, and reads and inserts on external Iceberg tables, run; reads and writes on managed tables and `UPDATE` or `DELETE` on external tables report an error. |
+| Partitioned tables | PostgreSQL `PARTITION BY RANGE`, `LIST`, and `HASH` syntax, including multi-field keys that define one composite Iceberg partition spec | The table is stored as one partitioned Iceberg table, and PostgreSQL sees an ordinary table. |
 | Schema changes | `ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN`, and `DROP NOT NULL` | Other `ALTER TABLE` changes, such as `ALTER COLUMN TYPE`, are rejected. |
 | Storage | Local filesystem and S3-compatible object storage through storage volumes | GCS and Azure providers are experimental. |
 | Foreign Iceberg tables | REST and SQLite catalogs; `SELECT`, `INSERT`, `UPDATE`, `DELETE`, and `COPY FROM`; `IMPORT FOREIGN SCHEMA`; optional creation of missing remote tables | Each table remains owned by its external catalog. |
@@ -64,15 +67,21 @@ and isolation levels follow
 ## Quick start
 
 LagoDB is currently built from source with [pgrx](https://github.com/pgcentralfoundation/pgrx).
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
+Choose PostgreSQL 16, 17 or 18 and point `PG_CONFIG` at that installation:
 
 ```bash
-cargo pgrx init --pg17=/path/to/pg_config
+PG_MAJOR=17 # or 16, 18
+PG_CONFIG=/path/to/pg_config
 
-cargo pgrx install --package lagodb-base --pg-config /path/to/pg_config
-cargo pgrx install --package lagodb-iceberg --pg-config /path/to/pg_config
-cargo pgrx install --package lagodb-connectors --pg-config /path/to/pg_config
+cargo pgrx init "--pg${PG_MAJOR}=${PG_CONFIG}"
+
+cargo pgrx install --package lagodb-base --pg-config "${PG_CONFIG}"
+cargo pgrx install --package lagodb-iceberg --pg-config "${PG_CONFIG}"
+cargo pgrx install --package lagodb-connectors --pg-config "${PG_CONFIG}"
 ```
+
+See [Build from source](docs/build-from-source.md) for prerequisites and version
+selection, and [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
 
 Add LagoDB to `postgresql.conf`, then restart PostgreSQL:
 
@@ -126,7 +135,8 @@ SELECT count(*) FROM events; -- 2
 ```
 
 PostgreSQL partitioning syntax creates a partitioned Iceberg table. You do not
-create individual partitions:
+create individual partitions, and PostgreSQL treats the result as one ordinary
+table:
 
 ```sql
 CREATE TABLE daily_events (
@@ -236,8 +246,10 @@ SELECT * FROM s3_events WHERE device_id = 101;
 
 ## PostgreSQL support
 
-LagoDB supports PostgreSQL 17. Support for PostgreSQL 16, 18, and 19 is
-planned.
+LagoDB supports PostgreSQL 16, 17 and 18. PostgreSQL 17 remains the default for
+ordinary Cargo commands; selecting PG16 or PG18 explicitly is documented in
+[Build from source](docs/build-from-source.md). Other major versions, including
+PostgreSQL 15 and 19, are not supported.
 
 ## Contributing
 

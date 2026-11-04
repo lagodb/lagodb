@@ -1,7 +1,7 @@
 # lagodb-arrow
 
 [![Rust](https://img.shields.io/badge/rust-1.97.1%2B-blue.svg)](https://www.rust-lang.org)
-[![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%7C%2017-blue.svg)](https://www.postgresql.org)
+[![PostgreSQL](https://img.shields.io/badge/postgresql-17%20%7C%2018-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE)
 
 **PostgreSQL⇆Arrow interoperability for LagoDB runtimes and providers.**
@@ -118,7 +118,7 @@ workspace is layered.
 ## Requirements
 
 - Rust 1.97.1 or later
-- PostgreSQL 16 or 17
+- PostgreSQL 16, 17 or 18
 - pgrx 0.19.2
 
 Dependencies are limited to `pgrx`, `lagodb-core`, the `arrow-*` crates, and
@@ -140,14 +140,16 @@ are `#[pg_test]` tests hosted in the aggregator crate
 [pg-backend-tests](../pg-backend-tests):
 
 The aggregator preloads `lagodb_base`. Install that runtime into the
-target pgrx PostgreSQL installation before running the test:
+target pgrx PostgreSQL installation before running the test. The loop covers
+every target major; run only the majors initialized with `cargo pgrx init`:
 
 ```bash
-cargo pgrx install \
-  --package lagodb-base \
-  --pg-config "$(cargo pgrx info pg-config pg17)"
-
-cargo pgrx test pg17 --package pg-backend-tests
+for pg in pg16 pg17 pg18; do
+  cargo pgrx install \
+    --package lagodb-base \
+    --pg-config "$(cargo pgrx info pg-config "${pg}")"
+  cargo pgrx test "${pg}" --package pg-backend-tests
+done
 ```
 
 ## License

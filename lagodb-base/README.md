@@ -1,7 +1,7 @@
 # lagodb-base
 
 [![Rust](https://img.shields.io/badge/rust-1.97.1%2B-blue.svg)](https://www.rust-lang.org)
-[![PostgreSQL](https://img.shields.io/badge/postgresql-17-blue.svg)](https://www.postgresql.org)
+[![PostgreSQL](https://img.shields.io/badge/postgresql-17%20%7C%2018-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE)
 
 ## PostgreSQL Foundation Runtime and System Host
@@ -151,17 +151,11 @@ ProcessUtility Hook Router
   │           └─ Forward untouched to the previous ProcessUtility hook
 ```
 
-Native-only TRUNCATE and ordinary managed-table TRUNCATE are delegated to the
-previous utility hook after a target-lock-free ownership probe. An unresolved
-target ends the probe and delegates the complete statement. A provider-owned
-provider-owned partitioned table found before that point selects one executor for all targets. The
-[TRUNCATE bridge contract](../lagodb-core/csrc/truncate/README.md) documents the standalone partitioned table
-topology, consumed-command hook boundary, and accepted negative-probe DDL window.
-
-The runtime owns maintenance admission, provider policy, the command recursion
-scope, and captured parent delegation. PostgreSQL option parsing, relation-plan
-memory, VACUUM/ANALYZE transaction and snapshot sequencing, and TRUNCATE execution
-are implemented by core's [maintenance executor](../lagodb-core/src/table_maintenance/README.md).
+Provider tables are ordinary relations, so PostgreSQL runs TRUNCATE, ANALYZE and
+routine VACUUM through their table AM. The runtime routes only VACUUM FULL. It
+owns admission, provider policy and captured parent delegation; option parsing,
+relation-plan memory and statement splitting are implemented by core's
+[maintenance executor](../lagodb-core/src/table_maintenance/README.md).
 
 ### 4. Background Worker and Maintenance Lifecycle
 
@@ -187,7 +181,7 @@ Provider or Runtime Worker
 ## Requirements
 
 - **Rust**: 1.97.1 or later
-- **PostgreSQL**: 17
+- **PostgreSQL**: 16, 17 or 18
 - **pgrx**: 0.19.2
 
 ## Configuration

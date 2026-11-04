@@ -73,7 +73,11 @@ PostgreSQL transactional semantics (ACID, MVCC, read-your-own-writes, conflict d
 
 ### 4. Fault Injection and Crash Testing
 
-To verify resilience against crashes, aborts, and network interruptions, tests leverage PostgreSQL 17's native **Injection Points** (`--enable-injection-points`):
+To verify resilience against crashes, aborts, and network interruptions, tests
+leverage native **Injection Points** in PostgreSQL 17 and 18
+(`--enable-injection-points`). PostgreSQL 16 has none, so
+`fault_injection.sql` skips itself there and `worker.sql` omits its crash-backoff
+block:
 - Injecting errors at transactional boundaries to verify that uncommitted data/delete files are discarded without metadata corruption.
 - Testing background worker crash recovery and WAL replay safety.
 
@@ -90,26 +94,37 @@ Runs Tier 1 pure unit tests instantly without starting PostgreSQL:
   ```bash
   cargo test -p lagodb-core --lib
   ```
-- **Run all workspace pure unit tests** (matches `xtask` Phase 1):
+- **Run all workspace pure unit tests** for each target PostgreSQL major
+  (matches `xtask` Phase 1):
   ```bash
-  cargo test --workspace --exclude pg-backend-tests --exclude lagodb-base --exclude lagodb-iceberg --exclude pg-delta-am --exclude lagodb-connectors --no-default-features --features pg17
+  for pg_feature in pg16 pg17 pg18; do
+    cargo test --workspace --exclude pg-backend-tests --exclude lagodb-base --exclude lagodb-iceberg --exclude pg-delta-am --exclude lagodb-connectors --no-default-features --features "${pg_feature}"
+  done
   ```
+
+  Ordinary package-level Cargo commands use the default `pg17` feature. To
+  target PG16 or PG18 with ordinary Cargo, always use
+  `--no-default-features --features pg16` or `pg18`; do not use `--all-features`, because
+  the PostgreSQL major features are mutually exclusive.
 
 
 ### Run PostgreSQL Backend Tests
 Runs Tier 2 `#[pg_test]` tests inside an ephemeral PostgreSQL test cluster:
 ```bash
-# Ensure the shared runtime is installed in the target pgrx installation
-cargo pgrx install --package lagodb-base --pg-config "$(cargo pgrx info pg-config pg17)"
-
-# Run backend tests
-cargo pgrx test pg17 --package lagodb-iceberg
+# cargo-pgrx selects the matching feature from the explicit target major.
+for pg in pg16 pg17 pg18; do
+  cargo pgrx install --package lagodb-base \
+    --pg-config "$(cargo pgrx info pg-config "${pg}")"
+  cargo pgrx test "${pg}" --package lagodb-iceberg
+done
 ```
 
 ### Run SQL Regression Tests
 Runs the complete SQL regression suite:
 ```bash
+cargo xtask regress pg16
 cargo xtask regress pg17
+cargo xtask regress pg18
 ```
 
 Credential coverage uses the existing MinIO and REST fixtures without changing
@@ -123,7 +138,9 @@ are not covered by these fixtures.
 ### Run Full Test Suite (Unit, Backend, Isolation, E2E)
 Runs the complete end-to-end verification suite:
 ```bash
+cargo xtask test-all pg16
 cargo xtask test-all pg17
+cargo xtask test-all pg18
 ```
 
 ## Summary of Best Practices

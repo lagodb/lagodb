@@ -19,21 +19,19 @@ replayed or decoded.
 
 ## UNLOGGED tables
 
-`CREATE UNLOGGED TABLE ... USING iceberg` is supported for both ordinary and
-managed partitioned tables, including creation through the default table AM.
-It disables local Iceberg file WAL through the existing PostgreSQL
-`RelationNeedsWAL` policy. File writes, partitioned-table reservation creation,
-in-place TRUNCATE and post-commit file/directory deletion all follow that
+`CREATE UNLOGGED TABLE ... USING iceberg` is supported, including creation
+through the default table AM. It disables local Iceberg file WAL through the
+existing PostgreSQL `RelationNeedsWAL` policy. File writes, in-place TRUNCATE and post-commit file/directory deletion all follow that
 policy. File synchronization, transaction visibility, savepoint
 rollback and commit/abort cleanup retain their ordinary behavior.
 
 This is an intentional departure from PostgreSQL heap UNLOGGED semantics:
 
 - Iceberg does not create a native init fork or an auxiliary reset table.
-  PG17 `ResetUnloggedRelations()` only processes native relation forks with an
-  init fork; it does not invoke the table AM or access the Iceberg catalog.
-  Neither the Iceberg directory nor its metadata pointer is reset to an empty
-  table after a crash.
+  PostgreSQL `ResetUnloggedRelations()` only processes native relation forks
+  with an init fork; it does not invoke the table AM or access the Iceberg
+  catalog. Neither the Iceberg directory nor its metadata pointer is reset to
+  an empty table after a crash.
 - The shared `iceberg.iceberg_metadata` catalog remains a logged heap table.
   Catalog and metadata-pointer updates still produce PostgreSQL WAL; only
   Iceberg file WAL is disabled.
@@ -56,7 +54,7 @@ storage rewrite, which requires a separate Iceberg storage-migration design.
 PostgreSQL relation storage can put relfilenode cleanup directly in transaction
 commit/abort records through `pendingDeletes` and `smgr`. A table access method
 extension cannot append arbitrary Iceberg paths to those core commit/abort
-records, and PostgreSQL 17's `smgr` switch is not a third-party registration
+records, and PostgreSQL's `smgr` switch is not a third-party registration
 API. Because both extension points are closed to this AM, Iceberg cannot make
 directory cleanup perfectly transaction-bound in the same way as heap storage.
 
@@ -73,7 +71,7 @@ Because of that limitation:
   are not committed table-state facts and still rely on primary-local cleanup
   plus orphan maintenance. A bounded post-commit `DELETE_FILES` operation is
   used for transaction-created files canceled by a successful final metadata
-  commit, committed VACUUM cleanup, and retired partitioned-table reservations.
+  commit and committed VACUUM cleanup.
 - Local table-directory deletion is modeled as post-commit cleanup. WAL-enabled
   storage writes and flushes `DELETE_DIRECTORY` before removing the primary
   directory; WAL-free storage removes it without logging.
@@ -82,30 +80,22 @@ Commit cleanup follows PostgreSQL's release ordering: first determine the
 transaction outcome, then release transaction locks, then remove retired
 storage. Owned cleanup transfers to core's `CommittedCleanup` at
 `XACT_EVENT_COMMIT`; `lagodb_core::resource` executes it in the actual top
-transaction owner's `RESOURCE_RELEASE_AFTER_LOCKS` callback. PG17 uses this
-ordering for native storage too, calling `smgrDoPendingDeletes(true)` after
+transaction owner's `RESOURCE_RELEASE_AFTER_LOCKS` callback. PostgreSQL uses
+this ordering for native storage too, calling `smgrDoPendingDeletes(true)` after
 ResourceOwner's lock-release phases. The extension uses the public
 ResourceOwner callback because it cannot register its paths with `smgr`.
 
 The storage retirement collection uses the transaction framework's savepoint
 callbacks to promote or cancel its entries. Each `LocalTableRetirement` owns a
-generation's directory, optional partitioned-table reservation and storage
-capability; none requires a live relation or snapshot. At `XACT_EVENT_COMMIT`,
-the collection transfers one owned batch to core's committed cleanup. This
-includes retirements registered by `ON COMMIT DROP`, which PostgreSQL executes
-after `PRE_COMMIT` callbacks. After lock release, the batch records every
-WAL-enabled retirement and flushes the last LSN once before removing directories
-in registration order and releasing their reservations. WAL-enabled non-temporary
-reservations remain as empty main-fork files: core forwards an MD
-`SYNC_UNLINK_REQUEST` to PostgreSQL, which unlinks them only after a safe checkpoint
-completes. The request
-is registered after both deletion records are flushed, so the checkpoint's REDO
-point excludes them before the number can be reused. WAL-free entries emit no
-deletion WAL and unlink their reservations directly; temporary reservations use
-their backend-specific paths. This separates normal committed cleanup from
-ResourceOwner's forgotten-resource fallback and its
-resource-leak warnings. The batch remains backend-local and does not close the
-crash gap described below.
+generation's directory and storage capability; neither requires a live relation
+or snapshot. At `XACT_EVENT_COMMIT`, the collection transfers one owned batch to
+core's committed cleanup. This includes retirements registered by `ON COMMIT
+DROP`, which PostgreSQL executes after `PRE_COMMIT` callbacks. After lock release,
+the batch records every WAL-enabled retirement and flushes the last LSN once
+before removing directories in registration order. WAL-free entries emit no
+deletion WAL. This separates normal committed cleanup from ResourceOwner's
+forgotten-resource fallback and its resource-leak warnings. The batch remains
+backend-local and does not close the crash gap described below.
 
 Pending retirements reject `PREPARE TRANSACTION`. If savepoint rollback has
 canceled every entry, PREPARE is allowed; core's successful-PREPARE callback
@@ -114,20 +104,12 @@ reference without executing any retirement.
 
 ### In-place local TRUNCATE
 
-PG17 `ExecuteTruncateGuts()` selects nontransactional truncation only when the
-table or its current locator was created in the current subtransaction. Abort
+PostgreSQL `ExecuteTruncateGuts()` selects nontransactional truncation only when
+the table or its current locator was created in the current subtransaction. Abort
 discards that generation, so its contents can be removed immediately before
 bootstrapping the empty local Iceberg table. Clearing the disposable generation
 in place avoids accumulating old path sets across repeated truncations and
 requires no per-file retirement WAL.
-
-Local partitioned tables use the metadata tracker's rebuild level for the same
-ownership decision because PostgreSQL does not manage their storage locator.
-CREATE and a generation-changing TRUNCATE record that owner; RELEASE reparents
-it and rollback restores it. Only a generation owned by the current nesting
-level is cleared in place. A generation owned by a parent or an earlier
-transaction is replaced, preserving it for rollback. In-place clearing retains
-the reservation file and still bootstraps new Iceberg metadata.
 
 WAL-enabled storage emits `TRUNCATE_DIRECTORY`, using the same path layout as
 `DELETE_DIRECTORY` but a different recovery contract. It precedes the
@@ -236,13 +218,8 @@ recovery cannot repair them because it skips `WRITE_FILE` redo. This limitation
 applies to logged and UNLOGGED local tables. Private ownership, catalog CAS and
 the local TRUNCATE rebuild protocol do not provide directory durability.
 
-Local directories use PostgreSQL relation paths with an `_iceberg` suffix.
-Ordinary tables use their native locator; partitioned tables allocate a PG file
-number and reserve it with an AM-owned empty file. A nonempty directory cannot
-be reused during bootstrap. Retired WAL-enabled partitioned-table reservations protect
-against number reuse until PostgreSQL's checkpoint unlink queue can release them;
-primary recovery still replays their existing deletion WAL. Retired directories
-and reservation handoff still depend on backend transaction state and post-commit
-cleanup. The crash window
+Local directories use the relation's native locator path with an `_iceberg`
+suffix. A nonempty directory cannot be reused during bootstrap. Retired directories
+still depend on backend transaction state and post-commit cleanup. The crash window
 between PostgreSQL commit and cleanup WAL emission remains unchanged; closing
 it requires recoverable retirement records.

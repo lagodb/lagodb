@@ -1,7 +1,7 @@
 # lagodb-core
 
 [![Rust](https://img.shields.io/badge/rust-1.97.1%2B-blue.svg)](https://www.rust-lang.org)
-[![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%7C%2017-blue.svg)](https://www.postgresql.org)
+[![PostgreSQL](https://img.shields.io/badge/postgresql-17%20%7C%2018-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE)
 
 ## PostgreSQL-Lakehouse Integration Framework
@@ -136,7 +136,7 @@ The reference implementation is [`lagodb-iceberg`](../lagodb-iceberg), which imp
 ## Requirements
 
 - **Rust**: 1.97.1 or later
-- **PostgreSQL**: 16 or 17
+- **PostgreSQL**: 16, 17 or 18
 - **pgrx**: 0.19.2
 
 ## Testing
@@ -147,8 +147,13 @@ The reference implementation is [`lagodb-iceberg`](../lagodb-iceberg), which imp
    cargo test -p lagodb-core
    ```
 2. **PostgreSQL Backend Tests**: Tests requiring a live PostgreSQL backend (Datum round-trips, syscache lookups, TableAM C callbacks) are aggregated in the shared [`pg-backend-tests`](../pg-backend-tests) crate:
+   The crate preloads `lagodb_base`, so install that runtime into the target pgrx PostgreSQL installation first. The loop covers every target major; run only the majors initialized with `cargo pgrx init`:
    ```bash
-   cargo pgrx test pg17 --package pg-backend-tests
+   for pg in pg16 pg17 pg18; do
+     cargo pgrx install --package lagodb-base \
+       --pg-config "$(cargo pgrx info pg-config "${pg}")"
+     cargo pgrx test "${pg}" --package pg-backend-tests
+   done
    ```
 
 ## License

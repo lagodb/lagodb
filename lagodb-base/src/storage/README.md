@@ -12,7 +12,7 @@ this path.
 3. Register one static bgworker named `lagodb-storage` when
    `lagodb.storage_server_enabled = on`.
 
-The worker connects to SPI with `Some("postgres")`. PostgreSQL 17 cannot open
+The worker connects to SPI with `Some("postgres")`. PostgreSQL cannot open
 `pg_tablespace` through relcache without a selected database, even though
 `pg_tablespace` is a shared catalog. We intentionally avoid `template1` because
 a persistent background-worker session there would block `CREATE DATABASE`.
