@@ -31,6 +31,37 @@ BEGIN
     RETURN plan;
 END;
 $$;
+\i include/explain_analyze_text.sql
+-- Text EXPLAIN ANALYZE with PostgreSQL's regression options. PostgreSQL row
+-- counts are masked as in partition_prune.sql because their text format
+-- differs across major versions. LagoDB worker peak memory depends on how
+-- producer batches interleave in each worker, so it is masked as
+-- select_parallel.sql masks parallel sort memory; other LagoDB metrics are left
+-- unchanged. LagoDB duration properties ("N ms") are masked as explain.sql
+-- masks them, but PostgreSQL's per-node actual time is not, so callers that
+-- request timing select only the properties they assert.
+CREATE FUNCTION pg_temp.explain_analyze_text(
+    query text,
+    verbose_plan boolean DEFAULT false,
+    timing boolean DEFAULT false
+) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+    ln text;
+BEGIN
+    FOR ln IN
+        EXECUTE format(
+            'EXPLAIN (ANALYZE, VERBOSE %s, COSTS OFF, TIMING %s, SUMMARY OFF, BUFFERS OFF) %s',
+            verbose_plan::text, timing::text, query)
+    LOOP
+        ln := regexp_replace(ln, 'actual rows=\d+(?:\.\d+)? loops=\d+',
+                             'actual rows=N loops=N');
+        ln := regexp_replace(ln, '(Worker \w+ Peak Memory Bytes): \d+', '\1: N');
+        ln := regexp_replace(ln, '\d+\.\d+ ms', 'N ms', 'g');
+        RETURN NEXT ln;
+    END LOOP;
+END;
+$$;
 -- Metadata COUNT produces its result without opening a data-file reader.
 SELECT plan #>> '{0,Plan,Execution Mode}' AS execution_mode,
        jsonb_path_query_first(plan,
@@ -104,8 +135,8 @@ WHERE id = 1;
          Aggregates: COUNT(*)
          ->  Table Scan on query_offload_explain_left
                Access Method: iceberg
-               Estimated Rows Read: 1
-               Estimated Bytes Read: 2731 bytes
+               Estimated Rows Read: 3
+               Estimated Bytes Read: 8192 bytes
                Filter: (id = 1)
                Pushed Filter: (id = 1)
 (10 rows)
@@ -128,8 +159,8 @@ WHERE id = 1;
                      Access Method: iceberg
                      Scan ID: 0
                      Output: id
-                     Estimated Rows Read: 1
-                     Estimated Bytes Read: 2731 bytes
+                     Estimated Rows Read: 3
+                     Estimated Bytes Read: 8192 bytes
                      Provider Startup Cost: 0.00
                      Filter: (id = 1)
                      Pushed Filter Conservative: (id = 1)
@@ -214,18 +245,19 @@ JOIN query_offload_explain_right AS "Right Side"
 
 -- Actual metrics survive COSTS OFF, are associated with their scan leaves,
 -- and exclude timing when PostgreSQL requests TIMING OFF.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT pg_temp.explain_analyze_text($$
 SELECT l.key, count(*)
 FROM query_offload_explain_left AS l
 JOIN query_offload_explain_right AS r USING (key)
 GROUP BY l.key
-ORDER BY l.key;
-                             QUERY PLAN                              
+ORDER BY l.key
+$$);
+                        explain_analyze_text                         
 ---------------------------------------------------------------------
- Custom Scan (LagoDB Query Offload) (actual rows=2 loops=1)
+ Custom Scan (LagoDB Query Offload) (actual rows=N loops=N)
    Engine: DataFusion
    Execution Mode: Serial
-   Local Engine Peak Memory Bytes: 4192
+   Local Engine Peak Memory Bytes: 1049168
    ->  Sort
          Sort Key: l.key ASC NULLS LAST
          ->  Aggregate
@@ -251,20 +283,21 @@ ORDER BY l.key;
 (26 rows)
 
 -- Engine physical diagnostics are restricted to ANALYZE VERBOSE.
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT pg_temp.explain_analyze_text($$
 SELECT l.key, count(*)
 FROM query_offload_explain_left AS l
 JOIN query_offload_explain_right AS r USING (key)
 GROUP BY l.key
-ORDER BY l.key;
-                                                            QUERY PLAN                                                             
------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (LagoDB Query Offload) (actual rows=2 loops=1)
+ORDER BY l.key
+$$, verbose_plan => true);
+                                                        explain_analyze_text                                                         
+-------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload) (actual rows=N loops=N)
    Output: l.key, (count(*))
    Engine: DataFusion
    Execution Mode: Serial
    Maximum Batch Rows: 2
-   Local Engine Peak Memory Bytes: 4192
+   Local Engine Peak Memory Bytes: 1049168
    ->  Sort
          Sort Key: l.key ASC NULLS LAST
          ->  Projection
@@ -319,38 +352,51 @@ ORDER BY l.key;
                        Metric: spill_count: 0
                        Metric: spilled_bytes: 0
                        Metric: spilled_rows: 0
-                       ->  HashJoinExec
-                             Details: HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(key@0, key@0)], projection=[key@0]
-                             Metric: output_rows: 3
-                             Metric: output_bytes: 24
-                             Metric: output_batches: 2
-                             Metric: build_mem_used: 32
-                             Metric: array_map_created_count: 1
-                             Metric: build_input_batches: 2
-                             Metric: build_input_rows: 3
-                             Metric: input_batches: 1
-                             Metric: input_rows: 2
-                             Metric: avg_fanout: 100% (3/3)
-                             Metric: probe_hit_rate: 75% (3/4)
-                             ->  CooperativeExec
-                                   Details: CooperativeExec
-                                   ->  ExternalTableScanExec
-                                         Details: ExternalTableScanExec: scan=0, runtime_filters=0
-                                         Metric: dynamic_filter_input_rows: 0
-                                         Metric: dynamic_filter_output_rows: 0
-                                         Metric: planned_bytes: 1293
-                                         Metric: planned_files: 1
-                                         Metric: planned_tasks: 1
-                             ->  CooperativeExec
-                                   Details: CooperativeExec
-                                   ->  ExternalTableScanExec
-                                         Details: ExternalTableScanExec: scan=1, runtime_filters=1
-                                         Metric: dynamic_filter_input_rows: 2
-                                         Metric: dynamic_filter_output_rows: 2
-                                         Metric: planned_bytes: 931
-                                         Metric: planned_files: 1
-                                         Metric: planned_tasks: 1
-(91 rows)
+                       ->  AdaptiveHashJoinExec
+                             Details: AdaptiveHashJoinExec
+                             Metric: fallback_partitions: 0
+                             ->  HashJoinExec
+                                   Details: HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(key@0, key@0)], projection=[key@1]
+                                   Metric: output_rows: 3
+                                   Metric: output_bytes: 24
+                                   Metric: output_batches: 2
+                                   Metric: build_mem_used: 16
+                                   Metric: array_map_created_count: 1
+                                   Metric: build_input_batches: 1
+                                   Metric: build_input_rows: 2
+                                   Metric: input_batches: 2
+                                   Metric: input_rows: 3
+                                   Metric: avg_fanout: 100% (3/3)
+                                   Metric: probe_hit_rate: 100% (3/3)
+                                   ->  CooperativeExec
+                                         Details: CooperativeExec
+                                         ->  ExternalTableScanExec
+                                               Details: ExternalTableScanExec: scan=1, runtime_filters=0
+                                               Metric: dynamic_filter_input_rows: 0
+                                               Metric: dynamic_filter_output_rows: 0
+                                               Metric: planned_bytes: 931
+                                               Metric: planned_files: 1
+                                               Metric: planned_tasks: 1
+                                   ->  CooperativeExec
+                                         Details: CooperativeExec
+                                         ->  ExternalTableScanExec
+                                               Details: ExternalTableScanExec: scan=0, runtime_filters=1
+                                               Metric: dynamic_filter_input_rows: 3
+                                               Metric: dynamic_filter_output_rows: 3
+                                               Metric: planned_bytes: 1293
+                                               Metric: planned_files: 1
+                                               Metric: planned_tasks: 1
+(94 rows)
+
+-- Like JIT timing, engine setup time appears only when EXPLAIN collects timing.
+SELECT ln FROM pg_temp.explain_analyze_text($$
+SELECT key, count(*) FROM query_offload_explain_left GROUP BY key
+$$, timing => true) AS ln
+WHERE ln ~ 'Setup Time';
+            ln             
+---------------------------
+   Engine Setup Time: N ms
+(1 row)
 
 -- JSON protects real Plans nesting and native numeric property types without
 -- snapshotting the complete structured document into the expected file.
@@ -601,6 +647,7 @@ RESET enable_mergejoin;
 RESET enable_material;
 DROP TABLE query_offload_explain_outer;
 DROP FUNCTION query_offload_explain_json(text, text);
+DROP FUNCTION pg_temp.explain_analyze_text(text, boolean, boolean);
 DROP TABLE query_offload_explain_right;
 DROP TABLE query_offload_explain_left;
 RESET lagodb.query_batch_rows;

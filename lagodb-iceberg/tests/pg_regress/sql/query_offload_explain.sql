@@ -39,6 +39,8 @@ BEGIN
 END;
 $$;
 
+\i include/explain_analyze_text.sql
+
 -- Metadata COUNT produces its result without opening a data-file reader.
 SELECT plan #>> '{0,Plan,Execution Mode}' AS execution_mode,
        jsonb_path_query_first(plan,
@@ -119,20 +121,28 @@ JOIN query_offload_explain_right AS "Right Side"
 
 -- Actual metrics survive COSTS OFF, are associated with their scan leaves,
 -- and exclude timing when PostgreSQL requests TIMING OFF.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT pg_temp.explain_analyze_text($$
 SELECT l.key, count(*)
 FROM query_offload_explain_left AS l
 JOIN query_offload_explain_right AS r USING (key)
 GROUP BY l.key
-ORDER BY l.key;
+ORDER BY l.key
+$$);
 
 -- Engine physical diagnostics are restricted to ANALYZE VERBOSE.
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT pg_temp.explain_analyze_text($$
 SELECT l.key, count(*)
 FROM query_offload_explain_left AS l
 JOIN query_offload_explain_right AS r USING (key)
 GROUP BY l.key
-ORDER BY l.key;
+ORDER BY l.key
+$$, verbose_plan => true);
+
+-- Like JIT timing, engine setup time appears only when EXPLAIN collects timing.
+SELECT ln FROM pg_temp.explain_analyze_text($$
+SELECT key, count(*) FROM query_offload_explain_left GROUP BY key
+$$, timing => true) AS ln
+WHERE ln ~ 'Setup Time';
 
 -- JSON protects real Plans nesting and native numeric property types without
 -- snapshotting the complete structured document into the expected file.
@@ -283,6 +293,7 @@ RESET enable_material;
 DROP TABLE query_offload_explain_outer;
 
 DROP FUNCTION query_offload_explain_json(text, text);
+DROP FUNCTION pg_temp.explain_analyze_text(text, boolean, boolean);
 DROP TABLE query_offload_explain_right;
 DROP TABLE query_offload_explain_left;
 

@@ -19,6 +19,8 @@ CREATE TABLE query_offload_comp_aux (
     key integer,
     label text,
     label_varchar varchar(8),
+    label_c text COLLATE "C",
+    label_varchar_c varchar(8) COLLATE "C",
     label_bpchar character(8),
     label_name name
 ) USING iceberg;
@@ -40,9 +42,9 @@ INSERT INTO query_offload_comp_right VALUES
     (104, 4, 400, 'r4'),
     (105, NULL, 500, 'rnull');
 INSERT INTO query_offload_comp_aux VALUES
-    (1, 'shared', 'shared', 'shared', 'shared'),
-    (2, 'shared', 'shared', 'shared ', 'shared'),
-    (4, 'four', 'four', 'four', 'four');
+    (1, 'shared', 'shared', 'shared', 'shared', 'shared', 'shared'),
+    (2, 'shared', 'shared', 'shared', 'shared', 'shared ', 'shared'),
+    (4, 'four', 'four', 'four', 'four', 'four', 'four');
 -- Duplicate fanout, NULL aggregate input, FILTER, and HAVING in one fragment.
 SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'force';
@@ -473,69 +475,80 @@ ORDER BY a.key;
    2 |     1 |           
 (1 row)
 
--- A three-source tree protects recursive join-to-aggregate composition. TEXT
--- and VARCHAR group keys also protect deterministic-collation byte equality.
+-- A three-source tree protects recursive join-to-aggregate composition.
+-- Default deterministic-collation keys cover equality; their C-collation
+-- twins independently make the requested ordering byte-compatible.
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT a.label,
        a.label_varchar,
+       a.label_c,
+       a.label_varchar_c,
        count(*) AS rows,
        sum(r.measure) AS total
 FROM query_offload_comp_left AS l
 JOIN query_offload_comp_right AS r USING (key)
 JOIN query_offload_comp_aux AS a USING (key)
-GROUP BY a.label, a.label_varchar
-ORDER BY a.label, a.label_varchar;
-                              QUERY PLAN                               
------------------------------------------------------------------------
- Sort
-   Sort Key: a.label, a.label_varchar
-   ->  Custom Scan (LagoDB Query Offload)
-         Engine: DataFusion
-         ->  Aggregate
-               Group Key: a.label, a.label_varchar
-               Aggregates: COUNT(*), SUM(r.measure)
-               ->  Hash Join
-                     Join Type: Inner
-                     Hash Cond: l.key = r.key
+GROUP BY a.label_c, a.label_varchar_c,
+         a.label, a.label_varchar
+ORDER BY a.label_c, a.label_varchar_c;
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Sort
+         Sort Key: a.label_c ASC NULLS LAST, a.label_varchar_c ASC NULLS LAST
+         ->  Projection
+               ->  Aggregate
+                     Group Key: a.label_c, a.label_varchar_c, a.label, a.label_varchar
+                     Aggregates: COUNT(*), SUM(r.measure)
                      ->  Hash Join
                            Join Type: Inner
-                           Hash Cond: l.key = a.key
-                           ->  Table Scan on query_offload_comp_left l
+                           Hash Cond: l.key = r.key
+                           ->  Hash Join
+                                 Join Type: Inner
+                                 Hash Cond: l.key = a.key
+                                 ->  Table Scan on query_offload_comp_left l
+                                       Access Method: iceberg
+                                 ->  Table Scan on query_offload_comp_aux a
+                                       Access Method: iceberg
+                           ->  Table Scan on query_offload_comp_right r
                                  Access Method: iceberg
-                           ->  Table Scan on query_offload_comp_aux a
-                                 Access Method: iceberg
-                     ->  Table Scan on query_offload_comp_right r
-                           Access Method: iceberg
-(19 rows)
+(20 rows)
 
 SELECT a.label,
        a.label_varchar,
+       a.label_c,
+       a.label_varchar_c,
        count(*) AS rows,
        sum(r.measure) AS total
 FROM query_offload_comp_left AS l
 JOIN query_offload_comp_right AS r USING (key)
 JOIN query_offload_comp_aux AS a USING (key)
-GROUP BY a.label, a.label_varchar
-ORDER BY a.label, a.label_varchar;
- label  | label_varchar | rows | total 
---------+---------------+------+-------
- shared | shared        |    5 |  1100
+GROUP BY a.label_c, a.label_varchar_c,
+         a.label, a.label_varchar
+ORDER BY a.label_c, a.label_varchar_c;
+ label  | label_varchar | label_c | label_varchar_c | rows | total 
+--------+---------------+---------+-----------------+------+-------
+ shared | shared        | shared  | shared          |    5 |  1100
 (1 row)
 
 SET lagodb.query_offload_mode = 'off';
 SELECT a.label,
        a.label_varchar,
+       a.label_c,
+       a.label_varchar_c,
        count(*) AS rows,
        sum(r.measure) AS total
 FROM query_offload_comp_left AS l
 JOIN query_offload_comp_right AS r USING (key)
 JOIN query_offload_comp_aux AS a USING (key)
-GROUP BY a.label, a.label_varchar
-ORDER BY a.label, a.label_varchar;
- label  | label_varchar | rows | total 
---------+---------------+------+-------
- shared | shared        |    5 |  1100
+GROUP BY a.label_c, a.label_varchar_c,
+         a.label, a.label_varchar
+ORDER BY a.label_c, a.label_varchar_c;
+ label  | label_varchar | label_c | label_varchar_c | rows | total 
+--------+---------------+---------+-----------------+------+-------
+ shared | shared        | shared  | shared          |    5 |  1100
 (1 row)
 
 -- BPCHAR and NAME have PostgreSQL-specific equality semantics that are not part
@@ -589,7 +602,7 @@ GROUP BY a.label_name;
 (13 rows)
 
 -- DISTINCT aggregate followed by ORDER BY and LIMIT/OFFSET.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (COSTS OFF)
 SELECT l.key,
        count(DISTINCT r.measure) AS distinct_values,
        max(r.measure) AS maximum,
@@ -602,10 +615,8 @@ ORDER BY maximum DESC, l.key
 LIMIT 1 OFFSET 1;
                                                             QUERY PLAN                                                            
 ----------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (LagoDB Query Offload) (actual rows=1 loops=1)
+ Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   Execution Mode: Serial
-   Local Engine Peak Memory Bytes: 7576
    ->  Limit
          ->  Sort
                Sort Key: MAX(r.measure) DESC NULLS FIRST, l.key ASC NULLS LAST
@@ -617,21 +628,11 @@ LIMIT 1 OFFSET 1;
                            Hash Cond: r.key = l.key
                            ->  Table Scan on query_offload_comp_right r
                                  Access Method: iceberg
-                                 Actual Input Batches: 3
-                                 Actual Input Rows: 5
-                                 Scan Tasks: 1
-                                 Data Files Selected: 1
-                                 Selected File Bytes: 1705
                            ->  Table Scan on query_offload_comp_left l
                                  Access Method: iceberg
                                  Filter: (id >= 1)
                                  Pushed Filter: (id >= 1)
-                                 Actual Input Batches: 2
-                                 Actual Input Rows: 4
-                                 Scan Tasks: 1
-                                 Data Files Selected: 1
-                                 Selected File Bytes: 1329
-(29 rows)
+(17 rows)
 
 SELECT l.key,
        count(DISTINCT r.measure) AS distinct_values,
@@ -665,7 +666,7 @@ LIMIT 1 OFFSET 1;
 (1 row)
 
 -- ORDER BY needs measure as a resjunk input while the final output contains
--- only id. Since Sort cannot perform that target-list change, PG17 creates a
+-- only id. Since Sort cannot perform that target-list change, PostgreSQL creates a
 -- real (dummypp=false) ProjectionPath above it. Query offload may still own the
 -- scan, but it must not absorb Sort or Limit through the PostgreSQL projection.
 SET lagodb.query_offload_mode = 'force';

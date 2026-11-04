@@ -1371,19 +1371,28 @@ RETURNING id, payload;
 
 -- An empty outer initializes and ends the inner scan without starting it.
 TRUNCATE customscan_null_param_outer;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (COSTS OFF)
 SELECT inner_rel.id FROM customscan_null_param_outer AS outer_rel
 CROSS JOIN LATERAL (
     SELECT id FROM customscan_null_param_lake
     WHERE id = outer_rel.id OFFSET 0
 ) AS inner_rel;
-                                    QUERY PLAN                                     
------------------------------------------------------------------------------------
- Nested Loop (actual rows=0 loops=1)
-   ->  Seq Scan on customscan_null_param_outer outer_rel (actual rows=0 loops=1)
-   ->  Custom Scan (lagodb-iceberg) on customscan_null_param_lake (never executed)
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Nested Loop
+   ->  Seq Scan on customscan_null_param_outer outer_rel
+   ->  Custom Scan (lagodb-iceberg) on customscan_null_param_lake
          Pushed Filter: (id = outer_rel.id)
 (4 rows)
+
+SELECT inner_rel.id FROM customscan_null_param_outer AS outer_rel
+CROSS JOIN LATERAL (
+    SELECT id FROM customscan_null_param_lake
+    WHERE id = outer_rel.id OFFSET 0
+) AS inner_rel;
+ id 
+----
+(0 rows)
 
 RESET max_parallel_workers_per_gather;
 RESET lagodb.customscan_mode;

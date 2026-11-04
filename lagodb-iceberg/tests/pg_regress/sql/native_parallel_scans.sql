@@ -25,7 +25,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
     plan jsonb;
 BEGIN
-    EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON) '
+    EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF, FORMAT JSON) '
             || query INTO plan;
     RETURN plan;
 END;
@@ -51,7 +51,7 @@ SELECT id, payload
 FROM native_parallel_managed
 ORDER BY id;
 SELECT (gather->>'Workers Launched')::integer > 0 AS worker_launched,
-       (gather->>'Actual Rows')::bigint = 3 AS gather_rows_ok,
+       (gather->>'Actual Rows')::numeric = 3 AS gather_rows_ok,
        jsonb_path_exists(scan, '$.Workers[*] ? (@."Actual Rows" > 0)') AS worker_scanned_rows
 FROM pg_temp.native_parallel_analyze(
     'SELECT id, payload
@@ -72,8 +72,7 @@ FROM native_parallel_managed
 ORDER BY id;
 SET max_parallel_workers_per_gather = 2;
 
--- Managed roots use their own partial path and DSM task inventory. PG
--- forbids native parallel_workers storage parameters on partition roots.
+-- Partitioned tables use their own partial path and DSM task inventory.
 -- Small Snappy files with distinct payloads provide physical page estimates;
 -- 63 selected files also form multiple groups at the default 4 MiB open cost.
 SET min_parallel_table_scan_size = 0;
@@ -92,7 +91,7 @@ ANALYZE native_parallel_root;
 -- Check the root's parallel and exact-filter contracts in the same runtime
 -- result; its planned worker count follows physical page estimates.
 SELECT coalesce((gather->>'Workers Launched')::integer, 0) >= 1 AS worker_launched,
-       (gather->>'Actual Rows')::bigint IS NOT DISTINCT FROM 63 AS gather_rows_ok,
+       (gather->>'Actual Rows')::numeric IS NOT DISTINCT FROM 63 AS gather_rows_ok,
        (scan->>'Parallel Aware')::boolean IS NOT DISTINCT FROM true AS parallel_aware,
        coalesce(jsonb_path_exists(scan, '$.Workers[*] ? (@."Actual Rows" > 0)'), false) AS worker_scanned_rows,
        (scan->>'Data Files Selected')::bigint = 63 AS files_selected_ok,
@@ -138,7 +137,7 @@ FROM native_parallel_fdw.filters
 WHERE id >= 2
 ORDER BY id;
 SELECT (gather->>'Workers Launched')::integer > 0 AS worker_launched,
-       (gather->>'Actual Rows')::bigint = 3 AS gather_rows_ok,
+       (gather->>'Actual Rows')::numeric = 3 AS gather_rows_ok,
        jsonb_path_exists(scan, '$.Workers[*] ? (@."Actual Rows" > 0)') AS worker_scanned_rows
 FROM pg_temp.native_parallel_analyze(
     'SELECT id, payload
@@ -170,7 +169,7 @@ FROM native_parallel_fdw.filters
 WHERE length(payload) > 0
 ORDER BY id;
 SELECT (gather->>'Workers Launched')::integer > 0 AS worker_launched,
-       (gather->>'Actual Rows')::bigint = 3 AS gather_rows_ok,
+       (gather->>'Actual Rows')::numeric = 3 AS gather_rows_ok,
        jsonb_path_exists(scan, '$.Workers[*] ? (@."Actual Rows" > 0)') AS worker_scanned_rows
 FROM pg_temp.native_parallel_analyze(
     'SELECT id, payload
@@ -249,8 +248,11 @@ EXPLAIN (COSTS OFF) SELECT id FROM native_parallel_fdw.filters_alias;
 EXPLAIN (COSTS OFF) SELECT id FROM native_parallel_fdw.historical;
 
 -- Cached plans retain Gather, but run on the leader with participation off.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-EXECUTE native_cached_gather;
+SELECT (gather->>'Workers Launched')::integer IS NOT DISTINCT FROM 0 AS zero_workers
+FROM pg_temp.native_parallel_analyze(
+    'EXECUTE native_cached_gather') AS document(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Node Type" == "Gather")') AS nodes(gather);
 EXECUTE native_cached_gather;
 
 -- The inner Gather Merge is initialized, shut down, and reinitialized.

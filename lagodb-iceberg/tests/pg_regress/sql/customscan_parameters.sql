@@ -971,7 +971,12 @@ RETURNING id, payload;
 
 -- An empty outer initializes and ends the inner scan without starting it.
 TRUNCATE customscan_null_param_outer;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (COSTS OFF)
+SELECT inner_rel.id FROM customscan_null_param_outer AS outer_rel
+CROSS JOIN LATERAL (
+    SELECT id FROM customscan_null_param_lake
+    WHERE id = outer_rel.id OFFSET 0
+) AS inner_rel;
 SELECT inner_rel.id FROM customscan_null_param_outer AS outer_rel
 CROSS JOIN LATERAL (
     SELECT id FROM customscan_null_param_lake

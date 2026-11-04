@@ -935,6 +935,85 @@ JOIN query_offload_join_right AS r
      6
 (1 row)
 
+-- PostgreSQL 18 can implement a semi join by hashing the smaller preserved
+-- side and scanning the larger non-preserved side. The resulting physical
+-- JOIN_RIGHT_SEMI must be normalized back to a logical left semi join before
+-- constructing the DataFusion plan.
+INSERT INTO query_offload_join_left (id, key_i4)
+SELECT 1000 + value, value
+FROM generate_series(1, 100) AS value;
+ANALYZE query_offload_join_left;
+ANALYZE query_offload_join_right;
+SET enable_nestloop = off;
+SET enable_mergejoin = off;
+SET lagodb.query_offload_mode = 'off';
+-- PostgreSQL 16 and 17 have no JOIN_RIGHT_SEMI; _1.out is their output. On
+-- PostgreSQL 18 the native plan must choose it, or the offloaded plan below no
+-- longer covers the normalization.
+EXPLAIN (COSTS OFF)
+SELECT r.id
+FROM query_offload_join_right AS r
+WHERE EXISTS (
+    SELECT 1
+    FROM query_offload_join_left AS l
+    WHERE l.key_i4 = r.key_i4
+)
+ORDER BY r.id;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Sort
+   Sort Key: r.id
+   ->  Hash Right Semi Join
+         Hash Cond: (l.key_i4 = r.key_i4)
+         ->  Seq Scan on query_offload_join_left l
+         ->  Hash
+               ->  Seq Scan on query_offload_join_right r
+(7 rows)
+
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT r.id
+FROM query_offload_join_right AS r
+WHERE EXISTS (
+    SELECT 1
+    FROM query_offload_join_left AS l
+    WHERE l.key_i4 = r.key_i4
+)
+ORDER BY r.id;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Sort
+         Sort Key: r.id ASC NULLS LAST
+         ->  Projection
+               ->  Hash Join
+                     Join Type: Left Semi
+                     Hash Cond: r.key_i4 = l.key_i4
+                     ->  Table Scan on query_offload_join_right r
+                           Access Method: iceberg
+                     ->  Table Scan on query_offload_join_left l
+                           Access Method: iceberg
+(12 rows)
+
+SELECT r.id
+FROM query_offload_join_right AS r
+WHERE EXISTS (
+    SELECT 1
+    FROM query_offload_join_left AS l
+    WHERE l.key_i4 = r.key_i4
+)
+ORDER BY r.id;
+ id  
+-----
+ 101
+ 102
+ 103
+ 104
+(4 rows)
+
+RESET enable_nestloop;
+RESET enable_mergejoin;
 -- ============================================================================
 -- Cleanup
 -- ============================================================================

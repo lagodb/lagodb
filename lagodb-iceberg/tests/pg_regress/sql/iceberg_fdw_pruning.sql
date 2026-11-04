@@ -100,6 +100,27 @@ SELECT array_agg(id ORDER BY id) AS partitioned_id_rows
 FROM iceberg_fdw_pruning.source
 WHERE id >= 4;
 
+-- Foreign scan cost prices layout pruning only. With PostgreSQL's CPU costs at
+-- zero, its run cost is seq_page_cost times the pages it expects to read, so
+-- the filtered run cost over the unfiltered one is the scanned fraction; the
+-- REST startup cost is left out. The table is unanalyzed: day(event_date) in
+-- both specs keeps PostgreSQL's default 1/200 of the days, which
+-- lagodb_iceberg.scan_min_fraction raises to 0.02.
+SET cpu_tuple_cost = 0;
+SET cpu_operator_cost = 0;
+SELECT round((((pruned #>> '{0,Plan,Total Cost}')::float8
+                - (pruned #>> '{0,Plan,Startup Cost}')::float8)
+              / ((whole #>> '{0,Plan,Total Cost}')::float8
+                 - (whole #>> '{0,Plan,Startup Cost}')::float8))::numeric, 4)
+       AS scanned_fraction
+FROM pg_temp.partition_query_json(
+         'EXPLAIN (FORMAT JSON) SELECT id FROM iceberg_fdw_pruning.source
+          WHERE event_date = DATE ''2024-01-03''') AS pruned,
+     pg_temp.partition_query_json(
+         'EXPLAIN (FORMAT JSON) SELECT id FROM iceberg_fdw_pruning.source') AS whole;
+RESET cpu_tuple_cost;
+RESET cpu_operator_cost;
+
 -- Nanosecond storage comparisons preserve PostgreSQL microsecond predicates.
 CREATE FOREIGN TABLE iceberg_fdw_pruning.nanos ()
 SERVER iceberg_pruning_rest
@@ -194,6 +215,10 @@ SELECT id FROM iceberg_fdw_pruning.scalars WHERE payload < '\x8000'::bytea;
 
 EXPLAIN (COSTS OFF)
 SELECT id FROM iceberg_fdw_pruning.scalars WHERE key >= '80000000-0000-0000-0000-000000000000'::uuid;
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM iceberg_fdw_pruning.scalars
+WHERE key IN ('80000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-000000000000');
 
 SELECT id FROM iceberg_fdw_pruning.scalars WHERE flag ORDER BY id;
 

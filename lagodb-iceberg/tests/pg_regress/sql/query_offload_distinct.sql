@@ -15,6 +15,7 @@ CREATE TABLE query_offload_distinct_basic (
     value_f8 double precision,
     value_numeric numeric(12, 2),
     value_text text,
+    value_text_c text COLLATE "C",
     value_date date,
     value_time time,
     value_timestamp timestamp,
@@ -24,24 +25,24 @@ CREATE TABLE query_offload_distinct_basic (
 ) USING iceberg;
 
 INSERT INTO query_offload_distinct_basic VALUES
-    (1, true, 10, 1.5, 1.25, 'alpha',
+    (1, true, 10, 1.5, 1.25, 'alpha', 'alpha',
      DATE '2024-01-01', TIME '10:00:00',
      TIMESTAMP '2024-01-01 10:00:00',
      TIMESTAMPTZ '2024-01-01 10:00:00+00',
      UUID '00000000-0000-0000-0000-000000000001', '\x01'),
-    (2, true, 10, 1.5, 1.25, 'alpha',
+    (2, true, 10, 1.5, 1.25, 'alpha', 'alpha',
      DATE '2024-01-01', TIME '10:00:00',
      TIMESTAMP '2024-01-01 10:00:00',
      TIMESTAMPTZ '2024-01-01 10:00:00+00',
      UUID '00000000-0000-0000-0000-000000000001', '\x01'),
-    (3, false, 20, 2.5, 2.50, 'beta',
+    (3, false, 20, 2.5, 2.50, 'beta', 'beta',
      DATE '2024-01-02', TIME '11:00:00',
      TIMESTAMP '2024-01-02 11:00:00',
      TIMESTAMPTZ '2024-01-02 11:00:00+00',
      UUID '00000000-0000-0000-0000-000000000002', '\x02'),
-    (4, NULL, NULL, NULL, NULL, NULL,
+    (4, NULL, NULL, NULL, NULL, NULL, NULL,
      NULL, NULL, NULL, NULL, NULL, NULL),
-    (5, true, NULL, 1.5, 1.25, 'alpha',
+    (5, true, NULL, 1.5, 1.25, 'alpha', 'alpha',
      DATE '2024-01-01', TIME '10:00:00',
      TIMESTAMP '2024-01-01 10:00:00',
      TIMESTAMPTZ '2024-01-01 10:00:00+00',
@@ -78,7 +79,7 @@ SELECT count(DISTINCT value_bool) AS bool_values,
        array_agg(DISTINCT value_i4 ORDER BY value_i4) AS ordered_i4,
        array_agg(DISTINCT value_i4 ORDER BY value_i4)
            FILTER (WHERE id <= 4) AS filtered_ordered_i4,
-       string_agg(DISTINCT value_text, ',' ORDER BY value_text) AS ordered_text
+       string_agg(DISTINCT value_text_c, ',' ORDER BY value_text_c) AS ordered_text
 FROM query_offload_distinct_basic;
 
 SELECT count(DISTINCT value_bool) AS bool_values,
@@ -102,7 +103,7 @@ SELECT count(DISTINCT value_bool) AS bool_values,
        array_agg(DISTINCT value_i4 ORDER BY value_i4) AS ordered_i4,
        array_agg(DISTINCT value_i4 ORDER BY value_i4)
            FILTER (WHERE id <= 4) AS filtered_ordered_i4,
-       string_agg(DISTINCT value_text, ',' ORDER BY value_text) AS ordered_text
+       string_agg(DISTINCT value_text_c, ',' ORDER BY value_text_c) AS ordered_text
 FROM query_offload_distinct_basic;
 
 -- PostgreSQL native result.
@@ -128,7 +129,7 @@ SELECT count(DISTINCT value_bool) AS bool_values,
        array_agg(DISTINCT value_i4 ORDER BY value_i4) AS ordered_i4,
        array_agg(DISTINCT value_i4 ORDER BY value_i4)
            FILTER (WHERE id <= 4) AS filtered_ordered_i4,
-       string_agg(DISTINCT value_text, ',' ORDER BY value_text) AS ordered_text
+       string_agg(DISTINCT value_text_c, ',' ORDER BY value_text_c) AS ordered_text
 FROM query_offload_distinct_basic;
 
 -- ============================================================================

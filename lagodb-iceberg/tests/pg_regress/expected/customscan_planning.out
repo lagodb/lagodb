@@ -31,7 +31,7 @@ UPDATE customscan_dml_lake SET v = v + 1 WHERE k = 1;
                            QUERY PLAN                            
 -----------------------------------------------------------------
  Custom Scan (LagoDBModifyTable)
-   Executor: PG17 LagoDB ModifyTable fork
+   Executor: LagoDB ModifyTable fork
    ->  Update on customscan_dml_lake
          ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake
                Scan Purpose: ModifyTarget
@@ -44,7 +44,7 @@ UPDATE customscan_dml_lake SET v = v + 1 WHERE k = 1;
                  QUERY PLAN                  
 ---------------------------------------------
  Custom Scan (LagoDBModifyTable)
-   Executor: PG17 LagoDB ModifyTable fork
+   Executor: LagoDB ModifyTable fork
    ->  Update on customscan_dml_lake
          ->  Seq Scan on customscan_dml_lake
                Filter: (k = 1)
@@ -56,7 +56,7 @@ DELETE FROM customscan_dml_lake WHERE k = 1;
                            QUERY PLAN                            
 -----------------------------------------------------------------
  Custom Scan (LagoDBModifyTable)
-   Executor: PG17 LagoDB ModifyTable fork
+   Executor: LagoDB ModifyTable fork
    ->  Delete on customscan_dml_lake
          ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake
                Scan Purpose: ModifyTarget
@@ -69,7 +69,7 @@ DELETE FROM customscan_dml_lake WHERE k = 1;
                  QUERY PLAN                  
 ---------------------------------------------
  Custom Scan (LagoDBModifyTable)
-   Executor: PG17 LagoDB ModifyTable fork
+   Executor: LagoDB ModifyTable fork
    ->  Delete on customscan_dml_lake
          ->  Seq Scan on customscan_dml_lake
                Filter: (k = 1)
@@ -84,7 +84,7 @@ WHEN MATCHED THEN UPDATE SET v = s.v;
                             QUERY PLAN                             
 -------------------------------------------------------------------
  Custom Scan (LagoDBModifyTable)
-   Executor: PG17 LagoDB ModifyTable fork
+   Executor: LagoDB ModifyTable fork
    ->  Merge on customscan_dml_lake t
          ->  Custom Scan (lagodb-iceberg) on customscan_dml_lake t
                Scan Purpose: ModifyTarget
@@ -100,7 +100,7 @@ WHEN MATCHED THEN UPDATE SET v = s.v;
                   QUERY PLAN                   
 -----------------------------------------------
  Custom Scan (LagoDBModifyTable)
-   Executor: PG17 LagoDB ModifyTable fork
+   Executor: LagoDB ModifyTable fork
    ->  Merge on customscan_dml_lake t
          ->  Seq Scan on customscan_dml_lake t
                Filter: (k = 1)

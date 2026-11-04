@@ -24,30 +24,31 @@ CREATE TABLE query_offload_aggregate_basic (
     value_time time,
     value_timestamp timestamp,
     value_timestamptz timestamptz,
-    value_text text
+    value_text text,
+    value_text_c text COLLATE "C"
 ) USING iceberg;
 
 INSERT INTO query_offload_aggregate_basic VALUES
     (1, 1, 10,  1,  10,  100,  1.0,  10.0,  1.25, true,
      DATE '2024-01-01', TIME '10:00:00',
      TIMESTAMP '2024-01-01 10:00:00',
-     TIMESTAMPTZ '2024-01-01 10:00:00+00', 'alpha'),
+     TIMESTAMPTZ '2024-01-01 10:00:00+00', 'alpha', 'alpha'),
     (2, 1, 10,  2,  20,  200,  2.0,  20.0,  2.50, false,
      DATE '2024-01-02', TIME '11:00:00',
      TIMESTAMP '2024-01-02 11:00:00',
-     TIMESTAMPTZ '2024-01-02 11:00:00+00', 'beta'),
+     TIMESTAMPTZ '2024-01-02 11:00:00+00', 'beta', 'beta'),
     (3, 2, 20, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-     NULL, NULL, NULL, NULL, NULL),
+     NULL, NULL, NULL, NULL, NULL, NULL),
     (4, 2, 20, -2, -20, -200, -2.0, -20.0, -2.50, true,
      DATE '2023-12-31', TIME '09:00:00',
      TIMESTAMP '2023-12-31 09:00:00',
-     TIMESTAMPTZ '2023-12-31 09:00:00+00', 'alpha'),
+     TIMESTAMPTZ '2023-12-31 09:00:00+00', 'alpha', 'alpha'),
     (5, 2, 30,  3,  30,  300,  3.0,  30.0,  3.75, false,
      DATE '2024-01-03', TIME '12:00:00',
      TIMESTAMP '2024-01-03 12:00:00',
-     TIMESTAMPTZ '2024-01-03 12:00:00+00', 'gamma'),
+     TIMESTAMPTZ '2024-01-03 12:00:00+00', 'gamma', 'gamma'),
     (6, 3, 30, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-     NULL, NULL, NULL, NULL, NULL);
+     NULL, NULL, NULL, NULL, NULL, NULL);
 
 -- ============================================================================
 -- GUC ownership: either path family remains usable while the other is off.
@@ -68,6 +69,45 @@ EXPLAIN (COSTS OFF)
 SELECT count(*)
 FROM query_offload_aggregate_basic
 WHERE id = 1;
+
+-- Auto mode prices the offload path against PostgreSQL's plan. Extreme engine
+-- costs make each side win whatever the calibrated defaults are.
+SET lagodb.query_offload_mode = 'auto';
+SET lagodb.query_offload_setup_cost = 1e10;
+EXPLAIN (COSTS OFF)
+SELECT group_i4, count(*)
+FROM query_offload_aggregate_basic
+GROUP BY group_i4;
+
+SET lagodb.query_offload_setup_cost = 0;
+SET lagodb.query_offload_cpu_cost_multiplier = 0;
+EXPLAIN (COSTS OFF)
+SELECT group_i4, count(*)
+FROM query_offload_aggregate_basic
+GROUP BY group_i4;
+
+-- The Iceberg reader's per-row CPU prices only the relation CustomScan, which
+-- replaces the SeqScan when CustomScan is on. Against an offload path costing
+-- its setup of 10 plus the same pages, the reader cost of the six rows decides:
+-- nothing at multiplier 0, and 6 * cpu_tuple_cost * 1000 = 60 at 1000.
+SET lagodb.customscan_mode = 'auto';
+SET lagodb.query_offload_setup_cost = 10;
+SET lagodb_iceberg.scan_cpu_cost_multiplier = 0;
+EXPLAIN (COSTS OFF)
+SELECT group_i4, count(*)
+FROM query_offload_aggregate_basic
+GROUP BY group_i4;
+
+SET lagodb_iceberg.scan_cpu_cost_multiplier = 1000;
+EXPLAIN (COSTS OFF)
+SELECT group_i4, count(*)
+FROM query_offload_aggregate_basic
+GROUP BY group_i4;
+RESET lagodb_iceberg.scan_cpu_cost_multiplier;
+RESET lagodb.query_offload_setup_cost;
+RESET lagodb.query_offload_cpu_cost_multiplier;
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'force';
 
 -- ============================================================================
 -- Metadata COUNT: exact snapshot counts and reader fallback for deletes.
@@ -385,6 +425,87 @@ SELECT min(value_f4) AS min_f4,
        string_agg(value_text, ',' ORDER BY id) AS ordered_text,
        string_agg(value_text, NULL ORDER BY id) AS concatenated_text
 FROM query_offload_aggregate_basic;
+
+-- ============================================================================
+-- Aggregate-local ORDER BY classification.
+-- ============================================================================
+
+-- ORDER BY does not affect these transition functions. Query offload may
+-- discard it after validating direct-column keys and built-in comparators.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(value_i4 ORDER BY value_time DESC) AS count_i4,
+       min(value_i4 ORDER BY id DESC) AS min_i4,
+       max(value_i4 ORDER BY id) AS max_i4,
+       bool_and(value_bool ORDER BY value_bool DESC) AS all_true,
+       string_agg(value_text_c, ',' ORDER BY value_time) AS ordered_time,
+       string_agg(value_text_c, ',' ORDER BY value_text_c USING ~<~)
+           AS ordered_pattern
+FROM query_offload_aggregate_basic;
+
+SELECT count(value_i4 ORDER BY value_time DESC) AS count_i4,
+       min(value_i4 ORDER BY id DESC) AS min_i4,
+       max(value_i4 ORDER BY id) AS max_i4,
+       bool_and(value_bool ORDER BY value_bool DESC) AS all_true,
+       string_agg(value_text_c, ',' ORDER BY value_time) AS ordered_time,
+       string_agg(value_text_c, ',' ORDER BY value_text_c USING ~<~)
+           AS ordered_pattern
+FROM query_offload_aggregate_basic;
+
+SET lagodb.query_offload_mode = 'off';
+SELECT count(value_i4 ORDER BY value_time DESC) AS count_i4,
+       min(value_i4 ORDER BY id DESC) AS min_i4,
+       max(value_i4 ORDER BY id) AS max_i4,
+       bool_and(value_bool ORDER BY value_bool DESC) AS all_true,
+       string_agg(value_text_c, ',' ORDER BY value_time) AS ordered_time,
+       string_agg(value_text_c, ',' ORDER BY value_text_c USING ~<~)
+           AS ordered_pattern
+FROM query_offload_aggregate_basic;
+
+-- ARRAY_AGG honors ORDER BY, so a boolean key exercises the executed-order
+-- BOOLOID admission rather than only the order-insensitive classification.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT array_agg(value_bool ORDER BY value_bool)
+FROM query_offload_aggregate_basic;
+
+-- Floating transitions remain order-sensitive. SUM covers arithmetic state;
+-- MIN and MAX separately protect their signed-zero and NaN transition rules.
+EXPLAIN (COSTS OFF)
+SELECT sum(value_f8 ORDER BY id)
+FROM query_offload_aggregate_basic;
+
+EXPLAIN (COSTS OFF)
+SELECT min(value_f8 ORDER BY id)
+FROM query_offload_aggregate_basic;
+
+EXPLAIN (COSTS OFF)
+SELECT max(value_f8 ORDER BY id)
+FROM query_offload_aggregate_basic;
+
+-- Ignored ORDER BY expressions must be direct columns.
+EXPLAIN (COSTS OFF)
+SELECT count(value_i4 ORDER BY id + 0)
+FROM query_offload_aggregate_basic;
+
+-- A user-defined btree ordering operator is not an admissible built-in even
+-- when it delegates to the same comparison function.
+CREATE OPERATOR #<# (
+    LEFTARG = integer,
+    RIGHTARG = integer,
+    PROCEDURE = int4lt
+);
+CREATE OPERATOR FAMILY query_offload_int4_ops USING btree;
+ALTER OPERATOR FAMILY query_offload_int4_ops USING btree ADD
+    OPERATOR 1 #<# (integer, integer),
+    OPERATOR 3 = (integer, integer);
+
+EXPLAIN (COSTS OFF)
+SELECT count(value_i4 ORDER BY id USING #<#)
+FROM query_offload_aggregate_basic;
+
+DROP OPERATOR FAMILY query_offload_int4_ops USING btree;
+DROP OPERATOR #<# (integer, integer);
 
 -- ============================================================================
 -- Variance/stddev output and empty-input aggregate semantics.

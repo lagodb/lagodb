@@ -25,7 +25,7 @@ CREATE FOREIGN TABLE query_offload_foreign.left_source (
     id integer,
     group_key integer,
     measure integer,
-    payload text
+    payload text COLLATE "C"
 )
 SERVER query_offload_foreign_rest
 OPTIONS (
@@ -60,7 +60,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
     result jsonb;
 BEGIN
-    EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF, TIMING OFF, SUMMARY OFF) '
+    EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) '
         || query INTO result;
     RETURN result;
 END;
@@ -131,8 +131,8 @@ WHERE id >= 2
 GROUP BY group_key
 ORDER BY group_key NULLS LAST;
 
--- DISTINCT owns the foreign scan; PostgreSQL may retain sorting and pagination
--- above that offloaded fragment according to its normal upper-path rules.
+-- Explicit C ordering lets DISTINCT, sorting and pagination share one offloaded
+-- fragment across platforms.
 EXPLAIN (COSTS OFF)
 SELECT DISTINCT payload
 FROM query_offload_foreign.left_source
@@ -234,7 +234,7 @@ SELECT offload->>'Execution Mode' = 'Parallel' AS parallel,
        (offload->>'Parallel Runs')::integer = 1 AS one_run,
        (offload->>'Worker Metric Reports')::integer > 0
            AND offload->'Worker Metric Reports' = offload->'Expected Worker Metric Reports' AS metrics_complete,
-       (offload->>'Actual Rows')::bigint = 4 AS output_rows_ok,
+       (offload->>'Actual Rows')::numeric = 4 AS output_rows_ok,
        (scan->>'Actual Input Rows')::bigint = 33 AS input_rows_ok,
        (scan->>'Scan Tasks')::bigint = 33
            AND (scan->>'Data Files Selected')::bigint = 33 AS inventory_complete,

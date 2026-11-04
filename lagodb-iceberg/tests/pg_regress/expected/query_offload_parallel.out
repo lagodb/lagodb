@@ -19,7 +19,8 @@ SELECT current_setting('lagodb.query_offload_parallel_min_scan_rows')::integer =
 CREATE TABLE query_offload_parallel_left (
     id integer,
     key integer,
-    value integer
+    value integer,
+    label text
 ) USING iceberg;
 CREATE TABLE query_offload_parallel_right (
     id integer,
@@ -41,18 +42,50 @@ INSERT INTO query_offload_parallel_right
 SELECT 100 + row_id, row_id % 4, row_id * 100
 FROM generate_series(1, 33) AS row_id;
 INSERT INTO query_offload_parallel_small VALUES (1, 1, 10);
+\i include/explain_analyze_text.sql
+-- Text EXPLAIN ANALYZE with PostgreSQL's regression options. PostgreSQL row
+-- counts are masked as in partition_prune.sql because their text format
+-- differs across major versions. LagoDB worker peak memory depends on how
+-- producer batches interleave in each worker, so it is masked as
+-- select_parallel.sql masks parallel sort memory; other LagoDB metrics are left
+-- unchanged. LagoDB duration properties ("N ms") are masked as explain.sql
+-- masks them, but PostgreSQL's per-node actual time is not, so callers that
+-- request timing select only the properties they assert.
+CREATE FUNCTION pg_temp.explain_analyze_text(
+    query text,
+    verbose_plan boolean DEFAULT false,
+    timing boolean DEFAULT false
+) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+    ln text;
+BEGIN
+    FOR ln IN
+        EXECUTE format(
+            'EXPLAIN (ANALYZE, VERBOSE %s, COSTS OFF, TIMING %s, SUMMARY OFF, BUFFERS OFF) %s',
+            verbose_plan::text, timing::text, query)
+    LOOP
+        ln := regexp_replace(ln, 'actual rows=\d+(?:\.\d+)? loops=\d+',
+                             'actual rows=N loops=N');
+        ln := regexp_replace(ln, '(Worker \w+ Peak Memory Bytes): \d+', '\1: N');
+        ln := regexp_replace(ln, '\d+\.\d+ ms', 'N ms', 'g');
+        RETURN NEXT ln;
+    END LOOP;
+END;
+$$;
 -- A one-file source has no distributable stage and negotiates serial execution
 -- before any worker starts.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT pg_temp.explain_analyze_text($$
 SELECT key, count(*)
 FROM query_offload_parallel_small
-GROUP BY key;
-                         QUERY PLAN                         
+GROUP BY key
+$$);
+                    explain_analyze_text                    
 ------------------------------------------------------------
- Custom Scan (LagoDB Query Offload) (actual rows=1 loops=1)
+ Custom Scan (LagoDB Query Offload) (actual rows=N loops=N)
    Engine: DataFusion
    Execution Mode: Serial
-   Local Engine Peak Memory Bytes: 4160
+   Local Engine Peak Memory Bytes: 4164
    ->  Aggregate
          Group Key: key
          Aggregates: COUNT(*)
@@ -67,16 +100,17 @@ GROUP BY key;
 
 -- The planner-row threshold is an admission gate, not an execution fallback.
 SET lagodb.query_offload_parallel_min_scan_rows = 2147483647;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT pg_temp.explain_analyze_text($$
 SELECT key, count(*)
 FROM query_offload_parallel_left
-GROUP BY key;
-                         QUERY PLAN                         
+GROUP BY key
+$$);
+                    explain_analyze_text                    
 ------------------------------------------------------------
- Custom Scan (LagoDB Query Offload) (actual rows=4 loops=1)
+ Custom Scan (LagoDB Query Offload) (actual rows=N loops=N)
    Engine: DataFusion
    Execution Mode: Serial
-   Local Engine Peak Memory Bytes: 4160
+   Local Engine Peak Memory Bytes: 4176
    ->  Aggregate
          Group Key: key
          Aggregates: COUNT(*)
@@ -86,22 +120,23 @@ GROUP BY key;
                Actual Input Rows: 33
                Scan Tasks: 33
                Data Files Selected: 33
-               Selected File Bytes: 41523
+               Selected File Bytes: 53886
 (14 rows)
 
 SET lagodb.query_offload_parallel_min_scan_rows = 0;
 -- PostgreSQL worker budget below two producers also negotiates serial mode.
 SET max_parallel_workers_per_gather = 0;
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT pg_temp.explain_analyze_text($$
 SELECT key, count(*)
 FROM query_offload_parallel_left
-GROUP BY key;
-                         QUERY PLAN                         
+GROUP BY key
+$$);
+                    explain_analyze_text                    
 ------------------------------------------------------------
- Custom Scan (LagoDB Query Offload) (actual rows=4 loops=1)
+ Custom Scan (LagoDB Query Offload) (actual rows=N loops=N)
    Engine: DataFusion
    Execution Mode: Serial
-   Local Engine Peak Memory Bytes: 4160
+   Local Engine Peak Memory Bytes: 4176
    ->  Aggregate
          Group Key: key
          Aggregates: COUNT(*)
@@ -111,14 +146,14 @@ GROUP BY key;
                Actual Input Rows: 33
                Scan Tasks: 33
                Data Files Selected: 33
-               Selected File Bytes: 41523
+               Selected File Bytes: 53886
 (14 rows)
 
 SET max_parallel_workers_per_gather = 2;
 -- A filtered grouped aggregate consumes every source work group exactly
 -- once. ANALYZE metrics prove that a parallel run was launched and completely
 -- reported, while the result is compared with PostgreSQL's native execution.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT pg_temp.explain_analyze_text($$
 SELECT key,
        count(*) AS rows,
        count(value) AS nonnull_values,
@@ -126,18 +161,19 @@ SELECT key,
 FROM query_offload_parallel_left
 WHERE id >= 1
 GROUP BY key
-ORDER BY key;
-                          QUERY PLAN                          
+ORDER BY key
+$$);
+                     explain_analyze_text                     
 --------------------------------------------------------------
- Custom Scan (LagoDB Query Offload) (actual rows=4 loops=1)
+ Custom Scan (LagoDB Query Offload) (actual rows=N loops=N)
    Engine: DataFusion
    Execution Mode: Parallel
    Maximum Launched Workers: 2
    Parallel Runs: 1
    Worker Metric Reports: 4
    Expected Worker Metric Reports: 4
-   Maximum Worker Fragment Peak Memory Bytes: 8448
-   Maximum Worker Participant Peak Memory Bytes: 8448
+   Maximum Worker Fragment Peak Memory Bytes: N
+   Maximum Worker Participant Peak Memory Bytes: N
    Local Engine Peak Memory Bytes: 3072
    ->  Sort
          Sort Key: key ASC NULLS LAST
@@ -152,8 +188,18 @@ ORDER BY key;
                      Actual Input Rows: 33
                      Scan Tasks: 33
                      Data Files Selected: 33
-                     Selected File Bytes: 41523
+                     Selected File Bytes: 53886
 (24 rows)
+
+-- With timing, a launched parallel run also reports its startup time.
+SELECT ln FROM pg_temp.explain_analyze_text($$
+SELECT key, count(*) FROM query_offload_parallel_left GROUP BY key
+$$, timing => true) AS ln
+WHERE ln ~ 'Startup Time';
+              ln               
+-------------------------------
+   Parallel Startup Time: N ms
+(1 row)
 
 SELECT key,
        count(*) AS rows,
@@ -169,6 +215,58 @@ ORDER BY key;
    1 |    9 |              7 |  1230
    2 |    8 |              6 |   880
    3 |    8 |              7 |  1210
+(4 rows)
+
+-- Two ordered STRING_AGGs with incompatible input orderings must retain the
+-- LagoDB wrapper after the partial aggregate is rebuilt inside each worker.
+SELECT pg_temp.explain_analyze_text($$
+SELECT key,
+       string_agg(label, ',' ORDER BY id) AS labels_by_id,
+       string_agg(label, ',' ORDER BY value DESC NULLS LAST, id)
+           AS labels_by_value
+FROM query_offload_parallel_left
+GROUP BY key
+ORDER BY key
+$$);
+                                                                 explain_analyze_text                                                                  
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload) (actual rows=N loops=N)
+   Engine: DataFusion
+   Execution Mode: Parallel
+   Maximum Launched Workers: 2
+   Parallel Runs: 1
+   Worker Metric Reports: 4
+   Expected Worker Metric Reports: 4
+   Maximum Worker Fragment Peak Memory Bytes: N
+   Maximum Worker Participant Peak Memory Bytes: N
+   Local Engine Peak Memory Bytes: 4096
+   ->  Sort
+         Sort Key: key ASC NULLS LAST
+         ->  Aggregate
+               Group Key: key
+               Aggregates: STRING_AGG(label, ',' ORDER BY id ASC NULLS LAST), STRING_AGG(label, ',' ORDER BY value DESC NULLS LAST, id ASC NULLS LAST)
+               ->  Table Scan on query_offload_parallel_left
+                     Access Method: iceberg
+                     Actual Input Batches: 33
+                     Actual Input Rows: 33
+                     Scan Tasks: 33
+                     Data Files Selected: 33
+                     Selected File Bytes: 53886
+(22 rows)
+
+SELECT key,
+       string_agg(label, ',' ORDER BY id) AS labels_by_id,
+       string_agg(label, ',' ORDER BY value DESC NULLS LAST, id)
+           AS labels_by_value
+FROM query_offload_parallel_left
+GROUP BY key
+ORDER BY key;
+ key |                                 labels_by_id                                  |                                labels_by_value                                
+-----+-------------------------------------------------------------------------------+-------------------------------------------------------------------------------
+   0 | label-4,label-8,label-12,label-16,label-20,label-24,label-28,label-32         | label-32,label-28,label-24,label-16,label-12,label-8,label-4,label-20
+   1 | label-1,label-5,label-9,label-13,label-17,label-21,label-25,label-29,label-33 | label-33,label-29,label-21,label-17,label-13,label-9,label-1,label-5,label-25
+   2 | label-2,label-6,label-10,label-14,label-18,label-22,label-26,label-30         | label-26,label-22,label-18,label-14,label-6,label-2,label-10,label-30
+   3 | label-3,label-7,label-11,label-15,label-19,label-23,label-27,label-31         | label-31,label-27,label-23,label-19,label-11,label-7,label-3,label-15
 (4 rows)
 
 SET lagodb.query_offload_mode = 'off';
@@ -188,31 +286,47 @@ ORDER BY key;
    3 |    8 |              7 |  1210
 (4 rows)
 
+SELECT key,
+       string_agg(label, ',' ORDER BY id) AS labels_by_id,
+       string_agg(label, ',' ORDER BY value DESC NULLS LAST, id)
+           AS labels_by_value
+FROM query_offload_parallel_left
+GROUP BY key
+ORDER BY key;
+ key |                                 labels_by_id                                  |                                labels_by_value                                
+-----+-------------------------------------------------------------------------------+-------------------------------------------------------------------------------
+   0 | label-4,label-8,label-12,label-16,label-20,label-24,label-28,label-32         | label-32,label-28,label-24,label-16,label-12,label-8,label-4,label-20
+   1 | label-1,label-5,label-9,label-13,label-17,label-21,label-25,label-29,label-33 | label-33,label-29,label-21,label-17,label-13,label-9,label-1,label-5,label-25
+   2 | label-2,label-6,label-10,label-14,label-18,label-22,label-26,label-30         | label-26,label-22,label-18,label-14,label-6,label-2,label-10,label-30
+   3 | label-3,label-7,label-11,label-15,label-19,label-23,label-27,label-31         | label-31,label-27,label-23,label-19,label-11,label-7,label-3,label-15
+(4 rows)
+
 -- A limited ordered inner join exercises parallel join distribution and
 -- early output termination without routing through an aggregate.
 SET lagodb.query_offload_mode = 'force';
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT pg_temp.explain_analyze_text($$
 SELECT l.id AS left_id, r.id AS right_id, l.key
 FROM query_offload_parallel_left AS l
 JOIN query_offload_parallel_right AS r USING (key)
 ORDER BY left_id, right_id
-LIMIT 8;
-                                    QUERY PLAN                                    
+LIMIT 8
+$$);
+                               explain_analyze_text                               
 ----------------------------------------------------------------------------------
- Limit (actual rows=8 loops=1)
-   ->  Sort (actual rows=8 loops=1)
+ Limit (actual rows=N loops=N)
+   ->  Sort (actual rows=N loops=N)
          Sort Key: l.id, r.id
          Sort Method: top-N heapsort  Memory: 25kB
-         ->  Result (actual rows=273 loops=1)
-               ->  Custom Scan (LagoDB Query Offload) (actual rows=273 loops=1)
+         ->  Result (actual rows=N loops=N)
+               ->  Custom Scan (LagoDB Query Offload) (actual rows=N loops=N)
                      Engine: DataFusion
                      Execution Mode: Parallel
                      Maximum Launched Workers: 2
                      Parallel Runs: 1
                      Worker Metric Reports: 5
                      Expected Worker Metric Reports: 5
-                     Maximum Worker Fragment Peak Memory Bytes: 1120
-                     Maximum Worker Participant Peak Memory Bytes: 2144
+                     Maximum Worker Fragment Peak Memory Bytes: N
+                     Maximum Worker Participant Peak Memory Bytes: N
                      Local Engine Peak Memory Bytes: 0
                      ->  Projection
                            ->  Hash Join
@@ -224,7 +338,7 @@ LIMIT 8;
                                        Actual Input Rows: 33
                                        Scan Tasks: 33
                                        Data Files Selected: 33
-                                       Selected File Bytes: 41523
+                                       Selected File Bytes: 53886
                                  ->  Table Scan on query_offload_parallel_right r
                                        Access Method: iceberg
                                        Actual Input Batches: 17
@@ -272,7 +386,7 @@ LIMIT 8;
 -- Aggregate-over-inner-join reuses the same parallel execution framework
 -- and preserves duplicate fanout, NULL aggregate inputs, FILTER, and HAVING.
 SET lagodb.query_offload_mode = 'force';
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT pg_temp.explain_analyze_text($$
 SELECT l.key,
        count(*) AS joined_rows,
        count(l.value) AS nonnull_left,
@@ -281,18 +395,19 @@ FROM query_offload_parallel_left AS l
 JOIN query_offload_parallel_right AS r USING (key)
 GROUP BY l.key
 HAVING count(*) > 60
-ORDER BY l.key;
-                                                  QUERY PLAN                                                   
+ORDER BY l.key
+$$);
+                                             explain_analyze_text                                              
 ---------------------------------------------------------------------------------------------------------------
- Custom Scan (LagoDB Query Offload) (actual rows=4 loops=1)
+ Custom Scan (LagoDB Query Offload) (actual rows=N loops=N)
    Engine: DataFusion
    Execution Mode: Parallel
    Maximum Launched Workers: 2
    Parallel Runs: 1
    Worker Metric Reports: 5
    Expected Worker Metric Reports: 5
-   Maximum Worker Fragment Peak Memory Bytes: 5348
-   Maximum Worker Participant Peak Memory Bytes: 5348
+   Maximum Worker Fragment Peak Memory Bytes: N
+   Maximum Worker Participant Peak Memory Bytes: N
    Local Engine Peak Memory Bytes: 3072
    ->  Sort
          Sort Key: l.key ASC NULLS LAST
@@ -310,7 +425,7 @@ ORDER BY l.key;
                                  Actual Input Rows: 33
                                  Scan Tasks: 33
                                  Data Files Selected: 33
-                                 Selected File Bytes: 41523
+                                 Selected File Bytes: 53886
                            ->  Table Scan on query_offload_parallel_right r
                                  Access Method: iceberg
                                  Actual Input Batches: 17
@@ -358,6 +473,7 @@ ORDER BY l.key;
 DROP TABLE query_offload_parallel_small;
 DROP TABLE query_offload_parallel_right;
 DROP TABLE query_offload_parallel_left;
+DROP FUNCTION pg_temp.explain_analyze_text(text, boolean, boolean);
 RESET max_parallel_workers_per_gather;
 RESET lagodb.query_offload_parallel_min_scan_rows;
 RESET lagodb.query_batch_rows;

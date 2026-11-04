@@ -470,6 +470,55 @@ FROM query_offload_join_left AS l
 JOIN query_offload_join_right AS r
   ON l.key_i4 < r.key_i4;
 
+-- PostgreSQL 18 can implement a semi join by hashing the smaller preserved
+-- side and scanning the larger non-preserved side. The resulting physical
+-- JOIN_RIGHT_SEMI must be normalized back to a logical left semi join before
+-- constructing the DataFusion plan.
+INSERT INTO query_offload_join_left (id, key_i4)
+SELECT 1000 + value, value
+FROM generate_series(1, 100) AS value;
+ANALYZE query_offload_join_left;
+ANALYZE query_offload_join_right;
+
+SET enable_nestloop = off;
+SET enable_mergejoin = off;
+SET lagodb.query_offload_mode = 'off';
+-- PostgreSQL 16 and 17 have no JOIN_RIGHT_SEMI; _1.out is their output. On
+-- PostgreSQL 18 the native plan must choose it, or the offloaded plan below no
+-- longer covers the normalization.
+EXPLAIN (COSTS OFF)
+SELECT r.id
+FROM query_offload_join_right AS r
+WHERE EXISTS (
+    SELECT 1
+    FROM query_offload_join_left AS l
+    WHERE l.key_i4 = r.key_i4
+)
+ORDER BY r.id;
+
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT r.id
+FROM query_offload_join_right AS r
+WHERE EXISTS (
+    SELECT 1
+    FROM query_offload_join_left AS l
+    WHERE l.key_i4 = r.key_i4
+)
+ORDER BY r.id;
+
+SELECT r.id
+FROM query_offload_join_right AS r
+WHERE EXISTS (
+    SELECT 1
+    FROM query_offload_join_left AS l
+    WHERE l.key_i4 = r.key_i4
+)
+ORDER BY r.id;
+
+RESET enable_nestloop;
+RESET enable_mergejoin;
+
 -- ============================================================================
 -- Cleanup
 -- ============================================================================

@@ -24,6 +24,8 @@ CREATE TABLE query_offload_comp_aux (
     key integer,
     label text,
     label_varchar varchar(8),
+    label_c text COLLATE "C",
+    label_varchar_c varchar(8) COLLATE "C",
     label_bpchar character(8),
     label_name name
 ) USING iceberg;
@@ -49,9 +51,9 @@ INSERT INTO query_offload_comp_right VALUES
     (105, NULL, 500, 'rnull');
 
 INSERT INTO query_offload_comp_aux VALUES
-    (1, 'shared', 'shared', 'shared', 'shared'),
-    (2, 'shared', 'shared', 'shared ', 'shared'),
-    (4, 'four', 'four', 'four', 'four');
+    (1, 'shared', 'shared', 'shared', 'shared', 'shared', 'shared'),
+    (2, 'shared', 'shared', 'shared', 'shared', 'shared ', 'shared'),
+    (4, 'four', 'four', 'four', 'four', 'four', 'four');
 
 -- Duplicate fanout, NULL aggregate input, FILTER, and HAVING in one fragment.
 SET lagodb.customscan_mode = 'off';
@@ -281,40 +283,50 @@ JOIN query_offload_comp_left AS b
 GROUP BY a.key
 ORDER BY a.key;
 
--- A three-source tree protects recursive join-to-aggregate composition. TEXT
--- and VARCHAR group keys also protect deterministic-collation byte equality.
+-- A three-source tree protects recursive join-to-aggregate composition.
+-- Default deterministic-collation keys cover equality; their C-collation
+-- twins independently make the requested ordering byte-compatible.
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT a.label,
        a.label_varchar,
+       a.label_c,
+       a.label_varchar_c,
        count(*) AS rows,
        sum(r.measure) AS total
 FROM query_offload_comp_left AS l
 JOIN query_offload_comp_right AS r USING (key)
 JOIN query_offload_comp_aux AS a USING (key)
-GROUP BY a.label, a.label_varchar
-ORDER BY a.label, a.label_varchar;
+GROUP BY a.label_c, a.label_varchar_c,
+         a.label, a.label_varchar
+ORDER BY a.label_c, a.label_varchar_c;
 
 SELECT a.label,
        a.label_varchar,
+       a.label_c,
+       a.label_varchar_c,
        count(*) AS rows,
        sum(r.measure) AS total
 FROM query_offload_comp_left AS l
 JOIN query_offload_comp_right AS r USING (key)
 JOIN query_offload_comp_aux AS a USING (key)
-GROUP BY a.label, a.label_varchar
-ORDER BY a.label, a.label_varchar;
+GROUP BY a.label_c, a.label_varchar_c,
+         a.label, a.label_varchar
+ORDER BY a.label_c, a.label_varchar_c;
 
 SET lagodb.query_offload_mode = 'off';
 SELECT a.label,
        a.label_varchar,
+       a.label_c,
+       a.label_varchar_c,
        count(*) AS rows,
        sum(r.measure) AS total
 FROM query_offload_comp_left AS l
 JOIN query_offload_comp_right AS r USING (key)
 JOIN query_offload_comp_aux AS a USING (key)
-GROUP BY a.label, a.label_varchar
-ORDER BY a.label, a.label_varchar;
+GROUP BY a.label_c, a.label_varchar_c,
+         a.label, a.label_varchar
+ORDER BY a.label_c, a.label_varchar_c;
 
 -- BPCHAR and NAME have PostgreSQL-specific equality semantics that are not part
 -- of the provider-neutral hash-grouping contract. The joins may still offload,
@@ -335,7 +347,7 @@ JOIN query_offload_comp_aux AS a USING (key)
 GROUP BY a.label_name;
 
 -- DISTINCT aggregate followed by ORDER BY and LIMIT/OFFSET.
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (COSTS OFF)
 SELECT l.key,
        count(DISTINCT r.measure) AS distinct_values,
        max(r.measure) AS maximum,
@@ -371,7 +383,7 @@ ORDER BY maximum DESC, l.key
 LIMIT 1 OFFSET 1;
 
 -- ORDER BY needs measure as a resjunk input while the final output contains
--- only id. Since Sort cannot perform that target-list change, PG17 creates a
+-- only id. Since Sort cannot perform that target-list change, PostgreSQL creates a
 -- real (dummypp=false) ProjectionPath above it. Query offload may still own the
 -- scan, but it must not absorb Sort or Limit through the PostgreSQL projection.
 SET lagodb.query_offload_mode = 'force';

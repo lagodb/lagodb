@@ -653,65 +653,123 @@ WHERE (a = 1 AND NOT (t IS NULL)) OR a = 2;
 
 RESET lagodb.customscan_mode;
 DROP TABLE customscan_partial_pushdown_t;
--- Cost-based path selection in auto mode.
-
--- Compare costed integer pushdown, uncosted date pruning, and an unfiltered scan. Two
--- data files provide nonzero size estimates; COSTS OFF keeps file-size-dependent costs
--- out of expected.
-CREATE TABLE customscan_auto_cost_t (
+-- Auto mode on a read: the provider replaces the table AM SeqScan, so the
+-- Plain CustomScan is the only path, and filters are still pushed down.
+CREATE TABLE customscan_auto_read_t (
     id integer,
-    payload text,
-    event_date date
+    payload text
 ) USING iceberg;
 
--- File 1: id in [1, 2000]
-INSERT INTO customscan_auto_cost_t
-SELECT g, 'auto_' || g, DATE '2024-01-01'
+INSERT INTO customscan_auto_read_t
+SELECT g, 'auto_' || g
 FROM generate_series(1, 2000) AS g;
 
--- File 2: id in [10000, 11999]
-INSERT INTO customscan_auto_cost_t
-SELECT g, 'auto_' || g, DATE '2025-01-01'
-FROM generate_series(10000, 11999) AS g;
-
-SELECT COUNT(*) AS auto_cost_rows FROM customscan_auto_cost_t;
-
 SET lagodb.customscan_mode = 'auto';
 
--- Costed integer equality selects CustomScan in auto mode.
 EXPLAIN (COSTS OFF)
-SELECT id, payload FROM customscan_auto_cost_t WHERE id = 1500;
+SELECT id, payload FROM customscan_auto_read_t;
 
--- Uncosted date pruning leaves SeqScan selected in auto mode.
 EXPLAIN (COSTS OFF)
-SELECT id, payload FROM customscan_auto_cost_t
-WHERE event_date = DATE '2024-01-01';
+SELECT id, payload FROM customscan_auto_read_t WHERE id = 1500;
 
--- Force selects the date CustomPath, distinguishing uncosted pruning from an
--- unsupported predicate.
-SET lagodb.customscan_mode = 'force';
-EXPLAIN (COSTS OFF)
-SELECT id, payload FROM customscan_auto_cost_t
-WHERE event_date = DATE '2024-01-01';
-
--- An unfiltered scan remains a SeqScan in auto mode.
-SET lagodb.customscan_mode = 'auto';
-EXPLAIN (COSTS OFF)
-SELECT id, payload FROM customscan_auto_cost_t;
-
--- Force keeps an unfiltered relation CustomScan available.
-SET lagodb.customscan_mode = 'force';
-EXPLAIN (COSTS OFF)
-SELECT id, payload FROM customscan_auto_cost_t;
-
-SET lagodb.customscan_mode = 'auto';
-SELECT id, payload FROM customscan_auto_cost_t WHERE id = 1500 ORDER BY id, payload;
+SELECT id, payload FROM customscan_auto_read_t WHERE id = 1500 ORDER BY id, payload;
 
 SET lagodb.customscan_mode = 'off';
-SELECT id, payload FROM customscan_auto_cost_t WHERE id = 1500 ORDER BY id, payload;
+SELECT id, payload FROM customscan_auto_read_t WHERE id = 1500 ORDER BY id, payload;
 
 RESET lagodb.customscan_mode;
-DROP TABLE customscan_auto_cost_t;
+DROP TABLE customscan_auto_read_t;
+
+-- Pruning estimates. With PostgreSQL's CPU costs at zero, the CustomScan costs
+-- only seq_page_cost times the pages it is expected to read, so the cost of a
+-- filtered read over the unfiltered one is the estimated scanned fraction, free
+-- of file sizes. Every data file holds 1000 rows and is one pruning unit, and
+-- ANALYZE samples these small tables whole and in insertion order.
+CREATE FUNCTION pg_temp.scan_cost(query text) RETURNS float8
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan json;
+BEGIN
+    EXECUTE 'EXPLAIN (FORMAT JSON) ' || query INTO plan;
+    RETURN (plan -> 0 -> 'Plan' ->> 'Total Cost')::float8;
+END;
+$$;
+
+SET cpu_tuple_cost = 0;
+SET cpu_operator_cost = 0;
+
+-- Files hold ids 1-1000, 1001-2000, ... in that order.
+CREATE TABLE customscan_pruning_cost_t (id integer) USING iceberg;
+INSERT INTO customscan_pruning_cost_t SELECT generate_series(1, 1000);
+INSERT INTO customscan_pruning_cost_t SELECT generate_series(1001, 2000);
+INSERT INTO customscan_pruning_cost_t SELECT generate_series(2001, 3000);
+INSERT INTO customscan_pruning_cost_t SELECT generate_series(3001, 4000);
+ANALYZE customscan_pruning_cost_t;
+
+-- Correlation 1: the qualifying rows fill one unit of four, as in
+-- brincostestimate.
+SELECT round((pg_temp.scan_cost('SELECT id FROM customscan_pruning_cost_t WHERE id = 1500')
+              / pg_temp.scan_cost('SELECT id FROM customscan_pruning_cost_t'))::numeric, 4)
+       AS scanned_fraction;
+
+-- lagodb_iceberg.scan_min_fraction floors the estimate.
+SET lagodb_iceberg.scan_min_fraction = 0.5;
+SELECT round((pg_temp.scan_cost('SELECT id FROM customscan_pruning_cost_t WHERE id = 1500')
+              / pg_temp.scan_cost('SELECT id FROM customscan_pruning_cost_t'))::numeric, 4)
+       AS scanned_fraction;
+RESET lagodb_iceberg.scan_min_fraction;
+
+-- Files hold parts 2, 4, 1, 3 in that order, ids following the part, so both
+-- columns correlate with physical order by only 1/16.
+CREATE TABLE customscan_layout_cost_t (id integer, part integer)
+PARTITION BY LIST (part) USING iceberg;
+INSERT INTO customscan_layout_cost_t SELECT g, 2 FROM generate_series(1001, 2000) AS g;
+INSERT INTO customscan_layout_cost_t SELECT g, 4 FROM generate_series(3001, 4000) AS g;
+INSERT INTO customscan_layout_cost_t SELECT g, 1 FROM generate_series(1, 1000) AS g;
+INSERT INTO customscan_layout_cost_t SELECT g, 3 FROM generate_series(2001, 3000) AS g;
+ANALYZE customscan_layout_cost_t;
+
+-- The identity partition prunes by layout: its selectivity is the fraction,
+-- whatever the correlation.
+SELECT round((pg_temp.scan_cost('SELECT id FROM customscan_layout_cost_t WHERE part = 2')
+              / pg_temp.scan_cost('SELECT id FROM customscan_layout_cost_t'))::numeric, 4)
+       AS scanned_fraction;
+
+-- The same rows reached through min/max statistics: at correlation 1/16 one
+-- qualifying unit spreads over all four.
+SELECT round((pg_temp.scan_cost('SELECT id FROM customscan_layout_cost_t WHERE id = 1500')
+              / pg_temp.scan_cost('SELECT id FROM customscan_layout_cost_t'))::numeric, 4)
+       AS scanned_fraction;
+
+-- Eight files: part 1 holds ids 1-4000 in four files, part 2 ids 4001-8000 in
+-- four more, ids in insertion order (correlation 1).
+CREATE TABLE customscan_combined_cost_t (id integer, part integer)
+PARTITION BY LIST (part) USING iceberg;
+INSERT INTO customscan_combined_cost_t SELECT g, 1 FROM generate_series(1, 1000) AS g;
+INSERT INTO customscan_combined_cost_t SELECT g, 1 FROM generate_series(1001, 2000) AS g;
+INSERT INTO customscan_combined_cost_t SELECT g, 1 FROM generate_series(2001, 3000) AS g;
+INSERT INTO customscan_combined_cost_t SELECT g, 1 FROM generate_series(3001, 4000) AS g;
+INSERT INTO customscan_combined_cost_t SELECT g, 2 FROM generate_series(4001, 5000) AS g;
+INSERT INTO customscan_combined_cost_t SELECT g, 2 FROM generate_series(5001, 6000) AS g;
+INSERT INTO customscan_combined_cost_t SELECT g, 2 FROM generate_series(6001, 7000) AS g;
+INSERT INTO customscan_combined_cost_t SELECT g, 2 FROM generate_series(7001, 8000) AS g;
+ANALYZE customscan_combined_cost_t;
+
+-- Statistics prune only the units the layout keeps: part = 1 keeps half of the
+-- eight units, and id <= 2400 (selectivity 0.3) fills ceil(4 * 0.3) = 2 of
+-- those four, so 0.5 * 2 / 4. Pricing the statistics over all eight units
+-- would give 0.5 * 3 / 8, statistics alone 3 / 8, and layout alone 0.5.
+SELECT round((pg_temp.scan_cost('SELECT id FROM customscan_combined_cost_t
+                                 WHERE part = 1 AND id <= 2400')
+              / pg_temp.scan_cost('SELECT id FROM customscan_combined_cost_t'))::numeric, 4)
+       AS scanned_fraction;
+
+RESET cpu_tuple_cost;
+RESET cpu_operator_cost;
+DROP TABLE customscan_combined_cost_t;
+DROP TABLE customscan_layout_cost_t;
+DROP TABLE customscan_pruning_cost_t;
+DROP FUNCTION pg_temp.scan_cost(text);
 
 -- Conservative pruning retains the PostgreSQL residual.
 
@@ -848,12 +906,12 @@ DROP TABLE customscan_conservative_pruning_t;
 -- EXPLAIN separates exact filters from conservative pruning.
 
 
--- Integer comparisons are exact, date comparisons conservative, and ordered default-
--- collation text comparisons residual.
+-- Integer comparisons and C-collation text comparisons are exact; date
+-- comparisons remain conservative.
 CREATE TABLE customscan_explain_split_t (
     id integer,
     d date,
-    descr text
+    descr text COLLATE "C"
 ) USING iceberg;
 
 -- File 1: id in [1, 3], d in 2023 (before the 2024-01-01 boundary)
@@ -892,8 +950,7 @@ SELECT id, d FROM customscan_explain_split_t
 WHERE id = 2 AND d < DATE '2024-01-01'
 ORDER BY id;
 
--- Ordered text comparison under the default collation stays residual even on a forced
--- CustomScan.
+-- Ordered text comparison under an explicit C collation is pushed exactly.
 
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -1019,17 +1076,16 @@ SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+
 SET lagodb.customscan_mode = 'off';
 SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
 
--- Default-collation text equality, ordering, and inequality.
+-- Default deterministic-collation text equality and inequality.
 CREATE TABLE rq_text (
     id integer,
-    label text,
-    note text
+    label text
 ) USING iceberg;
 
 -- File 1
-INSERT INTO rq_text VALUES (1, 'alpha', 'apple'), (2, 'bravo', 'banana'), (3, 'charlie', 'cherry');
+INSERT INTO rq_text VALUES (1, 'alpha'), (2, 'bravo'), (3, 'charlie');
 -- File 2
-INSERT INTO rq_text VALUES (4, 'delta', 'date'), (5, 'echo', 'elderberry'), (6, 'foxtrot', 'fig');
+INSERT INTO rq_text VALUES (4, 'delta'), (5, 'echo'), (6, 'foxtrot');
 
 SELECT COUNT(*) AS rq_text_rows FROM rq_text;
 
@@ -1043,16 +1099,6 @@ SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
 SET lagodb.customscan_mode = 'off';
 SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
 
--- Ordered text comparison under the database default collation remains residual.
-SET lagodb.customscan_mode = 'force';
-EXPLAIN (COSTS OFF)
-SELECT id, label FROM rq_text WHERE label < 'delta' ORDER BY id;
-
-SELECT id, label FROM rq_text WHERE label < 'delta' ORDER BY id;
-
-SET lagodb.customscan_mode = 'off';
-SELECT id, label FROM rq_text WHERE label < 'delta' ORDER BY id;
-
 -- Text inequality is exact under a deterministic default collation.
 SET lagodb.customscan_mode = 'force';
 EXPLAIN (COSTS OFF)
@@ -1062,16 +1108,6 @@ SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
 
 SET lagodb.customscan_mode = 'off';
 SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
-
--- Repeat the ordered residual comparison on another column.
-SET lagodb.customscan_mode = 'force';
-EXPLAIN (COSTS OFF)
-SELECT id, note FROM rq_text WHERE note < 'cherry' ORDER BY id;
-
-SELECT id, note FROM rq_text WHERE note < 'cherry' ORDER BY id;
-
-SET lagodb.customscan_mode = 'off';
-SELECT id, note FROM rq_text WHERE note < 'cherry' ORDER BY id;
 
 RESET lagodb.customscan_mode;
 RESET timezone;
