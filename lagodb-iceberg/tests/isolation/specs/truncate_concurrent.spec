@@ -90,6 +90,6 @@ permutation s1_begin_abort s1_truncate_abort s2_abort_location_unchanged s1_abor
 permutation s1_begin_multi s1_truncate_multi s2_multi_first_rows s1_commit_multi s2_multi_rows s2_multi_locations_changed
 permutation s1_begin_multi s1_truncate_multi s2_multi_second_rows s1_commit_multi s2_multi_rows s2_multi_locations_changed
 
-# Provider-owned partitioned roots retain commit and rollback lock semantics.
+# Partitioned Iceberg tables retain commit and rollback lock semantics.
 permutation s1_begin s1_truncate_partitioned s2_partitioned_location_unchanged s2_partitioned_insert s1_commit s2_partitioned_rows
 permutation s1_begin s1_truncate_partitioned s2_partitioned_location_unchanged s2_partitioned_rows s1_abort s2_partitioned_location_unchanged

@@ -1,0 +1,21 @@
+Parsed test spec with 2 sessions
+
+starting permutation: begin snapshot write create analyze commit estimates
+step begin: BEGIN ISOLATION LEVEL SERIALIZABLE;
+step snapshot: SELECT count(*) AS visible_rows FROM analyze_view_rows;
+visible_rows
+------------
+         100
+(1 row)
+
+step write: INSERT INTO analyze_view_rows SELECT generate_series(101, 400);
+step create: CREATE TABLE analyze_view_created (id integer) USING iceberg; INSERT INTO analyze_view_created SELECT generate_series(1, 100);
+step analyze: ANALYZE analyze_view_rows, analyze_view_created;
+step commit: COMMIT;
+step estimates: SELECT relname, relpages > 0 AS has_pages, reltuples::bigint AS reltuples FROM pg_class WHERE relname LIKE 'analyze_view_%' ORDER BY relname;
+relname             |has_pages|reltuples
+--------------------+---------+---------
+analyze_view_created|f        |        0
+analyze_view_rows   |t        |      100
+(2 rows)
+

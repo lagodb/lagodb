@@ -31,7 +31,21 @@ CREATE TEMP TABLE partition_read_cases (
 -- UUID identity partitions are rejected at DDL time; partitioned_table.sql
 -- covers that boundary. Enable their read/write cases after upstream manifest
 -- schema and literal encoding support Iceberg's fixed(16) UUID representation.
+-- A bucket prunes only equality and NULL tests, so its cases skip the ordered
+-- comparison matrix. Each pair of values hashes to two different buckets.
 INSERT INTO partition_read_cases VALUES
+    ('bucket_int2', 'smallint', '-7', '9', 'HASH (part_key)', false),
+    ('bucket_int4', 'integer', '-7', '9', 'HASH (part_key)', false),
+    ('bucket_int8', 'bigint', '9000000000', '9000000001', 'HASH (part_key)', false),
+    ('bucket_decimal', 'numeric(10,2)', '-12.34', '56.78', 'HASH (part_key)', false),
+    ('bucket_text', 'text COLLATE "C"', 'north', 'south', 'HASH (part_key)', false),
+    ('bucket_varchar', 'varchar(12) COLLATE "C"', 'north', 'south', 'HASH (part_key)', false),
+    ('bucket_date', 'date', '1969-12-31', '2024-01-02', 'HASH (part_key)', false),
+    ('bucket_time', 'time', '00:00:00.123456', '23:59:59.999999', 'HASH (part_key)', false),
+    ('bucket_timestamp', 'timestamp', '1969-12-31 23:59:59.123456', '2024-01-02 12:00:00', 'HASH (part_key)', false),
+    ('bucket_timestamptz', 'timestamptz', '2024-01-01 01:00:00+08', '2024-01-02 12:00:00-05', 'HASH (part_key)', false),
+    ('bucket_binary', 'bytea', '\x0001', '\x00ff', 'HASH (part_key)', false),
+    ('bucket_uuid', 'uuid', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002', 'HASH (part_key)', false),
     ('identity_bool', 'boolean', 'true', 'false', 'LIST (part_key)', false),
     ('identity_int2', 'smallint', '-7', '9', 'LIST (part_key)', true),
     ('identity_int4', 'integer', '-7', '9', 'LIST (part_key)', true),
@@ -180,6 +194,15 @@ EXECUTE partition_read_date(DATE '2024-01-02');
 EXECUTE partition_read_date(NULL);
 
 DEALLOCATE partition_read_date;
+-- `= ANY` binds its whole array as one value, NULL elements and a NULL array
+-- included. PostgreSQL still evaluates the exact qual on the selected files.
+PREPARE partition_read_any(integer[]) AS
+SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.identity_int4 WHERE part_key = ANY ($1);
+EXECUTE partition_read_any('{-7,NULL}');
+
+EXECUTE partition_read_any(NULL);
+
+DEALLOCATE partition_read_any;
 RESET plan_cache_mode;
 -- Repeated outer keys and NULL exercise parameterized LATERAL rescans.
 SELECT wanted.ordinal, matched.id
@@ -190,13 +213,61 @@ CROSS JOIN LATERAL (
 ) AS matched
 ORDER BY wanted.ordinal, matched.id;
 
--- Owned roots still require the storage scan when optional CustomScan is off.
-SET lagodb.customscan_mode = 'off';
-SELECT jsonb_path_query_first(pg_temp.partition_query_json(
+-- An infinite element cannot bind, so the set stops pruning and PostgreSQL decides.
+SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.range_date
+WHERE part_key IN (DATE '1969-12-31', 'infinity');
+
+-- A composite spec prunes on each field and on both together. id 5 lies inside
+-- the id range of the east file holding ids 1 and 10, so only the bucket field,
+-- and not column metrics, excludes that file. A set prunes the same way; NOT IN
+-- is not pushed and reads every file.
+CREATE TABLE partitioned_reads.composite (
+    id integer,
+    region text COLLATE "C",
+    payload text
+) PARTITION BY LIST (region, iceberg.bucket(4, id)) USING iceberg;
+INSERT INTO partitioned_reads.composite VALUES
+    (1, 'east', 'a'), (10, 'east', 'b'), (5, 'east', 'c'),
+    (1, 'west', 'd'), (5, 'west', 'e');
+SELECT predicate, scan->>'Data Files Selected' AS files, ids
+FROM (VALUES (1, 'region = ''east'''), (2, 'id = 5'),
+             (3, 'region = ''east'' AND id = 5'),
+             (4, 'id IN (5, 6)'), (5, 'id = ANY (ARRAY[5, NULL])'),
+             (6, 'region IN (''east'', ''mid'')'),
+             (7, 'id NOT IN (1, 5)')) AS p(ordinal, predicate)
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
     'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
-     SELECT id FROM partitioned_reads.identity_int4 WHERE part_key = -7'),
-    '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")')
-    ->>'Data Files Selected' AS files;
+     SELECT id FROM partitioned_reads.composite WHERE %s', predicate)) AS explained(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS selected(scan)
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.composite WHERE %s',
+    predicate)) AS results(ids)
+ORDER BY ordinal;
+
+-- The Arrow reader never evaluates a set. An AND keeps its other children for
+-- the reader, and an OR needs every branch. So PostgreSQL removes id 10 in the
+-- first and last cases, where the reader has nothing to apply, and no row in the
+-- second, where the reader applies payload = 'a' OR payload = 'e'.
+SELECT predicate, (scan->>'Rows Removed by Filter')::integer AS residual_removed, ids
+FROM (VALUES (1, 'id IN (1, 5)'),
+             (2, '(id IN (1, 6) AND payload = ''a'') OR (id IN (5, 6) AND payload = ''e'')'),
+             (3, 'id IN (1, 5) OR payload = ''e''')) AS p(ordinal, predicate)
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, FORMAT JSON)
+     SELECT id FROM partitioned_reads.composite WHERE %s', predicate)) AS explained(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Node Type" == "Custom Scan" && @."Custom Plan Provider" == "lagodb-iceberg")') AS selected(scan)
+CROSS JOIN LATERAL pg_temp.partition_query_json(format(
+    'SELECT jsonb_agg(id ORDER BY id) FROM partitioned_reads.composite WHERE %s',
+    predicate)) AS results(ids)
+ORDER BY ordinal;
+
+-- A partitioned table plans like an ordinary one: with optional CustomScan off,
+-- SeqScan reads it through the table AM and no Custom Scan selects files.
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT id FROM partitioned_reads.identity_int4 WHERE part_key = -7;
 
 SELECT id FROM partitioned_reads.identity_int4 WHERE part_key = -7 ORDER BY id;
 
@@ -207,7 +278,7 @@ RESET client_min_messages;
 RESET max_parallel_workers_per_gather;
 RESET lagodb.customscan_mode;
 
--- Provider-owned partitioned-table planning and native join costing.
+-- Partitioned-table planning and native join costing.
 
 CREATE SCHEMA partitioned_planning;
 

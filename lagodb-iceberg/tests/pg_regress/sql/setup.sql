@@ -31,6 +31,8 @@ SELECT current_setting('port') || '-' || current_database()
 
 -- Remove a cluster-wide injection attachment left by an interrupted worker
 -- lifecycle test before any ordinary regression test can wake that worker.
+SELECT current_setting('server_version_num')::int >= 170000 AS has_injection_points \gset
+\if :has_injection_points
 CREATE EXTENSION IF NOT EXISTS injection_points;
 DO $$
 BEGIN
@@ -46,6 +48,7 @@ EXCEPTION WHEN internal_error THEN
 END
 $$;
 DROP EXTENSION injection_points;
+\endif
 DROP DATABASE IF EXISTS lagodb_runtime_source WITH (FORCE);
 DROP ROLE IF EXISTS lagodb_runtime_non_superuser;
 

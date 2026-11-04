@@ -98,6 +98,14 @@ USING iceberg TABLESPACE regress_object;
 INSERT INTO remote_cleanup_drop
 SELECT generate_series(1, 1000);
 
+-- A remote table keeps a relfilenode, so it needs no tablespace shared dependency.
+SELECT count(*) AS object_tablespace_dependencies
+FROM pg_shdepend
+WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+  AND classid = 'pg_class'::regclass
+  AND objid = 'remote_cleanup_drop'::regclass
+  AND refclassid = 'pg_tablespace'::regclass;
+
 SELECT :'volume_id' AS volume_id,
        :'lagodb_regress_bucket' AS object_namespace,
        value AS remote_location,

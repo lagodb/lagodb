@@ -197,14 +197,6 @@ WHERE attrelid = 'schema_evolution_part_root_t'::regclass
 SELECT count(*) AS rows, count(body) AS body_values
 FROM schema_evolution_part_root_t;
 
-SELECT class.relkind = 'p' AS is_partitioned_catalog,
-       NOT class.relhassubclass AS has_no_pg_children,
-       metadata.metadata_location IS NOT NULL AS root_has_metadata
-FROM pg_class AS class
-LEFT JOIN iceberg.iceberg_metadata AS metadata
-  ON metadata.relid = class.oid
-WHERE class.oid = 'schema_evolution_part_root_t'::regclass;
-
 CREATE TABLE schema_evolution_epoch_t (
     id integer NOT NULL
 ) USING iceberg;

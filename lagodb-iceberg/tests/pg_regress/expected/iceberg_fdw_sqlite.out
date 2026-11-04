@@ -172,6 +172,13 @@ OPTIONS (table 'fdw_sqlite.invalid_creation_schema',
          create_remote_if_missing 'true', schema_id '0');
 ERROR:  invalid foreign option "schema_id": cannot be specified when creating a missing Iceberg table
 DETAIL:  while running utility hook 'lagodb-iceberg foreign-table DDL' in post-success phase for T_CreateForeignTableStmt
+-- A malformed table path keeps PostgreSQL's own message and SQLSTATE.
+CREATE FOREIGN TABLE iceberg_fdw_sqlite.invalid_table_path (id integer)
+SERVER iceberg_sqlite OPTIONS (table 'fdw_sqlite..invalid_table_path');
+ERROR:  string is not a valid identifier: "fdw_sqlite..invalid_table_path"
+DETAIL:  No valid identifier before ".".
+\echo :LAST_ERROR_SQLSTATE
+22023
 -- The same SQLite catalog publishes both tables at commit.
 BEGIN;
 INSERT INTO iceberg_fdw_sqlite.items VALUES (1, 'one'), (2, 'two');

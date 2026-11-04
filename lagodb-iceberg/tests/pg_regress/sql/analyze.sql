@@ -46,6 +46,25 @@ WHERE schemaname = 'analyze_test'
   AND tablename = 'stats_t'
   AND attname = 'id';
 
+-- A statistics object can need a larger sample than any column. Here its target
+-- covers every row, which makes both estimates exact. The second object has
+-- only an expression, so no column supplies its target.
+CREATE TABLE extended_stats_t (id integer, category integer) USING iceberg;
+INSERT INTO extended_stats_t
+SELECT value, value % 500 FROM generate_series(1, 1000) AS value;
+CREATE STATISTICS extended_columns (ndistinct) ON id, category
+FROM extended_stats_t;
+CREATE STATISTICS extended_expression ON (category + 1)
+FROM extended_stats_t;
+ALTER STATISTICS extended_expression SET STATISTICS 100;
+SET default_statistics_target = 1;
+ANALYZE extended_stats_t;
+RESET default_statistics_target;
+SELECT n_distinct FROM pg_stats_ext
+WHERE statistics_name = 'extended_columns';
+SELECT n_distinct FROM pg_stats_ext_exprs
+WHERE statistics_name = 'extended_expression';
+
 -- Separate statements create separate Iceberg data files. With one selected
 -- file, its 100 physical rows cannot supply the fixed 400-observation target
 -- without replacement. The AM must reuse reader rows by multiplicity while
@@ -111,8 +130,8 @@ SELECT reltuples::bigint = 100 AS vacuum_analyze_updates_rows
 FROM pg_class
 WHERE oid = 'transaction_t'::regclass;
 
--- A managed partitioned table is one logical Iceberg table. PostgreSQL keeps
--- relkind='p' for syntax and introspection, but no pg_inherits leaf owns data.
+-- A managed partitioned table is one logical Iceberg table, and PostgreSQL
+-- sees an ordinary relation with no pg_inherits leaves.
 CREATE TABLE partitioned_table_t (
     id integer,
     category text
@@ -120,10 +139,6 @@ CREATE TABLE partitioned_table_t (
 INSERT INTO partitioned_table_t
 SELECT value, CASE WHEN value <= 150 THEN 'common' ELSE 'rare' END
 FROM generate_series(1, 200) AS value;
-
-SELECT relkind = 'p' AND NOT relhassubclass AS partitioned_table_catalog_shape
-FROM pg_class
-WHERE oid = 'partitioned_table_t'::regclass;
 
 ANALYZE (BUFFER_USAGE_LIMIT '128kB') partitioned_table_t;
 SELECT reltuples::bigint = 200 AS partitioned_table_rows_estimated
@@ -152,7 +167,7 @@ WHERE schemaname = 'analyze_test'
   AND attname = 'category';
 
 -- Exercise PostgreSQL's top-level multi-relation transaction policy while
--- preserving statement order across a native ANALYZE and the partitioned table seam.
+-- preserving statement order across a native and an Iceberg ANALYZE.
 ANALYZE stats_t, partitioned_table_t;
 SELECT (SELECT reltuples::bigint FROM pg_class
         WHERE oid = 'stats_t'::regclass) = 1000
@@ -161,62 +176,6 @@ SELECT (SELECT reltuples::bigint FROM pg_class
         WHERE oid = 'partitioned_table_t'::regclass) = 200
        AS mixed_analyze_updated_both;
 
--- Adapt PG17 vacuum.sql's expression-index recursion case. The outer native
--- ANALYZE delegates to PostgreSQL; the inner partitioned table ANALYZE would be
--- consumed by LagoDB and bypass PostgreSQL's private recursion flag.
-CREATE TABLE recursion_t (id integer) USING heap;
-CREATE FUNCTION nested_analyze() RETURNS void VOLATILE LANGUAGE SQL
-AS 'ANALYZE analyze_test.partitioned_table_t';
-CREATE FUNCTION recursion_index(value integer) RETURNS integer
-IMMUTABLE LANGUAGE SQL
-AS 'SELECT $1 FROM analyze_test.nested_analyze()';
-CREATE INDEX ON recursion_t (recursion_index(id));
-INSERT INTO recursion_t VALUES (1), (2);
--- Catch the outer error after native maintenance has unwound its scope.
-DO $$
-BEGIN
-    EXECUTE 'ANALYZE analyze_test.recursion_t';
-    RAISE EXCEPTION 'native maintenance did not reject provider recursion';
-EXCEPTION WHEN feature_not_supported THEN
-    IF SQLERRM <> 'ANALYZE cannot be executed from VACUUM or ANALYZE' THEN
-        RAISE;
-    END IF;
-END;
-$$;
-ANALYZE partitioned_table_t;
--- Repeat through LagoDB's mixed executor, without internal transaction commits.
-DO $$
-BEGIN
-    EXECUTE 'ANALYZE analyze_test.recursion_t, analyze_test.partitioned_table_t';
-    RAISE EXCEPTION 'routed maintenance did not reject provider recursion';
-EXCEPTION WHEN feature_not_supported THEN
-    IF SQLERRM <> 'ANALYZE cannot be executed from VACUUM or ANALYZE' THEN
-        RAISE;
-    END IF;
-END;
-$$;
-ANALYZE partitioned_table_t;
--- Catching an inner rejection must preserve the outer maintenance scope.
--- The second attempt observes that state; the following successful ANALYZE
--- observes teardown. Native and mixed commands use different executors.
-CREATE OR REPLACE FUNCTION nested_analyze() RETURNS void
-VOLATILE LANGUAGE plpgsql AS $$
-BEGIN
-    FOR attempt IN 1..2 LOOP
-        BEGIN
-            EXECUTE 'ANALYZE analyze_test.partitioned_table_t';
-            RAISE EXCEPTION 'inner rejection cleared the outer maintenance scope';
-        EXCEPTION WHEN feature_not_supported THEN
-            IF SQLERRM <> 'ANALYZE cannot be executed from VACUUM or ANALYZE' THEN
-                RAISE;
-            END IF;
-        END;
-    END LOOP;
-END;
-$$;
-ANALYZE recursion_t;
-ANALYZE recursion_t, partitioned_table_t;
-ANALYZE partitioned_table_t;
 RESET search_path;
 DROP SCHEMA analyze_test CASCADE;
 DROP EXTENSION lagodb_iceberg CASCADE;

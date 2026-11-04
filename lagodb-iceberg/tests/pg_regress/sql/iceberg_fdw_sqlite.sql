@@ -133,6 +133,11 @@ SERVER iceberg_sqlite
 OPTIONS (table 'fdw_sqlite.invalid_creation_schema',
          create_remote_if_missing 'true', schema_id '0');
 
+-- A malformed table path keeps PostgreSQL's own message and SQLSTATE.
+CREATE FOREIGN TABLE iceberg_fdw_sqlite.invalid_table_path (id integer)
+SERVER iceberg_sqlite OPTIONS (table 'fdw_sqlite..invalid_table_path');
+\echo :LAST_ERROR_SQLSTATE
+
 -- The same SQLite catalog publishes both tables at commit.
 BEGIN;
 INSERT INTO iceberg_fdw_sqlite.items VALUES (1, 'one'), (2, 'two');

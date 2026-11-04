@@ -1,0 +1,4 @@
+-- PostgreSQL 17 introduced injection points.
+SELECT current_setting('server_version_num')::int < 170000 AS skip_test \gset
+\if :skip_test
+\quit

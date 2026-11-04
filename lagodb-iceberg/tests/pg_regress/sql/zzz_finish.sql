@@ -11,6 +11,8 @@ SELECT current_setting('port') || '-' || current_database()
 \setenv LAGODB_REGRESS_STORAGE_PID :lagodb_regress_storage_pid
 \setenv LAGODB_REGRESS_SLOT :lagodb_regress_slot
 \! bin/storage_worker_pause_guard recover
+SELECT current_setting('server_version_num')::int >= 170000 AS has_injection_points \gset
+\if :has_injection_points
 CREATE EXTENSION IF NOT EXISTS injection_points;
 DO $$
 BEGIN
@@ -26,6 +28,7 @@ EXCEPTION WHEN internal_error THEN
 END
 $$;
 DROP EXTENSION injection_points;
+\endif
 DROP DATABASE IF EXISTS lagodb_runtime_source WITH (FORCE);
 DROP ROLE IF EXISTS lagodb_runtime_non_superuser;
 DELETE FROM lagodb.maintenance_queue

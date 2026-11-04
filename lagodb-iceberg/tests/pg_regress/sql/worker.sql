@@ -25,6 +25,8 @@ DROP ROLE IF EXISTS :runtime_role;
 CREATE ROLE :runtime_role;
 CREATE DATABASE :runtime_database;
 CREATE DATABASE :runtime_template_database IS_TEMPLATE true;
+SELECT current_setting('server_version_num')::int >= 170000 AS has_injection_points \gset
+\if :has_injection_points
 CREATE EXTENSION IF NOT EXISTS injection_points;
 DO $$
 BEGIN
@@ -39,6 +41,7 @@ EXCEPTION WHEN internal_error THEN
     END IF;
 END
 $$;
+\endif
 RESET client_min_messages;
 
 -- Template databases must never enter the coordinator scheduler through
@@ -526,6 +529,8 @@ WHERE item_id IN (
     '00000000-0000-0000-0000-000000000003'
 );
 
+-- PostgreSQL 17 introduced injection points; _1.out is the PostgreSQL 16 output.
+\if :has_injection_points
 \connect :regress_database
 SELECT injection_points_attach(
     'lagodb-worker-after-database-connection',
@@ -574,6 +579,7 @@ SELECT injection_points_detach(
 \connect :runtime_database
 SELECT lagodb.request_worker_wakeup('lagodb_base', 'maintenance');
 CALL public.worker_regress_assert_runtime_idle('injection recovery');
+\endif
 
 SELECT oid::text AS runtime_database_oid
 FROM pg_database
@@ -619,7 +625,9 @@ END
 $$;
 DROP DATABASE :runtime_database;
 DROP ROLE :runtime_role;
+\if :has_injection_points
 DROP EXTENSION injection_points;
+\endif
 
 -- 5. Extension-worker statement cancellation on a real storage request.
 SELECT endpoint AS lagodb_regress_endpoint,

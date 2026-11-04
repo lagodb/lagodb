@@ -34,7 +34,7 @@ CREATE TABLE "JDBC Catalog".partitioned (id integer)
 PARTITION BY LIST (id) USING iceberg TABLESPACE regress_jdbc;
 CREATE TABLE "JDBC Catalog".local_table (id integer) USING iceberg;
 CREATE TABLE "JDBC Catalog".heap_table (id integer) USING heap;
--- Empty object-backed tables, including Iceberg partitioned roots, are published.
+-- Empty object-backed tables, including partitioned Iceberg tables, are published.
 SELECT table_name, iceberg_type, metadata_location IS NOT NULL AS has_metadata
 FROM iceberg_tables
 WHERE catalog_name = current_database() AND table_namespace = 'JDBC Catalog'

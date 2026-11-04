@@ -1,57 +1,46 @@
 -- Table DDL, table options, and physical storage lifecycle.
 
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+-- The hooks outlive the extension, so PostgreSQL reports the missing method.
+CREATE TABLE missing_am_t (id integer) USING iceberg;
 CREATE EXTENSION lagodb_iceberg;
 SET client_min_messages = notice;
 
--- UNLOGGED disables Iceberg file WAL while retaining ordinary transaction
--- and cleanup behavior, including partitioned tables and the default AM.
 CREATE UNLOGGED TABLE unlogged_iceberg (id integer) USING iceberg;
-CREATE UNLOGGED TABLE unlogged_partitioned_iceberg (id integer)
-PARTITION BY LIST (id) USING iceberg;
 SET default_table_access_method = 'iceberg';
 CREATE UNLOGGED TABLE unlogged_default_iceberg (id integer);
 RESET default_table_access_method;
 INSERT INTO unlogged_iceberg VALUES (10), (20);
-INSERT INTO unlogged_partitioned_iceberg VALUES (1), (2);
 INSERT INTO unlogged_default_iceberg VALUES (9);
-SELECT count(*) = 3 AS unlogged_catalog_bootstrapped
+SELECT count(*) = 2 AS unlogged_catalog_bootstrapped
 FROM pg_class AS c
 JOIN iceberg.iceberg_metadata AS m ON m.relid = c.oid
 WHERE c.oid IN ('unlogged_iceberg'::regclass,
-                'unlogged_partitioned_iceberg'::regclass,
                 'unlogged_default_iceberg'::regclass)
   AND c.relpersistence = 'u' AND m.metadata_location IS NOT NULL;
 SELECT (SELECT array_agg(id ORDER BY id) FROM unlogged_iceberg) AS table_rows,
-       (SELECT array_agg(id ORDER BY id) FROM unlogged_partitioned_iceberg) AS partitioned_rows,
        (SELECT array_agg(id ORDER BY id) FROM unlogged_default_iceberg) AS default_am_rows;
 BEGIN;
 SAVEPOINT unlogged_change;
 INSERT INTO unlogged_iceberg VALUES (30);
-TRUNCATE unlogged_iceberg, unlogged_partitioned_iceberg;
+TRUNCATE unlogged_iceberg;
 INSERT INTO unlogged_iceberg VALUES (99);
-INSERT INTO unlogged_partitioned_iceberg VALUES (99);
 DROP TABLE unlogged_default_iceberg;
 ROLLBACK TO SAVEPOINT unlogged_change;
 COMMIT;
 SELECT (SELECT array_agg(id ORDER BY id) FROM unlogged_iceberg) AS table_rows,
-       (SELECT array_agg(id ORDER BY id) FROM unlogged_partitioned_iceberg) AS partitioned_rows,
        (SELECT array_agg(id ORDER BY id) FROM unlogged_default_iceberg) AS default_am_rows;
-TRUNCATE unlogged_iceberg, unlogged_partitioned_iceberg, unlogged_default_iceberg;
+TRUNCATE unlogged_iceberg, unlogged_default_iceberg;
 SELECT NOT EXISTS (
     SELECT FROM unlogged_iceberg
-    UNION ALL SELECT FROM unlogged_partitioned_iceberg
     UNION ALL SELECT FROM unlogged_default_iceberg
 ) AS unlogged_truncate_cleared_rows;
 SELECT pg_read_file(metadata_location)::jsonb->>'location' AS unlogged_table_root
 FROM iceberg.iceberg_metadata WHERE relid = 'unlogged_iceberg'::regclass \gset
-SELECT pg_read_file(metadata_location)::jsonb->>'location' AS unlogged_partitioned_root
-FROM iceberg.iceberg_metadata WHERE relid = 'unlogged_partitioned_iceberg'::regclass \gset
 SELECT pg_read_file(metadata_location)::jsonb->>'location' AS unlogged_default_root
 FROM iceberg.iceberg_metadata WHERE relid = 'unlogged_default_iceberg'::regclass \gset
-DROP TABLE unlogged_iceberg, unlogged_partitioned_iceberg, unlogged_default_iceberg;
+DROP TABLE unlogged_iceberg, unlogged_default_iceberg;
 SELECT pg_stat_file(:'unlogged_table_root', true) IS NULL
-       AND pg_stat_file(:'unlogged_partitioned_root', true) IS NULL
        AND pg_stat_file(:'unlogged_default_root', true) IS NULL AS storage_removed;
 
 --
@@ -129,7 +118,7 @@ CREATE TABLE iceberg_default_test (
 ) USING iceberg;
 
 -- Local physical tables derive storage from PG and need no internal option.
-SELECT count(*) FILTER (WHERE name IN ('location', 'relfilenumber')) = 0
+SELECT count(*) FILTER (WHERE name = 'location') = 0
            AS has_no_storage_option,
        count(*) FILTER (WHERE name <> 'location') = 0
            AS has_no_user_overrides
@@ -346,13 +335,17 @@ FROM ddl_stable_copy;
 CREATE TABLE IF NOT EXISTS ddl_copied (LIKE missing_like_source)
 INHERITS (missing_parent) USING iceberg;
 
+-- A missing source keeps PostgreSQL's own message and SQLSTATE.
+CREATE TABLE ddl_missing_like (LIKE missing_like_source) USING iceberg;
+\echo :LAST_ERROR_SQLSTATE
+
 -- A skipped non-Iceberg CREATE has no newly-created OID or relation lock for
 -- the Iceberg post-hook to consume.
 CREATE TABLE ddl_existing_heap (id integer);
 CREATE TABLE IF NOT EXISTS ddl_existing_heap (id bigint) USING heap;
 DROP TABLE ddl_existing_heap;
 
-CREATE TABLE ddl_parent_ok (amount double precision);
+CREATE TABLE ddl_parent_ok (amount double precision) USING iceberg;
 CREATE TABLE ddl_child_ok (local_amount numeric) INHERITS (ddl_parent_ok) USING iceberg;
 
 INSERT INTO ddl_child_ok VALUES (10.5, 11.5);
@@ -378,6 +371,11 @@ CREATE TABLE ddl_rejected_child () INHERITS (ddl_parent_numeric) USING iceberg;
 
 CREATE TABLE ddl_rejected_copy (LIKE ddl_source INCLUDING DEFAULTS) USING iceberg;
 
+-- PostgreSQL recurses these into children, whose Iceberg schemas would drift.
+ALTER TABLE ddl_parent_ok ADD COLUMN child_drift integer;
+
+ALTER TABLE ddl_parent_ok RENAME COLUMN amount TO renamed_amount;
+
 -- Composite definitions must already fit Iceberg; DDL never replaces their types.
 CREATE TABLE ddl_rejected_composite (member ddl_incompatible_array) USING iceberg;
 
@@ -389,6 +387,15 @@ CREATE TABLE ddl_unsupported_type (value money) USING iceberg;
 \set VERBOSITY default
 SELECT to_regclass('ddl_rejected_child') IS NULL AS no_child,
        to_regclass('ddl_rejected_copy') IS NULL AS no_copy;
+
+-- ONLY DROP COLUMN leaves the child its own column, so neither schema drifts.
+CREATE TABLE ddl_only_parent (kept integer, dropped integer) USING iceberg;
+CREATE TABLE ddl_only_child () INHERITS (ddl_only_parent) USING iceberg;
+ALTER TABLE ONLY ddl_only_parent DROP COLUMN dropped;
+INSERT INTO ddl_only_child VALUES (1, 2);
+SELECT * FROM ONLY ddl_only_child;
+SELECT * FROM ONLY ddl_only_parent;
+DROP TABLE ddl_only_child, ddl_only_parent;
 
 DROP TABLE ddl_child_ok, ddl_parent_ok, ddl_parent_numeric,
     ddl_stable_copy, ddl_stable_source, ddl_copied_type, ddl_copied,

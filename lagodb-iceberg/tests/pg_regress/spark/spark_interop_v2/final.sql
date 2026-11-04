@@ -18,6 +18,27 @@ GROUP BY partition
 ORDER BY to_json(partition)
 ;
 
+-- step: composite-id-lookup
+SELECT id, region, payload
+FROM ${catalog}.${namespace}.composite_mutations
+WHERE id = 2
+;
+
+-- step: composite-region-lookup
+SELECT id, region, payload
+FROM ${catalog}.${namespace}.composite_mutations
+WHERE region = 'east'
+ORDER BY id
+;
+
+-- step: composite-delete-files
+SELECT to_json(partition), min(content), max(content),
+       min(file_format), max(file_format), sum(record_count)
+FROM ${catalog}.${namespace}.composite_mutations.delete_files
+GROUP BY partition
+ORDER BY to_json(partition)
+;
+
 -- step: external-rows
 SELECT id, payload
 FROM rest.${namespace}.external

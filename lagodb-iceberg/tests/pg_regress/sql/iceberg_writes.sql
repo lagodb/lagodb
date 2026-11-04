@@ -123,6 +123,12 @@ UPDATE dml_lifecycle.update_delete_t
 SET label = label
 WHERE tableoid = 'dml_lifecycle.update_delete_t'::regclass AND id = 999;
 
+-- DELETE RETURNING tableoid must retain its logical relation identity.
+DELETE FROM dml_lifecycle.update_delete_t
+WHERE id = 1
+RETURNING tableoid::regclass =
+    'dml_lifecycle.update_delete_t'::regclass AS correct_tableoid;
+
 -- User-visible heap system columns are not Iceberg row identity. The planner
 -- must reject them instead of exposing the executor-local synthetic ctid.
 \set VERBOSITY sqlstate
@@ -340,6 +346,320 @@ SELECT * FROM dml_lifecycle.rls_t ORDER BY id;
 DROP OWNED BY dml_rls_user;
 DROP ROLE dml_rls_user;
 
+-- PostgreSQL TM_SelfModified semantics for Lake table row identities.
+
+-- A nested SPI command uses a different CommandId and ModifyState. The outer
+-- command must therefore receive PostgreSQL's triggered-data-change error,
+-- not silently treat the nested mutation as its own duplicate match.
+CREATE FUNCTION dml_lifecycle.self_update_before()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.label IN ('outer_update', 'outer_merge') THEN
+        EXECUTE format(
+            'UPDATE %I.%I SET label = $1 WHERE id = $2',
+            TG_TABLE_SCHEMA,
+            TG_TABLE_NAME
+        ) USING 'trigger_update', OLD.id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION dml_lifecycle.self_delete_before()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    EXECUTE format(
+        'UPDATE %I.%I SET label = $1 WHERE id = $2',
+        TG_TABLE_SCHEMA,
+        TG_TABLE_NAME
+    ) USING 'trigger_delete', OLD.id;
+    RETURN OLD;
+END;
+$$;
+
+-- A nested SPI command that changes another physical row in the same data
+-- file must succeed. Duplicate detection is row-level, not file-level.
+CREATE FUNCTION dml_lifecycle.update_different_row_before()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.label = 'outer_different' THEN
+        EXECUTE format(
+            'UPDATE %I.%I SET label = $1 WHERE id = $2',
+            TG_TABLE_SCHEMA,
+            TG_TABLE_NAME
+        ) USING 'nested_different', OLD.id + 1;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- Force the first MERGE UPDATE action through the Arrow/Parquet flush path
+-- before the duplicate target identity raises an error. The failed statement
+-- must publish neither its appended data nor its position delete.
+SET iceberg.mutation_buffer_flush_mb = 1;
+
+-- Run the complete matrix through the provider CustomScan target path.
+SET lagodb.customscan_mode = 'force';
+
+CREATE TABLE dml_lifecycle.force_target (
+    id integer,
+    label text
+) USING iceberg;
+
+INSERT INTO dml_lifecycle.force_target VALUES
+    (1, 'original_update'),
+    (2, 'original_delete'),
+    (3, 'ordinary_update'),
+    (4, 'ordinary_delete');
+
+SELECT metadata_location AS force_before_error
+FROM iceberg.iceberg_metadata
+WHERE relid = 'dml_lifecycle.force_target'::regclass \gset
+
+\set VERBOSITY sqlstate
+MERGE INTO dml_lifecycle.force_target AS target
+USING (VALUES
+    (1, repeat('x', 1100000)),
+    (1, repeat('y', 1100000))
+) AS source(id, label)
+ON target.id = source.id
+WHEN MATCHED THEN
+    UPDATE SET label = source.label;
+\set VERBOSITY default
+
+SELECT id, label, length(label)
+FROM dml_lifecycle.force_target
+WHERE id = 1;
+
+SELECT metadata_location = :'force_before_error' AS metadata_unchanged
+FROM iceberg.iceberg_metadata
+WHERE relid = 'dml_lifecycle.force_target'::regclass;
+
+\set VERBOSITY sqlstate
+MERGE INTO dml_lifecycle.force_target AS target
+USING (VALUES (2), (2)) AS source(id)
+ON target.id = source.id
+WHEN MATCHED THEN
+    DELETE;
+\set VERBOSITY default
+
+SELECT id, label
+FROM dml_lifecycle.force_target
+WHERE id = 2;
+
+SELECT metadata_location = :'force_before_error' AS metadata_unchanged
+FROM iceberg.iceberg_metadata
+WHERE relid = 'dml_lifecycle.force_target'::regclass;
+
+UPDATE dml_lifecycle.force_target AS target
+SET label = source.label
+FROM (VALUES (3, 'updated_once'), (3, 'updated_once')) AS source(id, label)
+WHERE target.id = source.id
+RETURNING target.id;
+
+DELETE FROM dml_lifecycle.force_target AS target
+USING (VALUES (4), (4)) AS source(id)
+WHERE target.id = source.id
+RETURNING target.id;
+
+SELECT id, label
+FROM dml_lifecycle.force_target
+ORDER BY id;
+
+INSERT INTO dml_lifecycle.force_target VALUES
+    (5, 'trigger_update_original'),
+    (6, 'trigger_delete_original'),
+    (7, 'trigger_merge_original'),
+    (8, 'sibling_original'),
+    (9, 'different_outer_original'),
+    (10, 'different_nested_original');
+
+SELECT metadata_location AS force_before_trigger
+FROM iceberg.iceberg_metadata
+WHERE relid = 'dml_lifecycle.force_target'::regclass \gset
+
+CREATE TRIGGER force_self_update
+BEFORE UPDATE ON dml_lifecycle.force_target
+FOR EACH ROW EXECUTE FUNCTION dml_lifecycle.self_update_before();
+
+CREATE TRIGGER force_self_delete
+BEFORE DELETE ON dml_lifecycle.force_target
+FOR EACH ROW EXECUTE FUNCTION dml_lifecycle.self_delete_before();
+
+CREATE TRIGGER force_update_different
+BEFORE UPDATE ON dml_lifecycle.force_target
+FOR EACH ROW EXECUTE FUNCTION dml_lifecycle.update_different_row_before();
+
+\set VERBOSITY sqlstate
+UPDATE dml_lifecycle.force_target
+SET label = 'outer_update'
+WHERE id = 5;
+DELETE FROM dml_lifecycle.force_target WHERE id = 6;
+MERGE INTO dml_lifecycle.force_target AS target
+USING (VALUES (7)) AS source(id)
+ON target.id = source.id
+WHEN MATCHED THEN UPDATE SET label = 'outer_merge';
+\set VERBOSITY default
+
+SELECT id, label
+FROM dml_lifecycle.force_target
+WHERE id BETWEEN 5 AND 7
+ORDER BY id;
+
+SELECT metadata_location = :'force_before_trigger' AS metadata_unchanged
+FROM iceberg.iceberg_metadata
+WHERE relid = 'dml_lifecycle.force_target'::regclass;
+
+UPDATE dml_lifecycle.force_target
+SET label = 'outer_different'
+WHERE id = 9;
+
+SELECT id, label
+FROM dml_lifecycle.force_target
+WHERE id IN (9, 10)
+ORDER BY id;
+
+-- Two sibling ModifyTable nodes use separate IcebergModifyState values but
+-- the same PostgreSQL command ID. Exactly one action may affect the row.
+WITH first_update AS (
+    UPDATE dml_lifecycle.force_target
+    SET label = 'sibling_first'
+    WHERE id = 8
+    RETURNING id
+), second_update AS (
+    UPDATE dml_lifecycle.force_target
+    SET label = 'sibling_second'
+    WHERE id = 8
+    RETURNING id
+)
+SELECT count(*) AS changed_rows
+FROM (
+    SELECT id FROM first_update
+    UNION ALL
+    SELECT id FROM second_update
+) AS changed;
+
+SELECT count(*), bool_and(label IN ('sibling_first', 'sibling_second'))
+FROM dml_lifecycle.force_target
+WHERE id = 8;
+
+-- A claim made in an aborted savepoint must not poison the replacement
+-- command that subsequently sees the original physical row.
+BEGIN;
+SAVEPOINT row_claim;
+UPDATE dml_lifecycle.force_target
+SET label = 'rolled_back'
+WHERE id = 5;
+ROLLBACK TO SAVEPOINT row_claim;
+UPDATE dml_lifecycle.force_target
+SET label = 'after_rollback'
+WHERE id = 5;
+COMMIT;
+
+SELECT id, label
+FROM dml_lifecycle.force_target
+WHERE id = 5;
+
+-- Repeat on a native target SeqScan. Both target paths reach the same
+-- PostgreSQL error conversion, so one error per SQLSTATE covers this path.
+SET lagodb.customscan_mode = 'off';
+
+CREATE TABLE dml_lifecycle.seqscan_target (
+    id integer,
+    label text
+) USING iceberg;
+
+INSERT INTO dml_lifecycle.seqscan_target VALUES
+    (1, 'original_update'),
+    (3, 'ordinary_update'),
+    (4, 'ordinary_delete');
+
+SELECT metadata_location AS seqscan_before_error
+FROM iceberg.iceberg_metadata
+WHERE relid = 'dml_lifecycle.seqscan_target'::regclass \gset
+
+\set VERBOSITY sqlstate
+MERGE INTO dml_lifecycle.seqscan_target AS target
+USING (VALUES
+    (1, repeat('x', 1100000)),
+    (1, repeat('y', 1100000))
+) AS source(id, label)
+ON target.id = source.id
+WHEN MATCHED THEN
+    UPDATE SET label = source.label;
+\set VERBOSITY default
+
+SELECT id, label, length(label)
+FROM dml_lifecycle.seqscan_target
+WHERE id = 1;
+
+SELECT metadata_location = :'seqscan_before_error' AS metadata_unchanged
+FROM iceberg.iceberg_metadata
+WHERE relid = 'dml_lifecycle.seqscan_target'::regclass;
+
+UPDATE dml_lifecycle.seqscan_target AS target
+SET label = source.label
+FROM (VALUES (3, 'updated_once'), (3, 'updated_once')) AS source(id, label)
+WHERE target.id = source.id
+RETURNING target.id;
+
+DELETE FROM dml_lifecycle.seqscan_target AS target
+USING (VALUES (4), (4)) AS source(id)
+WHERE target.id = source.id
+RETURNING target.id;
+
+SELECT id, label
+FROM dml_lifecycle.seqscan_target
+ORDER BY id;
+
+INSERT INTO dml_lifecycle.seqscan_target VALUES
+    (5, 'trigger_update_original'),
+    (8, 'different_outer_original'),
+    (9, 'different_nested_original');
+
+SELECT metadata_location AS seqscan_before_trigger
+FROM iceberg.iceberg_metadata
+WHERE relid = 'dml_lifecycle.seqscan_target'::regclass \gset
+
+CREATE TRIGGER seqscan_self_update
+BEFORE UPDATE ON dml_lifecycle.seqscan_target
+FOR EACH ROW EXECUTE FUNCTION dml_lifecycle.self_update_before();
+
+CREATE TRIGGER seqscan_update_different
+BEFORE UPDATE ON dml_lifecycle.seqscan_target
+FOR EACH ROW EXECUTE FUNCTION dml_lifecycle.update_different_row_before();
+
+\set VERBOSITY sqlstate
+UPDATE dml_lifecycle.seqscan_target
+SET label = 'outer_update'
+WHERE id = 5;
+\set VERBOSITY default
+
+SELECT id, label
+FROM dml_lifecycle.seqscan_target
+WHERE id = 5;
+
+SELECT metadata_location = :'seqscan_before_trigger' AS metadata_unchanged
+FROM iceberg.iceberg_metadata
+WHERE relid = 'dml_lifecycle.seqscan_target'::regclass;
+
+UPDATE dml_lifecycle.seqscan_target
+SET label = 'outer_different'
+WHERE id = 8;
+
+SELECT id, label
+FROM dml_lifecycle.seqscan_target
+WHERE id IN (8, 9)
+ORDER BY id;
+
+RESET lagodb.customscan_mode;
+RESET iceberg.mutation_buffer_flush_mb;
 
 SET client_min_messages = warning;
 DROP SCHEMA dml_lifecycle CASCADE;

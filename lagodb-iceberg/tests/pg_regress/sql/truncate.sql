@@ -35,8 +35,8 @@ EXECUTE truncate_cached_in_place(1);
 ROLLBACK;
 DEALLOCATE truncate_cached_in_place;
 
--- Provider-owned partitioned tables also reuse a generation created in the
--- current transaction, without updating their persisted storage identity.
+-- Partitioned Iceberg tables also reuse a generation created in the current
+-- transaction.
 BEGIN;
 CREATE TABLE truncate_table_test.cached_partitioned (id integer)
 PARTITION BY LIST (id) USING iceberg;
@@ -313,126 +313,63 @@ SELECT pg_read_file(metadata_location)::jsonb AS rebuild_original_metadata
 FROM iceberg.iceberg_metadata
 WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
 \gset
--- Exercise exception-created child subtransactions, including successful release.
-DO $$
-DECLARE
-    original_number text;
-    number_after text;
-    parent_number text;
-    nested_number text;
-    previous_metadata_path text;
-BEGIN
-    SELECT value INTO original_number FROM lagodb.table_option_values
-    WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
-      AND name = 'relfilenumber';
-    BEGIN
-        TRUNCATE truncate_table_test.rebuild_definition;
-        SELECT value INTO number_after FROM lagodb.table_option_values
-        WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
-          AND name = 'relfilenumber';
-        IF number_after = original_number THEN
-            RAISE EXCEPTION 'logical TRUNCATE reused the file number';
-        END IF;
-        parent_number := number_after;
-        SELECT metadata_location INTO previous_metadata_path
-        FROM iceberg.iceberg_metadata
-        WHERE relid = 'truncate_table_test.rebuild_definition'::regclass;
-        INSERT INTO truncate_table_test.rebuild_definition VALUES (9, 'west');
-        TRUNCATE truncate_table_test.rebuild_definition;
-        SELECT value INTO number_after FROM lagodb.table_option_values
-        WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
-          AND name = 'relfilenumber';
-        IF number_after <> parent_number
-           OR pg_stat_file(previous_metadata_path, true) IS NOT NULL
-           OR (SELECT count(*) FROM truncate_table_test.rebuild_definition) <> 0 THEN
-            RAISE EXCEPTION 'repeated TRUNCATE did not clear the current generation in place';
-        END IF;
-        INSERT INTO truncate_table_test.rebuild_definition VALUES (11, 'west');
-        BEGIN
-            ALTER TABLE truncate_table_test.rebuild_definition ADD COLUMN scratch integer;
-            TRUNCATE truncate_table_test.rebuild_definition;
-            SELECT value INTO nested_number FROM lagodb.table_option_values
-            WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
-              AND name = 'relfilenumber';
-            IF nested_number = parent_number THEN
-                RAISE EXCEPTION 'child TRUNCATE reused its parent generation';
-            END IF;
-            INSERT INTO truncate_table_test.rebuild_definition VALUES (12, 'west', 7);
-            TRUNCATE truncate_table_test.rebuild_definition;
-            SELECT value INTO number_after FROM lagodb.table_option_values
-            WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
-              AND name = 'relfilenumber';
-            IF number_after <> nested_number THEN
-                RAISE EXCEPTION 'child TRUNCATE did not reuse its own generation';
-            END IF;
-            RAISE EXCEPTION USING ERRCODE = 'ZX002', MESSAGE = 'rollback child generation';
-        EXCEPTION WHEN SQLSTATE 'ZX002' THEN
-            NULL;
-        END;
-        SELECT value INTO number_after FROM lagodb.table_option_values
-        WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
-          AND name = 'relfilenumber';
-        IF number_after <> parent_number
-           OR (SELECT array_agg(id ORDER BY id) FROM truncate_table_test.rebuild_definition)
-              IS DISTINCT FROM ARRAY[11]
-           OR EXISTS (
-               SELECT 1 FROM pg_attribute
-               WHERE attrelid = 'truncate_table_test.rebuild_definition'::regclass
-                 AND attname = 'scratch' AND NOT attisdropped
-           ) THEN
-            RAISE EXCEPTION 'child rollback did not restore the parent generation, rows and schema';
-        END IF;
-        -- The EXCEPTION clause creates a child subtransaction; successful
-        -- completion releases its generation to the parent.
-        BEGIN
-            TRUNCATE truncate_table_test.rebuild_definition;
-            SELECT value INTO nested_number FROM lagodb.table_option_values
-            WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
-              AND name = 'relfilenumber';
-            IF nested_number = parent_number THEN
-                RAISE EXCEPTION 'released child reused its parent generation';
-            END IF;
-            INSERT INTO truncate_table_test.rebuild_definition VALUES (13, 'west');
-        EXCEPTION WHEN OTHERS THEN
-            RAISE;
-        END;
-        IF (SELECT array_agg(id ORDER BY id) FROM truncate_table_test.rebuild_definition)
-           IS DISTINCT FROM ARRAY[13] THEN
-            RAISE EXCEPTION 'released child lost its rows';
-        END IF;
-        TRUNCATE truncate_table_test.rebuild_definition;
-        SELECT value INTO number_after FROM lagodb.table_option_values
-        WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
-          AND name = 'relfilenumber';
-        IF number_after <> nested_number
-           OR (SELECT count(*) FROM truncate_table_test.rebuild_definition) <> 0 THEN
-            RAISE EXCEPTION 'parent TRUNCATE did not reuse the released generation';
-        END IF;
-        RAISE EXCEPTION USING ERRCODE = 'ZX001', MESSAGE = 'rollback rebuild';
-    EXCEPTION WHEN SQLSTATE 'ZX001' THEN
-        NULL;
-    END;
-    BEGIN
-        TRUNCATE truncate_table_test.rebuild_definition;
-        SELECT value INTO number_after FROM lagodb.table_option_values
-        WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
-          AND name = 'relfilenumber';
-        IF number_after = original_number THEN
-            RAISE EXCEPTION 'sibling TRUNCATE reused the committed generation after rollback';
-        END IF;
-        RAISE EXCEPTION USING ERRCODE = 'ZX003', MESSAGE = 'rollback sibling generation';
-    EXCEPTION WHEN SQLSTATE 'ZX003' THEN
-        NULL;
-    END;
-    SELECT value INTO number_after FROM lagodb.table_option_values
-    WHERE relid = 'truncate_table_test.rebuild_definition'::regclass
-      AND name = 'relfilenumber';
-    IF number_after <> original_number
-       OR (SELECT count(*) FROM truncate_table_test.rebuild_definition) <> 1 THEN
-        RAISE EXCEPTION 'savepoint rollback did not restore the generation';
-    END IF;
-END;
-$$;
+-- Savepoints scope TRUNCATE generations: a child never reuses its parent's,
+-- ROLLBACK TO restores the parent's, and RELEASE hands the child's to the parent.
+SELECT pg_relation_filenode('truncate_table_test.rebuild_definition'::regclass)
+    AS original_number \gset
+SAVEPOINT rebuild;
+TRUNCATE truncate_table_test.rebuild_definition;
+SELECT pg_relation_filenode(relid) AS parent_number,
+       metadata_location AS parent_metadata
+FROM iceberg.iceberg_metadata
+WHERE relid = 'truncate_table_test.rebuild_definition'::regclass \gset
+SELECT :'parent_number' <> :'original_number' AS new_file_number;
+-- A repeated TRUNCATE clears the current generation in place.
+INSERT INTO truncate_table_test.rebuild_definition VALUES (9, 'west');
+TRUNCATE truncate_table_test.rebuild_definition;
+SELECT pg_relation_filenode('truncate_table_test.rebuild_definition'::regclass)
+           = :'parent_number' AS same_file_number,
+       pg_stat_file(:'parent_metadata', true) IS NULL AS metadata_removed,
+       (SELECT count(*) FROM truncate_table_test.rebuild_definition) = 0 AS rows_cleared;
+INSERT INTO truncate_table_test.rebuild_definition VALUES (11, 'west');
+SAVEPOINT child;
+ALTER TABLE truncate_table_test.rebuild_definition ADD COLUMN scratch integer;
+TRUNCATE truncate_table_test.rebuild_definition;
+SELECT pg_relation_filenode('truncate_table_test.rebuild_definition'::regclass)
+    AS child_number \gset
+SELECT :'child_number' <> :'parent_number' AS new_file_number;
+INSERT INTO truncate_table_test.rebuild_definition VALUES (12, 'west', 7);
+TRUNCATE truncate_table_test.rebuild_definition;
+SELECT pg_relation_filenode('truncate_table_test.rebuild_definition'::regclass)
+           = :'child_number' AS same_file_number;
+-- Rollback restores the parent's generation, rows, and schema.
+ROLLBACK TO SAVEPOINT child;
+SELECT pg_relation_filenode('truncate_table_test.rebuild_definition'::regclass)
+           = :'parent_number' AS same_file_number;
+SELECT * FROM truncate_table_test.rebuild_definition;
+-- ROLLBACK TO leaves a new child open, and releasing it keeps its rows.
+TRUNCATE truncate_table_test.rebuild_definition;
+SELECT pg_relation_filenode('truncate_table_test.rebuild_definition'::regclass)
+    AS released_number \gset
+SELECT :'released_number' <> :'parent_number' AS new_file_number;
+INSERT INTO truncate_table_test.rebuild_definition VALUES (13, 'west');
+RELEASE SAVEPOINT child;
+SELECT * FROM truncate_table_test.rebuild_definition;
+-- The parent reuses the released generation.
+TRUNCATE truncate_table_test.rebuild_definition;
+SELECT pg_relation_filenode('truncate_table_test.rebuild_definition'::regclass)
+           = :'released_number' AS same_file_number,
+       (SELECT count(*) FROM truncate_table_test.rebuild_definition) = 0 AS rows_cleared;
+-- A sibling after rollback must not reuse the committed generation.
+ROLLBACK TO SAVEPOINT rebuild;
+TRUNCATE truncate_table_test.rebuild_definition;
+SELECT pg_relation_filenode('truncate_table_test.rebuild_definition'::regclass)
+           <> :'original_number' AS new_file_number;
+ROLLBACK TO SAVEPOINT rebuild;
+SELECT pg_relation_filenode('truncate_table_test.rebuild_definition'::regclass)
+           = :'original_number' AS same_file_number,
+       (SELECT count(*) FROM truncate_table_test.rebuild_definition) = 1 AS rows_restored;
+RELEASE SAVEPOINT rebuild;
 TRUNCATE truncate_table_test.rebuild_definition;
 WITH rebuilt AS MATERIALIZED (
     SELECT pg_read_file(metadata_location)::jsonb AS metadata
@@ -464,26 +401,23 @@ INSERT INTO truncate_table_test.rebuild_definition VALUES (2, 'west');
 COMMIT;
 SELECT id, region FROM truncate_table_test.rebuild_definition;
 
-SELECT regexp_replace(pg_read_file(metadata_location)::jsonb->>'location', '_iceberg$', '') AS rebuilt_reservation
+SELECT regexp_replace(pg_read_file(metadata_location)::jsonb->>'location', '_iceberg$', '') AS rebuilt_main_fork
 FROM iceberg.iceberg_metadata
 WHERE relid = 'truncate_table_test.rebuild_definition'::regclass \gset
 DROP TABLE truncate_table_test.rebuild_definition;
-SELECT pg_stat_file(:'rebuilt_reservation' || '_iceberg', true) IS NULL
+SELECT pg_stat_file(:'rebuilt_main_fork' || '_iceberg', true) IS NULL
        AS logical_directory_removed;
--- The empty reservation protects the number until a safe checkpoint completes.
+-- PostgreSQL unlinks the native main fork at the next checkpoint.
 CHECKPOINT;
-SELECT pg_stat_file(:'rebuilt_reservation', true) IS NULL
-       AND pg_stat_file(:'rebuilt_reservation' || '_iceberg', true) IS NULL
+SELECT pg_stat_file(:'rebuilt_main_fork', true) IS NULL
+       AND pg_stat_file(:'rebuilt_main_fork' || '_iceberg', true) IS NULL
        AS logical_storage_removed;
--- CREATE owns its local partitioned-table generation immediately. TRUNCATE
+-- CREATE owns its local generation immediately. TRUNCATE
 -- in that same transaction reuses it, and subsequent INSERT commits normally.
 BEGIN;
 CREATE TABLE truncate_table_test.created_partitioned (id integer, region text)
 PARTITION BY LIST (region) USING iceberg;
-SELECT value AS created_original_number
-FROM lagodb.table_option_values
-WHERE relid = 'truncate_table_test.created_partitioned'::regclass
-  AND name = 'relfilenumber'
+SELECT pg_relation_filenode('truncate_table_test.created_partitioned'::regclass) AS created_original_number
 \gset
 SELECT metadata_location AS created_previous_metadata_path
 FROM iceberg.iceberg_metadata
@@ -491,12 +425,9 @@ WHERE relid = 'truncate_table_test.created_partitioned'::regclass
 \gset
 INSERT INTO truncate_table_test.created_partitioned VALUES (1, 'east');
 TRUNCATE truncate_table_test.created_partitioned;
-SELECT value = :'created_original_number' AS created_generation_reused,
+SELECT pg_relation_filenode('truncate_table_test.created_partitioned'::regclass) = :'created_original_number' AS created_generation_reused,
        pg_stat_file(:'created_previous_metadata_path', true) IS NULL AS created_metadata_removed,
-       (SELECT count(*) FROM truncate_table_test.created_partitioned) = 0 AS created_rows_cleared
-FROM lagodb.table_option_values
-WHERE relid = 'truncate_table_test.created_partitioned'::regclass
-  AND name = 'relfilenumber';
+       (SELECT count(*) FROM truncate_table_test.created_partitioned) = 0 AS created_rows_cleared;
 INSERT INTO truncate_table_test.created_partitioned VALUES (2, 'west');
 COMMIT;
 SELECT array_agg(id ORDER BY id) AS rows_after_in_place_truncate

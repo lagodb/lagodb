@@ -115,6 +115,20 @@ INSERT INTO spark_interop_v2.partitioned_mutations VALUES
 UPDATE spark_interop_v2.partitioned_mutations
 SET payload = 'two-updated' WHERE id = 2;
 DELETE FROM spark_interop_v2.partitioned_mutations WHERE id = 3;
+-- Spark prunes its own lookups with Iceberg's bucket hash, so finding these rows
+-- proves LagoDB wrote each one to the bucket Spark computes.
+CREATE TABLE spark_interop_v2.composite_mutations (
+    id integer,
+    region text,
+    payload text
+) PARTITION BY HASH (iceberg.bucket(8, id), iceberg.bucket(7, region)) USING iceberg
+WITH ("format-version" = 2) TABLESPACE :"object_tablespace";
+INSERT INTO spark_interop_v2.composite_mutations VALUES
+    (1, 'east', 'one'), (2, 'west', 'two'),
+    (3, 'east', 'three'), (4, 'west', 'four');
+UPDATE spark_interop_v2.composite_mutations
+SET payload = 'two-updated' WHERE id = 2;
+DELETE FROM spark_interop_v2.composite_mutations WHERE id = 3;
 -- Both engines add position deletes for the same Spark data file. The final
 -- Spark read must apply their combined state.
 \set spark_run_step external_seed
@@ -173,6 +187,13 @@ spark: 4|west|four
 spark: partitioned-delete-files
 spark: {"region":"east"}|1|1|PARQUET|PARQUET|1
 spark: {"region":"west"}|1|1|PARQUET|PARQUET|1
+spark: composite-id-lookup
+spark: 2|west|two-updated
+spark: composite-region-lookup
+spark: 1|east|one
+spark: composite-delete-files
+spark: {"id_bucket_8":3,"region_bucket_7":2}|1|1|PARQUET|PARQUET|1
+spark: {"id_bucket_8":4,"region_bucket_7":0}|1|1|PARQUET|PARQUET|1
 spark: external-rows
 spark: 1|one-lagodb
 spark: 3|three-spark

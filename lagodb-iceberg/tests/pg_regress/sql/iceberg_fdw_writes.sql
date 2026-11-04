@@ -100,6 +100,83 @@ OPTIONS (
 
 SELECT * FROM iceberg_fdw_regress.writable ORDER BY id;
 
+CREATE TABLE iceberg_fdw_regress.delete_parent (
+    id integer,
+    payload text
+) PARTITION BY RANGE (id);
+CREATE FOREIGN TABLE iceberg_fdw_regress.delete_first
+PARTITION OF iceberg_fdw_regress.delete_parent
+FOR VALUES FROM (MINVALUE) TO (2)
+SERVER iceberg_rest
+OPTIONS (
+    table 'fdw_writes.partition_delete_first_v2',
+    create_remote_if_missing 'true'
+);
+-- Attach a leaf whose physical attnos differ from the parent's. PostgreSQL
+-- maps partition columns by name; DELETE RETURNING columns must do the same.
+CREATE FOREIGN TABLE iceberg_fdw_regress.delete_second (
+    payload text,
+    id integer
+)
+SERVER iceberg_rest
+OPTIONS (
+    table 'fdw_writes.partition_delete_second_v2',
+    create_remote_if_missing 'true'
+);
+ALTER TABLE iceberg_fdw_regress.delete_parent
+ATTACH PARTITION iceberg_fdw_regress.delete_second
+FOR VALUES FROM (2) TO (MAXVALUE);
+INSERT INTO iceberg_fdw_regress.delete_parent
+VALUES (1, 'first'), (2, 'second');
+
+-- UPDATE uses the same partition-leaf target scan binding as DELETE.
+UPDATE iceberg_fdw_regress.delete_parent
+SET payload = 'first-updated'
+WHERE id = 1
+RETURNING id, payload;
+
+-- A direct foreign target whose scan becomes a plan-time dummy Result still
+-- calls BeginForeignModify. With no ForeignScan state it must initialize as a
+-- no-op and never call the foreign row callback.
+DELETE FROM iceberg_fdw_regress.delete_first
+WHERE false
+RETURNING id, payload;
+
+SET plan_cache_mode = force_generic_plan;
+PREPARE partitioned_delete(integer) AS
+DELETE FROM iceberg_fdw_regress.delete_parent
+WHERE id = $1
+RETURNING id, payload;
+-- NULL initially prunes every leaf; retained PG17/PG18 modify states are no-ops.
+EXECUTE partitioned_delete(NULL);
+EXECUTE partitioned_delete(2);
+DEALLOCATE partitioned_delete;
+SELECT * FROM iceberg_fdw_regress.delete_parent;
+RESET plan_cache_mode;
+
+-- AddForeignUpdateTargets runs before the leaf RelOptInfo exists. A two-level
+-- result-relation chain must translate RETURNING through both AppendRelInfos.
+CREATE TABLE iceberg_fdw_regress.multilevel_parent (
+    id integer,
+    payload text
+) PARTITION BY RANGE (id);
+CREATE TABLE iceberg_fdw_regress.multilevel_middle
+PARTITION OF iceberg_fdw_regress.multilevel_parent
+FOR VALUES FROM (MINVALUE) TO (MAXVALUE)
+PARTITION BY RANGE (id);
+CREATE FOREIGN TABLE iceberg_fdw_regress.multilevel_leaf
+PARTITION OF iceberg_fdw_regress.multilevel_middle
+FOR VALUES FROM (MINVALUE) TO (MAXVALUE)
+SERVER iceberg_rest
+OPTIONS (
+    table 'fdw_writes.partition_delete_multilevel_v2',
+    create_remote_if_missing 'true'
+);
+INSERT INTO iceberg_fdw_regress.multilevel_parent VALUES (3, 'multilevel');
+DELETE FROM iceberg_fdw_regress.multilevel_parent
+WHERE id = 3
+RETURNING id, payload;
+
 -- JSONB writes use the remote schema, including recursive values and NULLs.
 SET lagodb.query_offload_mode = 'off';
 CREATE FOREIGN TABLE iceberg_fdw_regress.nested (

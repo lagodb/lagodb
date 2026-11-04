@@ -8,6 +8,10 @@ CREATE FOREIGN DATA WRAPPER lagodb_iceberg
 
 REVOKE ALL ON FUNCTION iceberg.maintenance_worker(internal) FROM PUBLIC;
 
+-- Table owners must be able to name iceberg.bucket in PARTITION BY. USAGE only
+-- resolves names here; iceberg_metadata keeps its own ACL.
+GRANT USAGE ON SCHEMA iceberg TO PUBLIC;
+
 SELECT lagodb.register_worker(
     'iceberg_maintenance',
     'iceberg.maintenance_worker(internal)'::regprocedure

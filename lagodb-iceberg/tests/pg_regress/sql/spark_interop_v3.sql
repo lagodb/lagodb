@@ -35,6 +35,20 @@ INSERT INTO spark_interop_v3.partitioned_mutations VALUES
 UPDATE spark_interop_v3.partitioned_mutations
 SET payload = 'two-updated' WHERE id = 2;
 DELETE FROM spark_interop_v3.partitioned_mutations WHERE id = 3;
+-- Spark prunes its own lookups with Iceberg's bucket hash, so finding these rows
+-- proves LagoDB wrote each one to the bucket Spark computes.
+CREATE TABLE spark_interop_v3.composite_mutations (
+    id integer,
+    region text,
+    payload text
+) PARTITION BY HASH (iceberg.bucket(8, id), iceberg.bucket(7, region)) USING iceberg
+WITH ("format-version" = 3) TABLESPACE :"object_tablespace";
+INSERT INTO spark_interop_v3.composite_mutations VALUES
+    (1, 'east', 'one'), (2, 'west', 'two'),
+    (3, 'east', 'three'), (4, 'west', 'four');
+UPDATE spark_interop_v3.composite_mutations
+SET payload = 'two-updated' WHERE id = 2;
+DELETE FROM spark_interop_v3.composite_mutations WHERE id = 3;
 
 -- Spark and LagoDB delete rows from the same data file. LagoDB must replace
 -- Spark's existing deletion vector with one merged vector for that file.
