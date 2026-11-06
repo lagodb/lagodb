@@ -13,12 +13,14 @@ use crate::table_am::{AmModifyState, TableAccessMethod};
 
 use super::binding::ModifyBindContext;
 
-/// Prepared AM session and the immutable storage context required by its writer.
-pub struct PreparedModifyScan<A: TableAccessMethod> {
-    /// Session whose row cursor is opened only after ModifyTable binds it.
-    pub session: A::ScanSession,
+/// Prepared native SeqScan target and the immutable storage context required
+/// by its writer.
+pub struct PreparedModifyScan<P: LagodbCustomModifyProvider> {
+    /// Provider preparation that becomes a scan session only once bound.
+    pub scan: P::PreparedSeqScan,
     /// Snapshot and task ownership passed to the corresponding writer.
-    pub context: <A::ModifyState as AmModifyState>::ScanContext,
+    pub context:
+        <<P::AccessMethod as TableAccessMethod>::ModifyState as AmModifyState>::ScanContext,
 }
 
 /// PostgreSQL executor features accepted by one Custom ModifyTable provider.
@@ -44,6 +46,10 @@ impl ModifyCapabilities {
 /// Provider contract for the generic Custom ModifyTable framework.
 pub trait LagodbCustomModifyProvider: LagodbCustomScanProvider {
     type AccessMethod: TableAccessMethod;
+
+    /// Native SeqScan target prepared before the outer ModifyTable binds it.
+    /// It is not a scan session; [`Self::open_modify_seq_scan`] produces one.
+    type PreparedSeqScan;
 
     /// Unique PostgreSQL CustomScan method name for the outer ModifyTable
     /// wrapper.
@@ -72,15 +78,18 @@ pub trait LagodbCustomModifyProvider: LagodbCustomScanProvider {
         snapshot: &SnapshotHandle<'_>,
         filters: BoundFilterSet<'_, Self::BoundPredicate>,
         needed_columns: NeededColumns<'_>,
-    ) -> Result<PreparedModifyScan<Self::AccessMethod>, CustomScanError>;
+    ) -> Result<PreparedModifyScan<Self>, CustomScanError>
+    where
+        Self: Sized;
 
-    /// Complete the prepared AM session's one-time binding before its first row.
-    fn bind_modify_seq_scan(
-        session: &mut <Self::AccessMethod as TableAccessMethod>::ScanSession,
+    /// Consume the prepared target with its one-time ModifyTable binding and
+    /// return the complete, row-ready AM scan session.
+    fn open_modify_seq_scan(
+        prepared: Self::PreparedSeqScan,
         binding: ModifyScanBinding<
             <Self::AccessMethod as TableAccessMethod>::ModifyQueryState,
         >,
-    ) -> Result<(), CustomScanError>;
+    ) -> Result<<Self::AccessMethod as TableAccessMethod>::ScanSession, CustomScanError>;
 
     /// Attach this provider's ModifyTarget-purpose scan to the stable relation state
     /// owned by the outer ModifyTable execution.

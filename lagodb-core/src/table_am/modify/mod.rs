@@ -237,7 +237,7 @@ pub trait AmModifyState {
     /// Begin and construct the complete write session for one result relation.
     ///
     /// `rel` is borrowed only for the duration of construction (symmetric with
-    /// [`AmScanSession::new`](super::AmScanSession::new)). This is the
+    /// [`AmScanSession::scan_begin`](super::AmScanSession::scan_begin)). This is the
     /// relation-local execution boundary: implementations may load metadata,
     /// create writers, and allocate buffers here. A successful return must be a fully usable session; a failure
     /// returns before any provider state is published to the executor.

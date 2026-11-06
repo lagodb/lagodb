@@ -3,8 +3,8 @@
 //! Regular scans keep two lifecycle layers:
 //!
 //! - [`PreparedRowScan`] owns the statement snapshot, projection, predicates,
-//!   decoder, and scan task cache. Metadata is captured in `new` while the
-//!   PG snapshot is borrowed; `scan_begin` prepares the cursor. Both are
+//!   decoder, and scan task cache. `scan_begin` captures metadata while the
+//!   PG snapshot is borrowed and opens the first cursor. The prepared read is
 //!   preserved across `scan_rescan`, so the visible snapshot is frozen for the
 //!   scan's duration. This matches the Read Committed contract: every
 //!   `scan_rescan` comes from the same statement that issued `scan_begin`.
@@ -13,11 +13,10 @@
 //!
 //! ANALYZE has its own state after the shared statement metadata and decoder
 //! have been captured. Managed mutation cursors and task ownership live in the
-//! sibling `mutation` module and are shared with the CustomScan adapter.
+//! sibling `mutation` module and are shared with the CustomScan adapter; the
+//! native SeqScan mutation target is constructed by [`PreparedModifySeqScan`].
 
 mod mutation;
-
-use std::mem;
 
 use lagodb_core::prelude::*;
 use pgrx::pg_sys;
@@ -25,21 +24,19 @@ use pgrx::pg_sys;
 use crate::error::IcebergError;
 use crate::managed_table::access::analyze::{AnalyzePreparation, AnalyzeScanState};
 use crate::managed_table::{IcebergTableAm, ManagedTableReadView};
-use crate::scan::{
-    IcebergReadSnapshot, PgRowCursor, PreparedRowScan, ScanPredicates,
-};
+use crate::scan::{PgRowCursor, PreparedRowScan, ScanPredicates};
 use crate::schema::relation::RelationLayout;
 
-use super::mutation::{ManagedMutationScan, PreparedManagedMutationScan};
+use super::mutation::ManagedMutationScan;
+
+pub(crate) use mutation::PreparedModifySeqScan;
 
 /// PostgreSQL-facing scan session for the Iceberg table AM.
 pub struct IcebergScan {
-    relation: ScanRelation,
     state: IcebergScanState,
 }
 
-/// Descriptor-derived relation facts retained after the `RelationHandle`
-/// borrow ends.
+/// Descriptor-derived relation facts used while a scan session is constructed.
 struct ScanRelation {
     oid: pg_sys::Oid,
     layout: RelationLayout,
@@ -54,74 +51,6 @@ impl ScanRelation {
     }
 }
 
-enum ScanKind {
-    Regular(IcebergReadSnapshot),
-    #[cfg(any(feature = "pg17", feature = "pg18"))]
-    Analyze,
-    /// PostgreSQL 16 never passes the invocation's selected columns, `targrows`,
-    /// or inherited `childtargrows` to the callbacks, so this stores the
-    /// relation-local approximation while the relation is still borrowed. It
-    /// covers built-in non-inherited scans, but can overproduce for a column
-    /// list or underfill a child allocation made from its parent's targets.
-    /// Every admitted column type uses a built-in analyzer unless a superuser
-    /// replaces it with `ALTER TYPE ... SET (ANALYZE = ...)`.
-    #[cfg(feature = "pg16")]
-    Analyze {
-        sample_budget: u64,
-    },
-}
-
-impl ScanKind {
-    fn begin(
-        self,
-        relation: &ScanRelation,
-        keys: &OwnedScanKeys,
-    ) -> AmResult<IcebergScanState> {
-        match self {
-            Self::Regular(snapshot) => Ok(IcebergScanState::Regular(
-                RegularScanState::begin(relation, keys, snapshot)?,
-            )),
-            #[cfg(any(feature = "pg17", feature = "pg18"))]
-            Self::Analyze => Ok(IcebergScanState::Analyze(Box::new(
-                AnalyzeScanState::pending(Self::prepare_analyze(relation)?),
-            ))),
-            #[cfg(feature = "pg16")]
-            Self::Analyze { sample_budget } => Ok(IcebergScanState::Analyze(
-                Box::new(AnalyzeScanState::pending(
-                    Self::prepare_analyze(relation)?,
-                    sample_budget,
-                )),
-            )),
-        }
-    }
-
-    #[cfg(any(feature = "pg17", feature = "pg18"))]
-    fn analyze(_relation: &RelationHandle) -> AmResult<Self> {
-        Ok(Self::Analyze)
-    }
-
-    #[cfg(feature = "pg16")]
-    fn analyze(relation: &RelationHandle) -> AmResult<Self> {
-        Ok(Self::Analyze {
-            sample_budget: relation.analyze_sample_budget()?,
-        })
-    }
-
-    fn prepare_analyze(relation: &ScanRelation) -> AmResult<AnalyzePreparation> {
-        let view = ManagedTableReadView::for_active_snapshot(relation.oid)?;
-        let storage_bytes = view.storage_bytes()?;
-        let snapshot = view.into_read_snapshot()?;
-        let prepared = PreparedRowScan::full(
-            snapshot,
-            ScanPredicates::unfiltered(),
-            &relation.layout,
-        )?;
-        Ok(AnalyzePreparation::try_new(
-            prepared.analyze_input(storage_bytes)?,
-        )?)
-    }
-}
-
 struct RegularScanState {
     prepared: PreparedRowScan,
     cursor: PgRowCursor,
@@ -130,9 +59,13 @@ struct RegularScanState {
 impl RegularScanState {
     fn begin(
         relation: &ScanRelation,
+        snapshot: &SnapshotHandle,
         _keys: &OwnedScanKeys,
-        snapshot: IcebergReadSnapshot,
     ) -> AmResult<Self> {
+        // Bind while the callback borrows PG's registered snapshot. Retain
+        // only owned Iceberg state; no SnapshotHandle escapes this callback.
+        let snapshot = ManagedTableReadView::for_snapshot(relation.oid, snapshot)?
+            .into_read_snapshot()?;
         let mut prepared = PreparedRowScan::full(
             snapshot,
             ScanPredicates::unfiltered(),
@@ -157,12 +90,48 @@ impl RegularScanState {
 // to shrink this once-per-scan state object.
 #[allow(clippy::large_enum_variant)]
 enum IcebergScanState {
-    Pending(ScanKind),
     Regular(RegularScanState),
-    MutationPending(PreparedManagedMutationScan),
     Mutation(ManagedMutationScan),
     Analyze(Box<AnalyzeScanState>),
-    Ended,
+}
+
+impl IcebergScanState {
+    #[cfg(any(feature = "pg17", feature = "pg18"))]
+    fn analyze(_rel: &RelationHandle, relation: &ScanRelation) -> AmResult<Self> {
+        Ok(Self::Analyze(Box::new(AnalyzeScanState::pending(
+            Self::prepare_analyze(relation)?,
+        ))))
+    }
+
+    /// PostgreSQL 16 never passes the invocation's selected columns, `targrows`,
+    /// or inherited `childtargrows` to the callbacks, so this captures the
+    /// relation-local approximation while the relation is still borrowed. It
+    /// covers built-in non-inherited scans, but can overproduce for a column
+    /// list or underfill a child allocation made from its parent's targets.
+    /// Every admitted column type uses a built-in analyzer unless a superuser
+    /// replaces it with `ALTER TYPE ... SET (ANALYZE = ...)`.
+    #[cfg(feature = "pg16")]
+    fn analyze(rel: &RelationHandle, relation: &ScanRelation) -> AmResult<Self> {
+        let sample_budget = rel.analyze_sample_budget()?;
+        Ok(Self::Analyze(Box::new(AnalyzeScanState::pending(
+            Self::prepare_analyze(relation)?,
+            sample_budget,
+        ))))
+    }
+
+    fn prepare_analyze(relation: &ScanRelation) -> AmResult<AnalyzePreparation> {
+        let view = ManagedTableReadView::for_active_snapshot(relation.oid)?;
+        let storage_bytes = view.storage_bytes()?;
+        let snapshot = view.into_read_snapshot()?;
+        let prepared = PreparedRowScan::full(
+            snapshot,
+            ScanPredicates::unfiltered(),
+            &relation.layout,
+        )?;
+        Ok(AnalyzePreparation::try_new(
+            prepared.analyze_input(storage_bytes)?,
+        )?)
+    }
 }
 
 impl AmScan for IcebergTableAm {
@@ -174,43 +143,23 @@ impl AmScan for IcebergTableAm {
 impl AmScanSession for IcebergScan {
     type BatchDriver = Self;
 
-    fn new(
+    fn scan_begin(
         rel: &RelationHandle,
         snapshot: Option<&SnapshotHandle>,
         _pscan: Option<&ParallelTableScanDescHandle>,
         flags: ScanFlags,
+        keys: &OwnedScanKeys,
     ) -> AmResult<Self> {
         let relation = ScanRelation::from_relation(rel)?;
-        // Bind while the callback borrows PG's registered snapshot. Retain
-        // only owned Iceberg state; no SnapshotHandle escapes this callback.
-        let kind = if flags.is_analyze() {
-            ScanKind::analyze(rel)?
+        let state = if flags.is_analyze() {
+            IcebergScanState::analyze(rel, &relation)?
         } else {
             let snapshot = snapshot.expect("regular AM scans have a PG snapshot");
-            ScanKind::Regular(
-                ManagedTableReadView::for_snapshot(relation.oid, snapshot)?
-                    .into_read_snapshot()?,
-            )
+            IcebergScanState::Regular(RegularScanState::begin(
+                &relation, snapshot, keys,
+            )?)
         };
-        Ok(IcebergScan {
-            relation,
-            state: IcebergScanState::Pending(kind),
-        })
-    }
-
-    fn scan_begin(&mut self, keys: &OwnedScanKeys) -> AmResult<()> {
-        let kind = match mem::replace(&mut self.state, IcebergScanState::Ended) {
-            IcebergScanState::Pending(kind) => kind,
-            state => {
-                self.state = state;
-                return Err(IcebergError::InvariantViolated(
-                    "scan_begin called more than once for one Iceberg scan",
-                )
-                .into());
-            }
-        };
-        self.state = kind.begin(&self.relation, keys)?;
-        Ok(())
+        Ok(Self { state })
     }
 
     #[inline]
@@ -239,18 +188,17 @@ impl AmScanSession for IcebergScan {
                 state.rescan(None)?;
                 Ok(())
             }
-            IcebergScanState::MutationPending(_) => Ok(()),
-            IcebergScanState::Pending(_) => Ok(()),
             IcebergScanState::Analyze(_) => Err(IcebergError::InvariantViolated(
                 "PostgreSQL attempted to rescan an ANALYZE session",
             )
             .into()),
-            IcebergScanState::Ended => Ok(()),
         }
     }
 
+    /// The scan descriptor drops this session right after `scan_end`, through
+    /// the same lifecycle-context callback that releases it when ERROR skips
+    /// `table_endscan`.
     fn scan_end(&mut self) -> AmResult<()> {
-        self.state = IcebergScanState::Ended;
         Ok(())
     }
 
@@ -317,7 +265,10 @@ impl ScanBatchDriver for IcebergScan {
                 // movement reads the portal's tuplestore instead.
                 state.next_into_slot(out)
             }
-            _ => panic!("scan_driver called before scan initialization completed"),
+            // ANALYZE samples through its own callbacks, never scan_getnextslot.
+            IcebergScanState::Analyze(_) => {
+                panic!("scan_getnextslot used an ANALYZE scan")
+            }
         }
     }
 }

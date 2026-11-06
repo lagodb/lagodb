@@ -36,7 +36,7 @@ use crate::managed_table::ManagedTableReadView;
 use crate::managed_table::access::mutation::{
     IcebergModifyQueryState, IcebergModifyScanContext,
 };
-use crate::managed_table::access::scan::IcebergScan;
+use crate::managed_table::access::scan::{IcebergScan, PreparedModifySeqScan};
 use crate::managed_table::catalog::IcebergAccessMethod;
 use crate::managed_table::catalog::metadata_tracker::TxMetadata;
 use crate::predicate::{
@@ -210,6 +210,7 @@ impl LagodbCustomScanProvider for IcebergCustomScanProvider {
 
 impl LagodbCustomModifyProvider for IcebergCustomScanProvider {
     type AccessMethod = IcebergTableAm;
+    type PreparedSeqScan = PreparedModifySeqScan;
 
     const MODIFY_NAME: &'static CStr = c"LagoDBModifyTable";
 
@@ -220,18 +221,23 @@ impl LagodbCustomModifyProvider for IcebergCustomScanProvider {
         snapshot: &SnapshotHandle<'_>,
         filters: BoundFilterSet<'_, BoundIcebergPredicate>,
         needed_columns: NeededColumns<'_>,
-    ) -> Result<PreparedModifyScan<IcebergTableAm>, CustomScanError> {
-        let (session, context) =
-            IcebergScan::prepare_modify(relation, snapshot, filters, needed_columns)
-                .map_err(CustomScanError::provider)?;
-        Ok(PreparedModifyScan { session, context })
+    ) -> Result<PreparedModifyScan<Self>, CustomScanError> {
+        let scan = PreparedModifySeqScan::prepare(
+            relation,
+            snapshot,
+            filters,
+            needed_columns,
+        )
+        .map_err(CustomScanError::provider)?;
+        let context = scan.context();
+        Ok(PreparedModifyScan { scan, context })
     }
 
-    fn bind_modify_seq_scan(
-        session: &mut IcebergScan,
+    fn open_modify_seq_scan(
+        prepared: PreparedModifySeqScan,
         binding: ModifyScanBinding<IcebergModifyQueryState>,
-    ) -> Result<(), CustomScanError> {
-        session.bind_modify(binding).map_err(Into::into)
+    ) -> Result<IcebergScan, CustomScanError> {
+        prepared.open(binding).map_err(Into::into)
     }
 
     fn bind_modify(ctx: ModifyBindContext<'_, Self>) -> Result<(), CustomScanError> {

@@ -1,14 +1,13 @@
 //! Explicit mutation preparation and binding for the native SeqScan adapter.
 
-use std::mem;
-
 use iceberg_lite::expr::Predicate;
 use lagodb_core::customscan::provider::NeededColumns;
 use lagodb_core::expr::pushdown::BoundFilterSet;
 use lagodb_core::handles::{RelationHandle, SnapshotHandle};
 use lagodb_core::table_am::ModifyScanBinding;
+use pgrx::pg_sys;
 
-use crate::error::{IcebergError, IcebergResult};
+use crate::error::IcebergResult;
 use crate::managed_table::ManagedTableReadView;
 use crate::managed_table::access::mutation::{
     IcebergModifyQueryState, IcebergModifyScanContext, ManagedMutationScan,
@@ -22,13 +21,22 @@ use crate::schema::projection::{ProjectedAttribute, SlotProjection};
 
 use super::{IcebergScan, IcebergScanState, ScanRelation};
 
-impl IcebergScan {
-    pub(crate) fn prepare_modify(
+/// Native SeqScan mutation target prepared before ModifyTable binds it.
+///
+/// This is not a scan session: [`Self::open`] consumes it with the binding and
+/// returns the row-ready [`IcebergScan`] that the descriptor will own.
+pub(crate) struct PreparedModifySeqScan {
+    relation_oid: pg_sys::Oid,
+    prepared: PreparedManagedMutationScan,
+}
+
+impl PreparedModifySeqScan {
+    pub(crate) fn prepare(
         relation: &RelationHandle<'_>,
         snapshot: &SnapshotHandle<'_>,
         filters: BoundFilterSet<'_, BoundIcebergPredicate>,
         needed_columns: NeededColumns<'_>,
-    ) -> Result<(Self, IcebergModifyScanContext), IcebergFilterError> {
+    ) -> Result<Self, IcebergFilterError> {
         let relation = ScanRelation::from_relation(relation)?;
         let snapshot = ManagedTableReadView::for_snapshot(relation.oid, snapshot)?
             .into_read_snapshot()?;
@@ -80,34 +88,31 @@ impl IcebergScan {
         // the scan, but only static predicates narrow conflict validation.
         let conflict_filter = BoundIcebergPredicate::conjoin(filters.static_values())
             .unwrap_or(Predicate::AlwaysTrue);
-        let prepared =
-            PreparedManagedMutationScan::prepare(prepared, conflict_filter)?;
-        let context = prepared.context();
-        Ok((
-            Self {
-                relation,
-                state: IcebergScanState::MutationPending(prepared),
-            },
-            context,
-        ))
+        Ok(Self {
+            relation_oid: relation.oid,
+            prepared: PreparedManagedMutationScan::prepare(
+                prepared,
+                conflict_filter,
+            )?,
+        })
     }
 
-    pub(crate) fn bind_modify(
-        &mut self,
+    /// Storage context the outer ModifyTable binds before this scan opens.
+    pub(crate) fn context(&self) -> IcebergModifyScanContext {
+        self.prepared.context()
+    }
+
+    /// Open the bound mutation cursor and return the complete scan session.
+    pub(crate) fn open(
+        self,
         binding: ModifyScanBinding<IcebergModifyQueryState>,
-    ) -> IcebergResult<()> {
-        let IcebergScanState::MutationPending(prepared) =
-            mem::replace(&mut self.state, IcebergScanState::Ended)
-        else {
-            return Err(IcebergError::InvariantViolated(
-                "AM mutation scan was not awaiting binding",
-            ));
-        };
-        self.state = IcebergScanState::Mutation(ManagedMutationScan::new(
-            prepared,
-            binding,
-            self.relation.oid,
-        )?);
-        Ok(())
+    ) -> IcebergResult<IcebergScan> {
+        Ok(IcebergScan {
+            state: IcebergScanState::Mutation(ManagedMutationScan::new(
+                self.prepared,
+                binding,
+                self.relation_oid,
+            )?),
+        })
     }
 }

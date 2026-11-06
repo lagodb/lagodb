@@ -94,12 +94,10 @@ impl<'a> TableScanDescHandle<'a> {
 /// Owned copy of a PostgreSQL `ScanKeyData` array.
 ///
 /// PostgreSQL passes scan keys to access-method callbacks as a borrowed
-/// pointer that is only valid for the duration of the call. Because table
-/// AMs frequently need keys at a later moment than the callback in which
-/// they are received (notably, an Iceberg AM cannot translate a key into an
-/// Iceberg `Predicate` until it has resolved the table's schema in
-/// `scan_begin`), the `lagodb-core` dispatcher copies the keys here
-/// once and lends a stable reference to the AM.
+/// pointer that is only valid for the duration of the call. The descriptor
+/// publishes `rs_key`, and a later `scan_rescan` with a null key reuses the
+/// previous keys, so the `lagodb-core` dispatcher copies the keys here once
+/// and lends a stable reference to the AM in each callback.
 ///
 /// This mirrors PostgreSQL heap-AM internals: `heap_beginscan` allocates the
 /// `rs_key` buffer and `initscan` rewrites it with `memcpy` on every

@@ -109,11 +109,12 @@ unsafe fn begin_scan<A: TableAccessMethod>(
             (!snapshot.is_null()).then(|| SnapshotHandle::from_raw(snapshot));
         let parallel =
             (!pscan.is_null()).then(|| ParallelTableScanDescHandle::from_raw(pscan));
-        let instance = A::ScanSession::new(
+        let instance = A::ScanSession::scan_begin(
             &relation,
             snapshot_handle.as_ref(),
             parallel.as_ref(),
             ScanFlags::from_bits(flags),
+            &keys,
         )?;
         let desc = TableAmScanDesc::<A::ScanSession>::create(
             pg_sys::CurrentMemoryContext,
@@ -124,7 +125,6 @@ unsafe fn begin_scan<A: TableAccessMethod>(
             keys,
             instance,
         );
-        (*desc).begin()?;
         Ok(desc.cast())
     }
 }

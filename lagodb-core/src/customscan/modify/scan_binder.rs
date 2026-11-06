@@ -147,10 +147,17 @@ impl<'a, P: LagodbCustomModifyProvider> ModifyScanBinder<'a, P> {
             filters.bound(),
             needed_columns,
         )?;
+        let binding = unsafe {
+            self.execution.with_mut(|execution| {
+                execution.bind_scan(relation.oid(), prepared.context)
+            })
+        }?;
+        let session = P::open_modify_seq_scan(prepared.scan, binding)?;
         let flags = pg_sys::ScanOptions::SO_TYPE_SEQSCAN
             | pg_sys::ScanOptions::SO_ALLOW_STRAT
             | pg_sys::ScanOptions::SO_ALLOW_SYNC
             | pg_sys::ScanOptions::SO_ALLOW_PAGEMODE;
+        // The descriptor only ever owns a complete session.
         let descriptor = unsafe {
             TableAmScanDesc::<<P::AccessMethod as TableAccessMethod>::ScanSession>::create(
                 estate.es_query_cxt,
@@ -159,16 +166,11 @@ impl<'a, P: LagodbCustomModifyProvider> ModifyScanBinder<'a, P> {
                 ptr::null_mut(),
                 flags,
                 OwnedScanKeys::empty(),
-                prepared.session,
+                session,
             )
         };
         unsafe { (*scan).ss_currentScanDesc = descriptor.cast() };
-        let binding = unsafe {
-            self.execution.with_mut(|execution| {
-                execution.bind_scan(relation.oid(), prepared.context)
-            })
-        }?;
-        P::bind_modify_seq_scan(unsafe { (*descriptor).instance_mut() }, binding)
+        Ok(())
     }
 
     /// # Safety

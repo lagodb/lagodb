@@ -145,34 +145,31 @@ pub trait AmScanSession {
     /// keeps the per-row decode a static call.
     type BatchDriver: ScanBatchDriver;
 
-    /// Create a new scan session.
+    /// Begin the scan and construct the complete, row-ready session.
     ///
-    /// `new()` runs before any storage IO and therefore before the AM has
-    /// resolved its physical schema. Predicate keys are deliberately not
-    /// passed here: many access methods can only translate them once the
-    /// schema is known. They are surfaced to [`Self::scan_begin`] instead,
-    /// where the AM is expected to do schema-aware work.
-    fn new(
+    /// Like `heap_beginscan`, this is the single construction step for a
+    /// PostgreSQL-initiated scan; [`Self::scan_rescan`] restarts the
+    /// traversal. A session the framework installs directly, such as a
+    /// ModifyTable target scan, is likewise complete before its descriptor is
+    /// created. `rel`, `snapshot` and `pscan` are borrowed only for this call;
+    /// the AM captures what it needs into owned fields.
+    ///
+    /// `keys` is the dispatcher-copied set of effective scan keys for the
+    /// *initial* scan. The reference is only valid for the duration of this
+    /// call; the AM must consume the keys (e.g. translate them into its native
+    /// predicate language, after resolving its schema) here rather than
+    /// retaining the borrow. After construction the dispatcher moves the owned
+    /// buffer into the scan descriptor, and later [`Self::scan_rescan`] calls
+    /// see that buffer updated in place.
+    fn scan_begin(
         rel: &RelationHandle,
         snapshot: Option<&SnapshotHandle>,
         pscan: Option<&ParallelTableScanDescHandle>,
         flags: ScanFlags,
+        keys: &OwnedScanKeys,
     ) -> AmResult<Self>
     where
         Self: Sized;
-
-    /// Begin the scan.
-    ///
-    /// `keys` is the dispatcher-owned, dispatcher-copied set of effective
-    /// scan keys for the *initial* scan. The reference is only valid for
-    /// the duration of this call; the AM must consume the keys (e.g.
-    /// translate them into its native predicate language) here rather than
-    /// retaining the borrow. The owned buffer behind it lives in the FFI
-    /// session container and is what later [`Self::scan_rescan`] calls will
-    /// see updated in place; AMs that need to refer back to "the current
-    /// effective keys" outside of these callbacks should re-translate from
-    /// the keys argument they receive on the next callback.
-    fn scan_begin(&mut self, keys: &OwnedScanKeys) -> AmResult<()>;
 
     /// The scan's slot-filling driver for this session.
     ///
@@ -186,8 +183,7 @@ pub trait AmScanSession {
     /// and a row-at-a-time source (FDW) is a different framework, not an
     /// `AmScanSession`.
     ///
-    /// The driver must be ready by the time the executor fetches a row, i.e.
-    /// after [`Self::scan_begin`]; sessions typically build it there.
+    /// [`Self::scan_begin`] returns a session whose driver is already ready.
     fn scan_driver(&mut self) -> &mut Self::BatchDriver;
 
     /// Restart the scan.

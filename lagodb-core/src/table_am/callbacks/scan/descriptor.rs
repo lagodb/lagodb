@@ -4,8 +4,8 @@ use pgrx::pg_sys;
 
 use crate::diag::PgReportError;
 use crate::handles::OwnedScanKeys;
+use crate::table_am::AmScanSession;
 use crate::table_am::callbacks::common::FfiContainer;
-use crate::table_am::{AmResult, AmScanSession};
 use crate::tuple::{Row, RowDatumCodec, SlotDatumWriter};
 
 pub(crate) struct TableScanState<T> {
@@ -68,14 +68,7 @@ impl<T> TableScanState<T> {
 }
 
 impl<T: AmScanSession> TableAmScanDesc<T> {
-    /// # Safety
-    /// The descriptor owns a live session and is exclusively borrowed.
-    pub(crate) unsafe fn instance_mut(&mut self) -> &mut T {
-        let state = unsafe { self.session_mut() };
-        &mut state.am_instance
-    }
-
-    /// Install an already constructed session under the descriptor's PG owner.
+    /// Install a complete session under the descriptor's PG owner.
     ///
     /// # Safety
     /// The relation, snapshot, parallel descriptor and parent context must remain
@@ -107,12 +100,5 @@ impl<T: AmScanSession> TableAmScanDesc<T> {
             base.rs_key = key;
             desc
         }
-    }
-
-    /// # Safety
-    /// The descriptor has been initialized by `create` and has not ended.
-    pub(crate) unsafe fn begin(&mut self) -> AmResult<()> {
-        let state = unsafe { self.session_mut() };
-        state.am_instance.scan_begin(&state.scan_keys)
     }
 }
