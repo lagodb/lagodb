@@ -14,6 +14,7 @@ mod pg16;
 mod population;
 #[cfg(any(feature = "pg17", feature = "pg18"))]
 mod read_stream;
+mod returned;
 mod sampling;
 
 pub(crate) use block_domain::AnalyzeBlockDomain;
@@ -83,18 +84,16 @@ impl AnalyzePreparation {
             &mut rng,
         )?;
         let weight = live_weight(sample.candidate_count);
-        let (source, expected) = sample.read_plan.open(&self.scan)?;
         // SAFETY: AnalyzeScanInput supplies the scan and decoder from one
         // PgReadPlan. Sampling changes selected rows, not the scan projection.
-        Ok(unsafe {
-            AnalyzeBatchCursor::try_new(
-                source,
-                self.decoder,
-                expected,
-                tickets,
-                sample.candidate_count,
-                weight,
-            )
-        }?)
+        let (returned, expected) =
+            unsafe { sample.read_plan.open(&self.scan, self.decoder) }?;
+        Ok(AnalyzeBatchCursor::new(
+            returned,
+            expected,
+            tickets,
+            sample.candidate_count,
+            weight,
+        ))
     }
 }

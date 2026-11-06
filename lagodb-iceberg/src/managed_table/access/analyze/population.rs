@@ -1,15 +1,12 @@
 //! Stable Iceberg file population and ANALYZE read-plan construction.
 
 use std::collections::HashSet;
-use std::rc::Rc;
 
 use iceberg_lite::arrow::SelectedRowsReadRequest;
 use iceberg_lite::scan::FileScanTask;
 use rand::Rng;
 
-use super::cursor::{
-    AnalyzeReadPlan, ExpectedCursor, ExpectedFile, ExpectedPositions,
-};
+use super::cursor::{AnalyzeReadPlan, ExpectedFile, ExpectedPositions};
 use super::sampling::AnalyzeSampler;
 use crate::error::{IcebergError, IcebergResult};
 
@@ -118,7 +115,7 @@ impl AnalyzePopulation {
             if sample.positions.is_empty() {
                 continue;
             }
-            let path: Rc<str> = Rc::from(file.task.data_file_path.as_str());
+            let path = Box::from(file.task.data_file_path.as_str());
             let positions = sample
                 .positions
                 .iter()
@@ -126,9 +123,7 @@ impl AnalyzePopulation {
                 .collect::<Vec<_>>();
             expected_files.push(ExpectedFile {
                 path,
-                positions: ExpectedPositions::Selected(
-                    sample.positions.into_boxed_slice(),
-                ),
+                positions: ExpectedPositions::Selected(sample.positions.into_iter()),
             });
             requests.push(SelectedRowsReadRequest::try_new(file.task, positions)?);
         }
@@ -141,7 +136,7 @@ impl AnalyzePopulation {
         Ok(AnalyzePlannedSample {
             read_plan: AnalyzeReadPlan::Selected {
                 requests,
-                expected: ExpectedCursor::new(expected_files),
+                files: expected_files,
             },
             candidate_count: sampling.observation_count,
         })
@@ -153,14 +148,14 @@ impl AnalyzePopulation {
         let mut expected_files = Vec::with_capacity(file_count);
         for file in self.files.into_iter().chain(self.zero_row_files) {
             expected_files.push(ExpectedFile {
-                path: Rc::from(file.task.data_file_path.as_str()),
-                positions: ExpectedPositions::All(file.record_count),
+                path: Box::from(file.task.data_file_path.as_str()),
+                positions: ExpectedPositions::All(0..file.record_count),
             });
             tasks.push(file.task);
         }
         AnalyzeReadPlan::Full {
             tasks,
-            expected: ExpectedCursor::new(expected_files),
+            files: expected_files,
         }
     }
 }
