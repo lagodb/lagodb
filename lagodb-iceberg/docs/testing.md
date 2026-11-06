@@ -102,9 +102,9 @@ Runs Tier 1 pure unit tests instantly without starting PostgreSQL:
   done
   ```
 
-  Ordinary package-level Cargo commands use the default `pg17` feature. To
-  target PG16 or PG18 with ordinary Cargo, always use
-  `--no-default-features --features pg16` or `pg18`; do not use `--all-features`, because
+  Ordinary package-level Cargo commands use the default `pg18` feature. To
+  target PG16 or PG17 with ordinary Cargo, always use
+  `--no-default-features --features pg16` or `pg17`; do not use `--all-features`, because
   the PostgreSQL major features are mutually exclusive.
 
 

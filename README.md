@@ -2,7 +2,7 @@
 
 [![Build Status](https://github.com/lagodb/lagodb/actions/workflows/ci.yml/badge.svg)](https://github.com/lagodb/lagodb/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-1.97.1%2B-blue.svg)](https://www.rust-lang.org)
-[![PostgreSQL](https://img.shields.io/badge/postgresql-17%20%7C%2018-blue.svg)](https://www.postgresql.org)
+[![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%7C%2017%20%7C%2018-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 **A lakehouse database built on PostgreSQL.**
@@ -33,7 +33,7 @@ engines such as Apache Spark can read the same tables from object storage.
   metadata and Parquet files. Spark can read the tables that LagoDB manages in
   object storage, and both engines can read and modify tables in an Iceberg
   REST catalog.
-- **Analytics run in a vectorized engine.** Eligible filters, joins, and
+- **Analytics run in a vectorized engine.** Eligible joins, and
   aggregations run in an embedded [Apache DataFusion](https://datafusion.apache.org/)
   engine instead of PostgreSQL's row-at-a-time executor.
 - **Work with data where it already lives.** Query Iceberg tables in an external
@@ -70,7 +70,7 @@ LagoDB is currently built from source with [pgrx](https://github.com/pgcentralfo
 Choose PostgreSQL 16, 17 or 18 and point `PG_CONFIG` at that installation:
 
 ```bash
-PG_MAJOR=17 # or 16, 18
+PG_MAJOR=18 # or 16, 17
 PG_CONFIG=/path/to/pg_config
 
 cargo pgrx init "--pg${PG_MAJOR}=${PG_CONFIG}"
@@ -246,10 +246,9 @@ SELECT * FROM s3_events WHERE device_id = 101;
 
 ## PostgreSQL support
 
-LagoDB supports PostgreSQL 16, 17 and 18. PostgreSQL 17 remains the default for
-ordinary Cargo commands; selecting PG16 or PG18 explicitly is documented in
-[Build from source](docs/build-from-source.md). Other major versions, including
-PostgreSQL 15 and 19, are not supported.
+LagoDB supports PostgreSQL 16, 17 and 18. PostgreSQL 18 is the default for
+ordinary Cargo commands; selecting PG16 or PG17 explicitly is documented in
+[Build from source](docs/build-from-source.md).
 
 ## Contributing
 

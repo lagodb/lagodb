@@ -19,7 +19,7 @@ crate-type = ["cdylib"]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("pg13", "pg14", "pg15", "pg19"))'] }
 
 [features]
-default = ["pg17"]
+default = ["pg18"]
 pg16 = ["pgrx/pg16", "pgrx-tests/pg16", "lagodb-core/pg16", "lagodb-query/pg16"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17", "lagodb-core/pg17", "lagodb-query/pg17"]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18", "lagodb-core/pg18", "lagodb-query/pg18"]

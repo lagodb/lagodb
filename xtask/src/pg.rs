@@ -10,15 +10,17 @@ use crate::process::{cargo_pgrx, run_command};
 /// PostgreSQL major selected for one xtask invocation.
 ///
 /// Selection follows cargo-pgrx: an optional leading `pgXX` argument, otherwise
-/// the workspace's default PostgreSQL feature. The label is both the cargo-pgrx
-/// selector and the Cargo feature. cargo-pgrx runs any other spelling as a
-/// test-name filter on its default major, so every child command receives this
-/// label rather than the raw argument.
+/// the `#[default]` variant. The label is both the cargo-pgrx selector and the
+/// Cargo feature. cargo-pgrx runs any other spelling as a test-name filter on
+/// its default major, so every child command receives this label rather than
+/// the raw argument.
 #[derive(Clone, Copy, Default)]
 pub(crate) enum PgMajor {
     Pg16,
-    #[default]
     Pg17,
+    /// Must match the `default` feature of every PostgreSQL-aware crate's
+    /// `Cargo.toml`; nothing checks this, so change them together.
+    #[default]
     Pg18,
 }
 

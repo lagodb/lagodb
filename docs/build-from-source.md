@@ -1,6 +1,6 @@
 # Build from source
 
-LagoDB supports PostgreSQL 16, 17 and 18. PostgreSQL 17 is the default Cargo
+LagoDB supports PostgreSQL 16, 17 and 18. PostgreSQL 18 is the default Cargo
 feature for convenient local development; all three majors are first-class
 build, test, and CI targets.
 
@@ -23,7 +23,7 @@ cargo install --locked cargo-pgrx --version 0.19.2
 Set the target major and the absolute path to its `pg_config`:
 
 ```bash
-PG_MAJOR=17 # or 16, 18
+PG_MAJOR=18 # or 16, 17
 PG_CONFIG=/path/to/pg_config
 
 cargo pgrx init "--pg${PG_MAJOR}=${PG_CONFIG}"
@@ -35,8 +35,12 @@ regression and isolation suites. PostgreSQL 16 has no injection points, so omit
 the flag there:
 
 ```bash
+# PostgreSQL 17 or 18
 cargo pgrx init "--pg${PG_MAJOR}=download" \
   --configure-flag=--enable-injection-points
+
+# PostgreSQL 16
+cargo pgrx init --pg16=download
 
 PG_CONFIG="$(cargo pgrx info pg-config "pg${PG_MAJOR}")"
 ```
@@ -72,24 +76,24 @@ CREATE EXTENSION lagodb_connectors;
 
 ## Ordinary Cargo commands
 
-Commands that run Cargo directly use PG17 by default, so PG17 must already be
+Commands that run Cargo directly use PG18 by default, so PG18 must already be
 registered with `cargo pgrx init`:
 
 ```bash
 cargo check -p lagodb-iceberg
 ```
 
-Select PG16 or PG18 explicitly by disabling the PG17 default first. This form
-is also required when PG17 is not registered:
+Select PG16 or PG17 explicitly by disabling the PG18 default first. This form
+is also required when PG18 is not registered:
 
 ```bash
 cargo check -p lagodb-iceberg \
   --no-default-features \
-  --features pg18 # or pg16
+  --features pg17 # or pg16
 ```
 
 `cargo xtask` commands follow the same default: `cargo xtask test-all` targets
-PG17, while `cargo xtask test-all pg16` and `cargo xtask test-all pg18` select
+PG18, while `cargo xtask test-all pg16` and `cargo xtask test-all pg17` select
 those majors. They install into the selected pgrx PostgreSQL installation.
 
 Never use `--all-features` for PostgreSQL-aware crates: the `pg16`, `pg17` and

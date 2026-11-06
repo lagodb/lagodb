@@ -17,7 +17,7 @@ crate-type = ["cdylib"]
 unexpected_cfgs = { level = "warn", check-cfg = [] }
 
 [features]
-default = ["pg17"]
+default = ["pg18"]
 pg16 = [
     "pgrx/pg16",
     "pgrx-tests/pg16",

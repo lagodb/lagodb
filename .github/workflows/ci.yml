@@ -17,6 +17,9 @@ concurrency:
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
+  # Keep file and line backtraces but drop full debug info, which dominates
+  # the size of each cached target directory.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   PGRX_POSTGRES_CACHE_VERSION: "v3-injection-points"
   RUST_BACKTRACE: "1"
 

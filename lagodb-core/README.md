@@ -1,7 +1,7 @@
 # lagodb-core
 
 [![Rust](https://img.shields.io/badge/rust-1.97.1%2B-blue.svg)](https://www.rust-lang.org)
-[![PostgreSQL](https://img.shields.io/badge/postgresql-17%20%7C%2018-blue.svg)](https://www.postgresql.org)
+[![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%7C%2017%20%7C%2018-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE)
 
 ## PostgreSQL-Lakehouse Integration Framework
