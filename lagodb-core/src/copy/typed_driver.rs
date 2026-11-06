@@ -12,9 +12,7 @@ use super::context::{
     CopyFromPreparation, CopyParseState, CopyStatement, CopyToPreparation,
 };
 use super::pg::CopyToShutdown;
-use super::typed_callback::{
-    TypedDestinationGuard, TypedSourceGuard, destination_callback, source_callback,
-};
+use super::typed_callback::{TypedDestinationGuard, TypedSourceGuard};
 use super::{CopyColumnLayout, CopyDatumSource, CopyError, CopyTupleDestination, pg};
 
 pub struct TypedCopyFromSpec<'statement, 'parse> {
@@ -107,7 +105,7 @@ impl<'statement, 'parse> TypedCopyFromDriver<'statement, 'parse> {
             PgTryBuilder::new(AssertUnwindSafe(|| {
                 Ok(pg::CopyBridge::execute_routed_from_typed(
                     state,
-                    source_callback(),
+                    TypedSourceGuard::callback(),
                     source_context,
                     &bridge,
                 ))
@@ -233,7 +231,7 @@ impl<'statement, 'parse, 'destination>
             PgTryBuilder::new(AssertUnwindSafe(|| {
                 let processed = pg::CopyBridge::execute_routed_to_typed(
                     state,
-                    destination_callback(),
+                    TypedDestinationGuard::callback(),
                     destination_context,
                 );
                 // Query exports run ExecutorFinish/ExecutorEnd before the

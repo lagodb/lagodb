@@ -1,8 +1,11 @@
 //! Runtime registration for one table access-method provider.
 //!
 //! The descriptor published here owns the AM identity and the operations
-//! shared by COPY and maintenance. Command-specific routers remain in their
-//! respective modules and consume this one descriptor.
+//! shared by COPY and maintenance. Command-specific routers look the
+//! descriptor up through [`RuntimeClient::provider_for_am`]; nothing inside
+//! the crate depends on this registration module.
+//!
+//! [`RuntimeClient::provider_for_am`]: crate::runtime_api::RuntimeClient::provider_for_am
 
 mod hierarchy;
 
@@ -15,12 +18,11 @@ use crate::handles::RelationHandle;
 use crate::hooks::{HookError, HookRegistrationError, freeze_hooks_with_provider};
 use crate::runtime_api::{
     CallbackErrorReport, MaintenanceReport, MaintenanceRequest, MaintenanceStats,
-    ProviderIdentity, RuntimeApiError, RuntimeClient, RuntimeRegistrationError,
-    TableCopyCallbacks, TableProvider,
+    ProviderIdentity, RuntimeRegistrationError, TableCopyCallbacks, TableProvider,
 };
 use crate::table_maintenance::{
-    TableMaintenanceCommandTime, TableMaintenanceError, TableMaintenanceReport,
-    TableMaintenanceRequest, TableMaintenanceStats,
+    TableMaintenanceError, TableMaintenanceReport, TableMaintenanceRequest,
+    TableMaintenanceStats,
 };
 
 /// All runtime-visible facets owned by one table access-method provider.
@@ -62,17 +64,6 @@ pub trait LagodbTableProvider: 'static {
     ) -> Result<TableMaintenanceStats, TableMaintenanceError>;
 }
 
-/// Provider-neutral lookup and relation routing for table AM descriptors.
-pub struct TableProviderRouter;
-
-impl TableProviderRouter {
-    pub(crate) fn provider_for_am(
-        access_method_oid: pg_sys::Oid,
-    ) -> Result<Option<&'static TableProvider>, RuntimeApiError> {
-        Ok(RuntimeClient::connect()?.provider_for_am(access_method_oid))
-    }
-}
-
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn provider_access_method_oid<P>() -> pg_sys::Oid
 where
@@ -94,16 +85,9 @@ where
         // and holds the Relation open throughout this synchronous callback.
         let request = unsafe { &*request };
         let relation = unsafe { RelationHandle::from_raw(request.relation) };
-        let result = P::execute_maintenance(TableMaintenanceRequest {
-            relation: &relation,
-            mode: request.mode,
-            options: request.options(),
-            budget: request.budget(),
-            command_time: TableMaintenanceCommandTime::from_unix_epoch_ms(
-                request.command_time_ms,
-            ),
-        })
-        .map_err(|error| error.with_provider(P::NAME).into_report_error())?;
+        let request = TableMaintenanceRequest::from_wire(&relation, request);
+        let result = P::execute_maintenance(request)
+            .map_err(|error| error.with_provider(P::NAME).into_report_error())?;
         // SAFETY: the runtime owns this writable output for the callback.
         unsafe { report.write(result.into()) };
         Ok(())
@@ -127,12 +111,11 @@ where
         let relation = unsafe { RelationHandle::from_raw(relation) };
         let inspected = P::inspect_maintenance(&relation)
             .map_err(|error| error.with_provider(P::NAME).into_report_error())?;
-        let inspected =
-            MaintenanceStats::try_from_stats(inspected).ok_or_else(|| {
-                TableMaintenanceError::framework(
-                    "provider format name exceeds the maintenance ABI bound",
-                )
-            })?;
+        let inspected = inspected.to_wire().ok_or_else(|| {
+            TableMaintenanceError::framework(
+                "provider format name exceeds the maintenance ABI bound",
+            )
+        })?;
         // SAFETY: the runtime owns this writable output for the callback.
         unsafe { stats.write(inspected) };
         Ok(())

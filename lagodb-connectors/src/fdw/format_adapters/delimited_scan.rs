@@ -2,14 +2,12 @@
 
 use std::io;
 
-use lagodb_core::copy::{
-    CopyDataSource, CopyDocumentSource, CopyError, CopyFromScan,
-};
+use lagodb_core::copy::{CopyDataSource, CopyError};
 use lagodb_core::fdw::{
-    ForeignPathBuilder, ForeignPathContext, ForeignPathKeys, ForeignPathSpec,
-    ForeignPlanContext, ForeignPlanSpec, ForeignRelSize, ForeignRelSizeContext,
-    ReScanForeignScanContext, ScanProjectionPolicy, ScanSlotWriter,
-    StartForeignScanContext,
+    CopyDocumentSource, CopyFromScan, ForeignPathBuilder, ForeignPathContext,
+    ForeignPathKeys, ForeignPathSpec, ForeignPlanContext, ForeignPlanSpec,
+    ForeignRelSize, ForeignRelSizeContext, ReScanForeignScanContext,
+    ScanProjectionPolicy, ScanSlotWriter, StartForeignScanContext,
 };
 use pgrx::pg_sys;
 

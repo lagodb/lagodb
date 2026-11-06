@@ -3,7 +3,8 @@
 use arrow_array::RecordBatch;
 use lagodb_arrow::{ArrowColumnDecoder, BoundBatch};
 use lagodb_core::batch::{AmScanBatchSource, BatchRowDecoder};
-use lagodb_core::prelude::{AmResult, SlotDatumWriter};
+use lagodb_core::diag::PgReportError;
+use lagodb_core::tuple::SlotDatumWriter;
 
 use super::batch::ScanBatchSource;
 
@@ -38,7 +39,7 @@ where
     pub(crate) fn next_into_slot(
         &mut self,
         out: &mut SlotDatumWriter<'_>,
-    ) -> AmResult<bool> {
+    ) -> Result<bool, PgReportError> {
         self.next_with(|decoder, bound, row_index| {
             // SAFETY: PgReadPlan compiled the decoder from the relation
             // layout used by this cursor and validated every destination
@@ -50,9 +51,13 @@ where
 
     /// Emit one row through a lazily-created destination. `emit` is not called
     /// at end-of-scan, so an FDW does not touch its output slot for EOF.
-    pub(crate) fn next_with<F>(&mut self, mut emit: F) -> AmResult<bool>
+    pub(crate) fn next_with<F>(&mut self, mut emit: F) -> Result<bool, PgReportError>
     where
-        F: FnMut(&ArrowColumnDecoder, &BoundBatch, usize) -> AmResult<()>,
+        F: FnMut(
+            &ArrowColumnDecoder,
+            &BoundBatch,
+            usize,
+        ) -> Result<(), PgReportError>,
     {
         loop {
             if let Some(bound) = self.current.as_ref()

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use lagodb_core::backend_process::BackendProcess;
+use lagodb_core::backend::BackendProcess;
 use pgrx::PgLwLock;
 use pgrx::prelude::*;
 

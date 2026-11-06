@@ -9,9 +9,7 @@ use crate::diag::PgError;
 use super::context::{
     CopyFromPreparation, CopyParseState, CopyStatement, CopyToPreparation,
 };
-use super::io::{
-    DestinationGuard, SourceGuard, destination_callback, source_callback,
-};
+use super::io::{DestinationGuard, SourceGuard};
 use super::pg::CopyToShutdown;
 use super::progress::CopyOutputProgressGuard;
 use super::{CopyColumnLayout, CopyDataDestination, CopyDataSource, CopyError, pg};
@@ -91,7 +89,7 @@ impl<'statement, 'parse> CopyFromDriver<'statement, 'parse> {
                     // state. Passing a filename here would let PG open it.
                     std::ptr::null(),
                     false,
-                    source_callback(),
+                    SourceGuard::callback(),
                     attlist,
                     options,
                     false,
@@ -223,7 +221,7 @@ impl<'statement, 'parse, 'destination>
                     // instead of the destination callback.
                     std::ptr::null(),
                     false,
-                    destination_callback(),
+                    DestinationGuard::callback(),
                     attlist,
                     options,
                     false,

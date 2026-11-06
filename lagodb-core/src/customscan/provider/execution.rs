@@ -4,9 +4,9 @@ use core::marker::PhantomData;
 
 use pgrx::pg_sys;
 
-use crate::api::AmResult;
 use crate::customscan::error::CustomScanError;
 use crate::handles::{RelationHandle, ScanDirection};
+use crate::table_am::AmResult;
 use crate::tuple::{Row, RowDatumCodec, RowSlotWriter, SlotDatumWriter};
 
 use super::contract::LagodbCustomScanProvider;

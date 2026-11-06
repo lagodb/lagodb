@@ -4,16 +4,17 @@ use core::ffi::c_int;
 
 use pgrx::pg_sys;
 
-use crate::access::mutation::current_copy_command_id;
 use crate::handles::{ExecutorHandle, RelationHandle, SnapshotHandle};
 
 use super::contract::{
     FdwModify, ForeignModifyOperation, ForeignModifyPrivate, ForeignReturnedIdentity,
 };
+use super::copy_command::current_copy_command_id;
 use super::error::ForeignModifyError;
 use super::state::ForeignModifyStateWrapper;
 
-/// Executor context passed before a normal INSERT, UPDATE, or DELETE state is created.
+/// Executor context passed before a normal INSERT, UPDATE, or DELETE state is
+/// created.
 pub struct ForeignModifyBeginContext<'a, D: ForeignModifyPrivate> {
     private_data: &'a D,
     relation: RelationHandle<'a>,
@@ -199,7 +200,7 @@ impl<'a> ForeignInsertBeginContext<'a> {
     /// Output CID fixed by the owning ModifyTable or COPY command.
     ///
     /// Providers that need a COPY CID must register
-    /// [`crate::access::mutation::init_lifecycle_hooks`] in their own extension
+    /// [`crate::fdw::register_copy_command_lifecycle`] in their own extension
     /// during initialization, before hooks are published. COPY context is only
     /// accessed when this method is called; providers that do not use the CID
     /// do not need to register that lifecycle.

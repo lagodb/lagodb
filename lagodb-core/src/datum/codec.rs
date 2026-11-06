@@ -12,11 +12,11 @@ use pgrx::IntoDatum;
 use pgrx::pg_sys::{self, Datum, Oid};
 
 use crate::handles::TupleDescHandle;
-use crate::wrapper::PgWrapper;
 
 use super::cell::Cell;
 use super::encoding::Utf8ServerEncoding;
 use super::error::{DatumConversionError, Utf8ServerEncodingError};
+use super::json::{JsonText, JsonbValue};
 
 mod text;
 
@@ -303,9 +303,9 @@ impl Cell {
     /// This is the normal framework path. It validates semantic text input
     /// through PostgreSQL's JSON input functions and performs value-dependent
     /// integer narrowing. `Cell::String` JSON coercions are parsed through
-    /// PostgreSQL input functions. A `Cell::Json` is accepted only by a `json` target and
-    /// a `Cell::Jsonb` only by a `jsonb` target; crossing the two semantic types
-    /// requires an explicit text parse by the caller.
+    /// PostgreSQL input functions. A `Cell::Json` is accepted only by a `json`
+    /// target and a `Cell::Jsonb` only by a `jsonb` target; crossing the two
+    /// semantic types requires an explicit text parse by the caller.
     /// It intentionally does not apply typmods; the caller must provide values
     /// that satisfy the destination attribute's storage contract.
     ///
@@ -525,12 +525,8 @@ impl Cell {
         }
         .map_err(|_| DatumConversionError::invalid_input(target))?;
         let result = match target {
-            pg_sys::JSONOID => unsafe {
-                PgWrapper::json_input_from_cstr(text.as_ptr())
-            },
-            pg_sys::JSONBOID => unsafe {
-                PgWrapper::jsonb_input_from_cstr(text.as_ptr())
-            },
+            pg_sys::JSONOID => unsafe { JsonText::input_from_cstr(text.as_ptr()) },
+            pg_sys::JSONBOID => unsafe { JsonbValue::input_from_cstr(text.as_ptr()) },
             _ => return Err(DatumConversionError::incompatible(target)),
         };
         result.ok_or(DatumConversionError::invalid_input(target))

@@ -3,10 +3,10 @@
 use std::mem;
 
 use iceberg_lite::expr::Predicate;
-use lagodb_core::access::mutation::ModifyScanBinding;
 use lagodb_core::customscan::provider::NeededColumns;
 use lagodb_core::expr::pushdown::BoundFilterSet;
 use lagodb_core::handles::{RelationHandle, SnapshotHandle};
+use lagodb_core::table_am::ModifyScanBinding;
 
 use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::ManagedTableReadView;

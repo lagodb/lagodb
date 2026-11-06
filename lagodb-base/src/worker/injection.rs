@@ -1,4 +1,4 @@
-use lagodb_core::injection_point::InjectionPoint;
+use lagodb_core::backend::InjectionPoint;
 
 /// Worker-framework injection points at stable process-lifecycle boundaries.
 pub(super) struct InjectionPoints;

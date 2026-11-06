@@ -5,7 +5,6 @@
 
 use std::mem;
 
-use lagodb_core::api::AnalyzeTupleOutcome;
 use lagodb_core::prelude::*;
 use rand::Rng;
 

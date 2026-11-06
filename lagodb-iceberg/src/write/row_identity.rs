@@ -1,7 +1,7 @@
 //! Synthetic PostgreSQL `ctid` carrier for Iceberg physical row identities.
 
-use lagodb_core::api::TRIGGER_ROW_BLOCK_BASE;
 use lagodb_core::prelude::ItemPointer;
+use lagodb_core::table_am::TRIGGER_ROW_BLOCK_BASE;
 
 use super::registry::{ICEBERG_FILE_ID_BITS, IcebergFileId};
 use crate::error::{IcebergError, IcebergResult};

@@ -15,13 +15,13 @@ use crate::scan::{
 };
 use crate::schema::relation::RelationLayout;
 use iceberg_lite::expr::Predicate;
-use lagodb_core::access::mutation::ModifyScanBinding;
 use lagodb_core::customscan::modify::ModifyBindContext;
 use lagodb_core::customscan::provider::{
     BeginContext, CustomScanError, EndContext, NextSlotContext, NextSlotResult,
     ReScanContext, StartContext,
 };
 use lagodb_core::runtime_api::TableScanTaskMetrics;
+use lagodb_core::table_am::ModifyScanBinding;
 use pgrx::pg_sys;
 
 use super::IcebergCustomScanProvider;

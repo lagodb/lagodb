@@ -12,8 +12,8 @@ use pgrx::bgworkers::BackgroundWorker;
 use pgrx::{PgTryBuilder, pg_sys};
 use tokio::runtime::{Builder, Runtime};
 
+use lagodb_core::backend::BackendLatch;
 use lagodb_core::diag::PgReportError;
-use lagodb_core::pg_latch::BackendLatch;
 use lagodb_storage::{ManagedStoreRegistry, StorageRuntime};
 
 use super::catalog::VolumeConfigSource;

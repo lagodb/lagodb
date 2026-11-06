@@ -9,6 +9,7 @@ mod error;
 pub mod postgres;
 mod provider;
 mod types;
+mod wire;
 
 pub use error::TableMaintenanceError;
 pub use provider::{TableMaintenanceRequest, TableMaintenanceRouter};

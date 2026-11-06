@@ -1,13 +1,13 @@
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
 
-use crate::api::{
-    AmResult, MutationDeleteContext, MutationOutcome, MutationUpdateContext,
-    MutationWriteContext,
-};
 use crate::customscan::modify::LagodbCustomModifyProvider;
 use crate::diag::{PgReportError, ReportableError};
 use crate::handles::{ItemPointer, SnapshotHandle};
+use crate::table_am::{
+    AmResult, MutationDeleteContext, MutationOutcome, MutationUpdateContext,
+    MutationWriteContext,
+};
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{pg_guard, pg_sys};
 

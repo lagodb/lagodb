@@ -9,7 +9,7 @@ use pgrx::{PgTryBuilder, pg_sys};
 
 use crate::diag::PgError;
 
-use super::io::{CopyDataSource, SourceGuard, source_callback};
+use super::io::{CopyDataSource, SourceGuard};
 use super::{CopyError, pg};
 
 /// A raw text/CSV record returned by PostgreSQL's COPY parser.
@@ -110,7 +110,7 @@ impl<'source> CopyRawFieldReader<'source> {
             .with_active(|| unsafe {
                 PgTryBuilder::new(AssertUnwindSafe(|| {
                     Ok(pg::CopyBridge::begin_raw_field_reader(
-                        source_callback(),
+                        SourceGuard::callback(),
                         options,
                     ))
                 }))

@@ -13,12 +13,12 @@ use arrow_array::{
     TimestampMicrosecondArray, TimestampNanosecondArray,
 };
 use arrow_schema::DataType;
-use lagodb_core::api::{AmError, AmResult};
 use lagodb_core::batch::AmScanBatchSource;
 use lagodb_core::datum::{
     BoundColumnDatumCodec, ByteaView, Cell, ColumnDatumTarget,
     Decimal128NumericCodec, StringView,
 };
+use lagodb_core::diag::PgReportError;
 use pgrx::datum::Uuid;
 use pgrx::pg_sys;
 
@@ -56,9 +56,9 @@ pub(crate) unsafe fn is_null_unchecked(array: &impl Array, row_idx: usize) -> bo
 /// It adapts any Arrow batch iterator into an [`AmScanBatchSource`] without
 /// naming a table format. Batch *production* (opening Parquet, reading
 /// metadata, IO) is the producing crate's domain, not a value conversion, so
-/// the iterator's error only has to map into the callback boundary error
-/// ([`AmError`]) and carries its own SQLSTATE classification straight through —
-/// this layer never reclassifies a producer error as a [`ArrowConversionError`]
+/// the iterator's error only has to map into [`PgReportError`] and carries its
+/// own SQLSTATE classification straight through — this layer never
+/// reclassifies a producer error as a [`ArrowConversionError`]
 /// (`DatumConversionError`). The Iceberg AM keeps its format error type
 /// (`IcebergError`) out of this layer while preserving the right SQLSTATE.
 ///
@@ -66,7 +66,7 @@ pub(crate) unsafe fn is_null_unchecked(array: &impl Array, row_idx: usize) -> bo
 pub struct ArrowBatchSource<I, E>
 where
     I: Iterator<Item = Result<RecordBatch, E>>,
-    E: Into<AmError>,
+    E: Into<PgReportError>,
 {
     iter: I,
 }
@@ -74,7 +74,7 @@ where
 impl<I, E> ArrowBatchSource<I, E>
 where
     I: Iterator<Item = Result<RecordBatch, E>>,
-    E: Into<AmError>,
+    E: Into<PgReportError>,
 {
     pub fn new(iter: I) -> Self {
         Self { iter }
@@ -84,19 +84,19 @@ where
 impl<I, E> AmScanBatchSource for ArrowBatchSource<I, E>
 where
     I: Iterator<Item = Result<RecordBatch, E>>,
-    E: Into<AmError>,
+    E: Into<PgReportError>,
 {
     type Batch = RecordBatch;
 
-    fn next_batch(&mut self) -> AmResult<Option<RecordBatch>> {
-        // The producer error maps directly to the callback boundary's
-        // `PgReportError`, preserving its own SQLSTATE (IO/internal/feature),
-        // instead of being collapsed into a conversion `DATA_EXCEPTION`.
+    fn next_batch(&mut self) -> Result<Option<RecordBatch>, PgReportError> {
+        // The producer error maps directly to `PgReportError`, preserving its
+        // own SQLSTATE (IO/internal/feature), instead of being collapsed into a
+        // conversion `DATA_EXCEPTION`.
         let batch = self
             .iter
             .next()
             .transpose()
-            .map_err(Into::<AmError>::into)?;
+            .map_err(Into::<PgReportError>::into)?;
         Ok(batch)
     }
 }
@@ -155,12 +155,12 @@ pub(crate) enum ReaderImpl {
 /// Arrow array once, then read row by row with no per-value downcast.
 ///
 /// This public reader belongs to the row-world / FDW `Cell` API. The
-/// slot-first scan path uses the private `datum_codec::BoundDatumReader`, whose variants
-/// also encode the final datum conversion.
+/// slot-first scan path uses the private `datum_codec::BoundDatumReader`,
+/// whose variants also encode the final datum conversion.
 ///
-/// Opaque by design: the inner Arrow representation can change without breaking
-/// callers. Build one per column when a batch arrives ([`bind`](Self::bind)),
-/// then read rows from it.
+/// Opaque by design: the inner Arrow representation can change without
+/// breaking callers. Build one per column when a batch arrives
+/// ([`bind`](Self::bind)), then read rows from it.
 pub struct ColumnReader {
     reader: ReaderImpl,
 }
@@ -329,7 +329,8 @@ impl ColumnReader {
     ///
     /// The codec must be bound once for the destination column before this
     /// method is used repeatedly. Its type excludes provider-selected physical
-    /// codecs; those are bound by [`ArrowColumnDecoder`](crate::ArrowColumnDecoder) and use the private
+    /// codecs; those are bound by
+    /// [`ArrowColumnDecoder`](crate::ArrowColumnDecoder) and use the private
     /// bound-reader path directly.
     ///
     /// # Safety
@@ -364,8 +365,8 @@ impl ColumnReader {
     /// the view) after the reader is dropped — copy/materialize it first (e.g.
     /// into a slot datum) if it must live longer. The owned variants (numeric,
     /// temporal, list arrays) carry no borrow and are always safe. Provider
-    /// physical readers use the separate private `datum_codec::BoundDatumReader` type and
-    /// cannot enter this API.
+    /// physical readers use the separate private
+    /// `datum_codec::BoundDatumReader` type and cannot enter this API.
     pub unsafe fn read_cell_unchecked(
         &self,
         row_idx: usize,

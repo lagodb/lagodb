@@ -5,6 +5,7 @@
 //! provider/FFI boundary.
 
 mod datetime;
+mod numeric;
 
 use std::ffi::c_char;
 use std::fmt;
@@ -16,7 +17,6 @@ use std::slice;
 use pgrx::pg_sys::{self, JsonbIteratorToken as Token, jbvType};
 
 use crate::datum::json::JsonValueError;
-use crate::wrapper::PgWrapper;
 
 /// The position of a scalar in its enclosing JSONB container.
 #[derive(Clone, Copy)]
@@ -216,9 +216,9 @@ impl<'a> JsonbBuilder<'a> {
         }
         // SAFETY: the input is finite and the caller supplies its precision
         // and row context. PG errors reach the enclosing provider/FFI boundary.
-        let numeric =
-            unsafe { PgWrapper::jsonb_numeric_from_float(value, single_precision) };
-        // SAFETY: the wrapper allocated a finite Numeric in the row context.
+        let numeric = unsafe { Self::numeric_from_float(value, single_precision) };
+        // SAFETY: numeric_from_float allocated a finite Numeric in the row
+        // context.
         unsafe { self.numeric(position, numeric) };
     }
 

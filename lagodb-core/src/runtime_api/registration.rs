@@ -9,6 +9,45 @@ use super::{
     TableScanDescriptor, TableScanWorkerDescriptor,
 };
 
+pub const REGISTER_OK: u32 = 0;
+pub const REGISTER_INVALID_DESCRIPTOR: u32 = 1;
+pub const REGISTER_DUPLICATE_NAME: u32 = 2;
+pub const REGISTER_DUPLICATE_ACCESS_METHOD: u32 = 3;
+pub const REGISTER_OUTSIDE_PROVIDER_BOOTSTRAP: u32 = 4;
+pub const REGISTER_PROVIDER_LIBRARY_MISMATCH: u32 = 5;
+pub const REGISTER_DUPLICATE_TABLE_SCAN_ROUTE: u32 = 6;
+
+pub const UTILITY_ROUTE_PASS_THROUGH: u8 = 0;
+pub const UTILITY_ROUTE_CONSUMED: u8 = 1;
+/// A matching table consumer used only when no primary consumer claims COPY.
+/// This is a predicate result; successful execution still returns CONSUMED.
+pub const UTILITY_ROUTE_FALLBACK: u8 = 2;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum RuntimeRegistrationError {
+    #[error("runtime already has a different provider with this name")]
+    DuplicateProviderName,
+    #[error("runtime already has a table provider for this access method")]
+    DuplicateAccessMethod,
+    #[error("runtime already has a table-scan provider for this storage route")]
+    DuplicateTableScanRoute,
+    #[error("runtime rejected an invalid provider registration")]
+    InvalidProviderRegistration,
+    #[error(
+        "provider registration is only allowed during runtime bootstrap; add its library to lagodb.provider_libraries and restart PostgreSQL"
+    )]
+    OutsideProviderBootstrap,
+    #[error(
+        "provider registered a library name different from the library being loaded"
+    )]
+    ProviderLibraryMismatch,
+    #[error("runtime returned unknown {operation} registration status {status}")]
+    UnknownStatus {
+        operation: &'static str,
+        status: u32,
+    },
+}
+
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderKind {

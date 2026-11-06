@@ -5,22 +5,15 @@ use std::ptr;
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{pg_guard, pg_sys};
 
+use crate::catalog::find_all_inheritors;
 use crate::customscan::modify::LagodbCustomModifyProvider;
 use crate::customscan::provider::RelationContext;
-use crate::diag::{PgReportError, ReportableError};
+use crate::diag::{PgError, PgReportError, ReportableError};
 
 use super::scan_filters::ModifyScanFilters;
 use super::{methods, registry};
 
 pub(super) use crate::customscan::provider::WHOLEROW_NAME;
-
-unsafe extern "C-unwind" {
-    fn find_all_inheritors(
-        parent_rel_id: pg_sys::Oid,
-        lock_mode: i32,
-        numparents: *mut *mut pg_sys::List,
-    ) -> *mut pg_sys::List;
-}
 
 struct SystemColumnContext {
     target_rti: pg_sys::Index,
@@ -130,11 +123,11 @@ impl WholeRowPlanner {
     /// # Safety
     ///
     /// The target relation must remain locked and its relcache entry valid.
-    unsafe fn is_required(&self) -> bool {
+    unsafe fn is_required(&self) -> Result<bool, PgError> {
         if unsafe { (*self.parse).commandType } != pg_sys::CmdType::CMD_DELETE
             || !unsafe { (*self.parse).returningList }.is_null()
         {
-            return true;
+            return Ok(true);
         }
         // This hook runs before `standard_planner()` expands inheritance, so
         // child relcache entries are not locked yet.  Lock descendants with
@@ -143,14 +136,9 @@ impl WholeRowPlanner {
         // safe, but would then require a later lock upgrade to RowExclusiveLock
         // for DELETE and can introduce an avoidable upgrade deadlock.
         let lockmode = unsafe { (*self.rte).rellockmode };
-        let relations = unsafe {
-            pg_sys::ffi::pg_guard_ffi_boundary(|| {
-                find_all_inheritors((*self.rte).relid, lockmode, ptr::null_mut())
-            })
-        };
-        let count = unsafe { pg_sys::list_length(relations) };
-        for index in 0..count {
-            let relation_oid = unsafe { pg_sys::list_nth_oid(relations, index) };
+        for relation_oid in
+            find_all_inheritors(unsafe { (*self.rte).relid }, lockmode)?
+        {
             let relation =
                 unsafe { pg_sys::relation_open(relation_oid, pg_sys::NoLock as i32) };
             let trigger_desc = unsafe { (*relation).trigdesc };
@@ -163,20 +151,20 @@ impl WholeRowPlanner {
                 };
             unsafe { pg_sys::relation_close(relation, pg_sys::NoLock as i32) };
             if required {
-                return true;
+                return Ok(true);
             }
         }
-        false
+        Ok(false)
     }
 
     /// # Safety
     ///
     /// The query must be planner-owned and mutable in the current memory context.
-    unsafe fn inject(&self) {
+    unsafe fn inject(&self) -> Result<(), PgError> {
         if unsafe { self.targetlist_contains_wholerow() }
-            || !unsafe { self.is_required() }
+            || !unsafe { self.is_required() }?
         {
-            return;
+            return Ok(());
         }
         let var = unsafe {
             pg_sys::makeWholeRowVar(self.rte, self.target_rti as i32, 0, false)
@@ -194,6 +182,7 @@ impl WholeRowPlanner {
             (*self.parse).targetList =
                 pg_sys::lappend((*self.parse).targetList, tle.cast());
         }
+        Ok(())
     }
 }
 
@@ -263,9 +252,10 @@ mod wholerow_tests {
 /// # Safety
 ///
 /// `parse` must be a live rewrite-complete Query owned by the planner call.
-unsafe fn inject_wholerow(parse: *mut pg_sys::Query) {
-    if let Some(planner) = unsafe { WholeRowPlanner::inspect(parse) } {
-        unsafe { planner.inject() };
+unsafe fn inject_wholerow(parse: *mut pg_sys::Query) -> Result<(), PgError> {
+    match unsafe { WholeRowPlanner::inspect(parse) } {
+        Some(planner) => unsafe { planner.inject() },
+        None => Ok(()),
     }
 }
 
@@ -355,7 +345,7 @@ impl ModifyQueryPreparation {
     ) -> Result<(), PgReportError> {
         // SAFETY: the runtime supplies the current planner-owned Query.
         unsafe {
-            inject_wholerow(parse);
+            inject_wholerow(parse)?;
             reject_explicit_target_system_columns(parse)
         }
     }

@@ -15,6 +15,7 @@ mod error;
 mod json;
 pub mod jsonb;
 mod numeric;
+mod output_cstring;
 mod pg_type;
 mod temporal;
 mod text_io;

@@ -4,8 +4,6 @@ use std::{ffi::c_void, ptr};
 
 use pgrx::pg_sys;
 
-use crate::access::scan::TableAmScanDesc;
-use crate::api::TableAccessMethod;
 use crate::customscan::ScanPurpose;
 use crate::customscan::error::CustomScanError;
 use crate::customscan::execution::exec::provider_scan_purpose;
@@ -14,6 +12,7 @@ use crate::customscan::provider::NeededColumns;
 use crate::expr::inspect::{RelationExprAnalyzer, RelationScope};
 use crate::expr::relation::RelationVarsByAttno;
 use crate::handles::{OwnedScanKeys, RelationHandle, SnapshotHandle};
+use crate::table_am::{TableAccessMethod, TableAmScanDesc};
 
 use super::LagodbCustomModifyProvider;
 use super::binding::bind_modify_scan;

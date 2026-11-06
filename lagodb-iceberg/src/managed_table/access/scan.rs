@@ -19,9 +19,6 @@ mod mutation;
 
 use std::mem;
 
-use lagodb_core::access::scan::virtual_slot_callbacks_with_tid;
-use lagodb_core::api::unsupported_callback;
-use lagodb_core::handles::RelationHandle;
 use lagodb_core::prelude::*;
 use pgrx::pg_sys;
 

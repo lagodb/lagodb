@@ -5,7 +5,7 @@ use std::ptr;
 
 use pgrx::pg_sys;
 
-use super::{CallbackErrorReport, RuntimeClient};
+use super::CallbackErrorReport;
 
 /// One Bound volume's routing metadata; credentials never cross this ABI.
 /// Strings are valid UTF-8, allocated in the caller's PostgreSQL memory context.
@@ -43,13 +43,3 @@ impl Default for TablespaceBindingsOutput {
 
 pub type LoadTablespaceBindingsCallback =
     unsafe extern "C-unwind" fn(output: *mut TablespaceBindingsOutput) -> u32;
-
-impl RuntimeClient {
-    pub(crate) fn load_tablespace_bindings(
-        self,
-        output: &mut TablespaceBindingsOutput,
-    ) -> u32 {
-        // SAFETY: synchronous call with a live output reference.
-        unsafe { (self.api.load_tablespace_bindings)(output) }
-    }
-}

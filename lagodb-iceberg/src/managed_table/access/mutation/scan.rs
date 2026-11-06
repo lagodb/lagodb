@@ -3,8 +3,7 @@
 use std::rc::Rc;
 
 use iceberg_lite::expr::Predicate;
-use lagodb_core::access::mutation::ModifyScanBinding;
-use lagodb_core::api::AmResult;
+use lagodb_core::table_am::{AmResult, ModifyScanBinding};
 use lagodb_core::tuple::SlotDatumWriter;
 use pgrx::pg_sys;
 

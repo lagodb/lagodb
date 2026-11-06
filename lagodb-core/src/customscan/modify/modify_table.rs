@@ -1,11 +1,11 @@
 use std::ptr;
 use std::rc::Rc;
 
-use crate::access::mutation::acquire_modify_query_state;
 use crate::customscan::error::CustomScanError;
 use crate::customscan::modify::LagodbCustomModifyProvider;
 use crate::diag::{PgReportError, ReportableError};
 use crate::resource::{ResourceHandle, forget_resource, remember_resource};
+use crate::table_am::acquire_modify_query_state;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{

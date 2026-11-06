@@ -23,7 +23,6 @@ mod progress;
 mod raw_fields;
 mod route;
 mod row;
-mod scan;
 mod standard_driver;
 mod typed_callback;
 mod typed_driver;
@@ -47,7 +46,6 @@ pub use raw_fields::{
 };
 pub use route::CopyTargetProbe;
 pub use row::CopyRowEncoder;
-pub use scan::{CopyDocumentSource, CopyFromScan};
 pub use standard_driver::RoutedCopyFromDriver;
 pub use typed_driver::{
     TypedCopyFromDriver, TypedCopyFromSpec, TypedCopyToDriver, TypedCopyToSpec,
@@ -57,3 +55,7 @@ pub use typed_io::{
     CopyOutputDatum, CopyOutputDatums, CopyOutputRow, CopyRowOutcome,
     CopyRowRejection, CopyTupleDestination,
 };
+
+/// Parser bridge reused by the FDW COPY document decoder.
+pub(crate) use io::SourceGuard;
+pub(crate) use pg::CopyBridge;

@@ -18,7 +18,6 @@
 
 use std::mem;
 
-use lagodb_core::api::AnalyzeTupleOutcome;
 use lagodb_core::prelude::*;
 use pgrx::pg_sys;
 use rand::Rng;

@@ -3,6 +3,7 @@
 mod begin;
 mod callbacks;
 mod contract;
+mod copy_command;
 mod delete;
 mod error;
 mod execution_context;
@@ -26,6 +27,7 @@ pub use contract::{
     ForeignModifyOutcome, ForeignModifyPlanSpec, ForeignModifyPrivate,
     ForeignModifyState, ForeignReturnedIdentity,
 };
+pub use copy_command::register_copy_command_lifecycle;
 pub use error::{ForeignModifyError, ForeignModifyPhase};
 pub use execution_context::{ForeignInsertBeginContext, ForeignModifyBeginContext};
 pub use planning_context::{

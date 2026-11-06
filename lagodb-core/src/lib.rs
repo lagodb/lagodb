@@ -21,117 +21,63 @@
 //!     type ModifyQueryState = MyModifyQueryState;
 //!     type ModifyState = MyModify;
 //!     type CopySession = MyCopy;
+//!
+//!     fn access_method_oid() -> Option<pg_sys::Oid> {
+//!         let name = c"my_table_am";
+//!         let oid = unsafe { pg_sys::get_table_am_oid(name.as_ptr(), true) };
+//!         (oid != pg_sys::InvalidOid).then_some(oid)
+//!     }
 //! }
 //! ```
+//!
+//! # Unsafe boundary
+//!
+//! PostgreSQL exposes backend-owned objects as raw C pointers, so `unsafe`
+//! is not eliminated; it is kept at the domain that owns each object. Raw
+//! pointer operations stay crate-private next to the guard or handle type that
+//! encodes their ownership and lifetime (`RelationGuard`, `CatalogRelation`,
+//! `CatalogScan`, `SysCacheTuple`, ...). A public `unsafe fn` is acceptable
+//! only when callers must uphold PostgreSQL invariants the type system cannot
+//! express.
 
-/// Core trait definitions for table access methods
-pub mod api;
-
-/// Mutation batch buffering abstractions and default row buffer.
-pub mod batch;
-
-/// Scoped PostgreSQL FFI handles and owning guards
-pub mod handles;
-
-/// PostgreSQL semantic values and Datum conversion codecs
+// Foundation: PostgreSQL errors, FFI handles, values, rows, and expressions.
+pub mod catalog;
 pub mod datum;
-
-/// PostgreSQL row and tuple-slot abstractions
+pub mod diag;
+pub mod expr;
+pub mod handles;
+pub mod plan_data;
 pub mod tuple;
 
-/// Table access implementation modules (scan, index, mutation, ddl, relation)
-pub mod access;
-
-/// Typed PG-expression views, runtime parameters, and planned filter pushdown.
-pub mod expr;
-
-/// Generic CustomScan filter-pushdown framework: planner-and-executor seam
-/// that turns SQL `WHERE` predicates into provider-native scan predicates.
-pub mod customscan;
-
-/// Generic PostgreSQL Foreign Data Wrapper planning and scan framework.
-pub mod fdw;
-
-/// PostgreSQL COPY execution primitives shared by utility consumers.
-pub mod copy;
-
-/// Registration logic for Table Access Method routines
-pub mod registry;
-
-/// PostgreSQL catalog option extraction, persistence, and caches
-pub mod options;
-
-/// PostgreSQL hooks framework (utility, object access, etc.)
-pub mod hooks;
-
-/// Custom WAL Resource Manager framework
+// Backend runtime: process, transaction, ResourceOwner, WAL, and runtime ABI.
+pub mod backend;
+pub mod resource;
+pub mod runtime_api;
+pub mod transaction;
 pub mod wal;
 
-/// ResourceOwner-scoped cleanup callbacks.  Distinct from transaction events.
-pub mod resource;
-
-/// Exact-build C ABI published by `lagodb-base` through rendezvous.
-pub mod runtime_api;
-
+// Provider seams: table AM, FDW, CustomScan, COPY, and provider registration.
+pub mod batch;
+pub mod copy;
+pub mod customscan;
+pub mod fdw;
+pub mod parallel_scan;
+pub mod query_contract;
 mod scan_explain;
-
-/// Transaction lifecycle callbacks.  Distinct from ResourceOwner cleanup.
-pub mod transaction;
-
-/// Format-neutral durable physical object-cleanup queue and worker framework.
-pub mod object_cleanup;
-
-/// Runtime-backed settings shared by maintenance domains.
-pub(crate) mod maintenance_config;
-
-/// Format-neutral logical table-maintenance provider SPI and VACUUM routing.
-pub mod table_maintenance;
-
-/// Runtime identity and cross-command capabilities for one table provider.
+pub mod table_am;
 pub mod table_provider;
 
-/// Helper functions and diagnostics
-pub mod diag;
-
-/// Shared `copyObject`-safe plan-data primitives.
-pub mod plan_data;
-
-/// Shared contracts for provider-neutral query planning and source execution.
-pub mod query_contract;
-
-/// Provider-neutral DSM work claiming for native PostgreSQL parallel scans.
-pub mod parallel_scan;
-
-/// Internal wrapper for PostgreSQL functions
-mod wrapper;
-
-/// Catalog access and caching
-pub mod catalog;
-
-/// PostgreSQL backend latch primitives.
-pub mod pg_latch;
-
-/// Version-stable extension wait-event registration.
-pub mod wait_event;
-
-/// PostgreSQL backend-process lifecycle operations.
-pub mod backend_process;
-
-/// Typed PostgreSQL injection points with version-compatible no-op fallback.
-pub mod injection_point;
-
-/// Database-local extension worker protocol.
+// Cross-command services built on the seams.
 pub mod extension_worker;
-
-/// Storage service and storage-volume APIs.
+pub mod hooks;
+pub(crate) mod maintenance_config;
+pub mod object_cleanup;
+pub mod options;
 pub mod storage;
-
-/// PostgreSQL temporary files with independent positioned access.
-pub mod temp_file;
+pub mod table_maintenance;
 
 /// The prelude includes all necessary imports to make lagodb_core work
 pub mod prelude {
-    pub use crate::api::*;
     pub use crate::batch::*;
     pub use crate::datum::*;
     pub use crate::diag::{
@@ -139,6 +85,7 @@ pub mod prelude {
         SqlStateError,
     };
     pub use crate::handles::*;
+    pub use crate::table_am::*;
     pub use crate::tuple::{
         PgDatumRef, Row, RowDatumCodec, RowSlotWriter, SlotDatumIndex, SlotDatumView,
         SlotDatumWriter, TupleSlotBatch, TupleSlotRow,
@@ -149,7 +96,8 @@ pub mod prelude {
 use pgrx::AllocatedByPostgres;
 use pgrx::prelude::*;
 
-/// PgBox'ed `TableAmRoutine`, used in [`am_routine`](api::TableAccessMethod::am_routine)
+/// PgBox'ed `TableAmRoutine`, returned by
+/// [`am_routine`](table_am::TableAccessMethod::am_routine).
 pub type TableAmRoutine<A = AllocatedByPostgres> = PgBox<pg_sys::TableAmRoutine, A>;
 
 /// Procedural macro for generating table access method boilerplate

@@ -2,14 +2,14 @@
 
 use core::ffi::CStr;
 
-use crate::access::mutation::ModifyScanBinding;
-use crate::api::{AmModifyState, TableAccessMethod};
 use crate::customscan::error::CustomScanError;
 use crate::customscan::provider::{
     LagodbCustomScanProvider, NeededColumns, RelationContext,
 };
 use crate::expr::pushdown::BoundFilterSet;
 use crate::handles::{RelationHandle, SnapshotHandle};
+use crate::table_am::ModifyScanBinding;
+use crate::table_am::{AmModifyState, TableAccessMethod};
 
 use super::binding::ModifyBindContext;
 

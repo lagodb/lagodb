@@ -9,7 +9,6 @@ mod tests {
     use crate::lagodb_core::customscan::support::{
         TestScanState, impl_reject_all_filters,
     };
-    use lagodb_core::api::AmResult;
     use lagodb_core::customscan::exec::next_slot_wrapper;
     use lagodb_core::customscan::provider::{
         BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
@@ -22,6 +21,7 @@ mod tests {
     };
     use lagodb_core::datum::Cell;
     use lagodb_core::handles::RelationHandle;
+    use lagodb_core::table_am::AmResult;
     use lagodb_core::tuple::{Row, RowDatumCodec, SlotDatumWriter};
     use pgrx::pg_sys;
     use pgrx::pg_test;

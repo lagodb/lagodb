@@ -5,8 +5,8 @@ use std::{cell::RefCell, str};
 use pgrx::pg_sys;
 
 use super::codec_context::CodecContext;
+use super::output_cstring::PgOutputCString;
 use super::pg_type::PgType;
-use crate::wrapper::PgOutputCString;
 
 /// Backend-local I/O state. Function caches live in this codec's context,
 /// while returned datums belong to the caller's current row context.

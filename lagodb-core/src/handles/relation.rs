@@ -1,9 +1,10 @@
+use std::panic::AssertUnwindSafe;
 use std::{ptr::addr_of, slice};
 
 use super::borrowed::{PgBorrowed, PgNullable};
 use crate::diag::PgError;
-use crate::wrapper::PgWrapper;
-use pgrx::pg_sys;
+use crate::wal::xlog_is_needed;
+use pgrx::{PgTryBuilder, pg_sys};
 
 use super::{RelationColumn, RelationName, RelationTablespace, TupleDescHandle};
 
@@ -38,8 +39,16 @@ impl<'a> RelationHandle<'a> {
     /// PostgreSQL processes the notification at the next command counter
     /// increment and manages its commit and abort lifetime.
     pub fn invalidate_relcache(&self) -> Result<(), PgError> {
+        let relation = AssertUnwindSafe(self.as_raw());
         // SAFETY: the handle keeps this PostgreSQL relation valid for the call.
-        unsafe { PgWrapper::invalidate_relation_cache(self.as_raw()) }
+        unsafe {
+            PgTryBuilder::new(move || {
+                pg_sys::CacheInvalidateRelcache(*relation);
+                Ok(())
+            })
+            .catch_others(|error| Err(PgError::from_caught(error)))
+            .execute()
+        }
     }
 
     /// Whether PostgreSQL created this relation in the current subtransaction.
@@ -159,7 +168,19 @@ impl<'a> RelationHandle<'a> {
     /// This is equivalent to PostgreSQL's `RelationNeedsWAL(rel)` macro.
     #[inline]
     pub fn needs_wal(&self) -> bool {
-        unsafe { PgWrapper::relation_needs_wal(self.as_raw()) }
+        let rel = self.as_raw();
+        // SAFETY: the handle keeps this relcache entry valid for the call.
+        unsafe {
+            if (*(*rel).rd_rel).relpersistence
+                != pg_sys::RELPERSISTENCE_PERMANENT as i8
+            {
+                return false;
+            }
+            if xlog_is_needed() {
+                return true;
+            }
+            (*rel).rd_createSubid == 0 && (*rel).rd_firstRelfilelocatorSubid == 0
+        }
     }
 
     /// The relation's tuple descriptor (`rd_att`).
@@ -214,91 +235,6 @@ impl<'a> RelationHandle<'a> {
     #[inline]
     fn rd_rel(&self) -> *mut pg_sys::FormData_pg_class {
         unsafe { self.inner.as_ref().rd_rel }
-    }
-}
-
-/// RAII guard for an opened PostgreSQL relation.
-///
-/// This type only owns the open/close lifecycle. Catalog-specific operations
-/// live in `crate::catalog::CatalogRelation`.
-#[derive(Debug)]
-pub struct RelationGuard {
-    rel: pg_sys::Relation,
-    lock_mode: pg_sys::LOCKMODE,
-}
-
-impl RelationGuard {
-    /// Open any relation kind for scoped inspection, releasing this lock on drop.
-    pub fn open_relation(
-        oid: pg_sys::Oid,
-        lock_mode: pg_sys::LOCKMODE,
-    ) -> Result<Self, PgError> {
-        Ok(Self {
-            rel: PgWrapper::relation_open(oid, lock_mode)?,
-            lock_mode,
-        })
-    }
-
-    /// Open a relation of any kind, retaining the lock until transaction end.
-    /// Unlike table_open, this also admits standalone composite relations,
-    /// which PostgreSQL permits as CREATE TABLE LIKE sources. The caller owns
-    /// admission of relation kinds for its operation.
-    pub fn open_relation_retain_lock(
-        oid: pg_sys::Oid,
-        lock_mode: pg_sys::LOCKMODE,
-    ) -> Result<Self, PgError> {
-        Ok(Self {
-            rel: PgWrapper::relation_open(oid, lock_mode)?,
-            lock_mode: pg_sys::NoLock as _,
-        })
-    }
-
-    /// Opens a table relation with the specified lock mode.
-    ///
-    /// PostgreSQL rejects indexes, partitioned indexes, and composite types at
-    /// this boundary.
-    pub fn open_table(
-        oid: pg_sys::Oid,
-        lock_mode: pg_sys::LOCKMODE,
-    ) -> Result<Self, PgError> {
-        let rel = PgWrapper::table_open(oid, lock_mode)?;
-        Ok(Self { rel, lock_mode })
-    }
-
-    /// Opens a table relation while retaining its lock until transaction end.
-    ///
-    /// Closing the relcache handle with `NoLock` leaves PostgreSQL's lock
-    /// manager to release the originally acquired lock at commit or abort.
-    pub fn open_table_retain_lock(
-        oid: pg_sys::Oid,
-        lock_mode: pg_sys::LOCKMODE,
-    ) -> Result<Self, PgError> {
-        let rel = PgWrapper::table_open(oid, lock_mode)?;
-        Ok(Self {
-            rel,
-            lock_mode: pg_sys::NoLock as _,
-        })
-    }
-
-    /// Get a `RelationHandle` from this guard.
-    ///
-    /// The returned handle borrows from this guard, ensuring the relation
-    /// remains open while the handle is in use.
-    #[inline]
-    pub fn as_handle(&self) -> RelationHandle<'_> {
-        unsafe { RelationHandle::from_raw(self.rel) }
-    }
-
-    /// Get the raw relation pointer.
-    #[inline]
-    pub fn as_raw(&self) -> pg_sys::Relation {
-        self.rel
-    }
-}
-
-impl Drop for RelationGuard {
-    fn drop(&mut self) {
-        unsafe { PgWrapper::relation_close(self.rel, self.lock_mode) };
     }
 }
 

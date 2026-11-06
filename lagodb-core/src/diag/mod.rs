@@ -1,7 +1,7 @@
 //! Diagnostics and PostgreSQL error bridging.
 
-pub mod elog;
-pub mod error;
+mod elog;
+mod error;
 
 pub use elog::*;
 pub use error::*;

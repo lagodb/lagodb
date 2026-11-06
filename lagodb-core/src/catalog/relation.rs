@@ -5,10 +5,10 @@ use pgrx::pg_sys::RVROption::RVR_MISSING_OK;
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{pg_guard, pg_sys};
 
-use super::{CatalogRelation, CatalogScanKey, CatalogSnapshot, search_syscache1};
+use super::lookup::range_var_get_relid_extended;
+use super::{CatalogRelation, CatalogScanKey, CatalogSnapshot};
 use crate::diag::{PgError, PgReportError, ReportableError};
-use crate::handles::RelationTablespace;
-use crate::wrapper::PgWrapper;
+use crate::handles::{RelationTablespace, search_syscache1};
 
 /// PostgreSQL's `RangeVarCallbackForRenameAttribute` is private to
 /// tablecmds.c. Keep its admission checks in this callback so callers retain
@@ -132,7 +132,7 @@ impl RenameColumnTarget {
         relation: *const pg_sys::RangeVar,
     ) -> Result<Option<Self>, PgReportError> {
         let relation_oid = unsafe {
-            PgWrapper::range_var_get_relid_extended(
+            range_var_get_relid_extended(
                 relation,
                 pg_sys::AccessExclusiveLock as pg_sys::LOCKMODE,
                 RVR_MISSING_OK,

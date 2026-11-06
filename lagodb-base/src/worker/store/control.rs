@@ -1,4 +1,4 @@
-use lagodb_core::backend_process::BackendProcess;
+use lagodb_core::backend::BackendProcess;
 use pgrx::pg_sys;
 
 use crate::worker::state::WorkerKey;

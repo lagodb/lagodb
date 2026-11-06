@@ -1,4 +1,4 @@
-use lagodb_core::backend_process::BackendProcess;
+use lagodb_core::backend::BackendProcess;
 use pgrx::{PGRXSharedMemory, pg_sys};
 
 mod coordinator;

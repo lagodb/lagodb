@@ -1,10 +1,11 @@
+//! Database identity, naming, and storage paths.
+
 use std::ffi::CStr;
 
-use pgrx::pg_sys;
+use pgrx::{PgTryBuilder, pg_sys};
 
-use super::search_syscache1;
 use crate::diag::PgError;
-use crate::wrapper::PgWrapper;
+use crate::handles::search_syscache1;
 
 /// Database catalog identity protected by a transaction-level object lock.
 ///
@@ -32,9 +33,9 @@ impl LockedDatabase {
                 return Ok(None);
             }
 
-            PgWrapper::lock_database(candidate, lockmode)?;
+            Self::lock(candidate, lockmode)?;
             if unsafe { pg_sys::get_database_oid(name.as_ptr(), true) } != candidate {
-                PgWrapper::unlock_database(candidate, lockmode);
+                Self::unlock(candidate, lockmode);
                 continue;
             }
 
@@ -42,7 +43,7 @@ impl LockedDatabase {
                 pg_sys::SysCacheIdentifier::DATABASEOID as i32,
                 pg_sys::Datum::from(u32::from(candidate) as usize),
             ) else {
-                PgWrapper::unlock_database(candidate, lockmode);
+                Self::unlock(candidate, lockmode);
                 continue;
             };
             // SAFETY: DATABASEOID returned a live pg_database tuple whose
@@ -55,6 +56,38 @@ impl LockedDatabase {
                 is_template: form.datistemplate,
                 tablespace_oid: form.dattablespace,
             }));
+        }
+    }
+
+    fn lock(
+        database_oid: pg_sys::Oid,
+        lockmode: pg_sys::LOCKMODE,
+    ) -> Result<(), PgError> {
+        unsafe {
+            PgTryBuilder::new(move || {
+                pg_sys::LockSharedObject(
+                    pg_sys::DatabaseRelationId,
+                    database_oid,
+                    0,
+                    lockmode,
+                );
+                Ok(())
+            })
+            .catch_others(|err| Err(PgError::from_caught(err)))
+            .execute()
+        }
+    }
+
+    fn unlock(database_oid: pg_sys::Oid, lockmode: pg_sys::LOCKMODE) {
+        // SAFETY: `resolve` releases the same transaction-level database
+        // object lock and mode acquired immediately before revalidation.
+        unsafe {
+            pg_sys::UnlockSharedObject(
+                pg_sys::DatabaseRelationId,
+                database_oid,
+                0,
+                lockmode,
+            );
         }
     }
 
@@ -98,5 +131,28 @@ impl LockedDatabase {
                 &mut prepared_transactions,
             )
         }
+    }
+}
+
+pub fn current_database_name_bytes() -> Vec<u8> {
+    unsafe {
+        // PostgreSQL initializes `MyDatabaseId` before extension code can
+        // run in a connected backend, so the lookup cannot return NULL.
+        let ptr = pg_sys::get_database_name(pg_sys::MyDatabaseId);
+        let name = CStr::from_ptr(ptr).to_bytes().to_vec();
+        pg_sys::pfree(ptr.cast());
+        name
+    }
+}
+
+pub fn database_path(
+    database_oid: pg_sys::Oid,
+    tablespace_oid: pg_sys::Oid,
+) -> String {
+    unsafe {
+        let ptr = pg_sys::GetDatabasePath(database_oid, tablespace_oid);
+        let path = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+        pg_sys::pfree(ptr.cast());
+        path
     }
 }

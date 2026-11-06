@@ -11,8 +11,9 @@ use pgrx::pg_sys;
 
 use crate::diag::{PgReportError, report_warning};
 use crate::resource::{ResourceHandle, forget_resource, remember_resource};
-use crate::runtime_api::{CallbackErrorReport, TableCopyCallbacks, TableProvider};
-use crate::table_provider::TableProviderRouter;
+use crate::runtime_api::{
+    CallbackErrorReport, RuntimeClient, TableCopyCallbacks, TableProvider,
+};
 
 use super::CopyError;
 
@@ -66,7 +67,7 @@ impl CopyExecution {
                 }));
         }
         let am = unsafe { (*(*relation).rd_rel).relam };
-        let provider = TableProviderRouter::provider_for_am(am)?;
+        let provider = RuntimeClient::connect()?.provider_for_am(am);
         let Some(callbacks) = provider.and_then(TableProvider::copy) else {
             self.bindings.insert(oid, None);
             return Ok(ptr::null_mut());

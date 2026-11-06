@@ -1,4 +1,4 @@
-use lagodb_core::injection_point::InjectionPoint;
+use lagodb_core::backend::InjectionPoint;
 
 /// Object-storage injection points at coarse client lifecycle boundaries.
 pub(super) struct StorageInjectionPoints;

@@ -1,4 +1,4 @@
-use lagodb_core::wait_event::ExtensionWaitEvent;
+use lagodb_core::backend::ExtensionWaitEvent;
 use pgrx::pg_sys;
 use std::sync::OnceLock;
 

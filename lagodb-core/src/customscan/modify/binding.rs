@@ -2,13 +2,12 @@
 
 use core::marker::PhantomData;
 
-use crate::access::mutation::ModifyScanBinding;
-use crate::api::TableAccessMethod;
 use crate::customscan::error::CustomScanError;
 use crate::customscan::execution::exec::provider_scan_purpose;
 use crate::customscan::execution::state::CustomScanStateWrapper;
 use crate::customscan::provider::{ScanPurpose, method_tables_for};
 use crate::handles::RelationHandle;
+use crate::table_am::{ModifyScanBinding, TableAccessMethod};
 use pgrx::pg_sys;
 
 use super::contract::LagodbCustomModifyProvider;

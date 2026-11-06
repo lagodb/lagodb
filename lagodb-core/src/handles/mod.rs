@@ -36,10 +36,12 @@ mod relation;
 #[cfg(feature = "pg16")]
 mod relation_analyze;
 mod relation_column;
+mod relation_guard;
 mod relation_name;
 mod relation_storage;
 mod relation_tablespace;
 mod scan;
+mod syscache;
 mod tuple;
 mod tuple_desc;
 
@@ -56,10 +58,11 @@ pub use partition_key::{
     PartitionKey, PartitionKeyField, PartitionKeySource, PartitionStrategy,
 };
 pub use relation::{
-    AttrWidthsHandle, BufferAccessStrategyHandle, RelFileLocator, RelationGuard,
-    RelationHandle, SnapshotHandle, VacuumParamsHandle, VarlenaHandle,
+    AttrWidthsHandle, BufferAccessStrategyHandle, RelFileLocator, RelationHandle,
+    SnapshotHandle, VacuumParamsHandle, VarlenaHandle,
 };
 pub use relation_column::RelationColumn;
+pub use relation_guard::RelationGuard;
 pub use relation_name::RelationName;
 pub use relation_tablespace::RelationTablespace;
 #[cfg(any(feature = "pg17", feature = "pg18"))]
@@ -67,6 +70,9 @@ pub use scan::{AnalyzeReadStreamHandle, AnalyzeSamplerState};
 pub use scan::{
     OwnedScanKeys, ParallelTableScanDescHandle, SampleScanStateHandle, ScanDirection,
     ScanKeyEntry, ScanKeyIter, TBMIterateResultHandle, TableScanDescHandle,
+};
+pub use syscache::{
+    SysCacheTuple, SysCacheTupleCopy, search_syscache_copy, search_syscache1,
 };
 pub use tuple::{
     HeapTupleGuard, HeapTupleRef, ItemPointer, TupleTableSlotHandle, ValidItemPointer,

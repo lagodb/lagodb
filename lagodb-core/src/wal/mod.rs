@@ -1,12 +1,13 @@
 //! Custom WAL Resource Manager Framework
 //!
-//! This module provides a safe, ergonomic API for implementing custom WAL (Write-Ahead Logging)
-//! resource managers in PostgreSQL extensions.
+//! This module provides a safe, ergonomic API for implementing custom WAL
+//! (Write-Ahead Logging) resource managers in PostgreSQL extensions.
 //!
 //! # Overview
 //!
-//! PostgreSQL's WAL system ensures durability and crash recovery. Custom Resource Managers
-//! allow extensions to integrate their own data structures into this mechanism.
+//! PostgreSQL's WAL system ensures durability and crash recovery. Custom
+//! Resource Managers allow extensions to integrate their own data structures
+//! into this mechanism.
 //! The core WAL layer supports multiple custom resource managers in one PostgreSQL
 //! process, so different table access methods can each register their own custom
 //! resource manager ID.
@@ -17,7 +18,9 @@
 //! the extension through `shared_preload_libraries`.
 //!
 //! ```rust,no_run
-//! use lagodb_core::wal::{WalResourceManager, WalRecord, RmgrId, register_wal_rmgr, WalRmgrError};
+//! use lagodb_core::wal::{
+//!     RmgrId, WalRecord, WalResourceManager, WalRmgrError, register_wal_rmgr,
+//! };
 //!
 //! const MY_RMGR_ID_U8: u8 = 128; // Custom IDs start at 128
 //! const MY_RMGR_ID: RmgrId = RmgrId::new(MY_RMGR_ID_U8);
@@ -43,6 +46,8 @@ mod checkpoint;
 mod record;
 mod rmgr;
 
+use pgrx::pg_sys;
+
 pub use checkpoint::Checkpoint;
 pub use record::{
     WalRecord, WalRecordBuilder, XLogRecPtr, buffer_flags, record_flags,
@@ -56,11 +61,15 @@ pub use rmgr::{
 ///
 /// This is equivalent to PostgreSQL's `XLogIsNeeded()` macro.
 pub fn xlog_is_needed() -> bool {
-    crate::wrapper::PgWrapper::xlog_is_needed()
+    unsafe { pg_sys::wal_level >= pg_sys::WalLevel::WAL_LEVEL_REPLICA as i32 }
 }
 
 /// True when the system is in recovery and the current recovery mode is crash
 /// recovery rather than archive or standby recovery.
 pub fn is_crash_recovery_only() -> bool {
-    crate::wrapper::PgWrapper::is_crash_recovery_only()
+    unsafe {
+        pg_sys::RecoveryInProgress()
+            && !pg_sys::ArchiveRecoveryRequested
+            && !pg_sys::StandbyMode
+    }
 }

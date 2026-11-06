@@ -2,7 +2,6 @@
 
 use arrow_array::{Int64Array, RecordBatch};
 use lagodb_arrow::{ArrowColumnDecoder, BoundBatch};
-use lagodb_core::access::mutation::ModifyScanBinding;
 use lagodb_core::prelude::*;
 use pgrx::pg_sys;
 

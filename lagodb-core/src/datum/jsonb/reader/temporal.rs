@@ -11,10 +11,11 @@ use pgrx::pg_sys::{self, Datum};
 use crate::datum::{JsonValueError, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
 
 unsafe extern "C-unwind" {
-    // As in datum/numeric.rs and wrapper/json.rs, DirectFunctionCall requires
-    // native C entry points; pg_sys exposes guarded Rust functions. PG supplies
-    // the stack call frame, so do not replace this with pgrx's allocating
-    // direct_function_call_as_datum or a second implementation of LOCAL_FCINFO.
+    // As in datum/numeric.rs and datum/jsonb/builder/numeric.rs,
+    // DirectFunctionCall requires native C entry points; pg_sys exposes guarded
+    // Rust functions. PG supplies the stack call frame, so do not replace this
+    // with pgrx's allocating direct_function_call_as_datum or a second
+    // implementation of LOCAL_FCINFO.
     #[link_name = "date_in"]
     fn pg_date_in(fcinfo: pg_sys::FunctionCallInfo) -> Datum;
     #[link_name = "time_in"]

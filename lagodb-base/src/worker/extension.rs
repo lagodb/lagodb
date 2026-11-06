@@ -5,7 +5,7 @@ use pgrx::prelude::*;
 
 use crate::worker::state::WorkerKey;
 
-use lagodb_core::backend_process::BackendProcess;
+use lagodb_core::backend::BackendProcess;
 use lagodb_core::diag::{PgReportError, log_info, report_warning};
 use lagodb_core::extension_worker::{
     WorkerContextRaw, WorkerSchedule, WorkerTransaction,

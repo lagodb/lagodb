@@ -11,10 +11,9 @@ use pgrx::{AnyNumeric, FromDatum, IntoDatum, PgBuiltInOids, PgOid, datum::Uuid};
 use std::ffi::CStr;
 use std::fmt;
 
-use crate::wrapper::PgOutputCString;
-
 use super::error::DatumConversionError;
 use super::json::{JsonText, JsonbValue};
+use super::output_cstring::PgOutputCString;
 
 /// A non-owning view into UTF-8 string data.
 ///

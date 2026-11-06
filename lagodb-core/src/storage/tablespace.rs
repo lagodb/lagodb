@@ -8,14 +8,13 @@ use std::slice;
 use std::sync::Once;
 
 use pgrx::prelude::PgSqlErrorCode;
-use pgrx::{PgMemoryContexts, pg_sys};
+use pgrx::{PgMemoryContexts, pg_guard, pg_sys};
 
 use super::volume::{StorageVolumeId, StorageVolumeRoute};
 use crate::diag::{PgReportError, SqlStateError};
 use crate::runtime_api::{
     RuntimeApiError, RuntimeClient, TablespaceBindingEntry, TablespaceBindingsOutput,
 };
-use crate::wrapper::CacheRegisterSyscacheCallback;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TablespaceStorageError {
@@ -184,7 +183,7 @@ impl TablespaceStorage {
         }
         // SAFETY: PG retains this static callback for the backend lifetime.
         INIT.call_once(|| unsafe {
-            CacheRegisterSyscacheCallback(
+            pg_sys::CacheRegisterSyscacheCallback(
                 pg_sys::SysCacheIdentifier::TABLESPACEOID as i32,
                 Some(Self::invalidate_cache),
                 0.into(),
@@ -232,7 +231,8 @@ impl TablespaceStorage {
         message
     }
 
-    unsafe extern "C" fn invalidate_cache(
+    #[pg_guard]
+    unsafe extern "C-unwind" fn invalidate_cache(
         _arg: pg_sys::Datum,
         _cacheid: c_int,
         _hashvalue: u32,

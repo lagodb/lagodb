@@ -8,7 +8,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use lagodb_core::backend_process::BackendProcess;
+use lagodb_core::backend::BackendProcess;
 use lagodb_core::diag::PgReportError;
 use lagodb_core::query_contract::TableScanRoute;
 use lagodb_query::datafusion::{

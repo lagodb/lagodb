@@ -3,6 +3,7 @@
 mod callbacks;
 mod context;
 mod contract;
+mod copy_decoder;
 mod error;
 mod executor;
 mod explain;
@@ -27,6 +28,7 @@ pub use context::{
     PathVariantKind, Relids,
 };
 pub use contract::FdwScan;
+pub use copy_decoder::{CopyDocumentSource, CopyFromScan};
 pub use error::{ForeignScanError, ForeignScanPhase};
 pub use path_builder::ForeignPathBuilder;
 pub use pathkeys::{ForeignPathKey, ForeignPathKeys};

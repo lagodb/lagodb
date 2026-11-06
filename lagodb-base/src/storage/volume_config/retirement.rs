@@ -2,8 +2,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::runtime_is_preloaded;
-use lagodb_core::catalog::search_syscache1;
 use lagodb_core::diag::{PgReportError, SqlStateError, report_warning};
+use lagodb_core::handles::search_syscache1;
 use lagodb_core::storage::volume::StorageVolumeId;
 use lagodb_core::transaction::{self, TransactionResource, TransactionResult};
 use pgrx::pg_sys;

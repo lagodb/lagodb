@@ -1,4 +1,4 @@
-use lagodb_core::injection_point::InjectionPoint;
+use lagodb_core::backend::InjectionPoint;
 
 /// Iceberg maintenance injection points at transactionally meaningful edges.
 pub(super) struct IcebergInjectionPoints;

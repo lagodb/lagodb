@@ -1,6 +1,6 @@
 //! Storage-service injection points.
 
-use crate::injection_point::InjectionPoint;
+use crate::backend::InjectionPoint;
 
 /// Storage-client injection points at coarse foreground lifecycle boundaries.
 pub(super) struct StorageServiceInjectionPoints;

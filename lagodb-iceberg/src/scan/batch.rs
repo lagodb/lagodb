@@ -8,11 +8,10 @@ use iceberg_lite::metadata_columns::{
 };
 use iceberg_lite::scan::ArrowRecordBatchIterator;
 use lagodb_arrow::ArrowBatchSource;
-use lagodb_core::prelude::*;
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use pgrx::pg_sys;
 
-use crate::error::IcebergError;
+use crate::error::{IcebergError, IcebergResult};
 
 /// Adapts Iceberg's batch iterator to the format-neutral conversion source.
 ///
@@ -56,7 +55,7 @@ pub(crate) struct RowLocationLayout {
 }
 
 impl RowLocationLayout {
-    pub(crate) fn try_new(batch: &RecordBatch) -> AmResult<Self> {
+    pub(crate) fn try_new(batch: &RecordBatch) -> IcebergResult<Self> {
         let mut file_index = None;
         let mut position_index = None;
         for (index, field) in batch.schema().fields().iter().enumerate() {
@@ -102,7 +101,7 @@ impl RowLocationLayout {
     pub(crate) unsafe fn bind<'a>(
         self,
         batch: &'a RecordBatch,
-    ) -> AmResult<Option<BoundRowLocations<'a>>> {
+    ) -> IcebergResult<Option<BoundRowLocations<'a>>> {
         let file_array = batch.column(self.file_index);
         let files = file_array
             .as_any()

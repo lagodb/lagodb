@@ -1,4 +1,4 @@
-use lagodb_core::access::mutation;
+use lagodb_core::fdw;
 use pgrx::prelude::*;
 
 mod config;
@@ -30,7 +30,7 @@ extern "C-unwind" fn _PG_init() {
     // Iceberg foreign-table writes request the original COPY CID. Register
     // their command lifecycle before hooks are published; AM drivers own
     // their sessions and pass the executor CID explicitly.
-    mutation::init_lifecycle_hooks();
+    fdw::register_copy_command_lifecycle();
     managed_table::initialize_configuration_and_hooks();
     foreign_table::register();
     // Stage both PostgreSQL scan adapters and the shared query-offload facet

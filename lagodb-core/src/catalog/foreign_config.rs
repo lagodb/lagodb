@@ -3,9 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::os::raw::c_int;
 
-use pgrx::pg_sys;
-
-use crate::wrapper::CacheRegisterSyscacheCallback;
+use pgrx::{pg_guard, pg_sys};
 
 /// One foreign-server or user-mapping syscache invalidation.
 #[derive(Clone, Copy, Debug)]
@@ -90,12 +88,12 @@ fn initialize_callbacks() {
         // SAFETY: the callback has PostgreSQL's syscache ABI and remains loaded
         // for the backend lifetime. It only dispatches backend-local state.
         unsafe {
-            CacheRegisterSyscacheCallback(
+            pg_sys::CacheRegisterSyscacheCallback(
                 pg_sys::SysCacheIdentifier::FOREIGNSERVEROID as i32,
                 Some(foreign_config_invalidation_callback),
                 0.into(),
             );
-            CacheRegisterSyscacheCallback(
+            pg_sys::CacheRegisterSyscacheCallback(
                 pg_sys::SysCacheIdentifier::USERMAPPINGUSERSERVER as i32,
                 Some(foreign_config_invalidation_callback),
                 0.into(),
@@ -105,7 +103,8 @@ fn initialize_callbacks() {
     });
 }
 
-unsafe extern "C" fn foreign_config_invalidation_callback(
+#[pg_guard]
+unsafe extern "C-unwind" fn foreign_config_invalidation_callback(
     _arg: pg_sys::Datum,
     cache_id: c_int,
     hashvalue: u32,

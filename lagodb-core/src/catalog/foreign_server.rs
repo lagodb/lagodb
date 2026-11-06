@@ -1,9 +1,8 @@
 use std::ffi::CStr;
 
-use pgrx::pg_sys;
+use pgrx::{PgTryBuilder, pg_sys};
 
-use crate::diag::PgReportError;
-use crate::wrapper::PgWrapper;
+use crate::diag::{PgError, PgReportError};
 
 /// Existing foreign-server target admitted for provider ALTER policy checks.
 ///
@@ -17,9 +16,30 @@ pub struct ForeignServerDdlTarget {
 
 impl ForeignServerDdlTarget {
     pub fn resolve(name: &CStr) -> Result<Option<Self>, PgReportError> {
-        PgWrapper::resolve_owned_foreign_server(name)
-            .map(|target| target.map(|oid| Self { oid }))
-            .map_err(PgReportError::from_pg_error)
+        let name = name.as_ptr();
+        unsafe {
+            PgTryBuilder::new(move || {
+                let server_oid = pg_sys::get_foreign_server_oid(name, true);
+                if server_oid == pg_sys::InvalidOid {
+                    return Ok(None);
+                }
+                if !pg_sys::object_ownercheck(
+                    pg_sys::ForeignServerRelationId,
+                    server_oid,
+                    pg_sys::GetUserId(),
+                ) {
+                    pg_sys::aclcheck_error(
+                        pg_sys::AclResult::ACLCHECK_NOT_OWNER,
+                        pg_sys::ObjectType::OBJECT_FOREIGN_SERVER,
+                        name,
+                    );
+                }
+                Ok(Some(Self { oid: server_oid }))
+            })
+            .catch_others(|error| Err(PgError::from_caught(error)))
+            .execute()
+        }
+        .map_err(PgReportError::from_pg_error)
     }
 
     #[inline]

@@ -2,7 +2,7 @@
 //!
 //! Keep shared engine and AM business logic on [`IcebergResult<T>`] and
 //! [`IcebergError`]. The PostgreSQL table-AM callback boundary returns
-//! `lagodb_core::api::AmResult<T>`, which owns a PostgreSQL
+//! `lagodb_core::table_am::AmResult<T>`, which owns a PostgreSQL
 //! `ErrorReport` through a small error handle.
 //! The bridge is the `From<IcebergError> for ErrorReport` implementation in
 //! this file, so callback methods can use normal `?` propagation.

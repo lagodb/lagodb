@@ -8,10 +8,9 @@ use super::{
     TableMaintenanceStats,
 };
 use crate::runtime_api::{
-    CallbackErrorReport, MaintenanceReport, MaintenanceRequest, MaintenanceStats,
+    CallbackErrorReport, MaintenanceReport, MaintenanceStats, RuntimeClient,
     TableProvider,
 };
-use crate::table_provider::TableProviderRouter;
 
 pub struct TableMaintenanceRequest<'a> {
     pub relation: &'a RelationHandle<'a>,
@@ -27,8 +26,9 @@ impl TableMaintenanceRouter {
     fn provider_for_am(
         access_method_oid: pg_sys::Oid,
     ) -> Result<&'static TableProvider, TableMaintenanceError> {
-        TableProviderRouter::provider_for_am(access_method_oid)
+        RuntimeClient::connect()
             .map_err(|error| TableMaintenanceError::framework(error.to_string()))?
+            .provider_for_am(access_method_oid)
             .ok_or_else(|| {
                 TableMaintenanceError::framework(format!(
                     "no table-maintenance provider is registered for access method OID {access_method_oid}"
@@ -40,13 +40,7 @@ impl TableMaintenanceRouter {
         request: TableMaintenanceRequest<'_>,
     ) -> Result<TableMaintenanceReport, TableMaintenanceError> {
         let provider = Self::provider_for_am(request.relation.access_method_oid())?;
-        let wire_request = MaintenanceRequest::new(
-            request.relation.as_raw(),
-            request.mode,
-            request.options,
-            request.budget,
-            request.command_time,
-        );
+        let wire_request = request.to_wire();
         let mut report = MaintenanceReport::default();
         let mut error = CallbackErrorReport::default();
         // SAFETY: registration validated this exact-build callback. The locked
@@ -78,6 +72,6 @@ impl TableMaintenanceRouter {
         };
         // SAFETY: the callback's PostgreSQL-owned payload is still live here.
         unsafe { error.into_result(status, "inspect_maintenance") }?;
-        Ok(stats.into_stats(name))
+        Ok(TableMaintenanceStats::from_wire(&stats, name))
     }
 }

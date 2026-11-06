@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::runtime_api::RuntimeMaintenanceConfig;
+use crate::runtime_api::{RuntimeClient, RuntimeMaintenanceConfig};
 
 /// Runtime-backed settings shared by physical object cleanup and logical
 /// table maintenance.
@@ -22,7 +22,7 @@ pub(crate) struct VacuumBudgetSettings {
 
 impl MaintenanceSettings {
     pub(crate) fn load() -> Self {
-        let config = crate::runtime_api::RuntimeClient::connect()
+        let config = RuntimeClient::connect()
             .unwrap_or_else(|error| {
                 panic!("cannot read maintenance settings: {error}")
             })

@@ -69,13 +69,18 @@ thread_local! {
         const { RefCell::new(Vec::new()) };
 }
 
-pub(super) struct SourceGuard<'a> {
+pub(crate) struct SourceGuard<'a> {
     source: SourcePointer,
     _lifetime: PhantomData<&'a mut dyn CopyDataSource>,
 }
 
 impl<'a> SourceGuard<'a> {
-    pub(super) fn new(source: &'a mut dyn CopyDataSource) -> Self {
+    /// The native COPY source callback that reads from the active guard.
+    pub(crate) const fn callback() -> pg_sys::copy_data_source_cb {
+        Some(copy_source_callback)
+    }
+
+    pub(crate) fn new(source: &'a mut dyn CopyDataSource) -> Self {
         // SAFETY: PostgreSQL's callback ABI has no user-data pointer, so the
         // binding erases the borrow lifetime. PhantomData retains the exclusive
         // borrow; with_active lends this pointer only during a synchronous call.
@@ -94,7 +99,7 @@ impl<'a> SourceGuard<'a> {
     /// errors must be caught inside `call` before control returns to Rust.
     /// Nested parser/COPY invocations restore the caller's source on return,
     /// including Rust unwinding; inactive parsers retain no TLS entry.
-    pub(super) fn with_active<T>(&mut self, call: impl FnOnce() -> T) -> T {
+    pub(crate) fn with_active<T>(&mut self, call: impl FnOnce() -> T) -> T {
         let previous = ACTIVE_SOURCE.replace(Some(self.source));
         let _activation = SourceActivation(previous);
         call()
@@ -116,6 +121,11 @@ pub(super) struct DestinationGuard<'a> {
 }
 
 impl<'a> DestinationGuard<'a> {
+    /// The native COPY destination callback that writes to the innermost guard.
+    pub(super) const fn callback() -> pg_sys::copy_data_dest_cb {
+        Some(copy_destination_callback)
+    }
+
     pub(super) fn install(destination: &'a mut dyn CopyDataDestination) -> Self {
         // SAFETY: this erases only the trait object's borrow lifetime. The
         // guard retains the exclusive borrow and removes the pointer on Drop;
@@ -164,14 +174,6 @@ impl Drop for DestinationGuard<'_> {
             unsafe { (&mut *self.destination).abort() };
         }
     }
-}
-
-pub(super) const fn source_callback() -> pg_sys::copy_data_source_cb {
-    Some(copy_source_callback)
-}
-
-pub(super) const fn destination_callback() -> pg_sys::copy_data_dest_cb {
-    Some(copy_destination_callback)
 }
 
 pub(super) fn report(error: CopyError) -> ! {

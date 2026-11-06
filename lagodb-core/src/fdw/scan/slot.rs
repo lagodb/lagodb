@@ -359,7 +359,7 @@ impl<'a> ScanSlotWriter<'a> {
     /// The caller must use the returned arrays only for the current validated
     /// scan slot and must call [`Self::store_copy_input`] exactly once when
     /// PostgreSQL reports a row.
-    pub(crate) unsafe fn prepare_copy_input(
+    pub(super) unsafe fn prepare_copy_input(
         &mut self,
     ) -> (*mut pg_sys::Datum, *mut bool) {
         unsafe { self.begin_datum_output() };
@@ -372,7 +372,7 @@ impl<'a> ScanSlotWriter<'a> {
     ///
     /// [`Self::prepare_copy_input`] must have been called for this row and the
     /// arrays must contain a complete relation-shaped COPY result.
-    pub(crate) unsafe fn store_copy_input(&mut self) {
+    pub(super) unsafe fn store_copy_input(&mut self) {
         unsafe { pg_sys::ExecStoreVirtualTuple(self.slot) };
         self.stored = true;
     }

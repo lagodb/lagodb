@@ -6,15 +6,15 @@ use std::ptr::NonNull;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
-use crate::access::mutation::{ModifyScanBinding, RelationTriggerPolicy};
-use crate::api::{
-    AmModifyState, AmResult, ModifyActions, ModifyQueryState, ModifyStateContext,
-    MutationDeleteContext, MutationOutcome, MutationUpdateContext,
-    MutationWriteContext, TableAccessMethod,
-};
 use crate::customscan::modify::LagodbCustomModifyProvider;
 use crate::diag::PgReportError;
 use crate::handles::{ItemPointer, RelationHandle};
+use crate::table_am::{
+    AmModifyState, AmResult, ModifyActions, ModifyQueryState, ModifyScanBinding,
+    ModifyStateContext, MutationDeleteContext, MutationOutcome,
+    MutationUpdateContext, MutationWriteContext, RelationTriggerPolicy,
+    TableAccessMethod,
+};
 use crate::tuple::TupleSlotRow;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

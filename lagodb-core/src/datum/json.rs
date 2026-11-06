@@ -6,21 +6,21 @@
 
 mod object_encoder;
 
-use std::ffi::{CString, NulError, c_void};
+use std::ffi::{CString, NulError, c_char, c_void};
 use std::fmt;
 use std::mem::size_of;
 
-use pgrx::PgTryBuilder;
 use pgrx::pg_sys::{self, Datum};
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::varlena;
+use pgrx::{PgTryBuilder, fcinfo};
 use thiserror::Error;
 
 use crate::diag::{PgError, SqlStateError};
-use crate::wrapper::{PgOutputCString, PgWrapper};
 
 use super::encoding::Utf8ServerEncoding;
 use super::error::{DatumConversionError, Utf8ServerEncodingError};
+use super::output_cstring::PgOutputCString;
 use super::varlena::DetoastedVarlena;
 
 pub use object_encoder::{BoundJsonObjectEncoder, JsonDatumEncoder};
@@ -122,6 +122,27 @@ impl From<Utf8ServerEncodingError> for JsonValueError {
 }
 
 impl JsonText {
+    /// Call PostgreSQL's validating `json_in` input function for a
+    /// NUL-terminated string.
+    ///
+    /// This parses the input. PG errors unwind to the enclosing operation or
+    /// provider/FFI boundary; array/composite leaves do not catch individually.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to a live NUL-terminated string for the duration of
+    /// the PostgreSQL call.
+    pub(crate) unsafe fn input_from_cstr(ptr: *const c_char) -> Option<Datum> {
+        // SAFETY: the caller keeps the NUL-terminated input live. pgrx's PG
+        // binding translates PG ERROR into unwinding through Rust frames.
+        unsafe {
+            fcinfo::direct_function_call_as_datum(
+                pg_sys::json_in,
+                &[Some(Datum::from(ptr))],
+            )
+        }
+    }
+
     /// Validate and own JSON text through PostgreSQL's `json_in` function.
     pub fn parse(text: &str) -> Result<Self, JsonValueError> {
         Utf8ServerEncoding::resolve()?;
@@ -130,7 +151,7 @@ impl JsonText {
         // the enclosing row/FFI boundary catch PG errors instead.
         let datum = PgTryBuilder::new(|| {
             // SAFETY: input is NUL-terminated and lives through the PG call.
-            Ok(unsafe { PgWrapper::json_input_from_cstr(input.as_ptr()) })
+            Ok(unsafe { Self::input_from_cstr(input.as_ptr()) })
         })
         .catch_others(|error| Err(PgError::from(error)))
         .execute()?
@@ -219,6 +240,25 @@ impl fmt::Display for JsonText {
 }
 
 impl JsonbValue {
+    /// Call PostgreSQL's validating `jsonb_in` input function for a
+    /// NUL-terminated string.
+    /// PG errors unwind to the enclosing operation or provider/FFI boundary.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to a live NUL-terminated string for the duration of
+    /// the PostgreSQL call.
+    pub(crate) unsafe fn input_from_cstr(ptr: *const c_char) -> Option<Datum> {
+        // SAFETY: the caller keeps the NUL-terminated input live. pgrx's PG
+        // binding translates PG ERROR into unwinding through Rust frames.
+        unsafe {
+            fcinfo::direct_function_call_as_datum(
+                pg_sys::jsonb_in,
+                &[Some(Datum::from(ptr))],
+            )
+        }
+    }
+
     /// Validate JSON text and normalize it through PostgreSQL's JSONB input
     /// and output functions.
     pub fn parse(text: &str) -> Result<Self, JsonValueError> {
@@ -228,7 +268,7 @@ impl JsonbValue {
         // catch in the shared input wrapper used by row decoding.
         let datum = PgTryBuilder::new(|| {
             // SAFETY: input is NUL-terminated and lives through the PG call.
-            Ok(unsafe { PgWrapper::jsonb_input_from_cstr(input.as_ptr()) })
+            Ok(unsafe { Self::input_from_cstr(input.as_ptr()) })
         })
         .catch_others(|error| Err(PgError::from(error)))
         .execute()?
@@ -300,7 +340,7 @@ impl JsonbValue {
     pub(crate) unsafe fn to_datum_checked(&self) -> Result<Option<Datum>, PgError> {
         let input = CString::new(self.as_str()).map_err(PgError::from)?;
         // SAFETY: input is NUL-terminated and lives through the PG call.
-        Ok(unsafe { PgWrapper::jsonb_input_from_cstr(input.as_ptr()) })
+        Ok(unsafe { Self::input_from_cstr(input.as_ptr()) })
     }
 }
 

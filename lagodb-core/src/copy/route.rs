@@ -7,7 +7,7 @@ use pgrx::{PgSqlErrorCode, pg_sys};
 use crate::catalog::RelationCatalogEntry;
 use crate::diag::PgReportError;
 use crate::handles::RelationHandle;
-use crate::table_provider::TableProviderRouter;
+use crate::runtime_api::RuntimeClient;
 
 use super::{CopyError, CopyFromPreparation, CopyStatement};
 
@@ -47,7 +47,8 @@ impl<'statement> CopyTargetProbe<'statement> {
         if relkind != pg_sys::RELKIND_RELATION {
             return Ok(false);
         }
-        Ok(TableProviderRouter::provider_for_am(access_method)?
+        Ok(RuntimeClient::connect()?
+            .provider_for_am(access_method)
             .is_some_and(|provider| provider.copy().is_some()))
     }
 

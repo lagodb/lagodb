@@ -66,6 +66,11 @@ pub(super) struct TypedSourceGuard<'a> {
 }
 
 impl<'a> TypedSourceGuard<'a> {
+    /// The derived executor's source callback for an installed guard context.
+    pub(super) const fn callback() -> super::pg::TypedCopySourceCallback {
+        typed_source_callback
+    }
+
     pub(super) fn install(
         source: &'a mut dyn CopyDatumSource,
         layout: CopyColumnLayout,
@@ -120,6 +125,11 @@ pub(super) struct TypedDestinationGuard<'a> {
 }
 
 impl<'a> TypedDestinationGuard<'a> {
+    /// The derived executor's destination callback for an installed guard context.
+    pub(super) const fn callback() -> super::pg::TypedCopyDestinationCallback {
+        typed_destination_callback
+    }
+
     pub(super) fn install(
         destination: &'a mut dyn CopyTupleDestination,
         layout: CopyColumnLayout,
@@ -168,15 +178,6 @@ impl Drop for TypedDestinationGuard<'_> {
             unsafe { (&mut *self.context.destination).abort() };
         }
     }
-}
-
-pub(super) const fn source_callback() -> super::pg::TypedCopySourceCallback {
-    typed_source_callback
-}
-
-pub(super) const fn destination_callback() -> super::pg::TypedCopyDestinationCallback
-{
-    typed_destination_callback
 }
 
 #[pg_guard]

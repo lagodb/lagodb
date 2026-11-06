@@ -1,11 +1,11 @@
 //! PostgreSQL 16 ANALYZE sample budget for table access methods.
 
-use pgrx::{PgSqlErrorCode, pg_sys};
+use std::panic::AssertUnwindSafe;
 
-use super::RelationHandle;
-use crate::catalog::search_syscache1;
-use crate::diag::PgReportError;
-use crate::wrapper::PgWrapper;
+use pgrx::{PgSqlErrorCode, PgTryBuilder, pg_sys};
+
+use super::{RelationHandle, search_syscache1};
+use crate::diag::{PgError, PgReportError};
 
 /// `std_typanalyze()` sets `minrows` to this multiple of the statistics target.
 const ROWS_PER_STATISTICS_TARGET: u64 = 300;
@@ -43,9 +43,7 @@ impl RelationHandle<'_> {
             .max()
             .unwrap_or(0);
 
-        for statistics_oid in
-            unsafe { PgWrapper::relation_stat_ext_oids(self.as_raw())? }
-        {
+        for statistics_oid in self.stat_ext_oids()? {
             // ANALYZE's ShareUpdateExclusiveLock excludes DROP STATISTICS, so
             // every OID in the relcache list has a catalog row.
             let tuple = search_syscache1(
@@ -89,5 +87,25 @@ impl RelationHandle<'_> {
             max_target = max_target.max(target);
         }
         Ok((ROWS_PER_STATISTICS_TARGET * max_target as u64).max(MIN_SAMPLE_ROWS))
+    }
+
+    /// The extended-statistics object OIDs cached for this relation.
+    fn stat_ext_oids(&self) -> Result<Vec<pg_sys::Oid>, PgError> {
+        let relation = AssertUnwindSafe(self.as_raw());
+        // SAFETY: this handle keeps the relcache entry live for the call.
+        unsafe {
+            PgTryBuilder::new(move || {
+                let statistics = pg_sys::RelationGetStatExtList(*relation);
+                let len = pg_sys::list_length(statistics);
+                let mut result = Vec::with_capacity(len as usize);
+                for index in 0..len {
+                    result.push(pg_sys::list_nth_oid(statistics, index));
+                }
+                pg_sys::list_free(statistics);
+                Ok(result)
+            })
+            .catch_others(|err| Err(PgError::from_caught(err)))
+            .execute()
+        }
     }
 }

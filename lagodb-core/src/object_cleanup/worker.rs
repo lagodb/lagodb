@@ -12,9 +12,9 @@ use super::actor::{ActorResult, ActorRuntimeConfig, ObjectCleanupActorPool};
 use super::item::{ObjectCleanupItem, ObjectCleanupItemId};
 use super::repository::{ObjectCleanupRepository, QueuePoll};
 use super::runner::ObjectCleanupExecutionOutcome;
+use crate::backend::BackendLatch;
 use crate::extension_worker::{WorkerContext, WorkerSchedule, WorkerTransaction};
 use crate::maintenance_config::MaintenanceSettings;
-use crate::pg_latch::BackendLatch;
 use crate::storage::service::StorageEndpoint;
 
 const RESULT_PERSISTENCE_RETRY: Duration = Duration::from_secs(5);

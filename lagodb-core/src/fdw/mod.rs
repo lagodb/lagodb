@@ -33,7 +33,7 @@ pub use modify::{
     ForeignModifyPlanContext, ForeignModifyPlanSpec, ForeignModifyPrivate,
     ForeignModifyRelationContext, ForeignModifyState, ForeignReturnedIdentity,
     ForeignRowIdentity, ForeignRowIdentityKind, ForeignUpdateTargetContext,
-    ModifyPlanSlot, ModifySlot,
+    ModifyPlanSlot, ModifySlot, register_copy_command_lifecycle,
 };
 pub use provider::ForeignDataWrapper;
 pub use routine::{
@@ -42,15 +42,15 @@ pub use routine::{
 };
 pub use row_identity::{ForeignRowIdentityError, ForeignRowIdentityRequirement};
 pub use scan::{
-    BeginForeignScanContext, ColumnRequirements, FdwScan, ForeignExpressionValue,
-    ForeignExprs, ForeignFilterExplainValues, ForeignPathBuilder, ForeignPathContext,
-    ForeignPathKey, ForeignPathKeys, ForeignPathSpec, ForeignPlanContext,
-    ForeignPlanFilter, ForeignPlanFilters, ForeignPlanPrivate,
-    ForeignPlanQualLocation, ForeignPlanSpec, ForeignRelContext, ForeignRelSize,
-    ForeignRelSizeContext, ForeignScanError, ForeignScanPhase, ForeignScanResult,
-    PathVariantKind, ReScanForeignScanContext, Relids, RuntimeExpressionValues,
-    ScanDatumWriter, ScanOutputColumn, ScanProjection, ScanProjectionPolicy,
-    ScanSlotWriter, StartForeignScanContext,
+    BeginForeignScanContext, ColumnRequirements, CopyDocumentSource, CopyFromScan,
+    FdwScan, ForeignExpressionValue, ForeignExprs, ForeignFilterExplainValues,
+    ForeignPathBuilder, ForeignPathContext, ForeignPathKey, ForeignPathKeys,
+    ForeignPathSpec, ForeignPlanContext, ForeignPlanFilter, ForeignPlanFilters,
+    ForeignPlanPrivate, ForeignPlanQualLocation, ForeignPlanSpec, ForeignRelContext,
+    ForeignRelSize, ForeignRelSizeContext, ForeignScanError, ForeignScanPhase,
+    ForeignScanResult, PathVariantKind, ReScanForeignScanContext, Relids,
+    RuntimeExpressionValues, ScanDatumWriter, ScanOutputColumn, ScanProjection,
+    ScanProjectionPolicy, ScanSlotWriter, StartForeignScanContext,
 };
 pub use validation::ForeignValidationError;
 

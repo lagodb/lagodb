@@ -9,7 +9,6 @@ mod pg_test;
 
 use core::ffi::CStr;
 
-use lagodb_core::access::mutation::ModifyScanBinding;
 use lagodb_core::customscan::modify::{
     LagodbCustomModifyProvider, ModifyBindContext, ModifyCapabilities,
     PreparedModifyScan, register_provider as register_modify_provider,
@@ -28,6 +27,7 @@ use lagodb_core::expr::pushdown::{
 use lagodb_core::handles::{RelationHandle, SnapshotHandle};
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 use lagodb_core::runtime_api::TableScanTaskMetrics;
+use lagodb_core::table_am::ModifyScanBinding;
 use pgrx::pg_sys;
 
 use crate::error::IcebergError;

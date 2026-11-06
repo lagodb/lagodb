@@ -3,9 +3,9 @@
 use std::rc::Rc;
 
 use arrow_array::RecordBatch;
-use lagodb_core::api::AmResult;
 use lagodb_core::batch::BatchRowDecoder;
 use lagodb_core::datum::ColumnDatumTarget;
+use lagodb_core::diag::PgReportError;
 use lagodb_core::tuple::SlotDatumWriter;
 use pgrx::pg_sys;
 
@@ -157,7 +157,7 @@ impl ArrowColumnDecoder {
     pub unsafe fn bind_batch_unchecked(
         &self,
         batch: RecordBatch,
-    ) -> AmResult<BoundBatch> {
+    ) -> Result<BoundBatch, PgReportError> {
         // SAFETY: this adapter preserves the producer contract below.
         Ok(unsafe { self.bind_datums_unchecked(batch) }?)
     }
@@ -226,7 +226,7 @@ impl ArrowColumnDecoder {
         bound: &BoundBatch,
         row_idx: usize,
         out: &mut SlotDatumWriter<'_>,
-    ) -> AmResult<()> {
+    ) -> Result<(), PgReportError> {
         Ok(unsafe { bound.write_row_unchecked(row_idx, out) }?)
     }
 }
@@ -241,7 +241,7 @@ impl BatchRowDecoder for ArrowColumnDecoder {
     /// where downcasts alone cannot establish scale or UUID width. Type drift
     /// surfaces as a clean
     /// [`ArrowConversionError::ArrowTypeMismatch`] at the batch boundary.
-    fn bind(&self, batch: RecordBatch) -> AmResult<BoundBatch> {
+    fn bind(&self, batch: RecordBatch) -> Result<BoundBatch, PgReportError> {
         for col in self.columns.iter() {
             let array = batch.columns().get(col.src_col).ok_or_else(|| {
                 ArrowConversionError::ArrowTypeMismatch(
@@ -290,7 +290,7 @@ impl BatchRowDecoder for ArrowColumnDecoder {
         bound: &BoundBatch,
         row_idx: usize,
         out: &mut SlotDatumWriter<'_>,
-    ) -> AmResult<()> {
+    ) -> Result<(), PgReportError> {
         if row_idx >= bound.num_rows {
             return Err(ArrowConversionError::InvariantViolated(
                 "batch row index is out of bounds",

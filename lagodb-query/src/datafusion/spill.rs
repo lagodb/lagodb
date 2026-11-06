@@ -18,9 +18,8 @@ use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::disk_manager::DiskManagerBuilder;
 use datafusion::execution::{SpillFile, SpillWriter, TempFileFactory};
 use futures::Stream;
-use lagodb_core::backend_process::BackendProcess;
+use lagodb_core::backend::{BackendProcess, PgTempFile};
 use lagodb_core::diag::PgReportError;
-use lagodb_core::temp_file::PgTempFile;
 use pgrx::pg_sys;
 
 use super::error::QueryExecutionError;
