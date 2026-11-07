@@ -40,12 +40,28 @@ impl PreparedModifySeqScan {
         let relation = ScanRelation::from_relation(relation)?;
         let snapshot = ManagedTableReadView::for_snapshot(relation.oid, snapshot)?
             .into_read_snapshot()?;
-        let mut prepared = match needed_columns {
-            NeededColumns::All => PreparedRowScan::full(
-                snapshot,
-                ScanPredicates::unfiltered(),
-                &relation.layout,
-            )?,
+        let schema_id = snapshot.schema().schema_id();
+        // PostgreSQL SeqScan supplies no quals to TableAM. ModifyTable's explicit
+        // channel binds constants and external parameters for this execution.
+        // Both remain valid across rescans and serve pruning and reader filtering,
+        // except a set, which only prunes files.
+        // PG intentionally retains even exact quals for native SeqScan's EPQ
+        // contract (see LagodbCustomModifyProvider::prepare_modify_seq_scan).
+        // Reader filtering reduces rows sent through Datum conversion and PG
+        // qualification; repeated evaluation on surviving rows alone is not
+        // evidence that disabling reader filtering would improve performance.
+        let predicates = ScanPredicates::new(
+            StablePruningPredicate::new(BoundIcebergPredicate::conjoin(
+                filters.rescan_stable(),
+            )),
+            ReaderPredicate::new(BoundIcebergPredicate::conjoin_row_filter(
+                filters.rescan_stable(),
+            )),
+        );
+        let prepared = match needed_columns {
+            NeededColumns::All => {
+                PreparedRowScan::full(snapshot, predicates, &relation.layout)?
+            }
             NeededColumns::Subset(attnos) => {
                 // Native SeqScan keeps the full relation descriptor. Prune
                 // storage columns without compacting their slot destinations.
@@ -60,30 +76,15 @@ impl PreparedModifySeqScan {
                 PreparedRowScan::projected(
                     snapshot,
                     projection,
-                    ScanPredicates::unfiltered(),
+                    predicates,
                     &relation.layout,
                     relation.layout.attr_types(),
                 )?
             }
         };
-        BoundIcebergPredicate::validate_schema(filters.iter(), prepared.schema_id())?;
-        // PostgreSQL SeqScan supplies no quals to TableAM. ModifyTable's explicit
-        // channel binds constants and external parameters for this execution.
-        // Both remain valid across rescans and serve pruning and reader filtering,
-        // except a set, which only prunes files.
-        // PG intentionally retains even exact quals for native SeqScan's EPQ
-        // contract (see LagodbCustomModifyProvider::prepare_modify_seq_scan).
-        // Reader filtering reduces rows sent through Datum conversion and PG
-        // qualification; repeated evaluation on surviving rows alone is not
-        // evidence that disabling reader filtering would improve performance.
-        prepared.replace_predicates(ScanPredicates::new(
-            StablePruningPredicate::new(BoundIcebergPredicate::conjoin(
-                filters.rescan_stable(),
-            )),
-            ReaderPredicate::new(BoundIcebergPredicate::conjoin_row_filter(
-                filters.rescan_stable(),
-            )),
-        ));
+        // Validate after binding the read plan so column-binding errors keep
+        // their own SQLSTATE ahead of a planned-predicate schema mismatch.
+        BoundIcebergPredicate::validate_schema(filters.iter(), schema_id)?;
         // Match CustomScan's conflict policy: external parameters may narrow
         // the scan, but only static predicates narrow conflict validation.
         let conflict_filter = BoundIcebergPredicate::conjoin(filters.static_values())

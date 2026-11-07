@@ -77,9 +77,8 @@ impl RegularScanState {
 
     fn rescan(&mut self, _keys: &OwnedScanKeys) -> AmResult<()> {
         // Iceberg advertises no scan-key path. PostgreSQL remains responsible
-        // for SeqScan qualification, matching the previous empty translation.
-        self.prepared
-            .replace_predicates(ScanPredicates::unfiltered());
+        // for SeqScan qualification, so rescan only reopens the traversal over
+        // the unchanged prepared read.
         self.cursor = self.prepared.open_row_cursor()?;
         Ok(())
     }

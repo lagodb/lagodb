@@ -70,34 +70,29 @@ impl IcebergScanState {
         let snapshot =
             ManagedTableReadView::for_snapshot(relation_oid, &ctx.snapshot)?
                 .into_read_snapshot()?;
+        let schema_id = snapshot.schema().schema_id();
+        let predicates = ScanPredicates::new(
+            StablePruningPredicate::new(BoundIcebergPredicate::conjoin(
+                ctx.filters.rescan_stable(),
+            )),
+            // Start installs the complete row predicate before opening readers.
+            ReaderPredicate::new(None),
+        );
 
-        let mut prepared = match projection {
-            None => PreparedRowScan::full(
-                snapshot,
-                ScanPredicates::unfiltered(),
-                &layout,
-            )?,
+        let prepared = match projection {
+            None => PreparedRowScan::full(snapshot, predicates, &layout)?,
             Some(projection) => PreparedRowScan::projected(
                 snapshot,
                 projection,
-                ScanPredicates::unfiltered(),
+                predicates,
                 &layout,
                 &scan_tuple.attr_types(),
             )?,
         };
-
-        BoundIcebergPredicate::validate_schema(
-            ctx.filters.iter(),
-            prepared.schema_id(),
-        )
-        .map_err(CustomScanError::provider)?;
-        let planning_filter =
-            BoundIcebergPredicate::conjoin(ctx.filters.rescan_stable());
-        prepared.replace_predicates(ScanPredicates::new(
-            StablePruningPredicate::new(planning_filter),
-            // Start installs the complete row predicate before opening readers.
-            ReaderPredicate::new(None),
-        ));
+        // Validate after binding the read plan so column-binding errors keep
+        // their own SQLSTATE ahead of a planned-predicate schema mismatch.
+        BoundIcebergPredicate::validate_schema(ctx.filters.iter(), schema_id)
+            .map_err(CustomScanError::provider)?;
 
         let execution = if ctx.purpose.is_modify_target() {
             let conflict_filter =

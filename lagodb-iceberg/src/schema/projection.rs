@@ -96,10 +96,6 @@ impl StorageProjection {
         Arc::clone(&self.schema)
     }
 
-    pub(crate) fn schema(&self) -> &IcebergSchema {
-        self.schema.as_ref()
-    }
-
     pub(crate) fn field_ids(&self) -> &[i32] {
         &self.field_ids
     }

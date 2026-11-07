@@ -168,21 +168,8 @@ impl PreparedIcebergRead {
         }
     }
 
-    fn replace_predicates(&mut self, predicates: ScanPredicates) {
-        let stable_changed =
-            self.predicates.stable_pruning.0 != predicates.stable_pruning.0;
-        if stable_changed {
-            self.query_tasks = None;
-        }
-        self.predicates = predicates;
-    }
-
     pub(crate) fn rebind_reader_filter(&mut self, predicate: ReaderPredicate) {
         self.predicates.current_reader = predicate;
-    }
-
-    pub(crate) fn schema_id(&self) -> i32 {
-        self.projection.schema().schema_id()
     }
 
     pub(crate) fn planned_query_tasks(
@@ -371,16 +358,8 @@ impl PreparedRowScan {
         }
     }
 
-    pub(crate) fn replace_predicates(&mut self, predicates: ScanPredicates) {
-        self.read.replace_predicates(predicates);
-    }
-
     pub(crate) fn rebind_reader_filter(&mut self, predicate: ReaderPredicate) {
         self.read.rebind_reader_filter(predicate);
-    }
-
-    pub(crate) fn schema_id(&self) -> i32 {
-        self.read.schema_id()
     }
 
     pub(crate) fn planned_query_tasks(
