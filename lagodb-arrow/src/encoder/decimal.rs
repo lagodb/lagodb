@@ -1,20 +1,15 @@
-//! `Decimal128` conversion for Arrow builders, backed by the shared
-//! PostgreSQL `NUMERIC` codec.
+//! `Decimal128` Arrow builder, backed by the shared PostgreSQL `NUMERIC` codec.
 
+use std::mem::size_of;
 use std::sync::Arc;
 
 use arrow_array::ArrayRef;
 use arrow_array::builder::{ArrayBuilder, Decimal128Builder};
-use lagodb_core::datum::{Cell, Decimal128NumericCodec, DecimalCodecError};
+use lagodb_core::datum::{Decimal128NumericCodec, DecimalCodecError};
 use pgrx::pg_sys;
-use pgrx::prelude::AnyNumeric;
 
-use super::{ColumnAppend, cell_type_mismatch};
+use super::ColumnBuilder;
 use crate::error::ArrowConversionResult;
-
-// ---------------------------------------------------------------------------
-// Write encoder
-// ---------------------------------------------------------------------------
 
 pub(crate) struct Decimal128Encoder {
     builder: Decimal128Builder,
@@ -37,35 +32,23 @@ impl Decimal128Encoder {
         })
     }
 
-    fn append_scaled(&mut self, value: &AnyNumeric) -> ArrowConversionResult<()> {
-        self.builder.append_value(self.codec.encode(value)?);
-        Ok(())
-    }
-
     /// Append a non-NULL PostgreSQL `numeric` datum after encoding its scale.
     ///
     /// # Safety
     /// `datum` must be a valid, non-NULL PostgreSQL `numeric` Datum.
-    pub(crate) unsafe fn append_bound(
+    pub(crate) unsafe fn append_numeric(
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {
         // SAFETY: this encoder is bound to a NUMERIC source and the caller
-        // supplies a present datum from that bound relation column.
+        // supplies a present datum from that bound column.
         let scaled = unsafe { self.codec.encode_bound_datum(datum) }?;
         self.builder.append_value(scaled);
-        Ok(std::mem::size_of::<i128>())
+        Ok(size_of::<i128>())
     }
 }
 
-impl ColumnAppend for Decimal128Encoder {
-    fn append_cell(&mut self, cell: &Cell) -> ArrowConversionResult<()> {
-        let Cell::Numeric(n) = cell else {
-            return Err(cell_type_mismatch("numeric"));
-        };
-        self.append_scaled(n)
-    }
-
+impl ColumnBuilder for Decimal128Encoder {
     fn append_null(&mut self) {
         self.builder.append_null();
     }
@@ -83,11 +66,6 @@ impl ColumnAppend for Decimal128Encoder {
         self.builder.len()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Read (Arrow → Cell): handled by the bound `ColumnReader` in `crate::read`,
-// which builds the `Decimal128NumericCodec` once per batch (not per value).
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

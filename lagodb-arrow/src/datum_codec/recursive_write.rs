@@ -1,4 +1,4 @@
-//! Source-bound recursive writers. Scalar leaves use the existing encoders.
+//! Source-bound recursive writers. Scalar leaves use the native encoders.
 
 use std::{mem, sync::Arc};
 
@@ -10,10 +10,9 @@ use lagodb_core::datum::{ArrayDatumLayout, CompositeDatumCodec};
 use pgrx::pg_sys;
 
 use super::text::TextIoEncoder;
-use super::{BoundDatumPlan, NodePlan};
-use super::{DatumEncoder, NativeEncoderPlan};
+use super::{BoundDatumPlan, DatumEncoder, NodePlan};
+use crate::error::{ArrowConversionError, ArrowConversionResult};
 use crate::jsonb::NestedJsonbEncoder;
-use crate::{ArrowConversionError, ArrowConversionResult};
 
 impl BoundDatumPlan {
     pub(crate) fn encoder(
@@ -21,9 +20,11 @@ impl BoundDatumPlan {
         capacity: usize,
     ) -> ArrowConversionResult<DatumEncoder> {
         match &self.node {
-            NodePlan::Scalar { rule, .. } | NodePlan::NativeList { rule, .. } => {
-                NativeEncoderPlan::bind(rule.clone(), self.base_type.oid)?
-                    .materialize(capacity)
+            NodePlan::Scalar { rule, .. } => {
+                DatumEncoder::bind(rule, self.base_type.oid, capacity)
+            }
+            NodePlan::NativeList { element, field, .. } => {
+                DatumEncoder::bind_list(*element, field, self.base_type.oid, capacity)
             }
             NodePlan::NestedJsonb(plan) => Ok(DatumEncoder::NestedJsonb(Box::new(
                 NestedJsonbEncoder::new(plan, capacity)?,
@@ -71,23 +72,17 @@ impl RecursiveDatumEncoder {
         capacity: usize,
     ) -> ArrowConversionResult<Self> {
         let state = match &plan.node {
-            NodePlan::Scalar { rule, .. } => EncoderState::Scalar(Box::new(
-                NativeEncoderPlan::bind(rule.clone(), plan.base_type.oid)?
-                    .materialize(capacity)?,
-            )),
+            NodePlan::Scalar { .. }
+            | NodePlan::NativeList { .. }
+            | NodePlan::NestedJsonb(_) => {
+                EncoderState::Scalar(Box::new(plan.encoder(capacity)?))
+            }
             NodePlan::TextIo { .. } => EncoderState::TextIo(TextIoEncoder::new(
                 plan.base_type,
                 plan.field.data_type(),
                 capacity,
             )),
             NodePlan::Oid => EncoderState::Oid(Int64Builder::with_capacity(capacity)),
-            NodePlan::NativeList { rule, .. } => EncoderState::Scalar(Box::new(
-                NativeEncoderPlan::bind(rule.clone(), plan.base_type.oid)?
-                    .materialize(capacity)?,
-            )),
-            NodePlan::NestedJsonb(_) => {
-                EncoderState::Scalar(Box::new(plan.encoder(capacity)?))
-            }
             NodePlan::List {
                 layout, element, ..
             } => EncoderState::List {

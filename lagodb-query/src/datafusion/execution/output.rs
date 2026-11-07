@@ -103,7 +103,7 @@ impl QueryOutputDecoder {
     pub(super) unsafe fn bind_batch_unchecked(
         &self,
         batch: RecordBatch,
-    ) -> Result<BoundBatch, PgReportError> {
+    ) -> BoundBatch {
         // SAFETY: RecordBatchStream's fixed-schema contract is supplied by the
         // caller; PG target nullability is checked separately by execution state.
         unsafe { self.decoder.bind_batch_unchecked(batch) }

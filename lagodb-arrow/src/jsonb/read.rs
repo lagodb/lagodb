@@ -36,30 +36,32 @@ impl BoundNestedJsonb {
     /// # Safety
     /// `plan.accepts(array.data_type())` must hold for the complete tree.
     /// The decoder's checked entry validates it once; trusted scans instead
-    /// establish it through their producer's fixed projection schema. Downcast
-    /// alone does not establish decimal scale or fixed binary UUID width.
+    /// establish it through their producer's fixed projection schema. The
+    /// concrete array kind alone does not establish decimal scale or fixed
+    /// binary UUID width.
     pub(crate) unsafe fn bind_unchecked(
         plan: &NestedJsonbPlan,
         array: &dyn Array,
-    ) -> ArrowConversionResult<Self> {
+    ) -> Self {
         let value = match &plan.node {
-            NodePlan::Scalar(plan) => BoundValue::Scalar(plan.bind(array)?),
+            // SAFETY: the parent contract includes this leaf's type.
+            NodePlan::Scalar(plan) => BoundValue::Scalar(unsafe { plan.bind(array) }),
             NodePlan::Struct(fields) => {
                 let array = array.as_struct();
                 let fields = fields
                     .iter()
                     .zip(array.columns())
                     .map(|(field, column)| {
-                        Ok((
+                        (
                             Arc::clone(&field.name),
                             // SAFETY: the parent contract includes field order
                             // and all child types.
                             unsafe {
                                 Self::bind_unchecked(&field.value, column.as_ref())
-                            }?,
-                        ))
+                            },
+                        )
                     })
-                    .collect::<ArrowConversionResult<Box<[_]>>>()?;
+                    .collect();
                 BoundValue::Struct(fields)
             }
             NodePlan::List(element) => {
@@ -69,7 +71,7 @@ impl BoundNestedJsonb {
                     // SAFETY: the parent contract includes the element type.
                     element: Box::new(unsafe {
                         Self::bind_unchecked(element, array.values().as_ref())
-                    }?),
+                    }),
                 }
             }
             NodePlan::Map { key, value, object } => {
@@ -79,19 +81,19 @@ impl BoundNestedJsonb {
                     // SAFETY: the map contract includes key and value types.
                     key: Box::new(unsafe {
                         Self::bind_unchecked(key, array.keys().as_ref())
-                    }?),
+                    }),
                     // SAFETY: the map contract includes key and value types.
                     value: Box::new(unsafe {
                         Self::bind_unchecked(value, array.values().as_ref())
-                    }?),
+                    }),
                     object: *object,
                 }
             }
         };
-        Ok(Self {
+        Self {
             nulls: array.nulls().cloned(),
             value,
-        })
+        }
     }
 
     /// # Safety

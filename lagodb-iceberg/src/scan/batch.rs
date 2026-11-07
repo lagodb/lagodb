@@ -30,7 +30,7 @@ impl Iterator for ArrowBatches {
     }
 }
 
-pub(crate) type ScanBatchSource = ArrowBatchSource<ArrowBatches, IcebergError>;
+pub(crate) type ScanBatchSource = ArrowBatchSource<ArrowBatches>;
 
 /// ANALYZE batch adapter for paths not driven by `ExecScanFetch`.
 pub(crate) struct InterruptibleArrowBatches(pub(crate) ArrowRecordBatchIterator);
@@ -44,8 +44,7 @@ impl Iterator for InterruptibleArrowBatches {
     }
 }
 
-pub(crate) type AnalyzeBatchSource =
-    ArrowBatchSource<InterruptibleArrowBatches, IcebergError>;
+pub(crate) type AnalyzeBatchSource = ArrowBatchSource<InterruptibleArrowBatches>;
 
 /// Stable positions of Iceberg's row-location metadata columns.
 #[derive(Clone, Copy)]

@@ -8,7 +8,6 @@ mod object_encoder;
 
 use std::ffi::{CString, NulError, c_char, c_void};
 use std::fmt;
-use std::mem::size_of;
 
 use pgrx::pg_sys::{self, Datum};
 use pgrx::prelude::PgSqlErrorCode;
@@ -201,11 +200,6 @@ impl JsonText {
         &self.text
     }
 
-    #[inline]
-    pub fn mem_size(&self) -> usize {
-        size_of::<Self>() + self.text.len()
-    }
-
     /// Build a PostgreSQL `json` Datum through the already-bound semantic
     /// conversion path. The public value type deliberately does not implement
     /// `IntoDatum`, whose `Option<Datum>` return type cannot preserve errors.
@@ -328,11 +322,6 @@ impl JsonbValue {
     #[inline]
     pub fn as_str(&self) -> &str {
         &self.text
-    }
-
-    #[inline]
-    pub fn mem_size(&self) -> usize {
-        size_of::<Self>() + self.text.len()
     }
 
     /// Build a PostgreSQL JSONB Datum through validating input. PG errors

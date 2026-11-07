@@ -5,8 +5,7 @@ use std::sync::Arc;
 
 use arrow_schema::{Field, Schema};
 use lagodb_arrow::{
-    BoundDatumBuffer, BoundDatumColumnPlan, BoundDatumPlan, BoundWriteBuffer,
-    BoundWriteColumnPlan,
+    BoundDatumBuffer, BoundDatumPlan, BoundWriteBuffer, BoundWriteColumnPlan,
 };
 use lagodb_core::datum::PgType;
 
@@ -71,11 +70,7 @@ impl ParquetWritePlan {
     pub(super) fn into_datum_buffer(
         self,
     ) -> Result<BoundDatumBuffer, ConnectorError> {
-        let columns = self
-            .columns
-            .into_iter()
-            .map(|(_, plan)| BoundDatumColumnPlan::new(plan))
-            .collect();
-        Ok(BoundDatumBuffer::new(self.schema, columns)?)
+        let plans = self.columns.into_iter().map(|(_, plan)| plan).collect();
+        Ok(BoundDatumBuffer::new(self.schema, plans)?)
     }
 }

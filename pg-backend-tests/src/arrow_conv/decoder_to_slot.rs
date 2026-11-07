@@ -9,6 +9,7 @@
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
+    use std::fmt::Debug;
     use std::sync::Arc;
 
     use arrow_array::builder::{ListBuilder, StringBuilder};
@@ -22,11 +23,10 @@ mod tests {
     use arrow_schema::{Field, Schema};
     use lagodb_arrow::{
         ArrowBatchSource, ArrowColumnDecoder, ArrowConversionError, BoundDatumPlan,
-        CellRule, ColumnReader, DatumCodec, DecodedColumn, PgColumnType,
-        resolve_cell_rule,
+        CellRule, DatumCodec, DecodedColumn, PgColumnType, PgDatumArrayReader,
     };
     use lagodb_core::batch::{BatchRowCursor, BatchRowDecoder};
-    use lagodb_core::datum::{BoundColumnDatumCodec, ColumnDatumTarget, PgType};
+    use lagodb_core::datum::PgType;
     use lagodb_core::handles::ScanDirection;
     use lagodb_core::tuple::SlotDatumWriter;
     use pgrx::prelude::*;
@@ -448,8 +448,8 @@ mod tests {
         }
     }
 
-    // List columns decode straight into the slot via the direct array-datum path
-    // (no intermediate `Vec<Cell>`): a populated list (with an interior NULL
+    // List columns decode straight into the slot via the direct array-datum
+    // path: a populated list (with an interior NULL
     // element), a NULL list cell, and a present-but-empty list each land
     // correctly. Covers int4[] and text[].
     #[pg_test]
@@ -461,7 +461,7 @@ mod tests {
                 None,
                 Some(vec![]),
             ]));
-        let int_rule = resolve_cell_rule(
+        let int_rule = CellRule::resolve(
             int_list.data_type(),
             PgColumnType::Array(pg_sys::INT4OID),
         )
@@ -475,7 +475,7 @@ mod tests {
         sb.append(false);
         sb.append(true); // empty, non-null
         let str_list: ArrayRef = Arc::new(sb.finish());
-        let str_rule = resolve_cell_rule(
+        let str_rule = CellRule::resolve(
             str_list.data_type(),
             PgColumnType::Array(pg_sys::TEXTOID),
         )
@@ -546,23 +546,25 @@ mod tests {
 
     // Canonical case: when the Arrow physical element representation already
     // matches the target element type (so no element-OID retarget is needed),
-    // the slot-first direct array datum and the row-world `Cell` path
-    // (`read_cell_unchecked` + target-aware Cell conversion) must agree. This
-    // pins that the direct path is a faithful shortcut *for these cases*. The
-    // divergent retarget
-    // cases are covered separately by `retarget_list_datum_targets_element_oid`,
-    // where the Cell path is deliberately the wrong oracle.
+    // the declared-plan path and the explicit standard-codec path must both
+    // produce the expected array. The divergent retarget cases are covered
+    // separately by `retarget_list_datum_targets_element_oid`.
     #[pg_test]
-    fn canonical_list_datum_matches_cell_path() {
-        unsafe fn assert_parity<T>(
-            rule: &CellRule,
+    fn canonical_list_datum_matches_declared_and_standard_paths() {
+        unsafe fn assert_paths<T>(
             array: ArrayRef,
             array_oid: pg_sys::Oid,
+            expected: T,
         ) where
-            T: FromDatum + std::fmt::Debug + PartialEq,
+            T: FromDatum + Debug + PartialEq,
         {
+            let element_oid = unsafe { pg_sys::get_element_type(array_oid) };
+            let rule = CellRule::resolve(
+                array.data_type(),
+                PgColumnType::Array(element_oid),
+            )
+            .expect("list rule");
             unsafe {
-                // Direct: bind the one-column batch and decode row 0 into a slot.
                 let decoder = ArrowColumnDecoder::new(vec![
                     DecodedColumn::bind(
                         BoundDatumPlan::bind(
@@ -573,33 +575,24 @@ mod tests {
                         0,
                         0,
                     )
-                    .expect("bind decoded column"),
+                    .expect("bind declared column"),
+                    DecodedColumn::new(
+                        rule,
+                        0,
+                        1,
+                        array_oid,
+                        DatumCodec::standard(array_oid)
+                            .expect("bind standard datum codec"),
+                    )
+                    .expect("bind standard column"),
                 ]);
-                let bound =
-                    decoder.bind(batch_of(vec![array.clone()])).expect("bind");
-                let slot = make_slot(&[array_oid]);
+                let bound = decoder.bind(batch_of(vec![array])).expect("bind");
+                let slot = make_slot(&[array_oid, array_oid]);
                 let mut cols =
                     SlotDatumWriter::new(slot, pg_sys::CurrentMemoryContext);
                 decoder.write_row(&bound, 0, &mut cols).expect("write_row");
-                let direct = read::<T>(slot, 0);
-
-                // Cell path: read a `Cell` via the same bound reader and
-                // materialize it for the same target oid.
-                let cell = ColumnReader::bind(rule, array.as_ref())
-                    .expect("bind cell reader")
-                    .read_cell_unchecked(0)
-                    .expect("read_cell_unchecked")
-                    .expect("present cell");
-                let codec = BoundColumnDatumCodec::bind(ColumnDatumTarget::from_oid(
-                    array_oid,
-                ))
-                .expect("bind cell datum codec");
-                let via_cell = codec.cell_to_datum(cell).expect("cell to datum");
-                assert_eq!(
-                    direct,
-                    T::from_datum(via_cell, false),
-                    "direct array datum diverged from the Cell path"
-                );
+                assert_eq!(read::<T>(slot, 0).as_ref(), Some(&expected), "declared");
+                assert_eq!(read::<T>(slot, 1), Some(expected), "standard codec");
             }
         }
 
@@ -608,27 +601,11 @@ mod tests {
             Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
                 Some(vec![Some(1), None, Some(3)]),
             ]));
-        let int_rule = resolve_cell_rule(
-            int_list.data_type(),
-            PgColumnType::Array(pg_sys::INT4OID),
-        )
-        .expect("int list rule");
-
         // int2[] backed by its native Int16 element source.
-        let i16_schema: ArrayRef =
-            Arc::new(ListArray::from_iter_primitive::<Int16Type, _, _>(vec![
-                Some(vec![Some(1)]),
-            ]));
-        let i16_rule = resolve_cell_rule(
-            i16_schema.data_type(),
-            PgColumnType::Array(pg_sys::INT2OID),
-        )
-        .expect("int list rule for int16 source");
         let i16_list: ArrayRef =
             Arc::new(ListArray::from_iter_primitive::<Int16Type, _, _>(vec![
                 Some(vec![Some(7i16), None, Some(9)]),
             ]));
-
         // text[]: Utf8 physical -> text target (no retarget).
         let mut sb = ListBuilder::new(StringBuilder::new());
         sb.values().append_value("x");
@@ -636,40 +613,32 @@ mod tests {
         sb.values().append_value("z");
         sb.append(true);
         let str_list: ArrayRef = Arc::new(sb.finish());
-        let str_rule = resolve_cell_rule(
-            str_list.data_type(),
-            PgColumnType::Array(pg_sys::TEXTOID),
-        )
-        .expect("text list rule");
 
         unsafe {
-            assert_parity::<Vec<Option<i32>>>(
-                &int_rule,
+            assert_paths(
                 int_list,
                 pg_sys::INT4ARRAYOID,
+                vec![Some(1i32), None, Some(3)],
             );
-            assert_parity::<Vec<Option<i16>>>(
-                &i16_rule,
+            assert_paths(
                 i16_list,
                 pg_sys::INT2ARRAYOID,
+                vec![Some(7i16), None, Some(9)],
             );
-            assert_parity::<Vec<Option<String>>>(
-                &str_rule,
+            assert_paths(
                 str_list,
                 pg_sys::TEXTARRAYOID,
+                vec![Some("x".to_owned()), None, Some("z".to_owned())],
             );
         }
     }
 
     // Retarget cases: the produced array's element type must come from the
-    // rule's declared element OID, *not* the Arrow physical type. Here the Cell
-    // path would be the wrong oracle (it keeps the physical element type), so
-    // these assert `read_datum_unchecked`'s output directly off the `ArrayType`
-    // header.
+    // rule's declared element OID, *not* the Arrow physical type, so these
+    // assert the produced datum directly off the `ArrayType` header.
     //
     // - Physical `Int32` targeting `int2[]`: asserts both the element OID and
-    //   the narrowed values, whereas the natural Cell array conversion
-    //   would yield `int4[]`.
+    //   the narrowed values; the physical width alone would yield `int4[]`.
     // - Physical `Utf8` targeting `name[]`: asserts the element OID only (the
     //   text-family retarget signal — a natural `StringArray` conversion
     //   would yield `text[]`). The values are not read back here because `name`
@@ -683,19 +652,15 @@ mod tests {
         }
 
         unsafe fn read_list_datum(
-            rule: &CellRule,
             array: &ArrayRef,
             target_oid: pg_sys::Oid,
         ) -> pg_sys::Datum {
-            let reader =
-                ColumnReader::bind(rule, array.as_ref()).expect("bind reader");
-            // The list's element type comes from the rule's bound elem_oid;
+            // The list's element type comes from the rule's bound element OID;
             // the standard array codec still binds the destination array OID.
-            let target =
-                BoundColumnDatumCodec::bind(ColumnDatumTarget::from_oid(target_oid))
-                    .expect("bind standard array datum codec");
-            unsafe { reader.read_datum_unchecked(0, target) }
-                .expect("read_datum_unchecked")
+            let reader = PgDatumArrayReader::bind(array.as_ref(), target_oid)
+                .expect("bind reader");
+            unsafe { reader.datum_unchecked(0) }
+                .expect("read list datum")
                 .expect("present list cell")
         }
 
@@ -704,11 +669,6 @@ mod tests {
             Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
                 Some(vec![Some(1), None, Some(3)]),
             ]));
-        let int2_rule = resolve_cell_rule(
-            i32_list.data_type(),
-            PgColumnType::Array(pg_sys::INT2OID),
-        )
-        .expect("int2[] rule");
 
         // Physical Utf8 -> name[] (text-family element-OID retarget).
         let mut sb = ListBuilder::new(StringBuilder::new());
@@ -717,15 +677,9 @@ mod tests {
         sb.values().append_value("z");
         sb.append(true);
         let str_list: ArrayRef = Arc::new(sb.finish());
-        let name_rule = resolve_cell_rule(
-            str_list.data_type(),
-            PgColumnType::Array(pg_sys::NAMEOID),
-        )
-        .expect("name[] rule");
 
         unsafe {
-            let int2_datum =
-                read_list_datum(&int2_rule, &i32_list, pg_sys::INT2ARRAYOID);
+            let int2_datum = read_list_datum(&i32_list, pg_sys::INT2ARRAYOID);
             assert_eq!(
                 array_elem_oid(int2_datum),
                 pg_sys::INT2OID,
@@ -737,8 +691,7 @@ mod tests {
                 "int2[] values must be the narrowed elements"
             );
 
-            let name_datum =
-                read_list_datum(&name_rule, &str_list, pg_sys::NAMEARRAYOID);
+            let name_datum = read_list_datum(&str_list, pg_sys::NAMEARRAYOID);
             assert_eq!(
                 array_elem_oid(name_datum),
                 pg_sys::NAMEOID,

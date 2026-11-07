@@ -1,20 +1,18 @@
-//! Backend tests for the row-world `Cell` read path
-//! (`ColumnReader::bind` + `read_cell_unchecked`, `Arrow → Cell`) and the encoder
-//! NULL-append path.
+//! Backend tests for the standard scalar read path
+//! (`PgDatumArrayReader::bind` + `datum_unchecked`, `Arrow → Datum`).
 //!
-//! These cannot run as host `#[test]`s: `read_cell_unchecked` dispatches over
-//! every column rule, so its compiled body references the numeric decode
-//! (`numeric_recv`) and the bound writer's PostgreSQL datum references
-//! `Decimal128Encoder`'s numeric encode path (`numeric_mul`, `numeric_floor`,
-//! `pg_detoast_datum`, ...). Linking those into an ordinary Linux test binary
-//! fails with `undefined symbol: PG_exception_stack` (and friends), so the
-//! tests must run inside a live backend as `#[pg_test]`s. The pure
-//! resolution-table / codec-math tests stay as host tests in
+//! These cannot run as host `#[test]`s: the bound reader dispatches over every
+//! leaf conversion, so its compiled body references PostgreSQL symbols such as
+//! the numeric decode and array construction. Linking those into an ordinary
+//! Linux test binary fails with `undefined symbol: PG_exception_stack` (and
+//! friends), so the tests must run inside a live backend as `#[pg_test]`s. The
+//! pure resolution-table / codec-math tests stay as host tests in
 //! `lagodb-arrow/tests/`.
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
+    use std::fmt::Debug;
     use std::sync::Arc;
 
     use arrow_array::builder::{
@@ -24,23 +22,22 @@ mod tests {
     };
     use arrow_array::types::{Int16Type, Int32Type};
     use arrow_array::{Array, ArrayRef, ListArray};
-    use lagodb_arrow::{CellRule, ColumnReader, PgColumnType, resolve_cell_rule};
-    use lagodb_core::datum::{Cell, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
+    use lagodb_arrow::PgDatumArrayReader;
+    use lagodb_core::datum::{PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
     use pgrx::pg_sys;
     use pgrx::prelude::*;
     use proptest::prelude::*;
     use proptest::test_runner::{Config, TestCaseError, TestRunner};
 
-    /// A generated column: the rule, the built array, and the expected Cell per
-    /// row (None = null).
+    /// A generated column: the target PG type, the built array, and the
+    /// expected value per row (None = null).
     #[derive(Debug)]
     struct GeneratedColumn {
-        rule: CellRule,
+        oid: pg_sys::Oid,
         array: ArrayRef,
         expected: Vec<Option<ExpectedValue>>,
     }
 
-    /// Subset of Cell that can be compared without PartialEq on Cell itself.
     #[derive(Debug, Clone, PartialEq)]
     enum ExpectedValue {
         Bool(bool),
@@ -54,23 +51,25 @@ mod tests {
     }
 
     impl ExpectedValue {
-        fn matches_cell(&self, cell: &Cell) -> bool {
-            match (self, cell) {
-                (ExpectedValue::Bool(a), Cell::Bool(b)) => a == b,
-                (ExpectedValue::I32(a), Cell::I32(b)) => a == b,
-                (ExpectedValue::I64(a), Cell::I64(b)) => a == b,
-                (ExpectedValue::F32(a), Cell::F32(b)) => a.to_bits() == b.to_bits(),
-                (ExpectedValue::F64(a), Cell::F64(b)) => a.to_bits() == b.to_bits(),
-                (ExpectedValue::Date(pg_days), Cell::Date(d)) => {
-                    d.to_pg_epoch_days() == *pg_days
+        /// Compare a decoded pass-by-value datum. Primitive types decode
+        /// through pgrx's `FromDatum`; temporal types compare their PostgreSQL
+        /// `DateADT` / `TimeADT` / `Timestamp` integer representation.
+        fn matches_datum(&self, datum: pg_sys::Datum) -> bool {
+            // SAFETY: the reader produced a non-null datum of the column's OID.
+            unsafe {
+                match self {
+                    Self::Bool(v) => bool::from_datum(datum, false) == Some(*v),
+                    Self::I32(v) => i32::from_datum(datum, false) == Some(*v),
+                    Self::I64(v) => i64::from_datum(datum, false) == Some(*v),
+                    Self::F32(v) => f32::from_datum(datum, false)
+                        .is_some_and(|d| d.to_bits() == v.to_bits()),
+                    Self::F64(v) => f64::from_datum(datum, false)
+                        .is_some_and(|d| d.to_bits() == v.to_bits()),
+                    Self::Date(pg_days) => datum.value() as i32 == *pg_days,
+                    Self::Time(micros) | Self::Timestamp(micros) => {
+                        datum.value() as i64 == *micros
+                    }
                 }
-                (ExpectedValue::Time(micros), Cell::Time(t)) => {
-                    i64::from(*t) == *micros
-                }
-                (ExpectedValue::Timestamp(pg_micros), Cell::Timestamp(ts)) => {
-                    i64::from(*ts) == *pg_micros
-                }
-                _ => false,
             }
         }
     }
@@ -86,7 +85,7 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: CellRule::Bool,
+            oid: pg_sys::BOOLOID,
             array: Arc::new(builder.finish()),
             expected,
         }
@@ -103,7 +102,7 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: CellRule::I32,
+            oid: pg_sys::INT4OID,
             array: Arc::new(builder.finish()),
             expected,
         }
@@ -120,7 +119,7 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: CellRule::I64,
+            oid: pg_sys::INT8OID,
             array: Arc::new(builder.finish()),
             expected,
         }
@@ -137,7 +136,7 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: CellRule::F32,
+            oid: pg_sys::FLOAT4OID,
             array: Arc::new(builder.finish()),
             expected,
         }
@@ -154,7 +153,7 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: CellRule::F64,
+            oid: pg_sys::FLOAT8OID,
             array: Arc::new(builder.finish()),
             expected,
         }
@@ -173,7 +172,7 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: CellRule::Date32,
+            oid: pg_sys::DATEOID,
             array: Arc::new(builder.finish()),
             expected,
         }
@@ -190,7 +189,7 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: CellRule::Time64Micros,
+            oid: pg_sys::TIMEOID,
             array: Arc::new(builder.finish()),
             expected,
         }
@@ -213,16 +212,13 @@ mod tests {
             }
         }
         GeneratedColumn {
-            rule: CellRule::Timestamp {
-                nanos: false,
-                tz: false,
-            },
+            oid: pg_sys::TIMESTAMPOID,
             array: Arc::new(builder.finish()),
             expected,
         }
     }
 
-    fn arb_nullable<T: Clone + std::fmt::Debug + 'static>(
+    fn arb_nullable<T: Clone + Debug + 'static>(
         inner: impl Strategy<Value = T>,
     ) -> impl Strategy<Value = Vec<Option<T>>> {
         prop::collection::vec(prop::option::of(inner), 1..=16)
@@ -261,32 +257,26 @@ mod tests {
     }
 
     fn check_extract(col: GeneratedColumn) -> Result<(), TestCaseError> {
-        let reader = ColumnReader::bind(&col.rule, col.array.as_ref())
+        let reader = PgDatumArrayReader::bind(col.array.as_ref(), col.oid)
             .map_err(|e| TestCaseError::fail(format!("bind error: {e:?}")))?;
         for (row_idx, expected) in col.expected.iter().enumerate() {
-            // SAFETY: the generated scalar columns never produce a borrowed-view
-            // `Cell` (no text/binary types), so the returned `Cell` is owned and
-            // outlives `reader` safely; for any view it would, the `reader`
-            // outlives every use within this loop.
-            let cell =
-                unsafe { reader.read_cell_unchecked(row_idx) }.map_err(|e| {
-                    TestCaseError::fail(format!(
-                        "read_cell error at row {row_idx}: {e:?}"
-                    ))
-                })?;
-            match (expected, cell) {
+            // SAFETY: `row_idx` is within the bound array, and every generated
+            // type is pass-by-value.
+            let datum = unsafe { reader.datum_unchecked(row_idx) }.map_err(|e| {
+                TestCaseError::fail(format!("read error at row {row_idx}: {e:?}"))
+            })?;
+            match (expected, datum) {
                 (None, None) => {}
-                (Some(exp), Some(cell)) => prop_assert!(
-                    exp.matches_cell(&cell),
-                    "row {}: expected {:?}, got {:?}",
+                (Some(exp), Some(datum)) => prop_assert!(
+                    exp.matches_datum(datum),
+                    "row {}: expected {:?}, got raw datum {:#x}",
                     row_idx,
                     exp,
-                    cell
+                    datum.value()
                 ),
-                (None, Some(cell)) => prop_assert!(
-                    false,
-                    "row {row_idx}: expected null but got {cell:?}"
-                ),
+                (None, Some(_)) => {
+                    prop_assert!(false, "row {row_idx}: expected null")
+                }
                 (Some(exp), None) => prop_assert!(
                     false,
                     "row {row_idx}: expected {exp:?} but got null"
@@ -296,11 +286,10 @@ mod tests {
         Ok(())
     }
 
-    // The slot-first datum path and row-world `read_cell_unchecked` share the
-    // same concrete-array binding logic, so this pins that shared decode logic
-    // across all supported scalar types and random nullability.
+    // Pins the bound scalar decode across all supported fixed-width types and
+    // random nullability.
     #[pg_test]
-    fn extract_produces_expected_cell() {
+    fn extract_produces_expected_datum() {
         let config = Config {
             cases: 256,
             failure_persistence: None,
@@ -309,74 +298,57 @@ mod tests {
         let mut runner = TestRunner::new(config);
         runner
             .run(&arb_generated_column(), check_extract)
-            .expect("extract must produce the expected Cell");
+            .expect("extract must produce the expected datum");
     }
 
-    /// Resolve the rule for a list column from the built array's own Arrow type,
-    /// pairing it with the canonical PG element OID for that element kind (the
-    /// row-world `read_cell_unchecked` output ignores the OID — it keeps the
-    /// physical width — but resolution validates the element kind against the
-    /// OID).
-    fn list_rule(array: &ArrayRef) -> CellRule {
-        use arrow_schema::DataType;
-        let elem_oid = match array.data_type() {
-            DataType::List(field) => match field.data_type() {
-                DataType::Boolean => pg_sys::BOOLOID,
-                DataType::Int16 => pg_sys::INT2OID,
-                DataType::Int32 => pg_sys::INT4OID,
-                DataType::Int64 => pg_sys::INT8OID,
-                DataType::Float32 => pg_sys::FLOAT4OID,
-                DataType::Float64 => pg_sys::FLOAT8OID,
-                DataType::Utf8 | DataType::LargeUtf8 => pg_sys::TEXTOID,
-                other => panic!("unsupported test list element: {other:?}"),
-            },
-            other => panic!("not a list type: {other:?}"),
-        };
-        resolve_cell_rule(array.data_type(), PgColumnType::Array(elem_oid))
-            .expect("list column rule")
+    /// Decode every row of a native list column into its PostgreSQL array
+    /// type and read the result back through pgrx's array `FromDatum`.
+    fn read_list<V: FromDatum>(
+        array: &ArrayRef,
+        array_oid: pg_sys::Oid,
+    ) -> Vec<Option<V>> {
+        let reader =
+            PgDatumArrayReader::bind(array.as_ref(), array_oid).expect("bind");
+        (0..array.len())
+            .map(|row| {
+                // SAFETY: `row` is within the bound array; the array datum is
+                // allocated in this test's current memory context.
+                unsafe {
+                    reader
+                        .datum_unchecked(row)
+                        .expect("read")
+                        .and_then(|datum| V::from_datum(datum, false))
+                }
+            })
+            .collect()
     }
 
-    // These pin `ListValues::into_cell`: the populated cell carries an interior
-    // NULL element, and a present-but-empty cell yields an empty `Vec` (not a
-    // NULL row). `read_cell_unchecked` returns `None` for a null row, so only
-    // non-null rows produce a cell here.
+    // A populated row keeps its interior NULL element, and a present-but-empty
+    // row yields an empty array rather than a NULL row.
     #[pg_test]
     fn extract_int4_list_keeps_values_and_interior_null() {
         let array: ArrayRef =
             Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
                 Some(vec![Some(1), None, Some(3)]),
                 Some(vec![]),
+                None,
             ]));
-        let rule = list_rule(&array);
-        let reader = ColumnReader::bind(&rule, array.as_ref()).expect("bind");
-
-        // SAFETY: list cells are owned (`Cell::*Array`), so they carry no borrow
-        // of the reader.
-        match unsafe { reader.read_cell_unchecked(0) }.unwrap().unwrap() {
-            Cell::I32Array(v) => assert_eq!(v, vec![Some(1), None, Some(3)]),
-            other => panic!("expected I32Array, got {other:?}"),
-        }
-        match unsafe { reader.read_cell_unchecked(1) }.unwrap().unwrap() {
-            Cell::I32Array(v) => assert_eq!(v, Vec::<Option<i32>>::new()),
-            other => panic!("expected empty I32Array, got {other:?}"),
-        }
+        assert_eq!(
+            read_list::<Vec<Option<i32>>>(&array, pg_sys::INT4ARRAYOID),
+            vec![Some(vec![Some(1), None, Some(3)]), Some(vec![]), None]
+        );
     }
 
-    // Resolve the native Int16 list contract and retain its element width.
     #[pg_test]
-    fn extract_int16_list_stays_i16_no_widening() {
+    fn extract_int16_list_into_int2_array() {
         let array: ArrayRef =
             Arc::new(ListArray::from_iter_primitive::<Int16Type, _, _>(vec![
                 Some(vec![Some(7i16), None, Some(9)]),
             ]));
-        let rule = list_rule(&array);
-        let reader = ColumnReader::bind(&rule, array.as_ref()).expect("bind");
-
-        // SAFETY: list cells are owned (`Cell::I16Array`), no borrow of reader.
-        match unsafe { reader.read_cell_unchecked(0) }.unwrap().unwrap() {
-            Cell::I16Array(v) => assert_eq!(v, vec![Some(7), None, Some(9)]),
-            other => panic!("expected I16Array, got {other:?}"),
-        }
+        assert_eq!(
+            read_list::<Vec<Option<i16>>>(&array, pg_sys::INT2ARRAYOID),
+            vec![Some(vec![Some(7), None, Some(9)])]
+        );
     }
 
     #[pg_test]
@@ -386,18 +358,10 @@ mod tests {
         bb.values().append_null();
         bb.append(true);
         let bool_array: ArrayRef = Arc::new(bb.finish());
-        let bool_rule = list_rule(&bool_array);
-        let bool_reader =
-            ColumnReader::bind(&bool_rule, bool_array.as_ref()).expect("bind");
-        // SAFETY: list cells are owned (`Cell::BoolArray`/`StringArray`), no
-        // borrow of the reader.
-        match unsafe { bool_reader.read_cell_unchecked(0) }
-            .unwrap()
-            .unwrap()
-        {
-            Cell::BoolArray(v) => assert_eq!(v, vec![Some(true), None]),
-            other => panic!("expected BoolArray, got {other:?}"),
-        }
+        assert_eq!(
+            read_list::<Vec<Option<bool>>>(&bool_array, pg_sys::BOOLARRAYOID),
+            vec![Some(vec![Some(true), None])]
+        );
 
         let mut sb = ListBuilder::new(StringBuilder::new());
         sb.values().append_value("a");
@@ -405,37 +369,9 @@ mod tests {
         sb.values().append_value("c");
         sb.append(true);
         let str_array: ArrayRef = Arc::new(sb.finish());
-        let str_rule = list_rule(&str_array);
-        let str_reader =
-            ColumnReader::bind(&str_rule, str_array.as_ref()).expect("bind");
-        match unsafe { str_reader.read_cell_unchecked(0) }
-            .unwrap()
-            .unwrap()
-        {
-            Cell::StringArray(v) => {
-                assert_eq!(
-                    v,
-                    vec![Some("a".to_string()), None, Some("c".to_string())]
-                )
-            }
-            other => panic!("expected StringArray, got {other:?}"),
-        }
-    }
-
-    // The NULL path of `ArrowColumnEncoder::append_null` appends one slot
-    // without reading a datum. It lives here because the bound datum path is
-    // backed by PostgreSQL `FromDatum` implementations.
-    #[pg_test]
-    fn null_append_adds_one_slot_per_call() {
-        use arrow_array::Array;
-        use lagodb_arrow::ArrowColumnEncoder;
-        let mut encoder = ArrowColumnEncoder::new(&CellRule::I32, 4)
-            .expect("I32 encoder construction is infallible");
-        encoder.append_null();
-        encoder.append_null();
-        assert_eq!(encoder.len(), 2);
-        let array = encoder.finish().expect("finish");
-        assert_eq!(array.len(), 2);
-        assert_eq!(array.null_count(), 2);
+        assert_eq!(
+            read_list::<Vec<Option<String>>>(&str_array, pg_sys::TEXTARRAYOID),
+            vec![Some(vec![Some("a".to_owned()), None, Some("c".to_owned())])]
+        );
     }
 }

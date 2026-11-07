@@ -4,9 +4,8 @@ use arrow_schema::extension::{ExtensionType, Uuid};
 use arrow_schema::{DataType, Field};
 
 use super::NestedJsonbPlan;
-use crate::{
-    ArrowConversionError, ArrowConversionResult, PgColumnType, resolve_cell_rule,
-};
+use crate::error::{ArrowConversionError, ArrowConversionResult};
+use crate::rule::{CellRule, PgColumnType};
 
 impl NestedJsonbPlan {
     /// Compile shared recursive semantics from an Arrow field. UUID leaves
@@ -22,20 +21,20 @@ impl NestedJsonbPlan {
             field.try_extension_type::<Uuid>()?;
             return Self::scalar(
                 field,
-                resolve_cell_rule(field.data_type(), PgColumnType::Uuid)?,
+                CellRule::resolve(field.data_type(), PgColumnType::Uuid)?,
             );
         }
         let target = match field.data_type() {
             DataType::Struct(fields) => {
-                // No duplicate-name pass is needed here. Iceberg's Schema builder
-                // runs for both schema construction and metadata deserialization
-                // and recursively rejects duplicate field paths before a foreign
-                // Struct can be bound to JSONB. Managed Structs bind to PostgreSQL
-                // composites or intervals, while Parquet admission rejects nested
-                // container-to-JSONB mappings. Current storage-provider paths that
-                // reach this branch have therefore already established unique
-                // object keys; a new structural source must establish the same
-                // invariant at its binding boundary.
+                // No duplicate-name pass is needed here. The table-format schema
+                // builder recursively rejects duplicate field paths, for both
+                // schema construction and metadata deserialization, before a
+                // foreign Struct can be bound to JSONB. Managed Structs bind to
+                // PostgreSQL composites or intervals, and file admission rejects
+                // nested container-to-JSONB mappings. Current provider paths
+                // that reach this branch have therefore already established
+                // unique object keys; a new structural source must establish
+                // the same invariant at its binding boundary.
                 let children = fields
                     .iter()
                     .map(|field| {
@@ -89,6 +88,6 @@ impl NestedJsonbPlan {
                 )));
             }
         };
-        Self::scalar(field, resolve_cell_rule(field.data_type(), target)?)
+        Self::scalar(field, CellRule::resolve(field.data_type(), target)?)
     }
 }

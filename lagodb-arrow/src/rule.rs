@@ -9,7 +9,7 @@ use crate::error::{ArrowConversionError, ArrowConversionResult};
 /// `(Arrow DataType, PG type)` dispatch keys on.
 ///
 /// Supplied by the consumer from the relation's `TupleDesc` (see
-/// [`Self::from_pg_type`]). [`resolve_cell_rule`] checks every column's
+/// [`Self::from_pg_type`]). [`CellRule::resolve`] checks every column's
 /// Arrow type against this target, so it is load-bearing for *all* columns —
 /// it both rejects incompatible pairs (e.g. `Int32` data aimed at a `text`
 /// column) and makes the one distinction the Arrow type cannot make on its
@@ -103,8 +103,8 @@ impl PgColumnType {
     }
 }
 
-/// Conversion vocabulary for the owned `Cell` subset. Declared PostgreSQL
-/// containers, text I/O and nested JSONB belong to
+/// Conversion vocabulary for native Arrow leaves and primitive lists. Declared
+/// PostgreSQL containers, text I/O and nested JSONB belong to
 /// [`BoundDatumPlan`](crate::BoundDatumPlan), which reuses these leaf rules.
 #[derive(Debug, Clone)]
 pub enum CellRule {
@@ -150,20 +150,205 @@ pub enum CellRule {
 }
 
 impl CellRule {
+    /// Resolve the conversion rule for a column from its Arrow `DataType` and
+    /// target PostgreSQL type.
+    ///
+    /// The pair must be one this layer can materialize: each recognized Arrow type
+    /// admits a specific set of PostgreSQL target buckets (e.g. `Int32` backs both
+    /// `int2` and `int4`, since both round-trip through a 32-bit Arrow column;
+    /// `Timestamp` with a zone backs `timestamptz`, without a zone backs
+    /// `timestamp`). This is the single point where `(Arrow, PG)` compatibility is
+    /// decided, so a desync such as `Int32` data aimed at a `text` column is
+    /// rejected here at converter construction rather than surfacing as a corrupt
+    /// or failed datum mid-scan.
+    ///
+    /// The admitted pairs serve both directions: [`BoundDatumPlan`] reads (Arrow to
+    /// PostgreSQL) and writes (PostgreSQL to Arrow) resolve through this function,
+    /// because a table column binding must round-trip. UPDATE reads and rewrites
+    /// whole rows, and a transaction reads its own writes. Every admitted pair
+    /// therefore has both a decoder and a source-bound encoder. Three pairs are
+    /// lossless only when written, so providers guard the read direction:
+    /// `Int32` to `int2` relies on the producer preserving the int16 domain;
+    /// nanosecond timestamps truncate to microseconds (foreign UPDATE rejects
+    /// them); and `Decimal128` to a typmod-constrained `numeric` is checked per
+    /// value by the target typmod. Do not add a pair that holds in only one
+    /// direction here; that would need a direction-specific resolver.
+    ///
+    /// [`BoundDatumPlan`]: crate::BoundDatumPlan
+    ///
+    /// Returns [`ArrowConversionError::IncompatibleColumnType`] when the `DataType` is
+    /// recognized but paired with an incompatible PostgreSQL type, and
+    /// [`ArrowConversionError::UnsupportedColumnType`] when the `DataType` is one this layer
+    /// cannot materialize at all.
+    pub fn resolve(
+        arrow: &DataType,
+        pg: PgColumnType,
+    ) -> ArrowConversionResult<Self> {
+        use PgColumnType as Pg;
+        match arrow {
+            DataType::Boolean => {
+                require_pg(pg == Pg::Bool, arrow, pg, CellRule::Bool)
+            }
+            DataType::Int16 => require_pg(pg == Pg::Int2, arrow, pg, CellRule::I16),
+            // Formats without int16 widen int2 to Int32. Such providers must
+            // preserve the original PG value domain; generic external Int32 is
+            // not proof.
+            DataType::Int32 => require_pg(
+                matches!(pg, Pg::Int2 | Pg::Int4),
+                arrow,
+                pg,
+                CellRule::I32,
+            ),
+            DataType::Int64 => require_pg(pg == Pg::Int8, arrow, pg, CellRule::I64),
+            DataType::Float32 => {
+                require_pg(pg == Pg::Float4, arrow, pg, CellRule::F32)
+            }
+            DataType::Float64 => {
+                require_pg(pg == Pg::Float8, arrow, pg, CellRule::F64)
+            }
+            DataType::Utf8 | DataType::LargeUtf8 => {
+                require_pg(pg == Pg::Text, arrow, pg, CellRule::Utf8)
+            }
+            DataType::Binary | DataType::LargeBinary => {
+                require_pg(pg == Pg::Bytea, arrow, pg, CellRule::Binary)
+            }
+            DataType::Date32 => {
+                require_pg(pg == Pg::Date, arrow, pg, CellRule::Date32)
+            }
+            DataType::Time64(TimeUnit::Microsecond) => {
+                require_pg(pg == Pg::Time, arrow, pg, CellRule::Time64Micros)
+            }
+            DataType::Timestamp(unit, tz) => {
+                // Only microsecond and nanosecond physical units are materializable
+                // (the decoder downcasts to exactly those, and `accepts` admits only
+                // them). Reject second/millisecond here — at the single (Arrow, PG)
+                // compatibility point — so plan binding fails at the schema
+                // boundary instead of letting an unsupported unit pass the gate and
+                // surface only on the first decoded batch.
+                let nanos = match unit {
+                    TimeUnit::Microsecond => false,
+                    TimeUnit::Nanosecond => true,
+                    TimeUnit::Second | TimeUnit::Millisecond => {
+                        return Err(ArrowConversionError::UnsupportedColumnType(
+                            format!(
+                                "Timestamp unit {unit:?} is not supported \
+                             (only microsecond and nanosecond)"
+                            ),
+                        ));
+                    }
+                };
+                // A zone-aware Arrow timestamp must land in `timestamptz` and a
+                // zone-naive one in `timestamp`; the physical unit is independent.
+                let want = if tz.is_some() {
+                    Pg::Timestamptz
+                } else {
+                    Pg::Timestamp
+                };
+                require_pg(
+                    pg == want,
+                    arrow,
+                    pg,
+                    CellRule::Timestamp {
+                        nanos,
+                        tz: tz.is_some(),
+                    },
+                )
+            }
+            DataType::Decimal128(precision, scale) => {
+                if pg != Pg::Numeric {
+                    return Err(incompatible(arrow, pg));
+                }
+                // `1 <= precision <= 38` bounds the i128 range the encoder needs
+                // (it computes `10^precision`/`10^scale` as `i128`, which holds iff
+                // the exponent is ≤ 38). Table formats, Arrow and PostgreSQL require
+                // `0 <= scale <= precision` as a *schema* invariant, which both
+                // executors enforce later (read: `Decimal128NumericCodec::new`;
+                // write: `with_precision_and_scale` at flush). Resolve it here too
+                // so an illegal external schema fails at session begin — "resolve
+                // once, fail early" — instead of only on the first decode/flush.
+                // (Per-*value* over-precision stays a separate runtime check at
+                // encode time, not here.) The third clause short-circuits after the
+                // first two, so `scale` is already in `0..=38` and the cast is safe.
+                if !(1..=38).contains(precision)
+                    || !(0..=38).contains(scale)
+                    || *scale as u32 > *precision as u32
+                {
+                    return Err(ArrowConversionError::IncompatibleColumnType(
+                        format!("Decimal128({precision}, {scale})"),
+                        "require 1 <= precision <= 38 and 0 <= scale <= precision"
+                            .to_string(),
+                    ));
+                }
+                Ok(CellRule::Decimal128 {
+                    precision: *precision as u32,
+                    scale: *scale as u32,
+                })
+            }
+            // UUID and fixed-width bytea both arrive as FixedSizeBinary; the target
+            // PostgreSQL type decides which rule applies.
+            DataType::FixedSizeBinary(n) => {
+                let n = *n;
+                if n == 16 && pg == Pg::Uuid {
+                    Ok(CellRule::Uuid)
+                } else if pg == Pg::Bytea && (1..=i32::MAX).contains(&n) {
+                    Ok(CellRule::FixedBinary { len: n as usize })
+                } else if n == 16 {
+                    Err(ArrowConversionError::IncompatibleColumnType(
+                        "FixedSizeBinary(16)".to_string(),
+                        format!("target PG type {pg:?} is neither uuid nor bytea"),
+                    ))
+                } else {
+                    Err(ArrowConversionError::UnsupportedColumnType(format!(
+                        "FixedSizeBinary({n}) is only supported as bytea"
+                    )))
+                }
+            }
+            DataType::List(element_field) => {
+                let Pg::Array(elem_oid) = pg else {
+                    return Err(incompatible(arrow, pg));
+                };
+                let element = ListElementRule::resolve(element_field.data_type())?;
+                // The element-granularity twin of the scalar arms' single-point
+                // (Arrow, PG) compatibility check: the resolved element kind must be
+                // materializable into the column's declared element OID (an `Int32`
+                // element backs `int2`/`int4`, a `Utf8` element backs the text
+                // family), so a desync is rejected here rather than mid-scan at datum
+                // construction.
+                if !element.accepts_target_oid(elem_oid) {
+                    return Err(ArrowConversionError::IncompatibleColumnType(
+                        format!("{arrow:?}"),
+                        format!(
+                            "list element rule {element:?} cannot materialize into PG \
+                             element OID {}",
+                            u32::from(elem_oid)
+                        ),
+                    ));
+                }
+                Ok(CellRule::List {
+                    element,
+                    field: element_field.clone(),
+                    elem_oid,
+                })
+            }
+            other => Err(ArrowConversionError::UnsupportedColumnType(format!(
+                "{other:?}"
+            ))),
+        }
+    }
+
     /// Whether an Arrow array of `dt` can be decoded by this already-resolved
     /// rule.
     ///
-    /// This is the batch-boundary check that complements
-    /// [`crate::column_encoder::downcast`]: `downcast` only confirms the *concrete*
-    /// array kind, but several Arrow types share a kind while differing in the
+    /// This is the batch-boundary check behind trusted array binding: several
+    /// Arrow types share a concrete array kind while differing in the
     /// `DataType` parameters the value math depends on — decimal
     /// precision/scale, fixed-binary width, timestamp unit/timezone. Validating
-    /// the full `DataType` once per scan (against the type the plan resolved
+    /// the full `DataType` once per batch (against the type the plan resolved
     /// from the schema) turns a producer/plan drift into a clean
-    /// [`ArrowConversionError::ArrowTypeMismatch`] at the boundary instead of a panic or a
-    /// value silently decoded at the wrong scale/width.
+    /// [`ArrowConversionError::ArrowTypeMismatch`] at the boundary instead of a
+    /// panic or a value silently decoded at the wrong scale/width.
     ///
-    /// The accepted set mirrors [`resolve_cell_rule`] (e.g. `Utf8` accepts
+    /// The accepted set mirrors [`Self::resolve`] (e.g. `Utf8` accepts
     /// `Utf8`/`LargeUtf8`) and the exact unit the decoder reads for timestamps.
     pub fn accepts(&self, dt: &DataType) -> bool {
         match self {
@@ -202,25 +387,18 @@ impl CellRule {
                 DataType::Decimal128(p, s)
                     if *p as u32 == *precision && *s as u32 == *scale
             ),
-            CellRule::List { element, .. } => matches!(
-                dt,
-                DataType::List(field)
-                    if element.accepts_data_type(field.data_type())
-            ),
+            CellRule::List { element, .. } => element.accepts_list(dt),
         }
     }
 
     /// Whether decoding or encoding this rule crosses the PostgreSQL/Arrow
     /// semantic UTF-8 boundary.
     pub(crate) fn requires_utf8_server_encoding(&self) -> bool {
-        matches!(self, Self::Utf8)
-            || matches!(
-                self,
-                Self::List {
-                    element: ListElementRule::String,
-                    ..
-                }
-            )
+        match self {
+            Self::Utf8 => true,
+            Self::List { element, .. } => element.requires_utf8_server_encoding(),
+            _ => false,
+        }
     }
 }
 
@@ -243,6 +421,18 @@ pub enum ListElementRule {
 }
 
 impl ListElementRule {
+    /// Resolve the conversion rule for a list element from its Arrow
+    /// `DataType`. Anything outside `bool`/`int`/`long`/`float`/`double`/
+    /// `string` (including a nested list) is rejected with
+    /// [`ArrowConversionError::UnsupportedColumnType`].
+    pub fn resolve(element_type: &DataType) -> ArrowConversionResult<Self> {
+        Self::for_arrow_type(element_type).ok_or_else(|| {
+            ArrowConversionError::UnsupportedColumnType(format!(
+                "list element type {element_type:?} is not supported"
+            ))
+        })
+    }
+
     /// Classify the element families with an existing specialized list codec.
     pub(crate) fn for_arrow_type(dt: &DataType) -> Option<Self> {
         match dt {
@@ -257,11 +447,21 @@ impl ListElementRule {
         }
     }
 
+    /// Whether an Arrow `List` column carries elements of this kind.
+    pub(crate) fn accepts_list(&self, dt: &DataType) -> bool {
+        matches!(dt, DataType::List(field) if self.accepts_data_type(field.data_type()))
+    }
+
+    /// String elements require the UTF-8 server-encoding capability.
+    pub(crate) fn requires_utf8_server_encoding(&self) -> bool {
+        matches!(self, Self::String)
+    }
+
     /// Whether an Arrow list-element `DataType` can be decoded by this element
     /// rule — the element-level counterpart of [`CellRule::accepts`], used to
     /// validate a list column's element type at the batch boundary.
     ///
-    /// This is kept in lockstep with the physical types `read::list` handles:
+    /// This is kept in lockstep with the physical types the list reader binds:
     /// `String` accepts `Utf8`/`LargeUtf8`, and every other kind matches exactly. Element
     /// types the resolver rejects (e.g. `Binary`, `UInt32`, a nested `List`)
     /// therefore fail here rather than slipping through as "some list".
@@ -282,7 +482,7 @@ impl ListElementRule {
     /// Whether this element kind can materialize into the array column's
     /// declared **element** type OID — the element-level counterpart of the
     /// scalar `(Arrow DataType, PgColumnType)` compatibility decided in
-    /// [`resolve_cell_rule`]. Mirrors those scalar arms exactly: an `Int`
+    /// [`CellRule::resolve`]. Mirrors those scalar arms exactly: an `Int`
     /// element backs `int2`/`int4` (narrowed at datum construction), `String`
     /// backs the `text`/`varchar`/`bpchar`/`name`/`json` family, and every other
     /// kind targets its single canonical OID.
@@ -303,180 +503,6 @@ impl ListElementRule {
                 B::TEXTOID | B::VARCHAROID | B::BPCHAROID | B::NAMEOID | B::JSONOID
             ),
         }
-    }
-}
-
-/// Resolve the conversion rule for a column from its Arrow `DataType` and
-/// target PostgreSQL type.
-///
-/// The pair must be one this layer can materialize: each recognized Arrow type
-/// admits a specific set of PostgreSQL target buckets (e.g. `Int32` backs both
-/// `int2` and `int4`, since both round-trip through a 32-bit Arrow column;
-/// `Timestamp` with a zone backs `timestamptz`, without a zone backs
-/// `timestamp`). This is the single point where `(Arrow, PG)` compatibility is
-/// decided, so a desync such as `Int32` data aimed at a `text` column is
-/// rejected here at converter construction rather than surfacing as a corrupt
-/// or failed datum mid-scan.
-///
-/// The admitted pairs serve both directions: [`BoundDatumPlan`] reads (Arrow to
-/// PostgreSQL) and writes (PostgreSQL to Arrow) resolve through this function,
-/// because a table column binding must round-trip. UPDATE reads and rewrites
-/// whole rows, and a transaction reads its own writes. Every admitted pair
-/// therefore has both a decoder and a source-bound encoder. Three pairs are
-/// lossless only when written, so providers guard the read direction:
-/// `Int32` to `int2` relies on the producer preserving the int16 domain;
-/// nanosecond timestamps truncate to microseconds (foreign UPDATE rejects
-/// them); and `Decimal128` to a typmod-constrained `numeric` is checked per
-/// value by the target typmod. Do not add a pair that holds in only one
-/// direction here; that would need a direction-specific resolver.
-///
-/// [`BoundDatumPlan`]: crate::BoundDatumPlan
-///
-/// Returns [`ArrowConversionError::IncompatibleColumnType`] when the `DataType` is
-/// recognized but paired with an incompatible PostgreSQL type, and
-/// [`ArrowConversionError::UnsupportedColumnType`] when the `DataType` is one this layer
-/// cannot materialize at all.
-pub fn resolve_cell_rule(
-    arrow: &DataType,
-    pg: PgColumnType,
-) -> ArrowConversionResult<CellRule> {
-    use PgColumnType as Pg;
-    match arrow {
-        DataType::Boolean => require_pg(pg == Pg::Bool, arrow, pg, CellRule::Bool),
-        DataType::Int16 => require_pg(pg == Pg::Int2, arrow, pg, CellRule::I16),
-        // Iceberg has no int16. Providers using Int32 for int2 must preserve
-        // the original PG value domain; generic external Int32 is not proof.
-        DataType::Int32 => {
-            require_pg(matches!(pg, Pg::Int2 | Pg::Int4), arrow, pg, CellRule::I32)
-        }
-        DataType::Int64 => require_pg(pg == Pg::Int8, arrow, pg, CellRule::I64),
-        DataType::Float32 => require_pg(pg == Pg::Float4, arrow, pg, CellRule::F32),
-        DataType::Float64 => require_pg(pg == Pg::Float8, arrow, pg, CellRule::F64),
-        DataType::Utf8 | DataType::LargeUtf8 => {
-            require_pg(pg == Pg::Text, arrow, pg, CellRule::Utf8)
-        }
-        DataType::Binary | DataType::LargeBinary => {
-            require_pg(pg == Pg::Bytea, arrow, pg, CellRule::Binary)
-        }
-        DataType::Date32 => require_pg(pg == Pg::Date, arrow, pg, CellRule::Date32),
-        DataType::Time64(TimeUnit::Microsecond) => {
-            require_pg(pg == Pg::Time, arrow, pg, CellRule::Time64Micros)
-        }
-        DataType::Timestamp(unit, tz) => {
-            // Only microsecond and nanosecond physical units are materializable
-            // (the decoder downcasts to exactly those, and `accepts` admits only
-            // them). Reject second/millisecond here — at the single (Arrow, PG)
-            // compatibility point — so `validate_cell_schema` fails at the schema
-            // boundary instead of letting an unsupported unit pass the gate and
-            // surface only on the first decoded batch.
-            let nanos = match unit {
-                TimeUnit::Microsecond => false,
-                TimeUnit::Nanosecond => true,
-                TimeUnit::Second | TimeUnit::Millisecond => {
-                    return Err(ArrowConversionError::UnsupportedColumnType(
-                        format!(
-                            "Timestamp unit {unit:?} is not supported \
-                         (only microsecond and nanosecond)"
-                        ),
-                    ));
-                }
-            };
-            // A zone-aware Arrow timestamp must land in `timestamptz` and a
-            // zone-naive one in `timestamp`; the physical unit is independent.
-            let want = if tz.is_some() {
-                Pg::Timestamptz
-            } else {
-                Pg::Timestamp
-            };
-            require_pg(
-                pg == want,
-                arrow,
-                pg,
-                CellRule::Timestamp {
-                    nanos,
-                    tz: tz.is_some(),
-                },
-            )
-        }
-        DataType::Decimal128(precision, scale) => {
-            if pg != Pg::Numeric {
-                return Err(incompatible(arrow, pg));
-            }
-            // `1 <= precision <= 38` bounds the i128 range the encoder needs
-            // (it computes `10^precision`/`10^scale` as `i128`, which holds iff
-            // the exponent is ≤ 38). Iceberg, Arrow and PostgreSQL all require
-            // `0 <= scale <= precision` as a *schema* invariant, which both
-            // executors enforce later (read: `Decimal128NumericCodec::new`;
-            // write: `with_precision_and_scale` at flush). Resolve it here too
-            // so an illegal external schema fails at session begin — "resolve
-            // once, fail early" — instead of only on the first decode/flush.
-            // (Per-*value* over-precision stays a separate runtime check at
-            // encode time, not here.) The third clause short-circuits after the
-            // first two, so `scale` is already in `0..=38` and the cast is safe.
-            if !(1..=38).contains(precision)
-                || !(0..=38).contains(scale)
-                || *scale as u32 > *precision as u32
-            {
-                return Err(ArrowConversionError::IncompatibleColumnType(
-                    format!("Decimal128({precision}, {scale})"),
-                    "require 1 <= precision <= 38 and 0 <= scale <= precision"
-                        .to_string(),
-                ));
-            }
-            Ok(CellRule::Decimal128 {
-                precision: *precision as u32,
-                scale: *scale as u32,
-            })
-        }
-        // UUID and fixed-width bytea both arrive as FixedSizeBinary; the target
-        // PostgreSQL type decides which rule applies.
-        DataType::FixedSizeBinary(n) => {
-            let n = *n;
-            if n == 16 && pg == Pg::Uuid {
-                Ok(CellRule::Uuid)
-            } else if pg == Pg::Bytea && (1..=i32::MAX).contains(&n) {
-                Ok(CellRule::FixedBinary { len: n as usize })
-            } else if n == 16 {
-                Err(ArrowConversionError::IncompatibleColumnType(
-                    "FixedSizeBinary(16)".to_string(),
-                    format!("target PG type {pg:?} is neither uuid nor bytea"),
-                ))
-            } else {
-                Err(ArrowConversionError::UnsupportedColumnType(format!(
-                    "FixedSizeBinary({n}) is only supported as bytea"
-                )))
-            }
-        }
-        DataType::List(element_field) => {
-            let Pg::Array(elem_oid) = pg else {
-                return Err(incompatible(arrow, pg));
-            };
-            let element = resolve_list_element_rule(element_field.data_type())?;
-            // The element-granularity twin of the scalar arms' single-point
-            // (Arrow, PG) compatibility check: the resolved element kind must be
-            // materializable into the column's declared element OID (an `Int32`
-            // element backs `int2`/`int4`, a `Utf8` element backs the text
-            // family), so a desync is rejected here rather than mid-scan at datum
-            // construction.
-            if !element.accepts_target_oid(elem_oid) {
-                return Err(ArrowConversionError::IncompatibleColumnType(
-                    format!("{arrow:?}"),
-                    format!(
-                        "list element rule {element:?} cannot materialize into PG \
-                         element OID {}",
-                        u32::from(elem_oid)
-                    ),
-                ));
-            }
-            Ok(CellRule::List {
-                element,
-                field: element_field.clone(),
-                elem_oid,
-            })
-        }
-        other => Err(ArrowConversionError::UnsupportedColumnType(format!(
-            "{other:?}"
-        ))),
     }
 }
 
@@ -503,45 +529,4 @@ fn incompatible(arrow: &DataType, pg: PgColumnType) -> ArrowConversionError {
         format!("{arrow:?}"),
         format!("cannot materialize into PG type {pg:?}"),
     )
-}
-
-/// Resolve the conversion rule for a list element from its Arrow `DataType`.
-/// Anything outside `bool`/`int`/`long`/`float`/`double`/`string` (including a
-/// nested list) is rejected with [`ArrowConversionError::UnsupportedColumnType`].
-pub fn resolve_list_element_rule(
-    element_type: &DataType,
-) -> ArrowConversionResult<ListElementRule> {
-    ListElementRule::for_arrow_type(element_type).ok_or_else(|| {
-        ArrowConversionError::UnsupportedColumnType(format!(
-            "list element type {element_type:?} is not supported"
-        ))
-    })
-}
-
-/// Reject any column whose `(DataType, PgColumnType)` pair cannot be
-/// materialized, in ascending column order. `pg_column_types[i]` is the target
-/// type for `arrow_schema.field(i)`, so the two views must describe the same
-/// columns and have equal length.
-///
-/// This is a pure type-level check — it never reads a row or array value — and
-/// returns `Ok(())` for a zero-column schema. It is the schema-granularity
-/// twin of [`resolve_cell_rule`]: it resolves each column's rule and discards
-/// the result, so the two stay in lockstep by sharing the same resolver. A
-/// length mismatch between the two views is a caller contract violation (the
-/// Arrow schema and the PG target-type list must align column-for-column) and
-/// is reported rather than silently truncated to the shorter view.
-pub fn validate_cell_schema(
-    arrow_schema: &arrow_schema::Schema,
-    pg_column_types: &[PgColumnType],
-) -> ArrowConversionResult<()> {
-    let fields = arrow_schema.fields();
-    if fields.len() != pg_column_types.len() {
-        return Err(ArrowConversionError::InvariantViolated(
-            "validate_cell_schema: Arrow schema and PG target-type counts differ",
-        ));
-    }
-    for (field, pg) in fields.iter().zip(pg_column_types) {
-        resolve_cell_rule(field.data_type(), *pg)?;
-    }
-    Ok(())
 }

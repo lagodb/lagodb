@@ -79,10 +79,7 @@ impl ParquetReadPlan {
 
     /// # Safety
     /// The batch comes from this plan's projection of the bound file schema.
-    pub(super) unsafe fn bind_batch(
-        &self,
-        batch: RecordBatch,
-    ) -> Result<BoundBatch, ConnectorError> {
-        Ok(unsafe { self.decoder.bind_datums_unchecked(batch) }?)
+    pub(super) unsafe fn bind_batch(&self, batch: RecordBatch) -> BoundBatch {
+        unsafe { self.decoder.bind_batch_unchecked(batch) }
     }
 }

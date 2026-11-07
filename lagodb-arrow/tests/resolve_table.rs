@@ -1,4 +1,4 @@
-//! Resolution-table assertions for `resolve_cell_rule` over the
+//! Resolution-table assertions for `CellRule::resolve` over the
 //! `(DataType, PgColumnType)` -> `CellRule` mapping. Host tests; no backend.
 //! `CellRule` is not `PartialEq`, so assertions use `matches!` /
 //! destructuring. UUID-specific cases live in `resolve_uuid.rs`.
@@ -6,9 +6,7 @@
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, TimeUnit};
-use lagodb_arrow::{
-    ArrowConversionError, CellRule, ListElementRule, PgColumnType, resolve_cell_rule,
-};
+use lagodb_arrow::{ArrowConversionError, CellRule, ListElementRule, PgColumnType};
 use pgrx::pg_sys;
 use proptest::prelude::*;
 
@@ -17,29 +15,29 @@ use proptest::prelude::*;
 // ---------------------------------------------------------------------------
 
 /// Each primitive Arrow `DataType` resolves to its matching `CellRule` when
-/// paired with a compatible `PgColumnType`. `resolve_cell_rule` validates the
+/// paired with a compatible `PgColumnType`. `CellRule::resolve` validates the
 /// pair for every type (not only `FixedSizeBinary(16)`), so the pairs here are
 /// deliberately the compatible ones.
 #[test]
 fn primitives_resolve_to_matching_rule() {
     assert!(matches!(
-        resolve_cell_rule(&DataType::Boolean, PgColumnType::Bool).unwrap(),
+        CellRule::resolve(&DataType::Boolean, PgColumnType::Bool).unwrap(),
         CellRule::Bool
     ));
     assert!(matches!(
-        resolve_cell_rule(&DataType::Int32, PgColumnType::Int4).unwrap(),
+        CellRule::resolve(&DataType::Int32, PgColumnType::Int4).unwrap(),
         CellRule::I32
     ));
     assert!(matches!(
-        resolve_cell_rule(&DataType::Int64, PgColumnType::Int8).unwrap(),
+        CellRule::resolve(&DataType::Int64, PgColumnType::Int8).unwrap(),
         CellRule::I64
     ));
     assert!(matches!(
-        resolve_cell_rule(&DataType::Float32, PgColumnType::Float4).unwrap(),
+        CellRule::resolve(&DataType::Float32, PgColumnType::Float4).unwrap(),
         CellRule::F32
     ));
     assert!(matches!(
-        resolve_cell_rule(&DataType::Float64, PgColumnType::Float8).unwrap(),
+        CellRule::resolve(&DataType::Float64, PgColumnType::Float8).unwrap(),
         CellRule::F64
     ));
 }
@@ -48,11 +46,11 @@ fn primitives_resolve_to_matching_rule() {
 #[test]
 fn utf8_variants_resolve_to_utf8() {
     assert!(matches!(
-        resolve_cell_rule(&DataType::Utf8, PgColumnType::Text).unwrap(),
+        CellRule::resolve(&DataType::Utf8, PgColumnType::Text).unwrap(),
         CellRule::Utf8
     ));
     assert!(matches!(
-        resolve_cell_rule(&DataType::LargeUtf8, PgColumnType::Text).unwrap(),
+        CellRule::resolve(&DataType::LargeUtf8, PgColumnType::Text).unwrap(),
         CellRule::Utf8
     ));
 }
@@ -61,11 +59,11 @@ fn utf8_variants_resolve_to_utf8() {
 #[test]
 fn binary_variants_resolve_to_binary() {
     assert!(matches!(
-        resolve_cell_rule(&DataType::Binary, PgColumnType::Bytea).unwrap(),
+        CellRule::resolve(&DataType::Binary, PgColumnType::Bytea).unwrap(),
         CellRule::Binary
     ));
     assert!(matches!(
-        resolve_cell_rule(&DataType::LargeBinary, PgColumnType::Bytea).unwrap(),
+        CellRule::resolve(&DataType::LargeBinary, PgColumnType::Bytea).unwrap(),
         CellRule::Binary
     ));
 }
@@ -76,11 +74,11 @@ fn binary_variants_resolve_to_binary() {
 #[test]
 fn binary_variants_do_not_infer_jsonb_codec() {
     assert!(matches!(
-        resolve_cell_rule(&DataType::Binary, PgColumnType::Jsonb),
+        CellRule::resolve(&DataType::Binary, PgColumnType::Jsonb),
         Err(ArrowConversionError::IncompatibleColumnType(_, _))
     ));
     assert!(matches!(
-        resolve_cell_rule(&DataType::LargeBinary, PgColumnType::Jsonb),
+        CellRule::resolve(&DataType::LargeBinary, PgColumnType::Jsonb),
         Err(ArrowConversionError::IncompatibleColumnType(_, _))
     ));
 }
@@ -93,7 +91,7 @@ fn binary_variants_do_not_infer_jsonb_codec() {
 #[test]
 fn date32_resolves_to_date32() {
     assert!(matches!(
-        resolve_cell_rule(&DataType::Date32, PgColumnType::Date).unwrap(),
+        CellRule::resolve(&DataType::Date32, PgColumnType::Date).unwrap(),
         CellRule::Date32
     ));
 }
@@ -102,7 +100,7 @@ fn date32_resolves_to_date32() {
 #[test]
 fn time64_micros_resolves_to_time64micros() {
     assert!(matches!(
-        resolve_cell_rule(
+        CellRule::resolve(
             &DataType::Time64(TimeUnit::Microsecond),
             PgColumnType::Time
         )
@@ -123,7 +121,7 @@ fn timestamp_combos_resolve_with_expected_flags() {
 
     // Microsecond, naive
     assert!(matches!(
-        resolve_cell_rule(
+        CellRule::resolve(
             &DataType::Timestamp(TimeUnit::Microsecond, None),
             PgColumnType::Timestamp,
         )
@@ -136,7 +134,7 @@ fn timestamp_combos_resolve_with_expected_flags() {
 
     // Microsecond, tz-aware
     assert!(matches!(
-        resolve_cell_rule(
+        CellRule::resolve(
             &DataType::Timestamp(TimeUnit::Microsecond, Some(tz.clone())),
             PgColumnType::Timestamptz,
         )
@@ -149,7 +147,7 @@ fn timestamp_combos_resolve_with_expected_flags() {
 
     // Nanosecond, naive
     assert!(matches!(
-        resolve_cell_rule(
+        CellRule::resolve(
             &DataType::Timestamp(TimeUnit::Nanosecond, None),
             PgColumnType::Timestamp,
         )
@@ -162,7 +160,7 @@ fn timestamp_combos_resolve_with_expected_flags() {
 
     // Nanosecond, tz-aware
     assert!(matches!(
-        resolve_cell_rule(
+        CellRule::resolve(
             &DataType::Timestamp(TimeUnit::Nanosecond, Some(tz)),
             PgColumnType::Timestamptz,
         )
@@ -184,7 +182,7 @@ fn timestamp_combos_resolve_with_expected_flags() {
 fn decimal128_passes_precision_and_scale_through() {
     for (p, s) in [(10u8, 2i8), (38, 0), (18, 4), (1, 0), (38, 38)] {
         let rule =
-            resolve_cell_rule(&DataType::Decimal128(p, s), PgColumnType::Numeric)
+            CellRule::resolve(&DataType::Decimal128(p, s), PgColumnType::Numeric)
                 .unwrap();
         match rule {
             CellRule::Decimal128 { precision, scale } => {
@@ -214,7 +212,7 @@ fn fixed16_wrong_pg_type_is_incompatible() {
         PgColumnType::Text,
         PgColumnType::Numeric,
     ] {
-        let err = resolve_cell_rule(&DataType::FixedSizeBinary(16), pg)
+        let err = CellRule::resolve(&DataType::FixedSizeBinary(16), pg)
             .expect_err("FixedSizeBinary(16) with wrong PG type must be rejected");
         assert!(
             matches!(err, ArrowConversionError::IncompatibleColumnType(_, _)),
@@ -238,7 +236,7 @@ fn list_of(elem: DataType) -> DataType {
 fn list_elements_resolve_to_matching_element_rule() {
     macro_rules! assert_list_elem {
         ($elem:expr, $oid:expr, $pat:pat) => {{
-            let rule = resolve_cell_rule(&list_of($elem), PgColumnType::Array($oid))
+            let rule = CellRule::resolve(&list_of($elem), PgColumnType::Array($oid))
                 .unwrap();
             match rule {
                 CellRule::List { element, .. } => {
@@ -278,7 +276,7 @@ fn list_elements_resolve_to_matching_element_rule() {
 #[test]
 fn unsupported_data_types_are_rejected() {
     // Decimal256 is not handled by the layer.
-    let err = resolve_cell_rule(&DataType::Decimal256(20, 4), PgColumnType::Numeric)
+    let err = CellRule::resolve(&DataType::Decimal256(20, 4), PgColumnType::Numeric)
         .expect_err("Decimal256 must be unsupported");
     assert!(
         matches!(err, ArrowConversionError::UnsupportedColumnType(_)),
@@ -286,7 +284,7 @@ fn unsupported_data_types_are_rejected() {
     );
 
     // Float16 is not a supported width.
-    let err = resolve_cell_rule(&DataType::Float16, PgColumnType::Float4)
+    let err = CellRule::resolve(&DataType::Float16, PgColumnType::Float4)
         .expect_err("Float16 must be unsupported");
     assert!(
         matches!(err, ArrowConversionError::UnsupportedColumnType(_)),
@@ -295,7 +293,7 @@ fn unsupported_data_types_are_rejected() {
 
     // Nested list (list of list) — the element rule rejects a list element.
     let nested = list_of(list_of(DataType::Int32));
-    let err = resolve_cell_rule(&nested, PgColumnType::Array(pg_sys::INT4OID))
+    let err = CellRule::resolve(&nested, PgColumnType::Array(pg_sys::INT4OID))
         .expect_err("nested List must be unsupported");
     assert!(
         matches!(err, ArrowConversionError::UnsupportedColumnType(_)),
@@ -305,7 +303,7 @@ fn unsupported_data_types_are_rejected() {
     // Struct is not a materializable column type here.
     let strukt =
         DataType::Struct(vec![Field::new("a", DataType::Int32, true)].into());
-    let err = resolve_cell_rule(&strukt, PgColumnType::Array(pg_sys::INT4OID))
+    let err = CellRule::resolve(&strukt, PgColumnType::Array(pg_sys::INT4OID))
         .expect_err("Struct must be unsupported");
     assert!(
         matches!(err, ArrowConversionError::UnsupportedColumnType(_)),
@@ -319,13 +317,13 @@ fn unsupported_data_types_are_rejected() {
 
 proptest! {
     /// for every valid Decimal128 precision/scale (`0 <= scale <= precision`),
-    /// `resolve_cell_rule` passes both through unchanged.
+    /// `CellRule::resolve` passes both through unchanged.
     #[test]
     fn prop_decimal128_resolution_passthrough(
         (p, s) in (1u8..=38).prop_flat_map(|p| (Just(p), 0i8..=p as i8)),
     ) {
         let rule =
-            resolve_cell_rule(&DataType::Decimal128(p, s), PgColumnType::Numeric)
+            CellRule::resolve(&DataType::Decimal128(p, s), PgColumnType::Numeric)
                 .expect("valid Decimal128 must resolve");
         match rule {
             CellRule::Decimal128 { precision, scale } => {
@@ -352,7 +350,7 @@ proptest! {
         let tz: Option<Arc<str>> = if has_tz { Some(Arc::from("+00:00")) } else { None };
         let pg = if has_tz { PgColumnType::Timestamptz } else { PgColumnType::Timestamp };
 
-        let rule = resolve_cell_rule(&DataType::Timestamp(unit, tz), pg)
+        let rule = CellRule::resolve(&DataType::Timestamp(unit, tz), pg)
             .expect("Timestamp must resolve");
         match rule {
             CellRule::Timestamp { nanos, tz } => {

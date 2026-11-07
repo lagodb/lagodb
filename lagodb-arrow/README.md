@@ -8,94 +8,76 @@
 
 `lagodb-arrow` owns the shared Arrow boundary: format-neutral conversion between
 Arrow arrays and PostgreSQL datums/slots, plus the typed provider adapter that
-exports serial scans through the Arrow C Stream ABI. It contains no DataFusion
-execution logic and never names a table format such as Iceberg, Delta, or Hudi.
+exports serial and parallel-worker scans through the Arrow C Stream ABI. It
+contains no query-engine execution logic and never names a table or file
+format.
 
-The crate is a library (`rlib`) linked into the extension crates that need it.
-Today [lagodb-iceberg](../lagodb-iceberg) uses both its conversion and typed
-table-scan APIs, while [lagodb-connectors](../lagodb-connectors) uses its
-conversion APIs. It is not a PostgreSQL extension itself and produces no
-`cdylib`.
+The crate is a library (`rlib`) linked into the extension crates that need it:
+
+- [lagodb-iceberg](../lagodb-iceberg) uses the conversion APIs and implements
+  the typed table-scan provider SPI.
+- [lagodb-connectors](../lagodb-connectors) uses the conversion APIs for its
+  file-format FDW and COPY paths.
+- [lagodb-query](../lagodb-query) uses the explicit physical `DatumCodec`s for
+  query results and the array reader/builder for PostgreSQL expression
+  evaluation.
+
+It is not a PostgreSQL extension itself and produces no `cdylib`.
 
 ## Why this crate exists
 
-Every lakehouse format in this workspace materializes its data as Arrow (via
-Parquet) before it reaches PostgreSQL. Once the data is Arrow, the rules for
-converting each value to and from a PostgreSQL datum are identical regardless of
-which format produced it: integer widening, decimal scale, the PostgreSQL↔Unix
-epoch offset for temporal types, varlena detoast, UUID byte order, and so on.
+Every consumer in this workspace meets PostgreSQL through Arrow. Once the data
+is Arrow, the rules for converting each value to and from a PostgreSQL datum are
+identical regardless of which format produced it: integer widening, decimal
+scale, the PostgreSQL↔Unix epoch offset for temporal types, varlena detoast,
+UUID byte order, and so on.
 
-What actually differs between consumers is *not* the value conversion. It is:
+What differs between consumers is the **format schema → Arrow schema** mapping
+and the **column model** (slot positions for an access method, foreign-table
+columns for an FDW, expression arguments for the query engine). Each consumer
+keeps those; `lagodb-arrow` takes over the moment an Arrow schema exists.
 
-- the **format schema → Arrow schema** mapping (Iceberg `timestamp_ns` →
-  `Timestamp(Nanosecond)`, `Uuid` → `FixedSizeBinary(16)`, and so on), and
-- the **column model** — an access method maps Arrow columns to `attno`/slot
-  positions, while an FDW maps them to foreign-table columns.
+The public `scan` module is the provider-facing half of the same boundary. It
+converts typed provider plans, prepared handles, schemas, and streams into
+`lagodb-core`'s Arrow-independent exact-build descriptor ABI. The host registry
+remains in `lagodb-base`, and the query-engine consumer in `lagodb-query`.
 
-Pulling the value rules into one crate means each consumer implements the
-[lagodb-core](../lagodb-core) framework interfaces once and never
-rewrites the conversion logic. Each consumer keeps its own schema mapping and
-column model; `lagodb-arrow` takes over the moment an Arrow schema exists and
-hands back datums (or arrays) with no knowledge of where the Arrow came from.
+## Principle: bind once, convert per row
 
-The public `scan` module is the provider-facing half of the same Arrow
-boundary. It converts typed provider plans, prepared handles, schemas, and
-streams into `lagodb-core`'s Arrow-independent exact-build descriptor ABI. The
-host registry remains in `lagodb-base`, and the DataFusion consumer remains in
-`lagodb-query`.
-
-## Principle: dispatch on `(Arrow DataType, PgColumnType)`
-
-The crate's central idea is that **standard semantic** conversion for a column is
-determined by a pair: the Arrow `DataType` of the source column and the target
-PostgreSQL column type. The Arrow `DataType` already carries decimal
-precision/scale, timestamp unit and timezone, and binary width, so the target
-PostgreSQL type is load-bearing for exactly one distinction Arrow cannot make on
-its own — separating a `uuid` from a fixed-width `bytea` when both arrive as
+The leaf conversion is determined by a pair: the Arrow `DataType` of the source
+column and the target PostgreSQL type. The Arrow `DataType` already carries
+decimal precision/scale, timestamp unit and timezone, and binary width, so the
+PostgreSQL type is load-bearing for one distinction Arrow cannot make on its
+own — separating a `uuid` from a fixed-width `bytea` when both arrive as
 `FixedSizeBinary(16)`.
 
-This pair is resolved **once per column** into a `ColumnRule`, an enum that
-captures everything the conversion needs (and nothing about column position or
-format type). After resolution, every row of the batch reuses the same rule with
-no further type dispatch or allocation. Schemas that pair an Arrow type with an
-incompatible PostgreSQL type, or that use an Arrow type the layer cannot
-materialize, are rejected up front rather than failing mid-scan. A provider that
-uses a private physical representation (for example, complete PostgreSQL
-JSONB varlena bytes in Arrow `Binary`) must bind the corresponding explicit
-`ColumnRule` and `DatumCodec` at its own column-planning boundary; the
-format-neutral resolver never infers that representation from `JSONBOID`.
+`CellRule::resolve` decides that pair, and `BoundDatumPlan::bind` extends it to
+a declared PostgreSQL type, recursing through arrays, composites, intervals and
+nested JSONB. All fallible setup — rule resolution, decimal codecs, array
+element layouts, UTF-8 server-encoding checks — happens while a column is
+bound. Binding a batch only selects concrete arrays, and each row reuses the
+bound reader or encoder with no further type dispatch. Incompatible pairs are
+rejected up front rather than mid-scan.
 
-## Two worlds, one set of rules
+A provider or query engine that uses a private physical representation (for
+example, complete PostgreSQL numeric varlena bytes in Arrow `Binary`) binds the
+corresponding explicit `DatumCodec` at its own planning boundary; the
+format-neutral resolver never infers that representation from a PostgreSQL OID.
 
-`lagodb-arrow` mirrors the row/column split that `lagodb-core` defines, and
-keeps both sides driven by the same per-column rule so a value converted one way
-is bit-identical to the same value converted the other.
+## Read and write paths
 
-**Column world (the hot path).** The columnar scan and DML paths work directly
-in terms of Arrow batches and tuple slots, skipping any owned intermediate
-representation:
-
-- On read, a batch source yields one Arrow `RecordBatch` at a time and a row
-  decoder writes one row of that batch straight into a slot, column by column.
-- On write, a relation-bound slot-fed buffer appends validated PostgreSQL
-  datums into one Arrow column builder per column and produces a `RecordBatch`
+- **Read:** `ArrowBatchSource` yields one `RecordBatch` at a time to
+  `lagodb-core`'s `AmScanBatchSource`, and `ArrowColumnDecoder` (a
+  `BatchRowDecoder`) writes one batch row straight into a slot.
+- **Write:** `BoundWriteBuffer` appends relation slot rows and
+  `BoundDatumBuffer` appends slot-free datum streams such as COPY into one Arrow
+  builder per column; both implement `BatchBuffer` and produce a `RecordBatch`
   on flush.
+- **Expressions:** `PgDatumArrayReader` / `PgDatumArrayBuilder` bind one Arrow
+  array to a PostgreSQL expression argument or result type.
 
-The read half implements the `AmScanBatchSource` / `BatchRowDecoder` traits from
-`lagodb-core`; the relation-bound write buffer implements `BatchBuffer`
-while keeping its provider-specific source binding in `lagodb-arrow`.
-
-**Row world (FDW and row-mode).** A row-at-a-time consumer (an FDW, a row-mode
-access method, or buffering and `EXPLAIN` rendering) works through `lagodb-core`'s
-owned `Cell`/`Row` types instead. After the caller establishes the row bound,
-the bound `ColumnReader::read_cell_unchecked` extracts a standard semantic
-Arrow value into a `Cell`, and the same `ColumnRule` builds an Arrow array from
-buffered `Cell`s (`ColumnRule::build`). A provider-owned physical codec is
-intentionally not exposed as a semantic `Cell` through
-`read_cell_unchecked`; its slot path binds the `DatumCodec` once and copies
-directly into the destination slot. Because the build path drives the very same
-column encoder the columnar hot path uses, the two write sources stay in
-lockstep.
+Reads and writes of the same declared type share one `BoundDatumPlan`, so a
+value written by one path reads back bit-identically through the other.
 
 ## Memory and error discipline
 
@@ -123,11 +105,11 @@ workspace is layered.
 
 Dependencies are limited to `pgrx`, `lagodb-core`, the `arrow-*` crates, and
 small support crates (`uuid`, `thiserror`, and `libc`). The crate deliberately
-does **not** depend on DataFusion or any table-format crate.
+does **not** depend on a query engine or any table-format crate.
 
 ## Testing
 
-Pure-Rust logic (rule resolution, codec math, validator parity) lives in this
+Pure-Rust logic (rule resolution, codec math, SQLSTATE mapping) lives in this
 crate and runs with ordinary `cargo test`:
 
 ```bash
@@ -135,7 +117,7 @@ cargo test -p lagodb-arrow
 ```
 
 Paths that require a live PostgreSQL backend — Arrow⇆PG encode/decode into real
-slots, encoder/decoder equivalence, buffer/flush behavior, and toast detoast —
+slots, write/read round trips, buffer/flush behavior, and toast detoast —
 are `#[pg_test]` tests hosted in the aggregator crate
 [pg-backend-tests](../pg-backend-tests):
 

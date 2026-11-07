@@ -124,7 +124,7 @@ impl ParquetBatchSource {
                     self.binding.as_ref().expect("a reader has a bound plan");
                 // SAFETY: every file's schema is checked at open; the reader
                 // applies exactly this plan's root projection to every batch.
-                return Ok(Some(unsafe { binding.plan.bind_batch(batch) }?));
+                return Ok(Some(unsafe { binding.plan.bind_batch(batch) }));
             }
             self.close_reader();
             if !self.open_next_reader()? {

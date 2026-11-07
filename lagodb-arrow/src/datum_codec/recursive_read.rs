@@ -2,74 +2,47 @@
 
 use std::{cell::RefCell, rc::Rc};
 
+use arrow_array::cast::AsArray;
+use arrow_array::types::Int64Type;
 use arrow_array::{
     Array, Int64Array, LargeStringArray, ListArray, StringArray, StructArray,
 };
 use arrow_buffer::NullBuffer;
+use arrow_schema::DataType;
 use lagodb_core::datum::{ArrayDatumBuffer, CompositeDatumCodec, PgTextIo};
 use pgrx::pg_sys;
 
-use super::reader::BoundDatumReader;
+use super::reader::{BoundDatumReader, is_null_unchecked};
 use super::{BoundDatumPlan, DatumReadState, NodePlan};
-use crate::column_encoder::downcast;
+use crate::ArrowConversionResult;
 use crate::jsonb::BoundNestedJsonb;
-use crate::read::is_null_unchecked;
-use crate::read::list::ListReader;
-use crate::{ArrowConversionResult, CellRule};
 
 impl BoundDatumPlan {
     /// Materialize direct scalar/native readers without an extra recursive
-    /// dispatch. Container state remains owned by the scan across batches.
+    /// dispatch. Conversion state remains owned by the scan across batches.
     ///
     /// # Safety
-    /// `self.accepts_arrow_type(array.data_type())` must hold for the entire tree, either
-    /// checked at the decoder boundary or guaranteed by its producer.
+    /// `self.accepts_arrow_type(array.data_type())` must hold for the entire
+    /// tree, either checked at the decoder boundary or guaranteed by its
+    /// producer, and `state` must have been built from this plan.
     pub(crate) unsafe fn bind_reader_unchecked(
         &self,
         array: &dyn Array,
         state: &DatumReadState,
-    ) -> ArrowConversionResult<BoundDatumReader> {
+    ) -> BoundDatumReader {
         match (&self.node, state) {
-            (NodePlan::Scalar { rule, codec }, _) => {
-                // SAFETY: the enclosing plan guarantees this scalar's type.
-                unsafe { BoundDatumReader::bind_unchecked(rule, array, *codec) }
-                    .map(|reader| reader.with_numeric_typmod(self.base_type.typmod))
+            // SAFETY: the enclosing plan guarantees this scalar's type.
+            (_, DatumReadState::Scalar(read)) => unsafe { read.bind_array(array) },
+            (NodePlan::NestedJsonb(plan), DatumReadState::NestedJsonb) => {
+                BoundDatumReader::NestedJsonb(Box::new(
+                    // SAFETY: the enclosing plan includes the complete JSONB tree.
+                    unsafe { BoundNestedJsonb::bind_unchecked(plan, array) },
+                ))
             }
-            (
-                NodePlan::TextIo {
-                    read_codec: Some(codec),
-                },
-                _,
-            ) => {
-                // SAFETY: TextIo binds Utf8/LargeUtf8 storage. The semantic
-                // codec checks the complete external text before PG input.
-                unsafe {
-                    BoundDatumReader::bind_unchecked(&CellRule::Utf8, array, *codec)
-                }
-            }
-            (
-                NodePlan::NativeList {
-                    rule: CellRule::List { element, .. },
-                    codec,
-                    ..
-                },
-                DatumReadState::NativeList(buffer),
-            ) => Ok(BoundDatumReader::List(Box::new(
-                ListReader::bind_with_buffer(
-                    array,
-                    *element,
-                    *codec,
-                    Rc::clone(buffer),
-                )?,
-            ))),
-            (NodePlan::NestedJsonb(plan), _) => Ok(BoundDatumReader::NestedJsonb(
-                // SAFETY: the enclosing plan includes the complete JSONB tree.
-                Box::new(unsafe { BoundNestedJsonb::bind_unchecked(plan, array) }?),
-            )),
-            _ => Ok(BoundDatumReader::Recursive(Box::new(
+            _ => BoundDatumReader::Recursive(Box::new(
                 // SAFETY: inherited from this binding entry point.
-                unsafe { RecursiveDatumReader::bind_unchecked(self, array, state) }?,
-            ))),
+                unsafe { RecursiveDatumReader::bind_unchecked(self, array, state) },
+            )),
         }
     }
 }
@@ -106,13 +79,12 @@ enum TextArray {
 }
 
 impl TextArray {
-    fn bind(array: &dyn Array) -> ArrowConversionResult<Self> {
-        if let Some(array) = array.as_any().downcast_ref::<StringArray>() {
-            Ok(Self::Utf8(array.clone()))
-        } else {
-            Ok(Self::LargeUtf8(
-                downcast::<LargeStringArray>(array, "LargeUtf8")?.clone(),
-            ))
+    /// # Safety
+    /// `array` must be `Utf8` or `LargeUtf8`.
+    unsafe fn bind(array: &dyn Array) -> Self {
+        match array.data_type() {
+            DataType::Utf8 => Self::Utf8(array.as_string::<i32>().clone()),
+            _ => Self::LargeUtf8(array.as_string::<i64>().clone()),
         }
     }
 
@@ -128,52 +100,41 @@ impl TextArray {
 
 impl RecursiveDatumReader {
     /// # Safety
-    /// `plan.accepts_arrow_type(array.data_type())` must hold for the entire subtree.
+    /// `plan.accepts_arrow_type(array.data_type())` must hold for the entire
+    /// subtree, and `state` must have been built from `plan`.
     unsafe fn bind_unchecked(
         plan: &BoundDatumPlan,
         array: &dyn Array,
         state: &DatumReadState,
-    ) -> ArrowConversionResult<Self> {
-        Ok(Self(match (&plan.node, state) {
-            (NodePlan::Scalar { rule, codec }, DatumReadState::Scalar) => {
-                // SAFETY: the subtree contract includes this scalar's type.
-                ReaderState::Scalar(Box::new(
-                    unsafe { BoundDatumReader::bind_unchecked(rule, array, *codec) }?
-                        .with_numeric_typmod(plan.base_type.typmod),
-                ))
-            }
-            (NodePlan::NativeList { .. }, DatumReadState::NativeList(_))
-            | (NodePlan::NestedJsonb(_), DatumReadState::Scalar)
-            | (
-                NodePlan::TextIo {
-                    read_codec: Some(_),
-                },
-                DatumReadState::Scalar,
-            ) => {
+    ) -> Self {
+        Self(match (&plan.node, state) {
+            (_, DatumReadState::Scalar(_))
+            | (NodePlan::NestedJsonb(_), DatumReadState::NestedJsonb) => {
                 // SAFETY: inherited from this subtree's binding contract.
                 ReaderState::Scalar(Box::new(unsafe {
                     plan.bind_reader_unchecked(array, state)
-                }?))
+                }))
             }
             (NodePlan::TextIo { read_codec: None }, DatumReadState::TextIo(io)) => {
                 ReaderState::TextIo {
-                    array: TextArray::bind(array)?,
+                    // SAFETY: TextIo plans accept only Utf8/LargeUtf8.
+                    array: unsafe { TextArray::bind(array) },
                     io: Rc::clone(io),
                 }
             }
             (NodePlan::Oid, DatumReadState::Oid) => {
-                ReaderState::Oid(downcast::<Int64Array>(array, "Int64")?.clone())
+                ReaderState::Oid(array.as_primitive::<Int64Type>().clone())
             }
             (
                 NodePlan::List { element, .. },
                 DatumReadState::List { buffer, child },
             ) => {
-                let array = downcast::<ListArray>(array, "List")?;
+                let array = array.as_list::<i32>();
                 ReaderState::List {
                     // SAFETY: the list contract includes its element type.
                     child: Box::new(unsafe {
                         Self::bind_unchecked(element, array.values().as_ref(), child)
-                    }?),
+                    }),
                     array: array.clone(),
                     buffer: Rc::clone(buffer),
                 }
@@ -182,7 +143,7 @@ impl RecursiveDatumReader {
                 NodePlan::Struct(fields),
                 DatumReadState::Struct { codec, children },
             ) => {
-                let array = downcast::<StructArray>(array, "Struct")?;
+                let array = array.as_struct();
                 ReaderState::Struct {
                     children: fields
                         .iter()
@@ -191,22 +152,19 @@ impl RecursiveDatumReader {
                         .map(|(((index, plan), array), state)| {
                             // SAFETY: the struct contract includes field order
                             // and each child's complete type.
-                            Ok((*index, unsafe {
+                            (*index, unsafe {
                                 Self::bind_unchecked(plan, array.as_ref(), state)
-                            }?))
+                            })
                         })
-                        .collect::<ArrowConversionResult<_>>()?,
+                        .collect(),
                     array: array.clone(),
                     codec: Rc::clone(codec),
                 }
             }
             (NodePlan::Interval, DatumReadState::Interval) => {
-                let array = downcast::<StructArray>(array, "interval struct")?;
-                let parts = [0, 1, 2].map(|i| {
-                    downcast::<Int64Array>(array.column(i).as_ref(), "Int64").cloned()
-                });
-                let [months, days, micros] = parts;
-                let parts = [months?, days?, micros?];
+                let array = array.as_struct();
+                let parts = [0, 1, 2]
+                    .map(|i| array.column(i).as_primitive::<Int64Type>().clone());
                 // The plan and batch schema require non-nullable components.
                 // StructArray permits their nulls only where the parent is NULL;
                 // the encoder's append_null() deliberately uses that masking.
@@ -217,7 +175,7 @@ impl RecursiveDatumReader {
                 ReaderState::Interval { nulls, parts }
             }
             _ => unreachable!("reader state is constructed from this type plan"),
-        }))
+        })
     }
 
     /// # Safety

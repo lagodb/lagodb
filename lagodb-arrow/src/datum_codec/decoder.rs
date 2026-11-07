@@ -10,16 +10,17 @@ use lagodb_core::tuple::SlotDatumWriter;
 use pgrx::pg_sys;
 
 use super::batch::{BoundBatch, BoundColumn};
-use super::reader::BoundDatumReader;
+use super::reader::ScalarRead;
 use super::state::DatumReadState;
-use crate::{
-    ArrowConversionError, ArrowConversionResult, BoundDatumPlan, CellRule, DatumCodec,
-};
+use super::{BoundDatumPlan, DatumCodec};
+use crate::error::{ArrowConversionError, ArrowConversionResult};
+use crate::rule::CellRule;
 
-/// One mapped column: which Arrow batch column to read, the resolved rule, the
-/// destination slot index, and the selected datum codec. A physical codec is
-/// part of the bound plan so a generic Arrow type or PostgreSQL OID cannot
-/// silently select storage or query-result semantics.
+/// One mapped column: which Arrow batch column to read, its bound conversion
+/// and the destination slot index. Every fallible conversion setup happens
+/// while the column is constructed; binding a batch only selects arrays. A
+/// physical codec is part of the bound conversion so a generic Arrow type or
+/// PostgreSQL OID cannot silently select storage or query-result semantics.
 pub struct DecodedColumn {
     source: DecoderSource,
     src_col: usize,
@@ -30,7 +31,7 @@ pub struct DecodedColumn {
 enum DecoderSource {
     Physical {
         rule: CellRule,
-        codec: DatumCodec,
+        read: ScalarRead,
     },
     Declared {
         plan: BoundDatumPlan,
@@ -64,7 +65,7 @@ impl DecodedColumn {
             ColumnDatumTarget::validate_utf8_server_encoding()?;
         }
         let target_oid = plan.pg_type_oid();
-        let state = DatumReadState::new(&plan);
+        let state = DatumReadState::new(&plan)?;
         Ok(Self {
             source: DecoderSource::Declared { plan, state },
             src_col,
@@ -89,8 +90,9 @@ impl DecodedColumn {
         if rule.requires_utf8_server_encoding() {
             ColumnDatumTarget::validate_utf8_server_encoding()?;
         }
+        let read = ScalarRead::bind(&rule, codec, None)?;
         Ok(Self {
-            source: DecoderSource::Physical { rule, codec },
+            source: DecoderSource::Physical { rule, read },
             src_col,
             dest,
             target_oid,
@@ -143,9 +145,9 @@ impl ArrowColumnDecoder {
         }
     }
 
-    /// Bind fresh arrays from a producer that already guarantees the scan schema.
-    /// Downcasts and buffer ownership are still established for every batch;
-    /// only the repeated recursive type comparisons are skipped.
+    /// Bind fresh arrays from a producer that already guarantees the scan
+    /// schema. Only the repeated recursive type comparisons are skipped; this
+    /// cannot fail because all conversion state was bound with the columns.
     ///
     /// # Safety
     /// Every mapped source column must exist and satisfy its complete conversion
@@ -154,52 +156,35 @@ impl ArrowColumnDecoder {
     /// projection/execution schema used to construct this decoder (or have been
     /// checked against it). File schema evolution belongs to the producer, not
     /// this binding layer. Unrelated, unmapped columns are permitted.
-    pub unsafe fn bind_batch_unchecked(
-        &self,
-        batch: RecordBatch,
-    ) -> Result<BoundBatch, PgReportError> {
-        // SAFETY: this adapter preserves the producer contract below.
-        Ok(unsafe { self.bind_datums_unchecked(batch) }?)
-    }
-
-    /// Bind a trusted batch without converting errors into an access-method error.
-    /// COPY and FDW providers retain their own error boundary and row policy.
-    ///
-    /// # Safety
-    /// The complete producer contract of [`Self::bind_batch_unchecked`] applies.
-    pub unsafe fn bind_datums_unchecked(
-        &self,
-        batch: RecordBatch,
-    ) -> ArrowConversionResult<BoundBatch> {
-        let num_rows = batch.num_rows();
-        let mut columns = Vec::with_capacity(self.columns.len());
-        for col in self.columns.iter() {
-            let array = batch.column(col.src_col);
-            // SAFETY: the caller establishes the full contract for each mapped
-            // column, so recursive children need not revalidate their subtrees.
-            let reader = unsafe {
-                match &col.source {
-                    DecoderSource::Declared { plan, state } => {
-                        plan.bind_reader_unchecked(array.as_ref(), state)?
+    pub unsafe fn bind_batch_unchecked(&self, batch: RecordBatch) -> BoundBatch {
+        let columns = self
+            .columns
+            .iter()
+            .map(|col| {
+                let array = batch.column(col.src_col).as_ref();
+                // SAFETY: the caller establishes the full contract for each
+                // mapped column, so recursive children need not revalidate
+                // their subtrees.
+                let reader = unsafe {
+                    match &col.source {
+                        DecoderSource::Declared { plan, state } => {
+                            plan.bind_reader_unchecked(array, state)
+                        }
+                        DecoderSource::Physical { read, .. } => {
+                            read.bind_array(array)
+                        }
                     }
-                    DecoderSource::Physical { rule, codec } => {
-                        BoundDatumReader::bind_unchecked(
-                            rule,
-                            array.as_ref(),
-                            *codec,
-                        )?
-                    }
+                };
+                BoundColumn {
+                    reader,
+                    dest: col.dest,
                 }
-            };
-            columns.push(BoundColumn {
-                reader,
-                dest: col.dest,
-            });
+            })
+            .collect();
+        BoundBatch {
+            columns,
+            num_rows: batch.num_rows(),
         }
-        Ok(BoundBatch {
-            columns: columns.into_boxed_slice(),
-            num_rows,
-        })
     }
 
     /// Decode one row directly into a slot whose layout is the one used to
@@ -219,7 +204,7 @@ impl ArrowColumnDecoder {
     /// destination mapping were validated when these `DecodedColumn`s were
     /// constructed. `row_idx` must be within `bound` and every bound Arrow
     /// array. The caller must also satisfy the memory-context requirements of
-    /// [`BoundDatumReader::read_datum_unchecked`].
+    /// [`BoundColumn::read_datum_unchecked`].
     #[inline]
     pub unsafe fn write_row_unchecked(
         &self,
@@ -238,7 +223,7 @@ impl BatchRowDecoder for ArrowColumnDecoder {
     /// Resolve every mapped column to its concrete typed array, once per batch.
     /// Each mapped column's complete type is checked once before sharing the
     /// trusted array-binding implementation. This includes NestedJsonb leaves,
-    /// where downcasts alone cannot establish scale or UUID width. Type drift
+    /// where array kinds alone cannot establish scale or UUID width. Type drift
     /// surfaces as a clean
     /// [`ArrowConversionError::ArrowTypeMismatch`] at the batch boundary.
     fn bind(&self, batch: RecordBatch) -> Result<BoundBatch, PgReportError> {
@@ -275,7 +260,7 @@ impl BatchRowDecoder for ArrowColumnDecoder {
         }
         // SAFETY: each mapped column was checked once above, recursively,
         // including NestedJsonb's decimal scale and UUID width prerequisites.
-        unsafe { self.bind_batch_unchecked(batch) }
+        Ok(unsafe { self.bind_batch_unchecked(batch) })
     }
 
     fn num_rows(&self, bound: &BoundBatch) -> usize {

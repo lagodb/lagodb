@@ -75,7 +75,7 @@ where
             };
             // SAFETY: the constructor pairs this source with its decoder.
             // Iceberg performs file-to-scan schema conversion before emission.
-            self.current = Some(unsafe { self.decoder.bind_batch_unchecked(batch) }?);
+            self.current = Some(unsafe { self.decoder.bind_batch_unchecked(batch) });
             self.row_index = 0;
         }
     }

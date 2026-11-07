@@ -22,10 +22,10 @@ use lagodb_core::runtime_api::{
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
-use super::c_stream;
+use super::export;
 use super::provider::{
     ScanPlanningContext, ScanStreamOptions, ScanSupport, ScanTaskPlanningOptions,
-    TableScanProvider, decode_runtime_predicate,
+    TableScanProvider,
 };
 
 /// Complete C-compatible descriptor adapter for one typed provider.
@@ -50,9 +50,9 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
                     negotiate_predicate: Self::negotiate_predicate,
                     plan_scan_tasks: Self::plan_scan_tasks,
                     open_stream: Self::open_stream,
-                    release_predicate: Self::release_predicate,
-                    release_planned: Self::release_planned,
-                    release_bound: Self::release_bound,
+                    release_predicate: export::release_boxed::<P::Predicate>,
+                    release_planned: export::release_boxed::<P::PlannedTasks>,
+                    release_bound: export::release_boxed::<P::BoundScan>,
                 },
             )
         }
@@ -115,13 +115,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
                     .map_err(PgReportError::from_domain_error)?;
                     let pruning_expression =
                         pruning.map_or(ptr::null_mut(), |pruning| pruning.expression);
-                    let schema = FFI_ArrowSchema::try_from(schema.as_ref())
-                        .map_err(|error| {
-                            PgReportError::from_message(
-                                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                                format!("table scan returned an unexportable Arrow schema: {error}"),
-                            )
-                        })?;
+                    let schema = export::schema(&schema)?;
                     // SAFETY: output is runtime-owned writable storage.
                     unsafe {
                         schema_output.cast::<FFI_ArrowSchema>().write(schema);
@@ -186,13 +180,13 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
         };
         let (_, _, pruning_expression) = normalized.into_parts();
         // PostgreSQL planning uses this artifact only to establish capability,
-        // costing, and EXPLAIN identity. DataFusion negotiates the final filter
+        // costing, and EXPLAIN identity. The query engine negotiates the final filter
         // again against the statement-bound scan and owns that execution
         // artifact through the physical plan.
         // TODO: Measure the planning allocations from constructing this unused
         // provider artifact. If material, let capability/cost analysis reuse the
         // provider's predicate rules without materializing the artifact. Preserve
-        // PG costing and final DataFusion negotiation; do not add a second
+        // PG costing and final query-engine negotiation; do not add a second
         // capability implementation or cache PG artifacts across those stages.
         drop(predicate);
         Ok(Some(AdapterPruning {
@@ -259,7 +253,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
             unsafe {
                 output
                     .cast::<FFI_ArrowArrayStream>()
-                    .write(c_stream::export(stream, request.stream_error));
+                    .write(export::stream(stream, request.stream_error));
             }
             Ok(())
         };
@@ -276,17 +270,7 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
         let operation = || {
             let provider = unsafe { Self::provider(context) };
             let scan = unsafe { &*bound.cast::<P::BoundScan>() };
-            let schema = FFI_ArrowSchema::try_from(
-                provider.bound_schema(scan).as_ref(),
-            )
-            .map_err(|error| {
-                PgReportError::from_message(
-                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    format!(
-                        "table scan returned an unexportable Arrow schema: {error}"
-                    ),
-                )
-            })?;
+            let schema = export::schema(&provider.bound_schema(scan))?;
             unsafe { output.cast::<FFI_ArrowSchema>().write(schema) };
             Ok(())
         };
@@ -311,7 +295,9 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
                     "table scan received a null predicate negotiation request",
                 )
             })?;
-            let predicate = decode_runtime_predicate(&slot)
+            // SAFETY: the lent slot's non-null data/count pair stays live for
+            // this synchronous callback.
+            let predicate = unsafe { slot.decode_replacement() }
                 .map_err(P::Error::from)
                 .map_err(PgReportError::from_domain_error)?;
             let (support, predicate) = match provider
@@ -382,48 +368,5 @@ impl<P: TableScanProvider> TableScanAdapter<P> {
             Ok(())
         };
         unsafe { (&mut *error).capture(operation) }
-    }
-
-    unsafe extern "C-unwind" fn release_planned(
-        _context: *mut c_void,
-        planned: *mut c_void,
-        error: *mut CallbackErrorReport,
-    ) -> u32 {
-        let planned = unsafe { Box::from_raw(planned.cast::<P::PlannedTasks>()) };
-        unsafe {
-            (&mut *error).capture(move || {
-                drop(planned);
-                Ok(())
-            })
-        }
-    }
-
-    unsafe extern "C-unwind" fn release_predicate(
-        _context: *mut c_void,
-        predicate: *mut c_void,
-        error: *mut CallbackErrorReport,
-    ) -> u32 {
-        let predicate = unsafe { Box::from_raw(predicate.cast::<P::Predicate>()) };
-        unsafe {
-            (&mut *error).capture(move || {
-                drop(predicate);
-                Ok(())
-            })
-        }
-    }
-
-    unsafe extern "C-unwind" fn release_bound(
-        _context: *mut c_void,
-        bound: *mut c_void,
-        error: *mut CallbackErrorReport,
-    ) -> u32 {
-        // SAFETY: runtime returns the unique handle created by bind_scan.
-        let bound = unsafe { Box::from_raw(bound.cast::<P::BoundScan>()) };
-        unsafe {
-            (&mut *error).capture(move || {
-                drop(bound);
-                Ok(())
-            })
-        }
     }
 }

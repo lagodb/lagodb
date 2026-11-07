@@ -1,6 +1,10 @@
 //! Leaf binding and JSONB scalar emission, with no per-value Arrow downcasts.
 
 use arrow_array::cast::AsArray;
+use arrow_array::types::{
+    Date32Type, Decimal128Type, Float32Type, Float64Type, Int32Type, Int64Type,
+    Time64MicrosecondType, TimestampMicrosecondType, TimestampNanosecondType,
+};
 use arrow_array::{
     Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array,
     FixedSizeBinaryArray, Float32Array, Float64Array, Int32Array, Int64Array,
@@ -11,8 +15,9 @@ use arrow_schema::{DataType, TimeUnit};
 use lagodb_core::datum::{Decimal128NumericCodec, JsonbBuilder, JsonbPosition};
 use uuid::Uuid;
 
-use crate::column_encoder::{downcast, temporal};
-use crate::{ArrowConversionError, ArrowConversionResult, CellRule};
+use crate::error::{ArrowConversionError, ArrowConversionResult};
+use crate::rule::CellRule;
+use crate::temporal;
 
 #[derive(Debug, Clone)]
 pub(super) enum ScalarPlan {
@@ -85,25 +90,18 @@ impl ScalarPlan {
         }
     }
 
-    pub(super) fn bind(
-        &self,
-        array: &dyn Array,
-    ) -> ArrowConversionResult<ScalarReader> {
-        Ok(match self {
-            Self::Bool => ScalarReader::Bool(
-                downcast::<BooleanArray>(array, "Boolean")?.clone(),
-            ),
-            Self::I32 => {
-                ScalarReader::I32(downcast::<Int32Array>(array, "Int32")?.clone())
-            }
-            Self::I64 => {
-                ScalarReader::I64(downcast::<Int64Array>(array, "Int64")?.clone())
-            }
+    /// # Safety
+    /// `self.accepts(array.data_type())` must hold.
+    pub(super) unsafe fn bind(&self, array: &dyn Array) -> ScalarReader {
+        match self {
+            Self::Bool => ScalarReader::Bool(array.as_boolean().clone()),
+            Self::I32 => ScalarReader::I32(array.as_primitive::<Int32Type>().clone()),
+            Self::I64 => ScalarReader::I64(array.as_primitive::<Int64Type>().clone()),
             Self::F32 => {
-                ScalarReader::F32(downcast::<Float32Array>(array, "Float32")?.clone())
+                ScalarReader::F32(array.as_primitive::<Float32Type>().clone())
             }
             Self::F64 => {
-                ScalarReader::F64(downcast::<Float64Array>(array, "Float64")?.clone())
+                ScalarReader::F64(array.as_primitive::<Float64Type>().clone())
             }
             Self::String => match array.data_type() {
                 DataType::Utf8 => {
@@ -117,33 +115,29 @@ impl ScalarPlan {
                 }
                 _ => ScalarReader::LargeBinary(array.as_binary::<i64>().clone()),
             },
-            Self::FixedBinary(_) => ScalarReader::FixedBinary(
-                downcast::<FixedSizeBinaryArray>(array, "FixedSizeBinary")?.clone(),
-            ),
-            Self::Uuid => ScalarReader::Uuid(
-                downcast::<FixedSizeBinaryArray>(array, "UUID")?.clone(),
-            ),
+            Self::FixedBinary(_) => {
+                ScalarReader::FixedBinary(array.as_fixed_size_binary().clone())
+            }
+            Self::Uuid => ScalarReader::Uuid(array.as_fixed_size_binary().clone()),
             Self::Date => {
-                ScalarReader::Date(downcast::<Date32Array>(array, "Date32")?.clone())
+                ScalarReader::Date(array.as_primitive::<Date32Type>().clone())
             }
             Self::Time => ScalarReader::Time(
-                downcast::<Time64MicrosecondArray>(array, "Time64")?.clone(),
+                array.as_primitive::<Time64MicrosecondType>().clone(),
             ),
             Self::Timestamp { nanos: false, tz } => ScalarReader::TimestampMicros(
-                downcast::<TimestampMicrosecondArray>(array, "TimestampMicrosecond")?
-                    .clone(),
+                array.as_primitive::<TimestampMicrosecondType>().clone(),
                 *tz,
             ),
             Self::Timestamp { nanos: true, tz } => ScalarReader::TimestampNanos(
-                downcast::<TimestampNanosecondArray>(array, "TimestampNanosecond")?
-                    .clone(),
+                array.as_primitive::<TimestampNanosecondType>().clone(),
                 *tz,
             ),
             Self::Decimal(codec) => ScalarReader::Decimal(
-                downcast::<Decimal128Array>(array, "Decimal128")?.clone(),
+                array.as_primitive::<Decimal128Type>().clone(),
                 *codec,
             ),
-        })
+        }
     }
 }
 

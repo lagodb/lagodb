@@ -1,18 +1,14 @@
-//! Temporal conversion: the PG↔Unix epoch arithmetic and the `date` / `time` /
-//! `timestamp` value math.
+//! PostgreSQL ⇄ Arrow temporal value math.
 //!
-//! These are stateless conversions, so they are plain module functions rather
-//! than methods on an empty marker type. The two epoch helpers are public
-//! because the consumer's predicate translator reuses them to keep pushed
-//! bounds aligned with stored manifest bounds; the rest are crate-internal.
+//! These are stateless conversions shared by the datum readers, the encoders
+//! and nested JSONB. The two epoch helpers are public because the consumer's
+//! predicate translator reuses them to keep pushed bounds aligned with stored
+//! manifest bounds; the rest are crate-internal.
 
-use arrow_array::types::{Date32Type, Time64MicrosecondType};
-use lagodb_core::datum::{Cell, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
+use lagodb_core::datum::{PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
+use pgrx::pg_sys;
 use pgrx::prelude::{Date, Time, Timestamp, TimestampWithTimeZone};
-use pgrx::{FromDatum, pg_sys};
 
-use super::primitive::PrimitiveConv;
-use super::read_bound;
 use crate::error::{ArrowConversionError, ArrowConversionResult};
 
 /// Convert PostgreSQL-epoch days (since 2000-01-01) to Unix-epoch days (since
@@ -50,11 +46,12 @@ pub(crate) fn pg_date_from_arrow_days(
     })
 }
 
-pub(crate) fn arrow_days_from_pg_date(date: &Date) -> ArrowConversionResult<i32> {
-    pg_epoch_days_to_unix_days(date.to_pg_epoch_days()).ok_or_else(|| {
+pub(crate) fn arrow_days_from_pg_date(
+    pg_days: pg_sys::DateADT,
+) -> ArrowConversionResult<i32> {
+    pg_epoch_days_to_unix_days(pg_days).ok_or_else(|| {
         invalid_datum(format!(
-            "PostgreSQL date value {} days overflows Unix epoch",
-            date.to_pg_epoch_days()
+            "PostgreSQL date value {pg_days} days overflows Unix epoch"
         ))
     })
 }
@@ -65,6 +62,19 @@ pub(crate) fn time_from_micros(micros: i64) -> ArrowConversionResult<Time> {
             "time value {micros} microseconds is outside PostgreSQL time range"
         ))
     })
+}
+
+/// PG includes 24:00:00; Arrow Time excludes the end-of-day boundary.
+/// All other PG time values already satisfy the Arrow range.
+pub(crate) fn arrow_time_from_pg_time(
+    micros: pg_sys::TimeADT,
+) -> ArrowConversionResult<i64> {
+    if micros == 86_400_000_000 {
+        return Err(invalid_datum(
+            "PostgreSQL time 24:00:00 is outside the Arrow time range",
+        ));
+    }
+    Ok(micros)
 }
 
 pub(crate) fn timestamp_from_unix_micros(
@@ -132,89 +142,6 @@ pub(crate) fn unix_micros_to_pg_micros(
         ))
     })
 }
-
-// ---------------------------------------------------------------------------
-// Write markers (date / time reuse the generic PrimitiveEncoder)
-// ---------------------------------------------------------------------------
-
-/// `date` column, encoded to Arrow epoch days.
-pub(crate) struct Date32Conv;
-impl PrimitiveConv for Date32Conv {
-    type Arrow = Date32Type;
-    const LABEL: &'static str = "date";
-
-    fn from_cell(cell: &Cell) -> ArrowConversionResult<Option<i32>> {
-        match cell {
-            Cell::Date(d) => arrow_days_from_pg_date(d).map(Some),
-            _ => Ok(None),
-        }
-    }
-}
-
-impl Date32Conv {
-    /// Read a non-NULL PostgreSQL `date` datum and convert its epoch.
-    ///
-    /// # Safety
-    /// `datum` must be a valid, non-NULL PostgreSQL `date` Datum.
-    pub(crate) unsafe fn from_date(
-        datum: pg_sys::Datum,
-    ) -> ArrowConversionResult<i32> {
-        let date = unsafe {
-            read_bound(
-                datum,
-                Date::from_datum,
-                "Date32 encoder: present date datum read as null",
-            )
-        }?;
-        arrow_days_from_pg_date(&date)
-    }
-}
-
-/// `time` column, stored as microseconds since midnight.
-pub(crate) struct Time64Conv;
-impl PrimitiveConv for Time64Conv {
-    type Arrow = Time64MicrosecondType;
-    const LABEL: &'static str = "time";
-
-    fn from_cell(cell: &Cell) -> ArrowConversionResult<Option<i64>> {
-        match cell {
-            Cell::Time(t) => Self::from_pg_micros(i64::from(*t)).map(Some),
-            _ => Ok(None),
-        }
-    }
-}
-
-impl Time64Conv {
-    /// PG includes 24:00:00; Arrow Time excludes the end-of-day boundary.
-    /// All other PG time values already satisfy the Arrow range.
-    fn from_pg_micros(micros: pg_sys::TimeADT) -> ArrowConversionResult<i64> {
-        if micros == 86_400_000_000 {
-            return Err(invalid_datum(
-                "PostgreSQL time 24:00:00 is outside the Arrow time range",
-            ));
-        }
-        Ok(micros)
-    }
-
-    /// Read a non-NULL PostgreSQL `time` datum as microseconds since midnight.
-    ///
-    /// # Safety
-    /// `datum` must be a valid, non-NULL PostgreSQL `time` Datum.
-    pub(crate) unsafe fn from_time(
-        datum: pg_sys::Datum,
-    ) -> ArrowConversionResult<i64> {
-        // Match DatumGetTimeADT. Time::from_datum wraps 24:00:00 to midnight
-        // before the storage boundary can reject the unrepresentable value.
-        Self::from_pg_micros(datum.value() as pg_sys::TimeADT)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Read (Arrow → Cell): handled by the bound `ColumnReader` in `crate::read`,
-// which reuses the value helpers above (`pg_date_from_arrow_days`,
-// `time_from_micros`, `timestamp_from_unix_micros`,
-// `timestamptz_from_unix_micros`, `unix_micros_from_nanos`).
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

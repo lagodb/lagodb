@@ -9,5 +9,5 @@
 mod buffer_behavior;
 mod decoder_equivalence;
 mod decoder_to_slot;
-mod encoder_equivalence;
 mod read;
+mod round_trip;

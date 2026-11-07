@@ -1,31 +1,29 @@
-//! Backend equivalence property between the slot/datum write path and the
-//! buffered-row write path.
+//! Backend write→read round trip for declared column plans.
 //!
-//! Both paths read the *same* PostgreSQL datum: `BoundWriteBuffer` reads it
-//! through a tuple-slot view, while `CellRule::build` reads it after it has
-//! been materialized into a `Cell`. The property asserts the two produce a
-//! bit-identical Arrow array (physical type, values, null mask, timezone, and
-//! decimal precision/scale), so the slot path can replace the row path without
-//! changing stored values.
-//!
-//! Driving both sides from one datum makes the check robust to representation
-//! quirks (session timezone, numeric text round-trips): it verifies the encoder
-//! reproduces `build`, not any absolute encoding.
+//! Each generated PostgreSQL datum is written through `BoundWriteBuffer` (the
+//! relation slot path) and read back through `ArrowColumnDecoder` from the
+//! same declared `BoundDatumPlan`. The property asserts that the PostgreSQL
+//! type-output text of every read-back value equals the original's, and that
+//! NULLs stay NULL. Comparing output text keeps the check independent of
+//! physical representation (numeric digit layout, jsonb binary form) while
+//! still pinning every value, including timezone and decimal scale.
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
+    use std::ffi::{CStr, CString};
     use std::ops::Range;
+    use std::sync::Arc;
+    use std::{ptr, slice};
 
-    use arrow_array::Array;
-    use arrow_schema::{Field, Schema};
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
     use lagodb_arrow::{
-        ArrowColumnEncoder, BoundDatumPlan, BoundWriteBuffer, BoundWriteColumnPlan,
-        CellRule,
+        ArrowColumnDecoder, ArrowConversionError, BoundDatumPlan, BoundWriteBuffer,
+        BoundWriteColumnPlan, DecodedColumn,
     };
-    use lagodb_core::batch::BatchBuffer;
-    use lagodb_core::datum::{Cell, PgType};
-    use lagodb_core::tuple::{Row, RowDatumCodec, TupleSlotRow};
+    use lagodb_core::batch::{BatchBuffer, BatchRowDecoder};
+    use lagodb_core::datum::PgType;
+    use lagodb_core::tuple::{SlotDatumWriter, TupleSlotRow};
     use pgrx::prelude::*;
     use pgrx::{IntoDatum, pg_sys};
     use proptest::prelude::*;
@@ -34,9 +32,9 @@ mod tests {
 
     type TsParts = (i32, u8, u8, u8, u8, u32);
 
-    /// One generated column: the resolved rule plus the per-row source values.
-    /// Each variant uses a provider-admitted PostgreSQL/Arrow mapping, including
-    /// managed smallint's widening to Int32 storage.
+    /// One generated column: the per-row source values of one
+    /// provider-admitted PostgreSQL/Arrow mapping, including managed
+    /// smallint's widening to Int32 storage.
     #[derive(Debug, Clone)]
     enum Case {
         Bool(Vec<Option<bool>>),
@@ -62,47 +60,54 @@ mod tests {
             nanos: bool,
             rows: Vec<Option<TsParts>>,
         },
-        /// `name` is a fixed `NameData` cstring, not a varlena, and maps to an
-        /// Iceberg string (`CellRule::Utf8`).
+        /// `name` is a fixed `NameData` cstring, not a varlena, stored as UTF-8.
         Name(Vec<Option<String>>),
-        /// `json` keeps its validated input text and maps to an Iceberg string
-        /// (`CellRule::Utf8`).
+        /// `json` keeps its validated input text, stored as UTF-8.
         Json(Vec<Option<String>>),
         /// Managed JSONB uses portable PostgreSQL output text.
         Jsonb(Vec<Option<String>>),
     }
 
-    /// Lower a generated case to the rule, source OID, and per-row datums. Runs
-    /// in-backend because building numeric/temporal datums calls PG functions.
-    fn into_parts(case: Case) -> (CellRule, pg_sys::Oid, Vec<Option<pg_sys::Datum>>) {
+    /// Lower a generated case to the stored Arrow type, source OID, and
+    /// per-row datums. Runs in-backend because building numeric/temporal
+    /// datums calls PG functions.
+    fn into_parts(case: Case) -> (DataType, pg_sys::Oid, Vec<Option<pg_sys::Datum>>) {
         match case {
-            Case::Bool(v) => {
-                (CellRule::Bool, pg_sys::BOOLOID, conv(v, |b| b.into_datum()))
-            }
-            Case::Int2AsI32(v) => {
-                (CellRule::I32, pg_sys::INT2OID, conv(v, |x| x.into_datum()))
-            }
-            Case::Int4AsI32(v) => {
-                (CellRule::I32, pg_sys::INT4OID, conv(v, |x| x.into_datum()))
-            }
-            Case::Int8AsI64(v) => {
-                (CellRule::I64, pg_sys::INT8OID, conv(v, |x| x.into_datum()))
-            }
+            Case::Bool(v) => (
+                DataType::Boolean,
+                pg_sys::BOOLOID,
+                conv(v, |b| b.into_datum()),
+            ),
+            Case::Int2AsI32(v) => (
+                DataType::Int32,
+                pg_sys::INT2OID,
+                conv(v, |x| x.into_datum()),
+            ),
+            Case::Int4AsI32(v) => (
+                DataType::Int32,
+                pg_sys::INT4OID,
+                conv(v, |x| x.into_datum()),
+            ),
+            Case::Int8AsI64(v) => (
+                DataType::Int64,
+                pg_sys::INT8OID,
+                conv(v, |x| x.into_datum()),
+            ),
             Case::Float4AsF32(v) => (
-                CellRule::F32,
+                DataType::Float32,
                 pg_sys::FLOAT4OID,
                 conv(v, |x| x.into_datum()),
             ),
             Case::Float8AsF64(v) => (
-                CellRule::F64,
+                DataType::Float64,
                 pg_sys::FLOAT8OID,
                 conv(v, |x| x.into_datum()),
             ),
             Case::Text(v) => {
-                (CellRule::Utf8, pg_sys::TEXTOID, conv(v, |s| s.into_datum()))
+                (DataType::Utf8, pg_sys::TEXTOID, conv(v, |s| s.into_datum()))
             }
             Case::Bytea(v) => (
-                CellRule::Binary,
+                DataType::LargeBinary,
                 pg_sys::BYTEAOID,
                 conv(v, |b| b.as_slice().into_datum()),
             ),
@@ -111,19 +116,19 @@ mod tests {
                 scale,
                 units,
             } => (
-                CellRule::Decimal128 { precision, scale },
+                DataType::Decimal128(precision as u8, scale as i8),
                 pg_sys::NUMERICOID,
                 conv(units, |u| numeric_from_units(u, scale).into_datum()),
             ),
             Case::Date(v) => (
-                CellRule::Date32,
+                DataType::Date32,
                 pg_sys::DATEOID,
                 conv(v, |(y, m, d)| {
                     Date::new(y, m, d).expect("valid date").into_datum()
                 }),
             ),
             Case::Time(v) => (
-                CellRule::Time64Micros,
+                DataType::Time64(TimeUnit::Microsecond),
                 pg_sys::TIMEOID,
                 conv(v, |(h, m, us)| {
                     Time::new(h, m, us as f64 / 1_000_000.0)
@@ -132,7 +137,7 @@ mod tests {
                 }),
             ),
             Case::Timestamp { nanos, rows } => (
-                CellRule::Timestamp { nanos, tz: false },
+                DataType::Timestamp(time_unit(nanos), None),
                 pg_sys::TIMESTAMPOID,
                 conv(rows, |(y, mo, d, h, mi, us)| {
                     Timestamp::new(y, mo, d, h, mi, us as f64 / 1_000_000.0)
@@ -141,7 +146,7 @@ mod tests {
                 }),
             ),
             Case::Timestamptz { nanos, rows } => (
-                CellRule::Timestamp { nanos, tz: true },
+                DataType::Timestamp(time_unit(nanos), Some("+00:00".into())),
                 pg_sys::TIMESTAMPTZOID,
                 conv(rows, |(y, mo, d, h, mi, us)| {
                     TimestampWithTimeZone::new(
@@ -157,27 +162,35 @@ mod tests {
                 }),
             ),
             Case::Name(v) => (
-                CellRule::Utf8,
+                DataType::Utf8,
                 pg_sys::NAMEOID,
                 conv(v, |s| unsafe { name_datum(&s) }),
             ),
             Case::Json(v) => (
-                CellRule::Utf8,
+                DataType::Utf8,
                 pg_sys::JSONOID,
                 conv(v, |s| unsafe { json_datum(&s) }),
             ),
             Case::Jsonb(v) => (
-                CellRule::Utf8,
+                DataType::Utf8,
                 pg_sys::JSONBOID,
                 conv(v, |s| unsafe { jsonb_datum(&s) }),
             ),
         }
     }
 
+    fn time_unit(nanos: bool) -> TimeUnit {
+        if nanos {
+            TimeUnit::Nanosecond
+        } else {
+            TimeUnit::Microsecond
+        }
+    }
+
     /// Build a `name` datum (a palloc'd `NameData`) from text via `namein`. The
     /// result owns its storage, so the temporary `CString` can be dropped.
     unsafe fn name_datum(s: &str) -> Option<pg_sys::Datum> {
-        let c = std::ffi::CString::new(s).expect("name has no interior NUL");
+        let c = CString::new(s).expect("name has no interior NUL");
         unsafe {
             pgrx::fcinfo::direct_function_call_as_datum(
                 pg_sys::namein,
@@ -188,7 +201,7 @@ mod tests {
 
     /// Build a `jsonb` datum from JSON text via `jsonb_in`.
     unsafe fn jsonb_datum(s: &str) -> Option<pg_sys::Datum> {
-        let c = std::ffi::CString::new(s).expect("json has no interior NUL");
+        let c = CString::new(s).expect("json has no interior NUL");
         unsafe {
             pgrx::fcinfo::direct_function_call_as_datum(
                 pg_sys::jsonb_in,
@@ -199,7 +212,7 @@ mod tests {
 
     /// Build a `json` datum from JSON text via `json_in`.
     unsafe fn json_datum(s: &str) -> Option<pg_sys::Datum> {
-        let c = std::ffi::CString::new(s).expect("json has no interior NUL");
+        let c = CString::new(s).expect("json has no interior NUL");
         unsafe {
             pgrx::fcinfo::direct_function_call_as_datum(
                 pg_sys::json_in,
@@ -242,10 +255,7 @@ mod tests {
         unsafe {
             let desc = pg_sys::CreateTemplateTupleDesc(1);
             pg_sys::TupleDescInitEntry(desc, 1, c"c".as_ptr(), oid, -1, 0);
-            pg_sys::MakeTupleTableSlot(
-                desc,
-                std::ptr::addr_of!(pg_sys::TTSOpsVirtual),
-            )
+            pg_sys::MakeTupleTableSlot(desc, ptr::addr_of!(pg_sys::TTSOpsVirtual))
         }
     }
 
@@ -255,8 +265,8 @@ mod tests {
     ) {
         unsafe {
             pg_sys::ExecClearTuple(slot);
-            let values = std::slice::from_raw_parts_mut((*slot).tts_values, 1);
-            let isnull = std::slice::from_raw_parts_mut((*slot).tts_isnull, 1);
+            let values = slice::from_raw_parts_mut((*slot).tts_values, 1);
+            let isnull = slice::from_raw_parts_mut((*slot).tts_isnull, 1);
             match datum {
                 Some(d) => {
                     values[0] = d;
@@ -271,81 +281,76 @@ mod tests {
         }
     }
 
-    fn run_case(case: Case) -> Result<(), TestCaseError> {
-        let (rule, oid, datums) = into_parts(case);
+    /// PostgreSQL type-output text of a non-NULL datum.
+    unsafe fn output_text(oid: pg_sys::Oid, datum: pg_sys::Datum) -> String {
+        let mut output = pg_sys::InvalidOid;
+        let mut is_varlena = false;
         unsafe {
-            let slot = make_slot(oid);
-            let row_codec = RowDatumCodec::from_slot(slot)
-                .expect("test slot must produce a row datum codec");
-            let mut type_encoder =
-                ArrowColumnEncoder::new(&rule, 0).map_err(|e| {
-                    TestCaseError::fail(format!(
-                        "type encoder construction failed: {e:?}"
-                    ))
-                })?;
-            let data_type = type_encoder
-                .finish()
-                .map_err(|e| {
-                    TestCaseError::fail(format!("type finish failed: {e:?}"))
-                })?
-                .data_type()
-                .clone();
-            let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
-                "c", data_type, true,
-            )]));
-            let plan = BoundDatumPlan::bind(schema.field(0), PgType::new(oid, -1))
-                .and_then(|plan| BoundWriteColumnPlan::bind(plan, 0, 1))
-                .map_err(|e| TestCaseError::fail(format!("bind failed: {e:?}")))?;
-            let mut buffer =
-                BoundWriteBuffer::new(schema, vec![plan].into_boxed_slice())
-                    .map_err(|e| {
-                        TestCaseError::fail(format!("buffer bind failed: {e:?}"))
-                    })?;
-            let mut rows: Vec<Row> = Vec::with_capacity(datums.len());
+            pg_sys::getTypeOutputInfo(oid, &mut output, &mut is_varlena);
+            CStr::from_ptr(pg_sys::OidOutputFunctionCall(output, datum))
+                .to_str()
+                .expect("server encoding is UTF-8")
+                .to_owned()
+        }
+    }
 
-            for datum in datums {
-                store_datum(slot, datum);
-                let row = TupleSlotRow::from_raw(slot);
-                buffer.append_slot_row(row).map_err(|e| {
-                    TestCaseError::fail(format!("encoder append failed: {e:?}"))
-                })?;
-                let view = row.datum_at(0);
-                let cell = match view.filter(|v| !v.is_null()) {
-                    Some(value) => value.to_cell(&row_codec).map_err(|error| {
-                        TestCaseError::fail(format!(
-                            "cell conversion failed: {error}"
-                        ))
-                    })?,
-                    None => None,
-                };
-                // JSONB now has a text storage representation. The Cell-side
-                // reference explicitly materializes that semantic output text.
-                let cell = cell.map(|cell| match cell {
-                    Cell::Jsonb(value) => Cell::String(value.to_string()),
-                    cell => cell,
-                });
-                let mut row = Row::with_width(1);
-                row.set_cell(0, cell);
-                rows.push(row);
+    unsafe fn slot_datum(slot: *mut pg_sys::TupleTableSlot) -> Option<pg_sys::Datum> {
+        unsafe {
+            if *(*slot).tts_isnull {
+                None
+            } else {
+                Some(*(*slot).tts_values)
             }
+        }
+    }
 
-            let encoded = buffer
-                .finish_batch()
-                .map_err(|e| {
-                    TestCaseError::fail(format!("encoder finish failed: {e:?}"))
-                })?
-                .column(0)
-                .clone();
-            let reference = rule
-                .build(&rows, 0)
-                .map_err(|e| TestCaseError::fail(format!("build failed: {e:?}")))?;
+    fn fail(stage: &str) -> impl Fn(ArrowConversionError) -> TestCaseError + '_ {
+        move |error| TestCaseError::fail(format!("{stage} failed: {error:?}"))
+    }
 
-            prop_assert_eq!(
-                encoded.to_data(),
-                reference.to_data(),
-                "encoder/build mismatch for {:?}",
-                rule
-            );
+    fn run_case(case: Case) -> Result<(), TestCaseError> {
+        let (data_type, oid, datums) = into_parts(case);
+        let schema = Arc::new(Schema::new(vec![Field::new("c", data_type, true)]));
+        let pg_type = PgType::new(oid, -1);
+        let write_plan = BoundDatumPlan::bind(schema.field(0), pg_type)
+            .and_then(|plan| BoundWriteColumnPlan::bind(plan, 0, 1))
+            .map_err(fail("write bind"))?;
+        let read_plan = BoundDatumPlan::bind(schema.field(0), pg_type)
+            .map_err(fail("read bind"))?;
+        let mut buffer = BoundWriteBuffer::new(schema, Box::new([write_plan]))
+            .map_err(fail("buffer bind"))?;
+        // SAFETY: the decoder reads only batches written from PostgreSQL datums
+        // of the same declared type, so widened int2 values stay in domain and
+        // TextIo values are NUL-free type-output text.
+        let decoder = ArrowColumnDecoder::new(vec![
+            unsafe { DecodedColumn::bind(read_plan, 0, 0) }
+                .map_err(fail("decoder bind"))?,
+        ]);
+
+        unsafe {
+            let source = make_slot(oid);
+            for datum in &datums {
+                store_datum(source, *datum);
+                buffer
+                    .append_slot_row(TupleSlotRow::from_raw(source))
+                    .map_err(fail("append"))?;
+            }
+            let batch = buffer.finish_batch().map_err(fail("finish"))?;
+            let bound = decoder.bind(batch).map_err(|error| {
+                TestCaseError::fail(format!("batch bind failed: {error:?}"))
+            })?;
+
+            let target = make_slot(oid);
+            for (row, datum) in datums.iter().enumerate() {
+                let mut out =
+                    SlotDatumWriter::new(target, pg_sys::CurrentMemoryContext);
+                decoder.write_row(&bound, row, &mut out).map_err(|error| {
+                    TestCaseError::fail(format!("read row {row} failed: {error:?}"))
+                })?;
+                let expected = datum.map(|datum| output_text(oid, datum));
+                let actual = slot_datum(target).map(|datum| output_text(oid, datum));
+                prop_assert_eq!(expected, actual, "row {} of type {:?}", row, oid);
+            }
         }
         Ok(())
     }
@@ -455,7 +460,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn encoder_output_matches_cell_rule_build() {
+    fn write_read_round_trip_preserves_values() {
         let config = Config {
             cases: 48,
             failure_persistence: None,
@@ -464,39 +469,39 @@ mod tests {
         let mut runner = TestRunner::new(config);
         runner
             .run(&cases(), run_case)
-            .expect("encoder output must match CellRule::build");
+            .expect("written values must read back unchanged");
     }
 
     // Type I/O-backed values also exercise deterministic NULL and text cases.
     #[pg_test]
-    fn encoder_output_matches_build_for_name() {
+    fn write_read_round_trip_for_name() {
         run_case(Case::Name(vec![
-            Some("name_value".to_string()),
+            Some("name_value".to_owned()),
             None,
             Some(String::new()),
-            Some("another_name".to_string()),
+            Some("another_name".to_owned()),
         ]))
-        .expect("name encoder output must match CellRule::build");
+        .expect("name values must read back unchanged");
     }
 
     #[pg_test]
-    fn encoder_output_matches_build_for_json() {
+    fn write_read_round_trip_for_json() {
         run_case(Case::Json(vec![
-            Some(r#"{ "json_key": 1, "json_key": 2 }"#.to_string()),
+            Some(r#"{ "json_key": 1, "json_key": 2 }"#.to_owned()),
             None,
-            Some("[true, null]".to_string()),
+            Some("[true, null]".to_owned()),
         ]))
-        .expect("json encoder output must match CellRule::build");
+        .expect("json values must read back unchanged");
     }
 
     #[pg_test]
-    fn encoder_output_matches_build_for_jsonb() {
+    fn write_read_round_trip_for_jsonb() {
         run_case(Case::Jsonb(vec![
-            Some(r#"{"jsonb_key": "val"}"#.to_string()),
+            Some(r#"{"jsonb_key": "val"}"#.to_owned()),
             None,
-            Some("[1, 2, 3]".to_string()),
-            Some("\"scalar\"".to_string()),
+            Some("[1, 2, 3]".to_owned()),
+            Some("\"scalar\"".to_owned()),
         ]))
-        .expect("jsonb encoder output must match CellRule::build");
+        .expect("jsonb values must read back unchanged");
     }
 }

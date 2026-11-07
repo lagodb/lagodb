@@ -111,7 +111,7 @@ impl ReturnedRows {
         let positions = locations.into_positions();
         // SAFETY: the constructor pairs the decoder with this scan source;
         // selected-row and full reads both use iceberg-lite's schema conversion.
-        let decoded = unsafe { self.decoder.bind_batch_unchecked(batch) }?;
+        let decoded = unsafe { self.decoder.bind_batch_unchecked(batch) };
         Ok(Some(ReturnedBatch { decoded, positions }))
     }
 

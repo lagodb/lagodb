@@ -298,60 +298,6 @@ impl Cell {
                 | Cell::StringArray(_)
         )
     }
-
-    /// Returns the estimated memory size of the cell in bytes
-    pub fn mem_size(&self) -> usize {
-        match self {
-            Cell::Bool(_) => std::mem::size_of::<bool>(),
-            Cell::I8(_) => std::mem::size_of::<i8>(),
-            Cell::I16(_) => std::mem::size_of::<i16>(),
-            Cell::F32(_) => std::mem::size_of::<f32>(),
-            Cell::I32(_) => std::mem::size_of::<i32>(),
-            Cell::F64(_) => std::mem::size_of::<f64>(),
-            Cell::I64(_) => std::mem::size_of::<i64>(),
-            Cell::Numeric(_) => std::mem::size_of::<AnyNumeric>(),
-            Cell::String(s) => std::mem::size_of::<String>() + s.len(),
-            Cell::StringView(_) => std::mem::size_of::<StringView>(),
-            Cell::Date(_) => std::mem::size_of::<Date>(),
-            Cell::Time(_) => std::mem::size_of::<Time>(),
-            Cell::Timestamp(_) => std::mem::size_of::<Timestamp>(),
-            Cell::Timestamptz(_) => std::mem::size_of::<TimestampWithTimeZone>(),
-            Cell::Interval(_) => std::mem::size_of::<Interval>(),
-            Cell::Json(value) => value.mem_size(),
-            Cell::Jsonb(value) => value.mem_size(),
-            Cell::Bytea(b) => std::mem::size_of::<Bytes>() + b.len(),
-            Cell::ByteaView(_) => std::mem::size_of::<ByteaView>(),
-            Cell::Uuid(_) => std::mem::size_of::<Uuid>(),
-            Cell::BoolArray(v) => {
-                std::mem::size_of::<Vec<Option<bool>>>()
-                    + v.len() * std::mem::size_of::<Option<bool>>()
-            }
-            Cell::I16Array(v) => {
-                std::mem::size_of::<Vec<Option<i16>>>()
-                    + v.len() * std::mem::size_of::<Option<i16>>()
-            }
-            Cell::I32Array(v) => {
-                std::mem::size_of::<Vec<Option<i32>>>()
-                    + v.len() * std::mem::size_of::<Option<i32>>()
-            }
-            Cell::I64Array(v) => {
-                std::mem::size_of::<Vec<Option<i64>>>()
-                    + v.len() * std::mem::size_of::<Option<i64>>()
-            }
-            Cell::F32Array(v) => {
-                std::mem::size_of::<Vec<Option<f32>>>()
-                    + v.len() * std::mem::size_of::<Option<f32>>()
-            }
-            Cell::F64Array(v) => {
-                std::mem::size_of::<Vec<Option<f64>>>()
-                    + v.len() * std::mem::size_of::<Option<f64>>()
-            }
-            Cell::StringArray(v) => {
-                std::mem::size_of::<Vec<Option<String>>>()
-                    + v.len() * (std::mem::size_of::<Option<String>>() + 16) // Rough estimate of 16 bytes per string to keep O(1)
-            }
-        }
-    }
 }
 
 fn write_array<T: std::fmt::Display>(

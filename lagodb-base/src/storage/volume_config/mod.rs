@@ -14,7 +14,6 @@ mod sql_api;
 mod store;
 
 pub(crate) use binding_export::load_tablespace_bindings;
-pub(crate) use control::StorageVolumeControl;
 pub(crate) use credential::CredentialConfig;
 pub(crate) use database_directory::{
     DatabaseDirectoryError, DatabaseDirectoryPolicy,

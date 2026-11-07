@@ -14,7 +14,6 @@ use super::slot_row::TupleSlotRow;
 #[derive(Debug, Clone, Default)]
 pub struct Row {
     cells: Vec<Option<Cell>>,
-    size: usize,
 }
 
 impl Row {
@@ -27,7 +26,6 @@ impl Row {
     pub fn with_width(width: usize) -> Self {
         Self {
             cells: vec![None; width],
-            size: 0,
         }
     }
 
@@ -37,12 +35,6 @@ impl Row {
 
     pub fn is_empty(&self) -> bool {
         self.cells.is_empty()
-    }
-
-    /// Estimated memory held by the row's cell payloads.
-    #[inline]
-    pub fn estimated_size(&self) -> usize {
-        self.size
     }
 
     pub fn get(&self, index: usize) -> Option<&Option<Cell>> {
@@ -75,25 +67,11 @@ impl Row {
     /// `index` must be smaller than [`Self::len`].
     pub unsafe fn set_cell_at_bound(&mut self, index: usize, cell: Option<Cell>) {
         // SAFETY: required by this method's contract.
-        let slot = unsafe { self.cells.get_unchecked_mut(index) };
-
-        if let Some(old_cell) = slot.take() {
-            self.size = self.size.saturating_sub(old_cell.mem_size());
-        }
-
-        if let Some(new_cell) = &cell {
-            self.size += new_cell.mem_size();
-        }
-
-        *slot = cell;
+        *unsafe { self.cells.get_unchecked_mut(index) } = cell;
     }
 
     pub fn take_cell(&mut self, index: usize) -> Option<Cell> {
-        let cell = self.cells.get_mut(index).and_then(Option::take);
-        if let Some(cell) = &cell {
-            self.size = self.size.saturating_sub(cell.mem_size());
-        }
-        cell
+        self.cells.get_mut(index).and_then(Option::take)
     }
 
     pub fn iter(&self) -> slice::Iter<'_, Option<Cell>> {
@@ -124,13 +102,6 @@ impl Row {
         let mut row = Self::with_width(natts);
         let (values, nulls) = datums.raw_parts();
         unsafe { codec.datums_to_cells(values, nulls, &mut row.cells) }?;
-        row.size = row
-            .cells
-            .iter()
-            .filter_map(Option::as_ref)
-            .map(Cell::mem_size)
-            .sum();
-
         Ok(row)
     }
 

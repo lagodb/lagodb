@@ -1,55 +1,53 @@
 //! # lagodb-arrow
 //!
-//! PostgreSQL⇆Arrow interoperability shared by LagoDB runtimes and providers.
-//! It owns format-neutral value conversion and the typed table-scan adapter
-//! over LagoDB's Arrow C Stream ABI, but no table-format or DataFusion logic.
+//! PostgreSQL⇆Arrow interoperability shared by LagoDB's storage providers and
+//! query runtime. It owns format-neutral datum conversion and the typed
+//! table-scan adapter over LagoDB's Arrow C Stream ABI; table formats, file
+//! formats and query planning stay in the consuming crates.
 //!
-//! - [`BoundDatumPlan::bind`] binds a declared PostgreSQL type and Arrow field once
-//!   for Datum conversion. [`resolve_cell_rule`] covers the owned Cell subset.
-//! - [`ColumnReader::bind`] resolves a semantic batch column's concrete Arrow
-//!   array once; its row reads are explicitly unchecked after the caller
-//!   establishes the batch row bound. Provider-selected physical codecs are
-//!   bound by the `ArrowColumnDecoder` plan and never materialized as `Cell` values;
-//!   [`CellRule::build`] writes buffered rows back into an Arrow array.
-//! - [`validate_cell_schema`] rejects shapes the owned Cell model cannot express.
-//! - [`BoundWriteBuffer`] binds source slot codecs and Arrow encoders once for
-//!   relation-backed mutation writers. Its row API is explicitly unsafe because
-//!   the bound relation layout is a runtime invariant supplied by the provider.
-//! - [`BoundDatumBuffer`] provides the same one-time binding for adapters whose
-//!   typed datum stream is not backed by a relation slot, such as native COPY.
+//! Every conversion binds once and then runs per row without re-resolving
+//! types:
+//!
+//! - [`BoundDatumPlan::bind`] binds a declared PostgreSQL type to an Arrow
+//!   field, recursing through arrays, composites, intervals and nested JSONB.
+//!   [`CellRule::resolve`] decides the native leaf `(Arrow, PostgreSQL)` pairs
+//!   it reuses.
+//! - [`DecodedColumn`] / [`ArrowColumnDecoder`] read Arrow batches into slot
+//!   datums. All fallible setup happens when the columns are bound; a batch
+//!   only selects concrete arrays. [`DatumCodec`] selects the explicit
+//!   physical representations a query engine may emit.
+//! - [`BoundWriteBuffer`] appends relation slot rows, and [`BoundDatumBuffer`]
+//!   appends slot-free datum streams such as COPY, into Arrow batches.
+//! - [`PgDatumArrayReader`] / [`PgDatumArrayBuilder`] bind one Arrow array to
+//!   a PostgreSQL expression argument or result type.
+//! - [`ArrowBatchSource`] adapts an Arrow batch iterator to the core
+//!   access-method scan loop.
+//! - [`scan`] is the typed table-scan boundary between table providers and
+//!   the query engine.
 //! - [`pg_epoch_days_to_unix_days`] / [`pg_epoch_micros_to_unix_micros`] expose
-//!   the shared PG↔Unix epoch offsets for the consumer's predicate translator.
+//!   the shared PG↔Unix epoch offsets for predicate translators.
 //!
-//! Semantic UTF-8 rules require a UTF-8 PostgreSQL server encoding; bound
-//! readers and writers validate that capability once during construction.
+//! Semantic UTF-8 conversions require a UTF-8 PostgreSQL server encoding;
+//! bound readers and writers validate that capability once during binding.
+//! Conversion errors are returned as [`ArrowConversionError`] and reported
+//! once at the caller's PostgreSQL boundary.
 
-mod column_encoder;
-mod convert;
-mod datum;
+mod batch_source;
 mod datum_codec;
+mod encoder;
 mod error;
 mod jsonb;
-mod read;
 mod rule;
-mod scalar;
 pub mod scan;
-mod write;
+mod temporal;
 
-pub use column_encoder::{
-    ArrowColumnEncoder, pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros,
-};
-pub use datum::DatumCodec;
+pub use batch_source::ArrowBatchSource;
 pub use datum_codec::{
-    ArrowColumnDecoder, BoundBatch, BoundColumn, BoundDatumPlan, DecodedColumn,
+    ArrowColumnDecoder, BoundBatch, BoundColumn, BoundDatumBuffer, BoundDatumPlan,
+    BoundWriteBuffer, BoundWriteColumnPlan, DatumCodec, DecodedColumn,
+    PgDatumArrayBuilder, PgDatumArrayReader,
 };
 pub use error::{ArrowConversionError, ArrowConversionResult};
 pub use jsonb::{NestedJsonbDefault, NestedJsonbDefaults, NestedJsonbPlan};
-pub use read::{ArrowBatchSource, ColumnReader};
-pub use rule::{
-    CellRule, ListElementRule, PgColumnType, resolve_cell_rule,
-    resolve_list_element_rule, validate_cell_schema,
-};
-pub use scalar::{PgDatumArrayBuilder, PgDatumArrayReader};
-pub use write::{
-    BoundDatumBuffer, BoundDatumColumnPlan, BoundWriteBuffer, BoundWriteColumnPlan,
-};
+pub use rule::{CellRule, ListElementRule, PgColumnType};
+pub use temporal::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};

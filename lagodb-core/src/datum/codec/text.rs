@@ -3,8 +3,45 @@
 use pgrx::IntoDatum;
 use pgrx::pg_sys::{Datum, Oid};
 
+use super::BoundColumnDatumCodec;
 use crate::datum::cell::Cell;
 use crate::datum::error::DatumConversionError;
+
+/// Copy UTF-8 text into a `text`-family varlena.
+///
+/// # Safety
+///
+/// PostgreSQL must be active with the memory context owning the resulting
+/// datum selected.
+unsafe fn text_datum_from_str(
+    text: &str,
+    target: Oid,
+) -> Result<Datum, DatumConversionError> {
+    // Rust/Arrow/Avro strings permit NUL; PostgreSQL text does not.
+    // Check before pgrx's byte-copying IntoDatum, including array elements.
+    if text.as_bytes().contains(&0) {
+        return Err(DatumConversionError::invalid_input(target));
+    }
+    text.into_datum()
+        .ok_or(DatumConversionError::invalid_input(target))
+}
+
+impl BoundColumnDatumCodec {
+    /// Convert UTF-8 text for an already-bound `text`, `varchar` or `bpchar`
+    /// target, rejecting embedded NUL bytes.
+    ///
+    /// # Safety
+    ///
+    /// This codec must have been bound from `TEXTOID`, `VARCHAROID` or
+    /// `BPCHAROID`. PostgreSQL must be active with the destination memory
+    /// context selected.
+    pub unsafe fn text_datum_from_str_unchecked(
+        self,
+        text: &str,
+    ) -> Result<Datum, DatumConversionError> {
+        unsafe { text_datum_from_str(text, self.target.oid) }
+    }
+}
 
 impl Cell {
     /// # Safety
@@ -20,12 +57,6 @@ impl Cell {
             Self::StringView(view) => unsafe { view.as_str() },
             _ => return Err(DatumConversionError::incompatible(target)),
         };
-        // Rust/Arrow/Avro strings permit NUL; PostgreSQL text does not.
-        // Check before pgrx's byte-copying IntoDatum, including array elements.
-        if text.as_bytes().contains(&0) {
-            return Err(DatumConversionError::invalid_input(target));
-        }
-        text.into_datum()
-            .ok_or(DatumConversionError::invalid_input(target))
+        unsafe { text_datum_from_str(text, target) }
     }
 }

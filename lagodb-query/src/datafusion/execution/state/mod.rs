@@ -126,8 +126,7 @@ impl QueryExecutionState {
                     // SAFETY: prepared execution builds output_decoder from the
                     // same plan that produces this RecordBatchStream. The stream
                     // guarantees that every batch has that plan's output schema.
-                    let batch = unsafe { output_decoder.bind_batch_unchecked(batch) }
-                        .map_err(QueryExecutionError::OutputConversion)?;
+                    let batch = unsafe { output_decoder.bind_batch_unchecked(batch) };
                     run.install_batch(batch, rows);
                 }
                 None => {

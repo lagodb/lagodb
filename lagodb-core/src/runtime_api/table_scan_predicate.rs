@@ -16,7 +16,7 @@
 //! an Iceberg binder can later reject for unrepresentable values.
 
 use std::borrow::Cow;
-use std::ptr;
+use std::{ptr, slice};
 
 use crate::expr::pushdown::PredicateExpr;
 
@@ -191,5 +191,32 @@ impl TableScanRuntimePredicate {
     #[must_use]
     pub const fn action(self) -> Option<RuntimePredicateUpdateAction> {
         RuntimePredicateUpdateAction::from_code(self.action)
+    }
+
+    /// Decode the predicate published by a replacement update.
+    ///
+    /// # Safety
+    ///
+    /// A non-null `data` must point to `data_len` readable bytes for the
+    /// duration of this call. The exact-build runtime ABI guarantees this for
+    /// a slot observed inside its serialized callback.
+    pub unsafe fn decode_replacement(
+        &self,
+    ) -> Result<RuntimePruningPredicate<'static>, RuntimePredicateCodecError> {
+        match self
+            .action()
+            .ok_or(RuntimePredicateCodecError::UnknownUpdateAction)?
+        {
+            RuntimePredicateUpdateAction::Replace => {}
+            RuntimePredicateUpdateAction::Clear => {
+                return Err(RuntimePredicateCodecError::ExpectedReplacement);
+            }
+        }
+        if self.data.is_null() {
+            return Err(RuntimePredicateCodecError::NullData);
+        }
+        // SAFETY: upheld by this method's contract for the non-null pair.
+        let data = unsafe { slice::from_raw_parts(self.data, self.data_len) };
+        RuntimePruningPredicate::decode(data)
     }
 }

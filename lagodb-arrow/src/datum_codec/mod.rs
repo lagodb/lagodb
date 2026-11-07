@@ -1,22 +1,26 @@
 //! Recursive conversion bound to declared column types and Arrow storage fields.
 //!
-//! Providers choose the storage schema and admission policy. This module knows
-//! neither Iceberg nor managed/foreign tables. Containers reuse scalar datum
-//! codecs. LagoDB resolves declared types and I/O functions during binding,
-//! and downcasts Arrow arrays per batch, not per element. PostgreSQL type I/O
-//! can still perform syscache lookups per value (for example, enum_in).
-//! Pass-by-reference Datums allocate in the caller's row memory context.
+//! Providers choose the storage schema and admission policy; this module
+//! knows no table format. Containers reuse scalar datum codecs. LagoDB
+//! resolves declared types, I/O functions and conversion state during binding,
+//! and selects concrete Arrow arrays per batch, not per element. PostgreSQL
+//! type I/O can still perform syscache lookups per value (for example,
+//! enum_in). Pass-by-reference Datums allocate in the caller's row memory
+//! context.
 
 mod batch;
+mod buffer;
+mod codec;
 mod decoder;
 mod encoder;
-mod native;
+mod list_read;
 mod native_list;
 mod reader;
 mod recursive_read;
+mod recursive_write;
+mod scalar_batch;
 mod state;
 mod text;
-mod write;
 
 use std::sync::Arc;
 
@@ -26,17 +30,19 @@ use lagodb_core::datum::{
 };
 use pgrx::pg_sys;
 
-use crate::{
-    ArrowConversionError, ArrowConversionResult, CellRule, DatumCodec,
-    ListElementRule, NestedJsonbPlan, PgColumnType, resolve_cell_rule,
-};
+use crate::error::{ArrowConversionError, ArrowConversionResult};
+use crate::jsonb::NestedJsonbPlan;
+use crate::rule::{CellRule, ListElementRule, PgColumnType};
 
 pub use batch::{BoundBatch, BoundColumn};
+pub use buffer::{BoundDatumBuffer, BoundWriteBuffer, BoundWriteColumnPlan};
+pub use codec::DatumCodec;
 pub use decoder::{ArrowColumnDecoder, DecodedColumn};
+pub use scalar_batch::{PgDatumArrayBuilder, PgDatumArrayReader};
+
 pub(crate) use encoder::DatumEncoder;
-pub(crate) use native::NativeEncoderPlan;
+pub(crate) use recursive_write::RecursiveDatumEncoder;
 pub(crate) use state::DatumReadState;
-pub(crate) use write::RecursiveDatumEncoder;
 
 /// A column's declared type and storage representation, bound before row access.
 /// Arrays and composites carry child plans; scalar adapters retain the type's
@@ -63,7 +69,8 @@ enum NodePlan {
     Oid,
     NestedJsonb(Box<NestedJsonbPlan>),
     NativeList {
-        rule: CellRule,
+        element: ListElementRule,
+        field: FieldRef,
         layout: ArrayDatumLayout,
         codec: BoundColumnDatumCodec,
     },
@@ -132,15 +139,10 @@ impl BoundDatumPlan {
             // Select one list strategy for both readers and writers. Native
             // primitive lists dispatch before the element loop; other lists
             // recurse through their declared PostgreSQL element type.
-            let native_rule = ListElementRule::for_arrow_type(child.data_type())
-                .filter(|rule| rule.accepts_target_oid(element.oid))
-                .map(|rule| CellRule::List {
-                    element: rule,
-                    field: Arc::clone(child),
-                    elem_oid: element.oid,
-                });
+            let native_element = ListElementRule::for_arrow_type(child.data_type())
+                .filter(|rule| rule.accepts_target_oid(element.oid));
             let layout = ArrayDatumLayout::bind(element.oid);
-            if let Some(rule) = native_rule {
+            if let Some(native_element) = native_element {
                 // Only the explicit prevalidated entry point may construct
                 // JSON elements as text; the layout retains the JSON OID.
                 let codec_oid = if element.oid == pg_sys::JSONOID
@@ -154,7 +156,8 @@ impl BoundDatumPlan {
                     ColumnDatumTarget::from_oid(codec_oid),
                 )?;
                 NodePlan::NativeList {
-                    rule,
+                    element: native_element,
+                    field: Arc::clone(child),
                     layout,
                     codec,
                 }
@@ -236,7 +239,7 @@ impl BoundDatumPlan {
                     NodePlan::TextIo { read_codec }
                 }
                 (Some(target), _) => {
-                    let rule = resolve_cell_rule(field.data_type(), target)?;
+                    let rule = CellRule::resolve(field.data_type(), target)?;
                     let codec = if base.oid == pg_sys::JSONOID
                         && matches!(json_text_policy, JsonTextPolicy::Prevalidated)
                     {
@@ -311,7 +314,9 @@ impl BoundDatumPlan {
     pub(crate) fn accepts_arrow_type(&self, data_type: &DataType) -> bool {
         match (&self.node, data_type) {
             (NodePlan::Scalar { rule, .. }, data_type) => rule.accepts(data_type),
-            (NodePlan::NativeList { rule, .. }, data_type) => rule.accepts(data_type),
+            (NodePlan::NativeList { element, .. }, data_type) => {
+                element.accepts_list(data_type)
+            }
             (NodePlan::NestedJsonb(plan), data_type) => plan.accepts(data_type),
             (NodePlan::TextIo { .. }, DataType::Utf8 | DataType::LargeUtf8) => true,
             (NodePlan::Oid, DataType::Int64) => true,
@@ -343,7 +348,9 @@ impl BoundDatumPlan {
         match &self.node {
             NodePlan::TextIo { .. } => true,
             NodePlan::NestedJsonb(_) => true,
-            NodePlan::NativeList { rule, .. } => rule.requires_utf8_server_encoding(),
+            NodePlan::NativeList { element, .. } => {
+                element.requires_utf8_server_encoding()
+            }
             NodePlan::Scalar { rule, .. } => rule.requires_utf8_server_encoding(),
             NodePlan::List { element, .. } => element.requires_utf8_server_encoding(),
             NodePlan::Struct(fields) => fields

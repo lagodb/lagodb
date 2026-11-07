@@ -313,7 +313,9 @@ impl ScanStreamOptions {
             RuntimePredicateUpdateAction::Replace => {
                 RuntimePredicateUpdate::Replace {
                     generation: slot.generation,
-                    predicate: decode_runtime_predicate(&slot)?,
+                    // SAFETY: the evolving slot's non-null data/count pair stays
+                    // live until the Arrow stream release callback returns.
+                    predicate: unsafe { slot.decode_replacement() }?,
                 }
             }
             RuntimePredicateUpdateAction::Clear => {
@@ -353,28 +355,6 @@ impl RuntimePredicateUpdate {
             }
         }
     }
-}
-
-pub(super) fn decode_runtime_predicate(
-    predicate: &TableScanRuntimePredicate,
-) -> Result<RuntimePruningPredicate<'static>, RuntimePredicateCodecError> {
-    match predicate
-        .action()
-        .ok_or(RuntimePredicateCodecError::UnknownUpdateAction)?
-    {
-        RuntimePredicateUpdateAction::Replace => {}
-        RuntimePredicateUpdateAction::Clear => {
-            return Err(RuntimePredicateCodecError::ExpectedReplacement);
-        }
-    }
-    if predicate.data.is_null() {
-        return Err(RuntimePredicateCodecError::NullData);
-    }
-    // SAFETY: the exact-build ABI requires the slot's non-null data/count pair
-    // to remain live for this serialized callback.
-    let data =
-        unsafe { core::slice::from_raw_parts(predicate.data, predicate.data_len) };
-    RuntimePruningPredicate::decode(data)
 }
 
 /// Run-local provider stream consumed by the Arrow C Stream exporter.

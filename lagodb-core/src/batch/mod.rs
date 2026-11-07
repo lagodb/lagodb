@@ -7,23 +7,16 @@
 //! the per-row path stays `dyn`-free (generics + enum dispatch), so the
 //! abstraction is zero-cost.
 //!
-//! Two write worlds, deliberately split by how the source row is owned:
-//!
-//! - **Column world (hot path):** a provider-owned relation-bound writer
-//!   consumes `TupleSlotRow` views *during* the callback and copies what it
-//!   needs straight into its column builders. `lagodb-arrow` provides the
-//!   `BoundWriteBuffer` implementation, which validates source codecs during
-//!   planning.
-//! - **Row world:** [`RowBatchBuffer`] owns [`Row`] values that are safe across
-//!   callback boundaries — the buffering half of the row-mode / FDW write path,
-//!   paired with `lagodb-arrow`'s `CellRule::build(&[Row], ..)`. Not on the
-//!   columnar hot path (see [`RowBatchBuffer`] for why it is retained).
-//!
+//! Write path: a provider-owned relation-bound writer consumes `TupleSlotRow`
+//! views *during* the callback and copies what it needs straight into its
+//! column builders, so no owned row outlives the callback. `lagodb-arrow`
+//! provides the `BoundWriteBuffer` implementation, which validates source
+//! codecs during planning, and `BoundDatumBuffer` for slot-free datum streams.
 //! Core does not provide a `Cell`-based columnar buffer: on a mutation hot path,
-//! materializing `Cell` first would add the same intermediate allocations the
+//! materializing `Cell` first would add the intermediate allocations the
 //! slot/datum path is designed to avoid.
 //!
-//! The read path mirrors this: an [`AmScanBatchSource`] yields AM-defined column
+//! Read path: an [`AmScanBatchSource`] yields AM-defined column
 //! batches and a [`BatchRowDecoder`] writes one batch row into a slot, paired by
 //! the core-provided [`BatchRowCursor`]. Their Arrow implementations
 //! (`ArrowBatchSource` / `ArrowColumnDecoder`) also live in `lagodb-arrow`.
@@ -32,4 +25,4 @@ mod read;
 mod write;
 
 pub use read::{AmScanBatchSource, BatchRowCursor, BatchRowDecoder, ScanBatchDriver};
-pub use write::{BatchBuffer, RowBatchBuffer};
+pub use write::BatchBuffer;

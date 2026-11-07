@@ -14,7 +14,7 @@ use lagodb_core::runtime_api::{
     WORKER_SOURCE_UNSUPPORTED, WorkerTableScanSourceResult,
 };
 
-use super::c_stream;
+use super::export;
 use super::provider::{ScanSupport, TableScanProvider, TableScanStream};
 
 /// Immutable provider payload copied into the parallel query protocol.
@@ -126,10 +126,10 @@ impl<P: TableScanWorkerProvider> TableScanWorkerAdapter<P> {
                 P::ROUTES,
                 ptr::from_ref(provider).cast_mut().cast(),
                 Self::prepare_source,
-                Self::release_prepared_source,
+                export::release_boxed::<WorkerSourcePayload>,
                 Self::decode_source,
                 Self::open_stream,
-                Self::release_source,
+                export::release_boxed::<P::WorkerSource>,
             )
         }
     }
@@ -184,20 +184,6 @@ impl<P: TableScanWorkerProvider> TableScanWorkerAdapter<P> {
         }
     }
 
-    unsafe extern "C-unwind" fn release_prepared_source(
-        _context: *mut c_void,
-        payload: *mut c_void,
-        error: *mut CallbackErrorReport,
-    ) -> u32 {
-        let payload = unsafe { Box::from_raw(payload.cast::<WorkerSourcePayload>()) };
-        unsafe {
-            (&mut *error).capture(move || {
-                drop(payload);
-                Ok(())
-            })
-        }
-    }
-
     unsafe extern "C-unwind" fn decode_source(
         context: *mut c_void,
         request: *const TableScanWorkerSourceRequest<'_>,
@@ -244,24 +230,10 @@ impl<P: TableScanWorkerProvider> TableScanWorkerAdapter<P> {
             unsafe {
                 output
                     .cast::<FFI_ArrowArrayStream>()
-                    .write(c_stream::export(stream, request.stream_error));
+                    .write(export::stream(stream, request.stream_error));
             }
             Ok(())
         };
         unsafe { (&mut *error).capture(operation) }
-    }
-
-    unsafe extern "C-unwind" fn release_source(
-        _context: *mut c_void,
-        source: *mut c_void,
-        error: *mut CallbackErrorReport,
-    ) -> u32 {
-        let source = unsafe { Box::from_raw(source.cast::<P::WorkerSource>()) };
-        unsafe {
-            (&mut *error).capture(move || {
-                drop(source);
-                Ok(())
-            })
-        }
     }
 }

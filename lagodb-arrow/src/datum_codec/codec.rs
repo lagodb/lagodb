@@ -1,9 +1,9 @@
 //! Datum codecs selected by a bound column mapping.
 //!
-//! `ColumnDatumTarget` covers the framework's normal semantic `Cell` → Datum
-//! conversion. The other variants are explicit physical codecs selected by a
-//! provider or the query engine. Keeping them here prevents an Arrow type or a
-//! PostgreSQL OID from silently selecting a representation.
+//! `ColumnDatumTarget` covers the framework's normal semantic conversion. The
+//! other variants are explicit physical codecs selected by a provider or the
+//! query engine. Keeping them here prevents an Arrow type or a PostgreSQL OID
+//! from silently selecting a representation.
 
 use std::ffi::c_char;
 use std::ptr;
@@ -16,11 +16,11 @@ use crate::error::{ArrowConversionError, ArrowConversionResult};
 /// The datum representation bound to one Arrow column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DatumCodec {
-    kind: DatumCodecKind,
+    pub(super) kind: DatumCodecKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DatumCodecKind {
+pub(super) enum DatumCodecKind {
     Standard(BoundColumnDatumCodec),
     PrevalidatedJsonText,
     PostgresNumericVarlena,
@@ -31,8 +31,7 @@ enum DatumCodecKind {
 impl DatumCodec {
     /// Bind the framework's standard semantic conversion for a destination OID.
     pub fn standard(oid: pg_sys::Oid) -> ArrowConversionResult<Self> {
-        let target = BoundColumnDatumCodec::bind(ColumnDatumTarget::from_oid(oid))
-            .map_err(ArrowConversionError::from)?;
+        let target = BoundColumnDatumCodec::bind(ColumnDatumTarget::from_oid(oid))?;
         Ok(Self {
             kind: DatumCodecKind::Standard(target),
         })
@@ -67,59 +66,30 @@ impl DatumCodec {
         }
     }
 
-    /// Bind DataFusion's native Int64 aggregate result to PostgreSQL NUMERIC.
+    /// Bind a native Int64 aggregate result to PostgreSQL NUMERIC.
     pub const fn numeric_from_int64() -> Self {
         Self {
             kind: DatumCodecKind::NumericFromInt64,
         }
     }
 
-    /// Bind DataFusion's native Float64 AVG result to PostgreSQL NUMERIC.
+    /// Bind a native Float64 aggregate result to PostgreSQL NUMERIC.
     pub const fn numeric_from_float64() -> Self {
         Self {
             kind: DatumCodecKind::NumericFromFloat64,
         }
     }
 
-    pub(crate) fn is_prevalidated_json_text(self) -> bool {
-        matches!(self.kind, DatumCodecKind::PrevalidatedJsonText)
-    }
-
-    pub(crate) fn is_postgres_numeric_varlena(self) -> bool {
-        matches!(self.kind, DatumCodecKind::PostgresNumericVarlena)
-    }
-
-    pub(crate) fn is_numeric_from_int64(self) -> bool {
-        matches!(self.kind, DatumCodecKind::NumericFromInt64)
-    }
-
-    pub(crate) fn is_numeric_from_float64(self) -> bool {
-        matches!(self.kind, DatumCodecKind::NumericFromFloat64)
-    }
-
-    pub(crate) fn standard_target(self) -> Option<BoundColumnDatumCodec> {
-        match self.kind {
-            DatumCodecKind::Standard(target) => Some(target),
-            DatumCodecKind::PrevalidatedJsonText
-            | DatumCodecKind::PostgresNumericVarlena
-            | DatumCodecKind::NumericFromInt64
-            | DatumCodecKind::NumericFromFloat64 => None,
-        }
-    }
-
-    pub(crate) fn validate_target_oid(
+    pub(super) fn validate_target_oid(
         self,
         target_oid: pg_sys::Oid,
     ) -> ArrowConversionResult<()> {
         let valid = match self.kind {
             DatumCodecKind::Standard(target) => target.oid() == target_oid,
             DatumCodecKind::PrevalidatedJsonText => target_oid == pg_sys::JSONOID,
-            DatumCodecKind::PostgresNumericVarlena => {
-                target_oid == pg_sys::NUMERICOID
-            }
-            DatumCodecKind::NumericFromInt64 | DatumCodecKind::NumericFromFloat64 => {
-                target_oid == pg_sys::NUMERICOID
-            }
+            DatumCodecKind::PostgresNumericVarlena
+            | DatumCodecKind::NumericFromInt64
+            | DatumCodecKind::NumericFromFloat64 => target_oid == pg_sys::NUMERICOID,
         };
         if valid {
             Ok(())
@@ -137,7 +107,7 @@ impl DatumCodec {
     ///
     /// `text` must be valid JSON established by the bound provider codec, and
     /// PostgreSQL must be running with the destination memory context selected.
-    pub(crate) unsafe fn copy_prevalidated_json_text(
+    pub(super) unsafe fn copy_prevalidated_json_text(
         text: &str,
     ) -> ArrowConversionResult<pg_sys::Datum> {
         let len = i32::try_from(text.len()).map_err(|_| {
@@ -145,18 +115,35 @@ impl DatumCodec {
                 "JSON text is too large for PostgreSQL varlena input".to_string(),
             )
         })?;
-        Ok(unsafe { Self::copy_json_text(text.as_ptr(), len) })
+        // SAFETY: `text` provides `len` readable bytes and the current
+        // PostgreSQL memory context owns the returned allocation.
+        let text_ptr = unsafe {
+            pg_sys::cstring_to_text_with_len(text.as_ptr() as *const c_char, len)
+        };
+        Ok(pg_sys::Datum::from(text_ptr))
     }
 
     /// Copy trusted complete PostgreSQL NUMERIC varlena bytes into the current
     /// destination memory context.
-    pub(crate) unsafe fn copy_postgres_numeric_varlena(
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must be a complete, detoasted NUMERIC varlena, and PostgreSQL
+    /// must be running with the destination memory context selected.
+    pub(super) unsafe fn copy_postgres_numeric_varlena(
         bytes: &[u8],
-    ) -> ArrowConversionResult<pg_sys::Datum> {
-        Ok(unsafe { Self::copy_internal_varlena(bytes) })
+    ) -> pg_sys::Datum {
+        let len = bytes.len();
+        // SAFETY: `bytes` contains `len` initialized bytes and `palloc`
+        // returns a live allocation in the current PostgreSQL memory context.
+        unsafe {
+            let new_ptr = pg_sys::palloc(len);
+            ptr::copy_nonoverlapping(bytes.as_ptr(), new_ptr.cast(), len);
+            pg_sys::Datum::from(new_ptr)
+        }
     }
 
-    pub(crate) fn numeric_datum_from_int64(
+    pub(super) fn numeric_datum_from_int64(
         value: i64,
     ) -> ArrowConversionResult<pg_sys::Datum> {
         AnyNumeric::from(value).into_datum().ok_or(
@@ -166,7 +153,7 @@ impl DatumCodec {
         )
     }
 
-    pub(crate) fn numeric_datum_from_float64(
+    pub(super) fn numeric_datum_from_float64(
         value: f64,
     ) -> ArrowConversionResult<pg_sys::Datum> {
         AnyNumeric::try_from(value)?.into_datum().ok_or(
@@ -174,25 +161,5 @@ impl DatumCodec {
                 "float to NUMERIC conversion returned SQL NULL",
             ),
         )
-    }
-
-    unsafe fn copy_json_text(ptr: *const u8, len: i32) -> pg_sys::Datum {
-        // SAFETY: the caller provides `len` readable bytes and the current
-        // PostgreSQL memory context owns the returned allocation.
-        let text_ptr =
-            unsafe { pg_sys::cstring_to_text_with_len(ptr as *const c_char, len) };
-        pg_sys::Datum::from(text_ptr)
-    }
-
-    unsafe fn copy_internal_varlena(bytes: &[u8]) -> pg_sys::Datum {
-        let ptr = bytes.as_ptr();
-        let len = bytes.len();
-        // SAFETY: `bytes` contains `len` initialized bytes and `palloc`
-        // returns a live allocation in the current PostgreSQL memory context.
-        unsafe {
-            let new_ptr = pg_sys::palloc(len);
-            ptr::copy_nonoverlapping(ptr, new_ptr.cast(), len);
-            pg_sys::Datum::from(new_ptr)
-        }
     }
 }
