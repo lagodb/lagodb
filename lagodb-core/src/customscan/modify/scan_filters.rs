@@ -125,7 +125,7 @@ impl<P: LagodbCustomModifyProvider> ModifyScanFilters<P> {
                 .append_count(offset);
             unsafe {
                 writer.append_list(encoded.planned);
-                writer.append_list(encoded.bindings);
+                writer.append_encoded_list(encoded.bindings);
             }
             Ok(())
         })
@@ -148,8 +148,7 @@ impl<P: LagodbCustomModifyProvider> ModifyScanFilters<P> {
                     let planned_count = reader.read_count()?;
                     let count = reader.read_count()?;
                     let offset = reader.read_count()?;
-                    let planned =
-                        reader.read_optional_list(pg_sys::NodeTag::T_List)?;
+                    let planned = reader.read_optional_list()?;
                     let bindings = reader.read_encoded_list()?;
                     let (planned, bindings) = FilterDataCodec::<P>::decode(
                         planned,

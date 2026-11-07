@@ -9,7 +9,7 @@ mod view;
 pub use leaf::{
     PgNullTestKind, PgPredicateLeafRef, PgScalarExprRef, PgStructuralError,
 };
-pub(crate) use list::expr_list;
+pub use list::expr_list;
 pub use view::{
     PgBoolExpr, PgBooleanTest, PgConst, PgExprRef, PgFuncExpr, PgNullTest, PgOpExpr,
     PgParam, PgRelabelType, PgScalarArrayOpExpr, PgVar,

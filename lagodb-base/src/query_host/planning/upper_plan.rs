@@ -13,6 +13,7 @@ use lagodb_query::plan::{
 use pgrx::pg_sys;
 
 use super::materialize;
+use super::path_private::QueryPathPrivate;
 use crate::query_host::{error::QueryHostError, methods};
 
 /// Absorb only a PostgreSQL wrapper whose direct child is the already selected
@@ -109,10 +110,11 @@ impl UpperPlanCandidate {
             }) else {
                 continue;
             };
-            let selected =
-                unsafe { SelectedQueryPlan::decode_path(&*(*custom).custom_private) }
-                    .map_err(QueryHostError::invalid_plan)?;
-            let Some(keys) = (unsafe { Self::sort_keys(root, &selected) }) else {
+            let path =
+                unsafe { QueryPathPrivate::decode(&*(*custom).custom_private) }?;
+            let selected = path.selected_plan()?;
+            let Some(keys) = (unsafe { Self::sort_keys(root, &path, &selected) })
+            else {
                 continue;
             };
             let (fragment, layout, runtime_values) =
@@ -126,8 +128,7 @@ impl UpperPlanCandidate {
                 selected.scans().len(),
             )
             .map_err(QueryHostError::invalid_plan)?;
-            let encoded = unsafe { selected.encode_replacement_path(&query, &[]) }
-                .map_err(QueryHostError::invalid_plan)?;
+            let encoded = unsafe { path.encode_replacement(&selected, &query, &[]) }?;
             let cost =
                 PlanCost::try_new(unsafe { (*exposed).startup_cost }, unsafe {
                     (*exposed).total_cost
@@ -167,9 +168,9 @@ impl UpperPlanCandidate {
             }) else {
                 continue;
             };
-            let selected =
-                unsafe { SelectedQueryPlan::decode_path(&*(*custom).custom_private) }
-                    .map_err(QueryHostError::invalid_plan)?;
+            let path =
+                unsafe { QueryPathPrivate::decode(&*(*custom).custom_private) }?;
+            let selected = path.selected_plan()?;
             let expressions = [
                 unsafe { (*limit_path).limitOffset }.cast::<pg_sys::Expr>(),
                 unsafe { (*limit_path).limitCount }.cast::<pg_sys::Expr>(),
@@ -208,9 +209,8 @@ impl UpperPlanCandidate {
             )
             .map_err(QueryHostError::invalid_plan)?;
             let encoded = unsafe {
-                selected.encode_replacement_path(&query, &bindings.expressions)
-            }
-            .map_err(QueryHostError::invalid_plan)?;
+                path.encode_replacement(&selected, &query, &bindings.expressions)
+            }?;
             let cost =
                 PlanCost::try_new(unsafe { (*exposed).startup_cost }, unsafe {
                     (*exposed).total_cost
@@ -242,6 +242,7 @@ impl UpperPlanCandidate {
 
     unsafe fn sort_keys(
         root: *mut pg_sys::PlannerInfo,
+        path: &QueryPathPrivate<'_>,
         selected: &SelectedQueryPlan<'_>,
     ) -> Option<Vec<SortExpr>> {
         let parse = unsafe { &*(*root).parse };
@@ -256,18 +257,8 @@ impl UpperPlanCandidate {
             let target = unsafe {
                 Self::target_for_sort_ref(parse.targetList, (*clause).tleSortGroupRef)
             }?;
-            let position =
-                (0..selected.query().tuple_layout().len()).find(|&position| {
-                    let candidate = selected
-                        .scan_target_expr(position)
-                        .expect("selected path target layout is complete");
-                    unsafe {
-                        pg_sys::equal(
-                            candidate.cast::<c_void>(),
-                            (*target).expr.cast::<c_void>(),
-                        )
-                    }
-                })?;
+            // The path envelope aligns scan targets with the tuple layout.
+            let position = path.scan_target_position(unsafe { (*target).expr })?;
             let slot = selected.query().tuple_layout().slots()[position];
             let direction =
                 PgOrderingDirection::from_builtin_sort_operator(unsafe {

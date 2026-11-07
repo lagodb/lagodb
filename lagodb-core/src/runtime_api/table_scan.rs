@@ -40,6 +40,12 @@ pub struct TableScanPlanningRequest<'a> {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PlannedTableScanResult {
+    /// Provider scan plan carried unchanged from planning to Begin: a non-NIL,
+    /// `copyObject`-safe `T_List` in the planner memory context. PostgreSQL
+    /// never walks it after PlanCustomPath (replace_nestloop_params,
+    /// set_plan_references and finalize_plan visit only custom_exprs and
+    /// custom_scan_tlist), so it must not contain expression nodes such as
+    /// `Var` or `Param`; record only self-contained plan data.
     pub plan_data: *mut pg_sys::List,
     /// Provider-approved exact or widened expression used for EXPLAIN.
     pub pruning_expression: *mut pg_sys::Expr,

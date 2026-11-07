@@ -4,7 +4,6 @@ use std::error::Error;
 use std::io;
 
 use datafusion::common::DataFusionError;
-use lagodb_core::customscan::custom_exprs::PgExpressionSectionsError;
 use lagodb_core::diag::{PgReportError, SqlStateError};
 use lagodb_core::expr::RuntimeValueStateError;
 use pgrx::prelude::PgSqlErrorCode;
@@ -28,8 +27,6 @@ pub enum QueryExecutionError {
     ScanPlan(#[source] PgReportError),
     #[error("failed to initialize query runtime values: {0}")]
     RuntimeValues(#[source] RuntimeValueStateError),
-    #[error("invalid PostgreSQL expression sections: {0}")]
-    ExpressionSections(#[source] PgExpressionSectionsError),
     #[error("selected query plan has {scans} scans but {callbacks} callback tables")]
     ScanCallbackCount { scans: usize, callbacks: usize },
     #[error("DataFusion query output has {columns} columns and {rows} rows")]
@@ -66,7 +63,6 @@ impl SqlStateError for QueryExecutionError {
             Self::InvalidLimits
             | Self::Runtime(_)
             | Self::RuntimeValues(_)
-            | Self::ExpressionSections(_)
             | Self::ScanCallbackCount { .. }
             | Self::MissingScanMetadata { .. }
             | Self::BoundScanStillShared { .. } => {

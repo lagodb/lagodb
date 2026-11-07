@@ -43,8 +43,7 @@ pub(crate) unsafe fn decode_path_private(
             let purpose = ScanPurpose::from_wire(purpose_raw)
                 .ok_or(EnvelopeError::UnknownScanPurpose { value: purpose_raw })?;
             let requires_wholerow = reader.read_bool()?;
-            let provider_metadata =
-                reader.read_optional_list(pg_sys::NodeTag::T_List)?;
+            let provider_metadata = reader.read_optional_list()?;
             Ok(EncodedPathPrivate {
                 purpose,
                 requires_wholerow,

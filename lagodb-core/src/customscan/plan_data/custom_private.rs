@@ -94,16 +94,13 @@ pub unsafe fn decode_private(
             let relation_oid = reader.read_oid()?;
             let planned_filter_count = reader.read_count()?;
             let binding_count = reader.read_count()?;
-            let provider_metadata_raw =
-                reader.read_optional_list(pg_sys::NodeTag::T_List)?;
+            let provider_metadata_raw = reader.read_optional_list()?;
             let tuple_layout_raw =
-                reader.read_optional_list(pg_sys::NodeTag::T_IntList)?;
+                reader.read_optional_list_of(pg_sys::NodeTag::T_IntList)?;
             let tuple_layout =
                 ScanTupleLayout::decode_wire(tuple_layout_raw, FIELD_TUPLE_LAYOUT)?;
-            let planned_filters_raw =
-                reader.read_optional_list(pg_sys::NodeTag::T_List)?;
-            let binding_slots_raw =
-                reader.read_optional_list(pg_sys::NodeTag::T_List)?;
+            let planned_filters_raw = reader.read_optional_list()?;
+            let binding_slots_raw = reader.read_optional_list()?;
             Ok(EncodedPrivate {
                 provider_id_or_name,
                 purpose,

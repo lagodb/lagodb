@@ -10,6 +10,7 @@ mod expression;
 mod join_candidate;
 mod materialize;
 mod path_installation;
+mod path_private;
 mod planned_query;
 mod provider_scan_planner;
 mod query_shape;

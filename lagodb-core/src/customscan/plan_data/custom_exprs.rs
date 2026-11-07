@@ -1,9 +1,10 @@
 //! Validated plan-data view of `CustomScan.custom_exprs`.
 
-use core::ffi::{c_int, c_void};
-use core::ptr;
+use core::ffi::c_int;
 
 use pgrx::pg_sys;
+
+use crate::expr::pg::expr_list;
 
 /// Invalid PostgreSQL-owned expression-section layout.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -65,8 +66,8 @@ impl PgExpressionSections {
         Ok(len)
     }
 
-    /// Build the sole PostgreSQL-owned expression list layout used by relation
-    /// and query CustomScans.
+    /// Build the PostgreSQL-owned expression list layout used by relation
+    /// CustomScans.
     ///
     /// # Safety
     /// Every expression must be live in the current planner memory context.
@@ -74,11 +75,12 @@ impl PgExpressionSections {
         runtime_bindings: &[*mut pg_sys::Expr],
         relation_pushdown_provenance: &[*mut pg_sys::Expr],
     ) -> *mut pg_sys::List {
-        let mut list = unsafe { Self::build_list(runtime_bindings) };
-        for &expression in relation_pushdown_provenance {
-            list = unsafe { pg_sys::lappend(list, expression.cast::<c_void>()) };
-        }
-        list
+        expr_list(
+            runtime_bindings
+                .iter()
+                .chain(relation_pushdown_provenance)
+                .copied(),
+        )
     }
 
     /// # Safety
@@ -140,17 +142,6 @@ impl PgExpressionSections {
     ///
     /// Binding expression pointers must be live in the current executor plan.
     pub unsafe fn runtime_binding_list(&self) -> *mut pg_sys::List {
-        unsafe { Self::build_list(&self.runtime_bindings) }
-    }
-
-    /// Build a PG `List` from expr pointers.
-    unsafe fn build_list(cells: &[*mut pg_sys::Expr]) -> *mut pg_sys::List {
-        let mut out: *mut pg_sys::List = ptr::null_mut();
-        for &cell in cells {
-            // SAFETY: `lappend` allocates a fresh list cell in the current
-            // memory context.
-            out = unsafe { pg_sys::lappend(out, cell.cast::<c_void>()) };
-        }
-        out
+        expr_list(self.runtime_bindings.iter().copied())
     }
 }

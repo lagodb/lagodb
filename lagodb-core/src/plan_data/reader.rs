@@ -245,13 +245,21 @@ impl<'a> PlanDataReader<'a> {
         T: 'a,
         E: From<PlanDataError>,
     {
-        let list = self.read_optional_list(pg_sys::NodeTag::T_List)?;
+        let list = self.read_optional_list()?;
         unsafe { Self::decode_list(list, decode) }
     }
 
-    /// Read a list-valued cell with an explicit PostgreSQL list tag. NIL is
-    /// returned as NULL and is valid for every list kind.
-    pub(crate) fn read_optional_list(
+    /// Read an optional `T_List` cell written by
+    /// [`super::PlanDataWriter::append_list`]; NIL is returned as NULL.
+    #[inline]
+    pub fn read_optional_list(&mut self) -> Result<*mut pg_sys::List, PlanDataError> {
+        self.read_optional_list_of(pg_sys::NodeTag::T_List)
+    }
+
+    /// Read an optional list cell of crate-internal list kind `expected`, such
+    /// as `T_IntList`; NIL is returned as NULL and is valid for every list
+    /// kind. `expected` must be a PostgreSQL list tag.
+    pub(crate) fn read_optional_list_of(
         &mut self,
         expected: pg_sys::NodeTag,
     ) -> Result<*mut pg_sys::List, PlanDataError> {
@@ -278,7 +286,7 @@ impl<'a> PlanDataReader<'a> {
     /// same lifetime as this reader's containing plan. The nested codec must
     /// perform its own complete-field validation.
     pub fn read_encoded_list(&mut self) -> Result<*mut pg_sys::List, PlanDataError> {
-        let list = self.read_optional_list(pg_sys::NodeTag::T_List)?;
+        let list = self.read_optional_list()?;
         if list.is_null() {
             Err(PlanDataError::NullList)
         } else {

@@ -220,12 +220,9 @@ where
 
             let planned_filter_count = reader.read_count()?;
             let binding_count = reader.read_count()?;
-            let planned_filters_raw =
-                reader.read_optional_list(pg_sys::NodeTag::T_List)?;
-            let binding_slots_raw =
-                reader.read_optional_list(pg_sys::NodeTag::T_List)?;
-            let explain_filters_raw =
-                reader.read_optional_list(pg_sys::NodeTag::T_List)?;
+            let planned_filters_raw = reader.read_optional_list()?;
+            let binding_slots_raw = reader.read_optional_list()?;
+            let explain_filters_raw = reader.read_optional_list()?;
             let decoded = DecodedScanPrivate {
                 private_data,
                 relation_oid,

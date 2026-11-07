@@ -49,8 +49,6 @@ impl<P: FilterPushdown> RelationFilterBinding<P> {
         binding_exprs: *mut pg_sys::List,
         parent: *mut pg_sys::PlanState,
     ) -> Result<Self, RelationFilterBindingError<P::Error>> {
-        let expression_count = unsafe { pg_sys::list_length(binding_exprs) as usize };
-        Self::validate_binding_count(expression_count, binding_metadata.len())?;
         let stable_records = planned
             .iter()
             .map(|filter| {
@@ -254,17 +252,6 @@ impl<P: FilterPushdown> RelationFilterBinding<P> {
     ) -> impl ExactSizeIterator<Item = PushdownContract> + '_ {
         self.planned.iter().map(|filter| filter.contract)
     }
-
-    fn validate_binding_count(
-        expression_count: usize,
-        metadata_count: usize,
-    ) -> Result<(), RelationFilterBindingError<P::Error>> {
-        if expression_count == metadata_count {
-            Ok(())
-        } else {
-            Err(RelationFilterBindingError::BindingCountMismatch)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -428,20 +415,6 @@ mod tests {
         assert_eq!(bound.iter().filter(|entry| entry.is_some()).count(), 1);
         assert_eq!(bound[0].as_ref().map(|entry| entry.predicate), Some(7));
         assert!(bound[1].is_none());
-    }
-
-    #[test]
-    fn binding_expression_count_must_match_metadata() {
-        RelationFilterBinding::<TestProvider>::validate_binding_count(2, 2)
-            .expect("matching binding counts must be accepted");
-        let error =
-            RelationFilterBinding::<TestProvider>::validate_binding_count(1, 2)
-                .expect_err("mismatched binding counts must be rejected");
-
-        assert!(matches!(
-            error,
-            RelationFilterBindingError::BindingCountMismatch
-        ));
     }
 
     #[test]

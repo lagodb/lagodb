@@ -1,4 +1,4 @@
-//! Selected path combining query semantics with provider table scans.
+//! Engine-owned selected plan payload: query semantics and provider table scans.
 
 use std::ffi::CStr;
 use std::ptr;
@@ -13,9 +13,6 @@ use crate::ExecutionProfile;
 
 use super::codec::{QueryPlanData, QueryPlanDataError};
 use super::table_scan_filter::TableScanFilterExplain;
-
-const PATH_PAYLOAD: i32 = 1;
-const EXECUTION_PAYLOAD: i32 = 2;
 
 /// One provider table scan with opaque plan data and explain metadata.
 pub struct PlannedTableScan<'plan> {
@@ -87,113 +84,35 @@ impl<'plan> PlannedTableScan<'plan> {
     }
 }
 
-/// Query plan carrier used first by a selected path and then by executor Begin.
+/// Self-contained engine plan-data frame: query semantics, execution profile
+/// and opaque provider scan frames.
+///
+/// Host-owned runtime bindings and scan-target expressions are not part of
+/// this payload.
 pub struct SelectedQueryPlan<'plan> {
     query: QueryPlanData,
     execution: ExecutionProfile,
     parallel_safe: bool,
     scans: Box<[PlannedTableScan<'plan>]>,
-    runtime_exprs: *mut pg_sys::List,
-    scan_target_exprs: *mut pg_sys::List,
 }
 
 impl<'plan> SelectedQueryPlan<'plan> {
-    /// Encode a planner-path carrier. Runtime expressions and raw scan-target
-    /// expressions remain PostgreSQL nodes until `PlanCustomPath` moves them to
-    /// `CustomScan.custom_exprs` and `CustomScan.custom_scan_tlist` respectively.
-    ///
     /// # Safety
     ///
     /// Every provider plan must satisfy [`PlannedTableScan::new`].
-    pub unsafe fn encode_path(
+    pub unsafe fn encode(
         query: &QueryPlanData,
         execution: ExecutionProfile,
         parallel_safe: bool,
         scans: &[PlannedTableScan<'plan>],
-        runtime_exprs: &[*mut pg_sys::Expr],
-        scan_target_exprs: &[*mut pg_sys::Expr],
-    ) -> Result<*mut pg_sys::List, SelectedQueryPlanError> {
-        if runtime_exprs.len() != query.runtime_values().len() {
-            return Err(SelectedQueryPlanError::RuntimeExpressionCount);
-        }
-        if scan_target_exprs.len() != query.tuple_layout().len() {
-            return Err(SelectedQueryPlanError::ScanTargetExpressionCount);
-        }
-        unsafe {
-            Self::encode(
-                PATH_PAYLOAD,
-                query,
-                execution,
-                parallel_safe,
-                scans,
-                Some((runtime_exprs, scan_target_exprs)),
-            )
-        }
-    }
-
-    /// Encode executor plan data without PostgreSQL expression nodes. Runtime
-    /// expressions and scan-target expressions have their single owners in the
-    /// corresponding `CustomScan` fields.
-    ///
-    /// # Safety
-    ///
-    /// Every provider plan must satisfy [`PlannedTableScan::new`].
-    pub unsafe fn encode_execution(
-        query: &QueryPlanData,
-        execution: ExecutionProfile,
-        parallel_safe: bool,
-        scans: &[PlannedTableScan<'plan>],
-    ) -> Result<*mut pg_sys::List, SelectedQueryPlanError> {
-        unsafe {
-            Self::encode(
-                EXECUTION_PAYLOAD,
-                query,
-                execution,
-                parallel_safe,
-                scans,
-                None,
-            )
-        }
-    }
-
-    unsafe fn encode(
-        payload_kind: i32,
-        query: &QueryPlanData,
-        execution: ExecutionProfile,
-        parallel_safe: bool,
-        scans: &[PlannedTableScan<'plan>],
-        planner_exprs: Option<(&[*mut pg_sys::Expr], &[*mut pg_sys::Expr])>,
     ) -> Result<*mut pg_sys::List, SelectedQueryPlanError> {
         Self::validate_scans(query, scans)?;
         let query_plan = query.encode(scans.len())?;
         PlanDataWriter::encode_list(|writer| {
             writer
-                .append_i32(payload_kind)
                 .append_bool(parallel_safe)
                 .append_count(execution.maximum_batch_rows().get())
                 .append_count(scans.len());
-            if let Some((runtime_exprs, scan_target_exprs)) = planner_exprs {
-                writer.append_count(runtime_exprs.len());
-                if !runtime_exprs.is_empty() {
-                    let mut expressions = ptr::null_mut();
-                    for expression in runtime_exprs {
-                        expressions = unsafe {
-                            pg_sys::lappend(expressions, expression.cast())
-                        };
-                    }
-                    unsafe { writer.append_encoded_list(expressions) };
-                }
-                writer.append_count(scan_target_exprs.len());
-                if !scan_target_exprs.is_empty() {
-                    let mut expressions = ptr::null_mut();
-                    for expression in scan_target_exprs {
-                        expressions = unsafe {
-                            pg_sys::lappend(expressions, expression.cast())
-                        };
-                    }
-                    unsafe { writer.append_encoded_list(expressions) };
-                }
-            }
             for scan in scans {
                 writer.append_nested(|record| {
                     record
@@ -227,80 +146,18 @@ impl<'plan> SelectedQueryPlan<'plan> {
         })
     }
 
-    /// Decode a planner-path carrier and reject execution-only payloads.
-    ///
     /// # Safety
     ///
     /// `list` must point to a live PostgreSQL plan-data `T_List` for the
     /// complete synchronous decode and subsequent scan preparation.
-    pub unsafe fn decode_path(
+    pub unsafe fn decode(
         list: &'plan pg_sys::List,
-    ) -> Result<Self, SelectedQueryPlanError> {
-        unsafe { Self::decode(list, PATH_PAYLOAD) }
-    }
-
-    /// Decode an execution carrier and reject path-only payloads.
-    ///
-    /// # Safety
-    ///
-    /// `list` must point to live PostgreSQL plan data for the complete decode
-    /// and subsequent scan preparation.
-    pub unsafe fn decode_execution(
-        list: &'plan pg_sys::List,
-    ) -> Result<Self, SelectedQueryPlanError> {
-        unsafe { Self::decode(list, EXECUTION_PAYLOAD) }
-    }
-
-    unsafe fn decode(
-        list: &'plan pg_sys::List,
-        expected_payload_kind: i32,
     ) -> Result<Self, SelectedQueryPlanError> {
         let decode = |reader: &mut PlanDataReader<'plan>| {
-            let payload_kind = reader.read_i32()?;
-            if payload_kind != expected_payload_kind {
-                return Err(SelectedQueryPlanError::WrongPayloadKind {
-                    expected: expected_payload_kind,
-                    found: payload_kind,
-                });
-            }
             let parallel_safe = reader.read_bool()?;
             // Encoded from the selected plan's validated profile.
             let execution = ExecutionProfile::restore(reader.read_count()?);
             let scan_count = reader.read_count()?;
-            let (runtime_expr_count, runtime_exprs, scan_target_exprs) =
-                if payload_kind == PATH_PAYLOAD {
-                    let runtime_expr_count = reader.read_count()?;
-                    let runtime_exprs = if runtime_expr_count == 0 {
-                        ptr::null_mut()
-                    } else {
-                        let expressions = reader.read_encoded_list()?;
-                        if unsafe { pg_sys::list_length(expressions) } as usize
-                            != runtime_expr_count
-                        {
-                            return Err(
-                                SelectedQueryPlanError::RuntimeExpressionCount,
-                            );
-                        }
-                        expressions
-                    };
-                    let scan_target_expr_count = reader.read_count()?;
-                    let scan_target_exprs = if scan_target_expr_count == 0 {
-                        ptr::null_mut()
-                    } else {
-                        let expressions = reader.read_encoded_list()?;
-                        if unsafe { pg_sys::list_length(expressions) } as usize
-                            != scan_target_expr_count
-                        {
-                            return Err(
-                                SelectedQueryPlanError::ScanTargetExpressionCount,
-                            );
-                        }
-                        expressions
-                    };
-                    (Some(runtime_expr_count), runtime_exprs, scan_target_exprs)
-                } else {
-                    (None, ptr::null_mut(), ptr::null_mut())
-                };
             let mut scans = Vec::with_capacity(scan_count);
             for _ in 0..scan_count {
                 scans.push(reader.read_nested(|record| {
@@ -350,17 +207,6 @@ impl<'plan> SelectedQueryPlan<'plan> {
             // SAFETY: `read_encoded_list` returned a checked nested List
             // borrowed from the live selected-plan payload.
             let query = unsafe { QueryPlanData::decode(query_plan, scan_count) }?;
-            if runtime_expr_count
-                .is_some_and(|count| query.runtime_values().len() != count)
-            {
-                return Err(SelectedQueryPlanError::RuntimeExpressionCount);
-            }
-            if payload_kind == PATH_PAYLOAD
-                && unsafe { pg_sys::list_length(scan_target_exprs) } as usize
-                    != query.tuple_layout().len()
-            {
-                return Err(SelectedQueryPlanError::ScanTargetExpressionCount);
-            }
             let scans = scans.into_boxed_slice();
             Self::validate_scans(&query, &scans)?;
             Ok(Self {
@@ -368,8 +214,6 @@ impl<'plan> SelectedQueryPlan<'plan> {
                 execution,
                 parallel_safe,
                 scans,
-                runtime_exprs,
-                scan_target_exprs,
             })
         };
         // SAFETY: the caller guarantees that `list` is live for this decode.
@@ -414,69 +258,6 @@ impl<'plan> SelectedQueryPlan<'plan> {
             .fold(0.0, f64::max)
     }
 
-    #[inline]
-    pub const fn runtime_exprs(&self) -> *mut pg_sys::List {
-        self.runtime_exprs
-    }
-
-    #[inline]
-    pub const fn scan_target_exprs(&self) -> *mut pg_sys::List {
-        self.scan_target_exprs
-    }
-
-    /// Return the planner expression aligned with one physical query output.
-    pub fn scan_target_expr(&self, index: usize) -> Option<*mut pg_sys::Expr> {
-        (index < self.query.tuple_layout().len()).then(|| unsafe {
-            pg_sys::list_nth(self.scan_target_exprs, index as i32)
-                .cast::<pg_sys::Expr>()
-        })
-    }
-
-    /// Re-encode this selected path after an upper operator has wrapped the
-    /// query IR. Provider plans, scan output expressions and existing runtime
-    /// expressions remain shared planner-owned nodes; only their containing
-    /// PostgreSQL lists are rebuilt.
-    ///
-    /// # Safety
-    ///
-    /// `additional_runtime_exprs` must remain live in the current planner
-    /// context and correspond exactly to runtime slots appended to `query`.
-    pub unsafe fn encode_replacement_path(
-        &self,
-        query: &QueryPlanData,
-        additional_runtime_exprs: &[*mut pg_sys::Expr],
-    ) -> Result<*mut pg_sys::List, SelectedQueryPlanError> {
-        let existing_count =
-            unsafe { pg_sys::list_length(self.runtime_exprs) } as usize;
-        let mut runtime_exprs =
-            Vec::with_capacity(existing_count + additional_runtime_exprs.len());
-        for index in 0..existing_count {
-            runtime_exprs.push(
-                unsafe { pg_sys::list_nth(self.runtime_exprs, index as i32) }
-                    .cast::<pg_sys::Expr>(),
-            );
-        }
-        runtime_exprs.extend_from_slice(additional_runtime_exprs);
-        let target_count = self.query.tuple_layout().len();
-        let mut scan_target_exprs = Vec::with_capacity(target_count);
-        for index in 0..target_count {
-            scan_target_exprs.push(
-                self.scan_target_expr(index)
-                    .expect("decoded selected path has a complete scan target list"),
-            );
-        }
-        unsafe {
-            Self::encode_path(
-                query,
-                self.execution,
-                self.parallel_safe,
-                &self.scans,
-                &runtime_exprs,
-                &scan_target_exprs,
-            )
-        }
-    }
-
     pub fn into_parts(
         self,
     ) -> (
@@ -498,18 +279,6 @@ pub enum SelectedQueryPlanError {
     InvalidPlan(#[from] super::QueryPlanError),
     #[error("selected query plan contains unknown table-scan route kind {0}")]
     UnknownTableScanRouteKind(i32),
-    #[error(
-        "selected query runtime expression count does not match its expression list"
-    )]
-    RuntimeExpressionCount,
-    #[error(
-        "selected query scan-target expression count does not match its tuple layout"
-    )]
-    ScanTargetExpressionCount,
-    #[error(
-        "selected query payload kind mismatch: expected {expected}, found {found}"
-    )]
-    WrongPayloadKind { expected: i32, found: i32 },
     #[error("table scan cost facts are invalid: {0}")]
     InvalidScanCost(#[from] ScanCostError),
 }

@@ -119,34 +119,34 @@ impl PlanDataWriter {
         self
     }
 
-    /// Append a nested `T_List`; PostgreSQL NIL is represented by NULL.
+    /// Append an optional nested list; PostgreSQL NIL is represented by a
+    /// NULL cell. [`super::PlanDataReader::read_optional_list`] reads it back.
     ///
     /// # Safety
     ///
-    /// `list` must be NIL or a live PostgreSQL-owned list in the current
-    /// planner memory context.
-    pub(crate) unsafe fn append_list(&mut self, list: *mut pg_sys::List) {
+    /// `list` must be NIL or a live, `copyObject`-safe PostgreSQL list in the
+    /// current planner memory context.
+    pub unsafe fn append_list(&mut self, list: *mut pg_sys::List) {
         if self.error.is_none() {
             unsafe { self.push_node(list.cast()) };
         }
     }
 
-    /// Append an already encoded nested plan-data frame.
+    /// Append an already encoded nested plan-data frame that must be present.
+    /// [`super::PlanDataReader::read_encoded_list`] reads it back and rejects NIL.
     ///
     /// This is the composition boundary for independently owned codecs, such
     /// as the selected query plan and an opaque provider scan plan.
     ///
     /// # Safety
     ///
-    /// `list` must be NIL or a live, `copyObject`-safe PostgreSQL `T_List` in
+    /// `list` must be a live, non-NIL, `copyObject`-safe PostgreSQL `T_List` in
     /// the current planner memory context.
     pub unsafe fn append_encoded_list(
         &mut self,
         list: *mut pg_sys::List,
     ) -> &mut Self {
-        if self.error.is_none() {
-            unsafe { self.append_list(list) };
-        }
+        unsafe { self.append_list(list) };
         self
     }
 

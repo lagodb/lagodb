@@ -179,9 +179,8 @@ unsafe fn begin_scan(
     // ExecInitNode installs PlanState instrumentation after BeginCustomScan;
     // EState carries the executor's request at this callback boundary.
     let instrumented = !explain_only && unsafe { (*estate).es_instrument } != 0;
-    let selected =
-        unsafe { SelectedQueryPlan::decode_execution(&*(*scan).custom_private) }
-            .map_err(QueryHostError::invalid_plan)?;
+    let selected = unsafe { SelectedQueryPlan::decode(&*(*scan).custom_private) }
+        .map_err(QueryHostError::invalid_plan)?;
     if explain_only {
         unsafe {
             state.explain.record_plan(&selected);
@@ -230,7 +229,9 @@ unsafe fn begin_scan(
             metrics_mode,
             callbacks: &callbacks,
             parallel,
-            runtime_exprs: unsafe { (*scan).custom_exprs },
+            // custom_exprs holds exactly the runtime-value bindings; the engine
+            // validates them against the runtime layout.
+            runtime_bindings: unsafe { (*scan).custom_exprs },
             parent: unsafe { &mut (*node).ss.ps },
         },
     )?));
@@ -360,10 +361,9 @@ pub(super) unsafe extern "C-unwind" fn explain(
         // capture the presentation metadata on demand.
         if matches!(&state.phase, QueryPhase::Active(_)) && !state.explain.has_plan()
         {
-            let selected = unsafe {
-                SelectedQueryPlan::decode_execution(&*(*scan).custom_private)
-            }
-            .map_err(QueryHostError::invalid_plan)?;
+            let selected =
+                unsafe { SelectedQueryPlan::decode(&*(*scan).custom_private) }
+                    .map_err(QueryHostError::invalid_plan)?;
             unsafe { state.explain.record_plan(&selected) };
         }
 

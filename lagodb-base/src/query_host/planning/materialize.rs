@@ -1,16 +1,18 @@
 //! Construction of PostgreSQL CustomPath and CustomScan nodes.
 
+#[cfg(feature = "pg18")]
 use std::ffi::c_int;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr;
 
-use lagodb_core::customscan::custom_exprs::PgExpressionSections;
-use lagodb_query::plan::{PlanCost, SelectedQueryPlan};
+use lagodb_core::expr::pg::expr_list;
+use lagodb_query::plan::PlanCost;
 use pgrx::{pg_guard, pg_sys};
 
 use super::super::error::QueryHostError;
 use super::super::methods;
+use super::path_private::QueryPathPrivate;
 
 /// PostgreSQL path-ranking fields that changed together in PG18.
 #[derive(Clone, Copy)]
@@ -55,7 +57,7 @@ impl PathRankingCost {
 pub(super) unsafe fn add_path(
     output_rel: *mut pg_sys::RelOptInfo,
     path_target: *mut pg_sys::PathTarget,
-    selected_plan: *mut pg_sys::List,
+    path_private: *mut pg_sys::List,
     ranking_cost: PathRankingCost,
     rows: f64,
     parameter_info: *mut pg_sys::ParamPathInfo,
@@ -90,7 +92,7 @@ pub(super) unsafe fn add_path(
         {
             (*custom_path).custom_restrictinfo = ptr::null_mut();
         }
-        (*custom_path).custom_private = selected_plan;
+        (*custom_path).custom_private = path_private;
         (*custom_path).methods = methods::tables().path();
         pg_sys::add_path(output_rel, path);
     }
@@ -102,7 +104,7 @@ pub(super) unsafe fn add_path(
 pub(super) unsafe fn replace_path(
     output_rel: *mut pg_sys::RelOptInfo,
     old_index: i32,
-    selected_plan: *mut pg_sys::List,
+    path_private: *mut pg_sys::List,
     cost: PlanCost,
 ) {
     let old_path = unsafe { pg_sys::list_nth((*output_rel).pathlist, old_index) };
@@ -119,7 +121,7 @@ pub(super) unsafe fn replace_path(
         add_path(
             output_rel,
             path_target,
-            selected_plan,
+            path_private,
             ranking_cost,
             rows,
             parameter_info,
@@ -147,29 +149,17 @@ unsafe fn materialize_plan(
     best_path: *mut pg_sys::CustomPath,
     target_list: *mut pg_sys::List,
 ) -> Result<*mut pg_sys::Plan, QueryHostError> {
-    let selected =
-        unsafe { SelectedQueryPlan::decode_path(&*(*best_path).custom_private) }
-            .map_err(QueryHostError::invalid_plan)?;
+    let path = unsafe { QueryPathPrivate::decode(&*(*best_path).custom_private) }?;
     let scan_target_list =
-        unsafe { build_scan_target_list(target_list, selected.scan_target_exprs())? };
-    let count = unsafe { pg_sys::list_length(selected.runtime_exprs()) } as usize;
-    let runtime_exprs = (0..count)
-        .map(|index| {
-            let expression =
-                unsafe { pg_sys::list_nth(selected.runtime_exprs(), index as c_int) };
-            unsafe { pg_sys::copyObjectImpl(expression) }.cast::<pg_sys::Expr>()
-        })
-        .collect::<Vec<_>>();
-    let custom_exprs = unsafe { PgExpressionSections::encode(&runtime_exprs, &[]) };
-    let custom_private = unsafe {
-        SelectedQueryPlan::encode_execution(
-            selected.query(),
-            selected.execution_profile(),
-            selected.parallel_safe(),
-            selected.scans(),
-        )
-    }
-    .map_err(QueryHostError::invalid_plan)?;
+        unsafe { build_scan_target_list(target_list, path.scan_target_exprs())? };
+    // custom_exprs holds exactly the runtime-value bindings in layout order.
+    let custom_exprs = expr_list(path.runtime_exprs().iter().map(|&expression| {
+        unsafe { pg_sys::copyObjectImpl(expression.cast::<c_void>()) }
+            .cast::<pg_sys::Expr>()
+    }));
+    // The engine payload is already the complete executor plan data. PostgreSQL
+    // setrefs adjusts custom_exprs and custom_scan_tlist, never custom_private.
+    let custom_private = path.selected_plan_data();
     let custom_scan = unsafe {
         pg_sys::palloc0(size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
     };
@@ -200,10 +190,10 @@ unsafe fn materialize_plan(
 
 unsafe fn build_scan_target_list(
     target_list: *mut pg_sys::List,
-    scan_target_exprs: *mut pg_sys::List,
+    scan_target_exprs: &[*mut pg_sys::Expr],
 ) -> Result<*mut pg_sys::List, QueryHostError> {
     let target_count = unsafe { pg_sys::list_length(target_list) };
-    if target_count != unsafe { pg_sys::list_length(scan_target_exprs) } {
+    if target_count as usize != scan_target_exprs.len() {
         return Err(QueryHostError::invalid_plan(
             "scan target expression count does not match the PostgreSQL target list",
         ));
@@ -216,10 +206,11 @@ unsafe fn build_scan_target_list(
             pg_sys::copyObjectImpl(target.cast::<c_void>())
                 .cast::<pg_sys::TargetEntry>()
         };
-        let scan_expression = unsafe { pg_sys::list_nth(scan_target_exprs, index) };
+        let scan_expression = scan_target_exprs[index as usize];
         unsafe {
             (*scan_target).expr =
-                pg_sys::copyObjectImpl(scan_expression).cast::<pg_sys::Expr>();
+                pg_sys::copyObjectImpl(scan_expression.cast::<c_void>())
+                    .cast::<pg_sys::Expr>();
             scan_target_list =
                 pg_sys::lappend(scan_target_list, scan_target.cast::<c_void>());
         }

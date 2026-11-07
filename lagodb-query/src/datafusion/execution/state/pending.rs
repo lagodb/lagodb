@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use lagodb_core::customscan::custom_exprs::PgExpressionSections;
 use lagodb_core::expr::RuntimeValueState;
 use lagodb_core::resource::without_pg_cleanup;
 use pgrx::pg_sys;
@@ -47,23 +46,14 @@ impl PendingQueryExecution {
             callbacks,
             parallel,
             limits,
-            runtime_exprs,
+            runtime_bindings,
             parent,
             metrics_mode: _,
         } = request;
         let (fragment, layout, runtime_layout) = query.into_parts();
         let postgres = unsafe { PgExprRuntime::from_plan_state(parent) };
-        let expression_sections = unsafe {
-            PgExpressionSections::from_custom_exprs(
-                runtime_exprs,
-                runtime_layout.len(),
-                0,
-            )
-        }
-        .map_err(QueryExecutionError::ExpressionSections)?;
-        let runtime_exprs = unsafe { expression_sections.runtime_binding_list() };
         let mut runtime_values = unsafe {
-            RuntimeValueState::initialize(runtime_layout, runtime_exprs, parent)
+            RuntimeValueState::initialize(runtime_layout, runtime_bindings, parent)
         }
         .map_err(QueryExecutionError::RuntimeValues)?;
         let econtext = unsafe { (*parent).ps_ExprContext };

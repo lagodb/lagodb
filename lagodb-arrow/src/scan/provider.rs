@@ -436,6 +436,10 @@ pub trait TableScanProvider: Send + Sync + 'static {
         context: &ScanPlanningContext<'_>,
     ) -> Result<ScanSupport<PlannedScan<Self::ScanPlan>>, Self::Error>;
 
+    /// Encode the plan as self-contained plan data. PostgreSQL never walks it
+    /// after PlanCustomPath (replace_nestloop_params, set_plan_references and
+    /// finalize_plan visit only custom_exprs and custom_scan_tlist), so it must
+    /// not embed expression nodes such as `Var` or `Param`.
     fn encode_scan_plan(
         &self,
         plan: &Self::ScanPlan,

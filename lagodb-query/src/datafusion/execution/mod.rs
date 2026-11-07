@@ -55,7 +55,10 @@ pub struct QueryExecutionRequest<'a> {
     pub metrics_mode: ExecutionMetricsMode,
     pub callbacks: &'a [TableScanCallbacks],
     pub parallel: Option<ParallelQueryOptions>,
-    pub runtime_exprs: *mut pg_sys::List,
+    /// Plan-owned PostgreSQL expressions corresponding one-to-one to
+    /// `query.runtime_values()`, in runtime layout order; NIL when the layout
+    /// is empty. Begin rejects a list whose length differs from the layout.
+    pub runtime_bindings: *mut pg_sys::List,
     pub parent: *mut pg_sys::PlanState,
 }
 

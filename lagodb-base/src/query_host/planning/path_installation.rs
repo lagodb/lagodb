@@ -9,7 +9,7 @@ use lagodb_query::ExecutionProfile;
 use lagodb_query::datafusion::DataFusionPlanAdmission;
 use lagodb_query::plan::{
     CostingContext, PlanCost, PlannedTableScan, QueryCostEstimator, ScanCostTable,
-    SelectedQueryPlan, TableScanFilterExplain,
+    TableScanFilterExplain,
 };
 use pgrx::pg_sys;
 
@@ -21,6 +21,7 @@ use crate::query_host::error::QueryHostError;
 use crate::query_host::execution::WorkMemBudget;
 
 use super::materialize;
+use super::path_private::QueryPathPrivate;
 use super::planned_query::{PlannedQuery, PlannedScanInput};
 use super::provider_scan_planner::{PlannedScanRecord, ProviderScanPlanner};
 
@@ -226,8 +227,8 @@ impl QueryPathInstallation {
             .iter()
             .map(|binding| binding.expr())
             .collect::<Vec<_>>();
-        let selected_plan = unsafe {
-            SelectedQueryPlan::encode_path(
+        let path_private = unsafe {
+            QueryPathPrivate::encode(
                 &self.planned.query,
                 execution,
                 parallel_safe,
@@ -235,13 +236,12 @@ impl QueryPathInstallation {
                 &runtime_exprs,
                 &self.planned.scan_target_exprs,
             )
-        }
-        .map_err(QueryHostError::invalid_plan)?;
+        }?;
         unsafe {
             materialize::add_path(
                 self.output_rel,
                 self.path_target,
-                selected_plan,
+                path_private,
                 materialize::PathRankingCost::new(cost),
                 self.output_rows,
                 self.parameter_info,
