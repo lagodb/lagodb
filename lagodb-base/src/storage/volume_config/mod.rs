@@ -1,5 +1,6 @@
 mod backend;
 mod binding;
+mod binding_export;
 mod control;
 mod credential;
 mod database_directory;
@@ -12,6 +13,7 @@ mod service_account;
 mod sql_api;
 mod store;
 
+pub(crate) use binding_export::load_tablespace_bindings;
 pub(crate) use control::StorageVolumeControl;
 pub(crate) use credential::CredentialConfig;
 pub(crate) use database_directory::{

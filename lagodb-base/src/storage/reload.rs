@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use lagodb_storage::{StorageRuntime, StorageRuntimeConfig};
 use pgrx::pg_sys;
 
-use super::catalog::VolumeConfigSource;
 use super::config::StorageWorkerRuntimeConfig;
+use super::config_source::VolumeConfigSource;
 use super::logging;
 use super::reconciler::{ReconcileReport, StoreConfigReconciler};
 

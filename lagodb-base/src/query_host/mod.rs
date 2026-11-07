@@ -5,6 +5,7 @@ use std::ffi::c_void;
 mod error;
 mod execution;
 mod explain;
+mod gucs;
 mod methods;
 mod parallel;
 mod planning;
@@ -13,8 +14,14 @@ mod table_scan_registry;
 use lagodb_core::diag::PgReportError;
 use pgrx::pg_sys;
 
-pub(crate) use table_scan_registry::PendingTableScanRegistration;
+pub(crate) use table_scan_registry::PreparedTableScanRegistration;
 
+/// Define the query-offload GUCs on every load of the runtime library.
+pub(crate) fn define_gucs() {
+    gucs::define();
+}
+
+/// Register the CustomScan method tables during a normal shared preload.
 pub(crate) fn init() {
     methods::register();
 }

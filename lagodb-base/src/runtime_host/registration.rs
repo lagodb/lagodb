@@ -9,13 +9,13 @@ use lagodb_core::runtime_api::{
 };
 use pgrx::{pg_guard, pg_sys};
 
-use crate::object_access::{self, PreparedObjectAccessHooks};
-use crate::planning_hooks::{self, PreparedPlanningHooks};
-use crate::process_utility::{self, PreparedUtilityConsumers, PreparedUtilityHooks};
+use crate::object_access::PreparedObjectAccessHooks;
+use crate::planning_hooks::PreparedPlanningHooks;
+use crate::process_utility::{PreparedUtilityConsumers, PreparedUtilityHooks};
 use crate::provider_bootstrap::{
-    self, PreparedProviderIdentity, ValidatedProviderIdentity,
+    PreparedProviderIdentity, ValidatedProviderIdentity,
 };
-use crate::query_host::PendingTableScanRegistration;
+use crate::query_host::PreparedTableScanRegistration;
 use crate::table_provider_registry::{
     PreparedTableProviderRegistration, ValidatedTableProvider,
 };
@@ -27,7 +27,7 @@ struct PreparedProviderRegistration {
     utility_consumers: PreparedUtilityConsumers,
     object_access: PreparedObjectAccessHooks,
     planning: PreparedPlanningHooks,
-    table_scan: PendingTableScanRegistration,
+    table_scan: PreparedTableScanRegistration,
 }
 
 impl PreparedProviderRegistration {
@@ -46,22 +46,18 @@ impl PreparedProviderRegistration {
         // logical runtime registry and PostgreSQL hook pointer unchanged.
         let table_provider =
             PreparedTableProviderRegistration::prepare(table_provider)?;
-        let utility = process_utility::prepare_hooks(registration.utility_hooks())
-            .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
+        let utility = PreparedUtilityHooks::prepare(registration.utility_hooks())?;
         let utility_consumers =
-            process_utility::prepare_consumers(registration.utility_consumers())
-                .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
-        let object_access = object_access::prepare_hooks(
+            PreparedUtilityConsumers::prepare(registration.utility_consumers())?;
+        let object_access = PreparedObjectAccessHooks::prepare(
             registration.object_access_hooks(),
             registration.object_access_str_hooks(),
-        )
-        .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
-        let planning = planning_hooks::prepare(
+        )?;
+        let planning = PreparedPlanningHooks::prepare(
             registration.relation_scan_planner(),
             registration.modify_planner(),
-        )
-        .ok_or(REGISTER_INVALID_DESCRIPTOR)?;
-        let table_scan = PendingTableScanRegistration::prepare(
+        )?;
+        let table_scan = PreparedTableScanRegistration::prepare(
             registration.table_scan(),
             registration.table_scan_worker(),
         )?;
@@ -69,7 +65,7 @@ impl PreparedProviderRegistration {
         // validated. This preserves the more specific duplicate-provider and
         // invalid-descriptor results while still preventing every registry
         // from being committed outside the bootstrap window.
-        let provider = provider_bootstrap::prepare_identity(identity)?;
+        let provider = PreparedProviderIdentity::prepare(identity)?;
         Ok(Self {
             table_provider,
             provider,
@@ -84,13 +80,13 @@ impl PreparedProviderRegistration {
     fn commit(self) {
         // Every registry has finished validation and allocation before any
         // registration becomes visible.
-        planning_hooks::commit(self.planning);
+        self.planning.commit();
         self.table_scan.commit();
         self.table_provider.commit();
-        process_utility::commit_hooks(self.utility);
-        process_utility::commit_consumers(self.utility_consumers);
-        object_access::commit_hooks(self.object_access);
-        provider_bootstrap::commit_identity(self.provider);
+        self.utility.commit();
+        self.utility_consumers.commit();
+        self.object_access.commit();
+        self.provider.commit();
     }
 }
 
@@ -126,6 +122,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::{object_access, process_utility};
 
     unsafe extern "C-unwind" fn access_method_oid() -> pg_sys::Oid {
         pg_sys::InvalidOid

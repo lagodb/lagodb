@@ -41,7 +41,7 @@ impl StorageProcessState {
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub(crate) struct StorageSharedState {
+pub(super) struct StorageSharedState {
     pid: i32,
     state: u8,
     reload_requested: u8,
@@ -149,7 +149,7 @@ impl StorageSharedState {
 // fields and arrays, and contains no references or process-local pointers.
 unsafe impl PGRXSharedMemory for StorageSharedState {}
 
-pub(crate) static STORAGE_STATE: PgLwLock<StorageSharedState> =
+pub(super) static STORAGE_STATE: PgLwLock<StorageSharedState> =
     unsafe { PgLwLock::new(c"lagodb storage state") };
 
 pub(super) struct StorageStatusStore;
@@ -233,7 +233,7 @@ impl StorageStatusStore {
     }
 }
 
-pub(crate) fn request_reload(force_default_chain: bool) {
+pub(super) fn request_reload(force_default_chain: bool) {
     let pid = {
         let mut state = STORAGE_STATE.exclusive();
         state.reload_requested = 1;
@@ -256,28 +256,28 @@ pub(crate) fn request_reload(force_default_chain: bool) {
     }
 }
 
-pub(crate) struct StorageRuntimeStatus {
-    pub(crate) pid: Option<i32>,
-    pub(crate) state: &'static str,
-    pub(crate) socket_path: String,
-    pub(crate) cache_dir: String,
-    pub(crate) last_start_ms: Option<i64>,
-    pub(crate) last_stop_ms: Option<i64>,
-    pub(crate) last_reload_at_ms: Option<i64>,
-    pub(crate) reload_generation: i64,
-    pub(crate) last_reload_added: i64,
-    pub(crate) last_reload_removed: i64,
-    pub(crate) last_reload_replaced: i64,
-    pub(crate) last_reload_unchanged: i64,
-    pub(crate) desired_volume_count: i64,
-    pub(crate) loaded_volume_count: i64,
-    pub(crate) stale_volume_count: i64,
-    pub(crate) unavailable_volume_count: i64,
-    pub(crate) last_error_at_ms: Option<i64>,
-    pub(crate) last_error: Option<String>,
+pub(super) struct StorageRuntimeStatus {
+    pub(super) pid: Option<i32>,
+    pub(super) state: &'static str,
+    pub(super) socket_path: String,
+    pub(super) cache_dir: String,
+    pub(super) last_start_ms: Option<i64>,
+    pub(super) last_stop_ms: Option<i64>,
+    pub(super) last_reload_at_ms: Option<i64>,
+    pub(super) reload_generation: i64,
+    pub(super) last_reload_added: i64,
+    pub(super) last_reload_removed: i64,
+    pub(super) last_reload_replaced: i64,
+    pub(super) last_reload_unchanged: i64,
+    pub(super) desired_volume_count: i64,
+    pub(super) loaded_volume_count: i64,
+    pub(super) stale_volume_count: i64,
+    pub(super) unavailable_volume_count: i64,
+    pub(super) last_error_at_ms: Option<i64>,
+    pub(super) last_error: Option<String>,
 }
 
-pub(crate) fn snapshot(
+pub(super) fn snapshot(
     socket_path: PathBuf,
     cache_dir: PathBuf,
 ) -> StorageRuntimeStatus {

@@ -1,7 +1,14 @@
+use std::ffi::{CStr, c_char};
 use std::time::Duration;
 
+use lagodb_core::runtime_api::{
+    STAGE_WORKER_WAKEUP_INVALID_REQUEST, STAGE_WORKER_WAKEUP_LOCATOR_NOT_FOUND,
+    STAGE_WORKER_WAKEUP_OK, STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED,
+};
 use pgrx::bgworkers::BackgroundWorkerBuilder;
 use pgrx::prelude::*;
+
+use crate::runtime_is_preloaded;
 
 mod bgworker;
 mod catalog;
@@ -9,6 +16,7 @@ mod control;
 mod coordinator;
 mod error;
 mod extension;
+mod gucs;
 mod injection;
 mod lifecycle;
 mod lock;
@@ -24,15 +32,13 @@ mod status;
 mod store;
 mod supervisor;
 
-pub(crate) use error::WorkerError;
+use error::WorkerError;
 pub(crate) use lifecycle::{
     drop_extension_workers, init as init_lifecycle, preflight,
-    request_wakeup as stage_worker_wakeup,
 };
-pub(crate) use lock::DatabaseLifecycleLock;
-pub(crate) use registry::resolve_worker_id;
-pub(crate) use state::{INVALID_OID, MAX_WORKER_NAME_BYTES, WorkerKey};
-pub(crate) use status::{ProcessStatus, WorkerStatus};
+use lock::DatabaseLifecycleLock;
+use state::{INVALID_OID, MAX_WORKER_NAME_BYTES, WorkerKey};
+use status::{ProcessStatus, WorkerStatus};
 use store::{COORDINATOR_TABLE, SHARED_STATE, Store, WORKER_TABLE};
 
 pub(crate) type WorkerResult<T> = Result<T, WorkerError>;
@@ -46,6 +52,11 @@ pub(super) const WORKER_TYPE: &str = "lagodb worker";
 pub(super) const CAPACITY_RETRY: Duration = Duration::from_millis(100);
 pub(super) const SUPERVISOR_ERROR_RETRY: Duration = Duration::from_secs(5);
 
+/// Define the worker GUCs on every load of the runtime library.
+pub(crate) fn define_gucs() {
+    gucs::define();
+}
+
 pub(crate) fn init_shared_memory() {
     pgrx::pg_shmem_init!(SHARED_STATE);
     pgrx::pg_shmem_init!(COORDINATOR_TABLE);
@@ -53,10 +64,6 @@ pub(crate) fn init_shared_memory() {
 }
 
 pub(crate) fn init() {
-    if !unsafe { pg_sys::process_shared_preload_libraries_in_progress } {
-        return;
-    }
-
     let _keep_supervisor = supervisor_main as extern "C-unwind" fn(pg_sys::Datum);
     let _keep_coordinator = coordinator_main as extern "C-unwind" fn(pg_sys::Datum);
     let _keep_worker = worker_main as extern "C-unwind" fn(pg_sys::Datum);
@@ -70,44 +77,78 @@ pub(crate) fn init() {
         .load();
 }
 
-pub(crate) fn wake_worker(key: WorkerKey) -> bool {
+fn wake_worker(key: WorkerKey) -> bool {
     store::Store::new().wake_worker(key)
 }
 
-pub(crate) fn wake_database_workers(database_oid: u32) -> bool {
+fn wake_database_workers(database_oid: u32) -> bool {
     store::Store::new().wake_database_workers(database_oid)
 }
 
-pub(crate) fn request_database_reconcile(database_oid: u32) -> bool {
+fn request_database_reconcile(database_oid: u32) -> bool {
     store::Store::new().request_database_reconcile(database_oid)
 }
 
-pub(crate) fn request_full_rescan() -> bool {
+fn request_full_rescan() -> bool {
     store::Store::new().request_full_rescan()
 }
 
-pub(crate) fn signal_supervisor() {
+fn signal_supervisor() {
     store::Store::new().signal_supervisor();
 }
 
-pub(crate) fn worker_status() -> Vec<WorkerStatus> {
+fn worker_status() -> Vec<WorkerStatus> {
     Store::new().worker_status()
 }
 
-pub(crate) fn process_status() -> Vec<ProcessStatus> {
+fn process_status() -> Vec<ProcessStatus> {
     Store::new().process_status()
 }
 
-pub(crate) fn prepare_database_drop(database_oid: u32) {
+fn prepare_database_drop(database_oid: u32) {
     control::StopController::new().prepare_database_drop(database_oid)
 }
 
-pub(crate) fn prepare_extension_drop(database_oid: u32, extension_oid: u32) {
+fn prepare_extension_drop(database_oid: u32, extension_oid: u32) {
     control::StopController::new().prepare_extension_drop(database_oid, extension_oid)
 }
 
-pub(crate) fn stop_worker(database_oid: u32, worker_id: i32) {
+fn stop_worker(database_oid: u32, worker_id: i32) {
     control::StopController::new().stop_worker(database_oid, worker_id)
+}
+
+/// Runtime ABI entry that resolves a worker by extension and worker name and
+/// stages its wakeup in the current database until the surrounding transaction
+/// commits.
+#[pg_guard]
+pub(crate) unsafe extern "C-unwind" fn stage_named_worker_wakeup(
+    extension_name: *const c_char,
+    worker_name: *const c_char,
+) -> u32 {
+    if !runtime_is_preloaded() {
+        return STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED;
+    }
+    // SAFETY: the exact-build ABI passes both arguments from `&CStr`, so they
+    // point to live, NUL-terminated strings for this synchronous call.
+    let extension_name = unsafe { CStr::from_ptr(extension_name) };
+    // SAFETY: the same runtime ABI string contract applies to `worker_name`.
+    let worker_name = unsafe { CStr::from_ptr(worker_name) };
+    if extension_name.is_empty()
+        || worker_name.is_empty()
+        || worker_name.to_bytes().len() > MAX_WORKER_NAME_BYTES
+    {
+        return STAGE_WORKER_WAKEUP_INVALID_REQUEST;
+    }
+    let Ok(worker_name) = worker_name.to_str() else {
+        return STAGE_WORKER_WAKEUP_INVALID_REQUEST;
+    };
+    let Some(worker_id) = registry::resolve_worker_id(extension_name, worker_name)
+        .unwrap_or_else(|error| error.report())
+    else {
+        return STAGE_WORKER_WAKEUP_LOCATOR_NOT_FOUND;
+    };
+    lifecycle::stage_worker_wakeup(worker_id);
+    STAGE_WORKER_WAKEUP_OK
 }
 
 #[pg_guard]

@@ -308,11 +308,7 @@ impl Store {
                 StoppedWorkerProcess::Coordinator(completion)
             }
             ProcessKey::Worker(key) => {
-                let restart_policy = RestartPolicy::new(
-                    crate::gucs::worker_restart_backoff_initial(),
-                    crate::gucs::worker_restart_backoff_max(),
-                    crate::gucs::worker_restart_healthy(),
-                );
+                let restart_policy = RestartPolicy::configured();
                 let Some(result) = WORKER_TABLE.with_mut(key, |slot| {
                     let disposition = slot.confirm_stopped(
                         timestamp_ms(),

@@ -8,6 +8,7 @@ use lagodb_core::copy::{
 };
 
 use lagodb_core::diag::PgReportError;
+use lagodb_core::hooks::{HookError, UtilityHookPhase};
 use pgrx::{PgSqlErrorCode, pg_sys};
 
 use super::ProcessUtilityArgs;
@@ -47,23 +48,27 @@ pub(super) unsafe fn unclaimed_uri_error(
 }
 
 /// Shared PostgreSQL-format FROM fallback, after format consumers declined.
+/// Return true only when this router consumed the COPY statement.
+///
+/// # Safety
+/// Arguments must describe the live COPY ProcessUtility invocation.
+pub(super) unsafe fn try_route(args: ProcessUtilityArgs) -> Result<bool, HookError> {
+    // SAFETY: the caller supplies the live COPY invocation.
+    unsafe { route_from(args) }.map_err(|error| {
+        HookError::from_copy_error(error).with_utility_context(
+            "CopyFromRouter",
+            UtilityHookPhase::Consume,
+            pg_sys::NodeTag::T_CopyStmt,
+        )
+    })
+}
+
 /// Admission deliberately retains the existing unlocked-probe DDL window.
 ///
 /// # Safety
 /// Arguments must describe the live COPY ProcessUtility invocation.
-pub(super) unsafe fn try_from(args: ProcessUtilityArgs) -> Result<bool, CopyError> {
-    let context = unsafe {
-        CopyContext::from_raw(
-            args.pstmt,
-            args.query_string,
-            args.read_only_tree,
-            args.context,
-            args.params,
-            args.query_env,
-            args.dest,
-            args.completion_tag,
-        )
-    };
+unsafe fn route_from(args: ProcessUtilityArgs) -> Result<bool, CopyError> {
+    let context = unsafe { args.copy_context() };
     if !context.statement().is_from()
         || !CopyTargetProbe::new(context.statement()).requires_write_bridge()?
     {
@@ -71,19 +76,7 @@ pub(super) unsafe fn try_from(args: ProcessUtilityArgs) -> Result<bool, CopyErro
     }
     // Preparation transforms expressions, so honor ProcessUtility's writable
     // tree contract only after the read-only admission accepted the command.
-    let args = unsafe { args.writable_copy() };
-    let mut context = unsafe {
-        CopyContext::from_raw(
-            args.pstmt,
-            args.query_string,
-            args.read_only_tree,
-            args.context,
-            args.params,
-            args.query_env,
-            args.dest,
-            args.completion_tag,
-        )
-    };
+    let mut context = unsafe { args.writable_copy().copy_context() };
     let parse = context.parse_state();
     let preparation = context.prepare_from(&parse)?;
     preparation.require_write_bridge()?;
@@ -94,4 +87,25 @@ pub(super) unsafe fn try_from(args: ProcessUtilityArgs) -> Result<bool, CopyErro
     parse.dispose()?;
     context.complete(CopyCompletion::new(processed));
     Ok(true)
+}
+
+impl ProcessUtilityArgs {
+    /// # Safety
+    /// These arguments must describe a live COPY ProcessUtility invocation,
+    /// and the returned context must not outlive that invocation.
+    unsafe fn copy_context<'a>(self) -> CopyContext<'a> {
+        // SAFETY: the caller guarantees a live CopyStmt invocation.
+        unsafe {
+            CopyContext::from_raw(
+                self.pstmt,
+                self.query_string,
+                self.read_only_tree,
+                self.context,
+                self.params,
+                self.query_env,
+                self.dest,
+                self.completion_tag,
+            )
+        }
+    }
 }

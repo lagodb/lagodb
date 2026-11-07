@@ -16,8 +16,8 @@ use super::query_shape::QueryShape;
 use super::relation_tree::{
     PlannedRelationInput, PlannedRelationTree, RelationTreePlanner,
 };
-use crate::gucs::{QueryOffloadMode, query_offload_mode};
 use crate::query_host::error::QueryHostError;
+use crate::query_host::gucs::QueryOffloadMode;
 
 pub(super) struct DistinctCandidate;
 
@@ -28,7 +28,7 @@ impl DistinctCandidate {
         input_rel: *mut pg_sys::RelOptInfo,
         output_rel: *mut pg_sys::RelOptInfo,
     ) -> Result<bool, QueryHostError> {
-        if query_offload_mode() == QueryOffloadMode::Off
+        if QueryOffloadMode::current() == QueryOffloadMode::Off
             || stage != pg_sys::UpperRelationKind::UPPERREL_DISTINCT
         {
             return Ok(false);

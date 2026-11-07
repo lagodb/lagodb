@@ -13,7 +13,7 @@ use lagodb_core::runtime_api::CallbackErrorReport;
 use pgrx::{pg_guard, pg_sys};
 
 use super::query_tree_preparation::QueryTreePreparation;
-use super::{PREV_PLANNER, callback_result, registry};
+use super::{PREV_PLANNER, registry};
 
 #[pg_guard]
 pub(super) unsafe extern "C-unwind" fn planner(
@@ -62,7 +62,9 @@ unsafe fn route(
         let status = unsafe {
             (descriptor.planner_post)(descriptor.context, planned, &mut error)
         };
-        callback_result(status, &error, "modify planner post callback")
+        // SAFETY: a failed callback populated `error` with text owned by the
+        // active PostgreSQL context for this synchronous call.
+        unsafe { error.into_result(status, "modify planner post callback") }
     })?;
     Ok(planned)
 }

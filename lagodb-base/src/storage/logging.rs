@@ -83,7 +83,7 @@ impl PgLogBridge {
     /// respect the supervisor's shared deadline.
     ///
     /// Must only be called from the bgworker main thread.
-    pub fn drain_to_pg_log(&mut self) {
+    pub(super) fn drain_to_pg_log(&mut self) {
         self.drain(None);
     }
 

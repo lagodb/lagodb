@@ -14,7 +14,6 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lagodb_core::storage::service::StorageEndpoint;
 use lagodb_storage::{
     CacheCleanupConfig, CacheRuntimeConfig, StorageRuntimeConfig,
     StorageServerConfig, StorageServiceConfig,
@@ -23,28 +22,28 @@ use lagodb_storage::{
 use super::gucs;
 
 /// Combined startup + runtime configuration, built once at worker start.
-pub struct StorageWorkerConfig {
-    pub startup: StorageWorkerStartupConfig,
-    pub runtime: StorageWorkerRuntimeConfig,
+pub(super) struct StorageWorkerConfig {
+    pub(super) startup: StorageWorkerStartupConfig,
+    pub(super) runtime: StorageWorkerRuntimeConfig,
 }
 
 /// Resources that require a PostgreSQL restart to change.
-pub struct StorageWorkerStartupConfig {
-    pub socket_path: PathBuf,
-    pub cache_dir: PathBuf,
-    pub server_config: StorageServerConfig,
-    pub service_config: StorageServiceConfig,
-    pub worker_threads: usize,
-    pub log_channel_capacity: usize,
+pub(super) struct StorageWorkerStartupConfig {
+    pub(super) socket_path: PathBuf,
+    pub(super) cache_dir: PathBuf,
+    pub(super) server_config: StorageServerConfig,
+    pub(super) service_config: StorageServiceConfig,
+    pub(super) worker_threads: usize,
+    pub(super) log_channel_capacity: usize,
 }
 
 /// Parameters the supervisor can reload via SIGHUP without restarting.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StorageWorkerRuntimeConfig {
-    pub shutdown_timeout: Duration,
+pub(super) struct StorageWorkerRuntimeConfig {
+    pub(super) shutdown_timeout: Duration,
     /// Runtime configuration for the storage server (cache parameters).
     /// Pushed to `StorageRuntime::apply()` after SIGHUP.
-    pub storage: StorageRuntimeConfig,
+    pub(super) storage: StorageRuntimeConfig,
 }
 
 impl StorageWorkerConfig {
@@ -53,16 +52,8 @@ impl StorageWorkerConfig {
     /// # Safety
     ///
     /// Must be called from the bgworker main thread where `pg_sys::DataDir` is valid.
-    pub fn from_gucs() -> Self {
-        let endpoint = StorageEndpoint::from_config(
-            gucs::socket_path().map(PathBuf::from),
-            gucs::cache_dir().map(PathBuf::from),
-            gucs::backend_max_idle_connections(),
-        )
-        .expect(
-            "PostgreSQL DataDir must be initialized before resolving storage paths",
-        );
-        let (socket_path, cache_dir) = endpoint.into_parts();
+    pub(super) fn from_gucs() -> Self {
+        let (socket_path, cache_dir) = gucs::endpoint().into_parts();
 
         Self {
             startup: StorageWorkerStartupConfig {
@@ -84,7 +75,7 @@ impl StorageWorkerRuntimeConfig {
     /// Re-read the Sighup-scoped GUCs into a fresh runtime config.
     ///
     /// Call this after `ProcessConfigFile(PGC_SIGHUP)` to pick up new values.
-    pub fn from_gucs() -> Self {
+    pub(super) fn from_gucs() -> Self {
         Self {
             shutdown_timeout: Duration::from_millis(gucs::shutdown_timeout_ms()),
             storage: StorageRuntimeConfig {

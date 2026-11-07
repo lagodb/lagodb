@@ -120,7 +120,8 @@ thread_local! {
         const { RefCell::new(Vec::new()) };
 }
 
-pub(crate) fn init() {
+/// Define `lagodb.provider_libraries` on every load of the runtime library.
+pub(crate) fn define_gucs() {
     GucRegistry::define_string_guc(
         c"lagodb.provider_libraries",
         c"LagoDB AM and FDW provider libraries",
@@ -131,13 +132,9 @@ pub(crate) fn init() {
     );
 }
 
+/// Load every configured provider library. `_PG_init` calls this only during
+/// a normal shared preload.
 pub(crate) fn load_configured() {
-    // SAFETY: `_PG_init` calls this while PostgreSQL is processing the runtime's
-    // `shared_preload_libraries` entry.
-    assert!(
-        unsafe { pg_sys::process_shared_preload_libraries_in_progress },
-        "provider libraries must be loaded during shared preload"
-    );
     let Some(configured) = PROVIDER_LIBRARIES.get() else {
         return;
     };
@@ -167,43 +164,45 @@ pub(crate) fn load_configured() {
     }
 }
 
-pub(crate) fn prepare_identity(
-    identity: ValidatedProviderIdentity<'_>,
-) -> Result<PreparedProviderIdentity, u32> {
-    BOOTSTRAP_STATE.with_borrow(|state| state.validate(identity.library_name))?;
-    PROVIDERS.with_borrow_mut(|providers| {
-        if let Some(existing) = providers
-            .iter()
-            .find(|existing| existing.name.as_c_str() == identity.name)
-        {
-            let identical = existing.extension_name.as_c_str()
-                == identity.extension_name
-                && existing.library_name.as_c_str() == identity.library_name
-                && existing.kind == identity.kind;
-            return if identical {
-                Ok(PreparedProviderIdentity { identity: None })
-            } else {
-                Err(REGISTER_DUPLICATE_NAME)
+impl PreparedProviderIdentity {
+    pub(crate) fn prepare(
+        identity: ValidatedProviderIdentity<'_>,
+    ) -> Result<Self, u32> {
+        BOOTSTRAP_STATE.with_borrow(|state| state.validate(identity.library_name))?;
+        PROVIDERS.with_borrow_mut(|providers| {
+            if let Some(existing) = providers
+                .iter()
+                .find(|existing| existing.name.as_c_str() == identity.name)
+            {
+                let identical = existing.extension_name.as_c_str()
+                    == identity.extension_name
+                    && existing.library_name.as_c_str() == identity.library_name
+                    && existing.kind == identity.kind;
+                return if identical {
+                    Ok(Self { identity: None })
+                } else {
+                    Err(REGISTER_DUPLICATE_NAME)
+                };
+            }
+            providers.reserve(1);
+            let identity = StoredProviderIdentity {
+                name: identity.name.to_owned(),
+                extension_name: identity.extension_name.to_owned(),
+                library_name: identity.library_name.to_owned(),
+                kind: identity.kind,
             };
-        }
-        providers.reserve(1);
-        let identity = StoredProviderIdentity {
-            name: identity.name.to_owned(),
-            extension_name: identity.extension_name.to_owned(),
-            library_name: identity.library_name.to_owned(),
-            kind: identity.kind,
-        };
-        Ok(PreparedProviderIdentity {
-            identity: Some(identity),
+            Ok(Self {
+                identity: Some(identity),
+            })
         })
-    })
-}
-
-pub(crate) fn commit_identity(prepared: PreparedProviderIdentity) {
-    if let Some(identity) = prepared.identity {
-        PROVIDERS.with_borrow_mut(|providers| providers.push(identity));
     }
-    BOOTSTRAP_STATE.with_borrow_mut(BootstrapState::confirm_registration);
+
+    pub(crate) fn commit(self) {
+        if let Some(identity) = self.identity {
+            PROVIDERS.with_borrow_mut(|providers| providers.push(identity));
+        }
+        BOOTSTRAP_STATE.with_borrow_mut(BootstrapState::confirm_registration);
+    }
 }
 
 fn parse_library_names(

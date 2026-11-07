@@ -10,8 +10,8 @@ use super::path_installation::QueryPathInstallation;
 use super::query_shape::QueryShape;
 use super::relation_plan::RelationPlanBuilder;
 use super::relation_tree::RelationTreePlanner;
-use crate::gucs::{QueryOffloadMode, query_offload_mode};
 use crate::query_host::error::QueryHostError;
+use crate::query_host::gucs::QueryOffloadMode;
 
 pub(super) struct JoinCandidate {
     root: *mut pg_sys::PlannerInfo,
@@ -34,7 +34,7 @@ impl JoinCandidate {
         join_type: pg_sys::JoinType::Type,
         extra: *mut pg_sys::JoinPathExtraData,
     ) -> Option<Self> {
-        if query_offload_mode() == QueryOffloadMode::Off {
+        if QueryOffloadMode::current() == QueryOffloadMode::Off {
             return None;
         }
         // Uncorrelated nested scopes are imported into the outer relation tree,

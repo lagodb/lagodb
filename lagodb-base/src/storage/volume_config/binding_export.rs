@@ -1,4 +1,4 @@
-//! Runtime ABI adapter for Bound routes in the base-owned volume config.
+//! Runtime ABI export of Bound tablespace routes from the volume config.
 
 use lagodb_core::diag::PgReportError;
 use lagodb_core::runtime_api::{
@@ -6,10 +6,10 @@ use lagodb_core::runtime_api::{
 };
 use pgrx::{PgMemoryContexts, pg_guard};
 
-use crate::storage::volume_config::StorageVolumeControl;
+use super::control::StorageVolumeControl;
 
 #[pg_guard]
-pub(super) unsafe extern "C-unwind" fn load_tablespace_bindings(
+pub(crate) unsafe extern "C-unwind" fn load_tablespace_bindings(
     output: *mut TablespaceBindingsOutput,
 ) -> u32 {
     // SAFETY: the exact-build ABI requires a live call-scoped output pointer.

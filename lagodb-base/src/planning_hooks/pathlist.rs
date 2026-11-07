@@ -10,8 +10,7 @@ use pgrx::{pg_guard, pg_sys};
 use crate::query_host;
 
 use super::{
-    PREV_CREATE_UPPER_PATHS, PREV_SET_JOIN_PATHLIST, PREV_SET_REL_PATHLIST,
-    callback_result, registry,
+    PREV_CREATE_UPPER_PATHS, PREV_SET_JOIN_PATHLIST, PREV_SET_REL_PATHLIST, registry,
 };
 
 #[pg_guard]
@@ -43,7 +42,9 @@ pub(super) unsafe extern "C-unwind" fn set_rel_pathlist(
                 &mut error,
             )
         };
-        callback_result(status, &error, "relation planning callback")
+        // SAFETY: a failed callback populated `error` with text owned by the
+        // active PostgreSQL context for this synchronous call.
+        unsafe { error.into_result(status, "relation planning callback") }
     });
     result
         .and_then(|()| unsafe {
@@ -111,7 +112,9 @@ unsafe fn route_upper_paths(
                 &mut error,
             )
         };
-        callback_result(status, &error, "modify upper-path callback")
+        // SAFETY: a failed callback populated `error` with text owned by the
+        // active PostgreSQL context for this synchronous call.
+        unsafe { error.into_result(status, "modify upper-path callback") }
     })?;
     unsafe {
         query_host::create_upper_paths(root, stage, input_rel, output_rel, extra)

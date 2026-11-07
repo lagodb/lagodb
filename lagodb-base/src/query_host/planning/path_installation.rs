@@ -13,12 +13,8 @@ use lagodb_query::plan::{
 };
 use pgrx::pg_sys;
 
-use crate::gucs::{
-    QueryOffloadMode, query_execution_profile, query_offload_cpu_cost_multiplier,
-    query_offload_mode, query_offload_setup_cost, query_offload_spill,
-};
 use crate::query_host::error::QueryHostError;
-use crate::query_host::execution::WorkMemBudget;
+use crate::query_host::gucs::{QueryOffloadMode, QueryPlanSettings, WorkMemBudget};
 
 use super::materialize;
 use super::path_private::QueryPathPrivate;
@@ -90,9 +86,9 @@ impl QueryPathInstallation {
             ));
             return Ok(());
         }
-        let execution = query_execution_profile();
-        let cost = self.cost(&scans, execution)?;
-        self.encode_and_install(scans, execution, cost, parallel_safe)
+        let settings = QueryPlanSettings::current();
+        let cost = self.cost(&scans, settings)?;
+        self.encode_and_install(scans, settings.execution, cost, parallel_safe)
     }
 
     fn parallel_safe(&self) -> bool {
@@ -102,7 +98,7 @@ impl QueryPathInstallation {
     }
 
     fn declines_auto_fallback(&self) -> bool {
-        query_offload_mode() == QueryOffloadMode::Auto
+        QueryOffloadMode::current() == QueryOffloadMode::Auto
             && self.planned.query.fragment().postgres_fallback_count() != 0
     }
 
@@ -130,9 +126,9 @@ impl QueryPathInstallation {
     fn cost(
         &self,
         scans: &[ProviderScanPlan],
-        execution: ExecutionProfile,
+        settings: QueryPlanSettings,
     ) -> Result<PlanCost, QueryHostError> {
-        match query_offload_mode() {
+        match QueryOffloadMode::current() {
             QueryOffloadMode::Off => unreachable!("mode was gated before planning"),
             QueryOffloadMode::Force => Ok(PlanCost::forced()),
             QueryOffloadMode::Auto => {
@@ -145,17 +141,16 @@ impl QueryPathInstallation {
                     .iter()
                     .map(|scan| scan.input.estimated_rows)
                     .collect::<Vec<_>>();
-                let spill_sort_memory_bytes = query_offload_spill()
-                    .then(WorkMemBudget::bytes)
-                    .transpose()?;
-                let cpu_cost_multiplier = query_offload_cpu_cost_multiplier();
+                let spill_sort_memory_bytes =
+                    settings.spill.then(WorkMemBudget::bytes);
+                let cpu_cost_multiplier = settings.cpu_cost_multiplier;
                 let context = CostingContext::try_new(
-                    execution,
+                    settings.execution,
                     unsafe { pg_sys::cpu_tuple_cost } * cpu_cost_multiplier,
                     unsafe { pg_sys::cpu_operator_cost } * cpu_cost_multiplier,
                     unsafe { pg_sys::seq_page_cost },
                     pg_sys::BLCKSZ as usize,
-                    query_offload_setup_cost(),
+                    settings.setup_cost,
                     spill_sort_memory_bytes,
                 )
                 .map_err(QueryHostError::invalid_plan)?;

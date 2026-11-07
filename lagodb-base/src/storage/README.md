@@ -1,16 +1,12 @@
 # Runtime Storage Worker
 
 This module is the runtime-owned host for the LagoDB storage singleton.
-`lagodb_base` calls `storage::init()` from `_PG_init`; AM crates do not call
-this path.
+`lagodb_base` calls it from `_PG_init`; AM crates do not call this path.
 
-`storage::init()` performs three operations while PostgreSQL is processing
-`shared_preload_libraries`:
-
-1. Register storage GUC backing statics.
-2. Clean the postmaster-wide staging directory once at startup.
-3. Register one static bgworker named `lagodb-storage` when
-   `lagodb.storage_server_enabled = on`.
+- `storage::define_gucs()` defines the storage GUCs on every load.
+- `storage::init()` runs only during a normal shared preload. It cleans
+  the postmaster-wide staging directory once at startup and registers one
+  static bgworker named `lagodb-storage`.
 
 The worker connects to SPI with `Some("postgres")`. PostgreSQL cannot open
 `pg_tablespace` through relcache without a selected database, even though

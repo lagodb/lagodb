@@ -8,7 +8,7 @@ use pgrx::{pg_getarg, pg_getarg_datum_raw};
 
 use crate::ensure_runtime_preloaded;
 
-use super::lifecycle::{request_database_reconcile, request_wakeup};
+use super::lifecycle::{stage_database_reconcile, stage_worker_wakeup};
 use super::registry;
 use super::{
     DatabaseLifecycleLock, WorkerError, process_status as runtime_process_status,
@@ -29,7 +29,7 @@ mod lagodb {
             .unwrap_or_else(|error| error.report());
         if !registry::database_is_template(database_oid) {
             DatabaseLifecycleLock::new(database_oid).acquire_shared();
-            request_database_reconcile();
+            stage_database_reconcile();
         }
         worker_id
     }
@@ -50,7 +50,7 @@ mod lagodb {
         }
         if !registry::database_is_template(database_oid) {
             DatabaseLifecycleLock::new(database_oid).acquire_shared();
-            request_database_reconcile();
+            stage_database_reconcile();
             if let Some(worker_id) = worker_id {
                 stop_worker(database_oid, worker_id);
             }
@@ -70,7 +70,7 @@ mod lagodb {
         }
         if !registry::database_is_template(database_oid) {
             DatabaseLifecycleLock::new(database_oid).acquire_shared();
-            request_database_reconcile();
+            stage_database_reconcile();
             if deregistered {
                 stop_worker(database_oid, worker_id);
             }
@@ -122,7 +122,7 @@ AS '@MODULE_PATHNAME@', '@FUNCTION_NAME@';
             }
             Err(error) => error.report(),
         };
-        request_wakeup(worker_id);
+        stage_worker_wakeup(worker_id);
     }
 
     #[pg_extern]

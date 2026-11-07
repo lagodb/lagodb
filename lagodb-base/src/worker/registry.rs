@@ -3,6 +3,7 @@
 use std::ffi::{CStr, c_char};
 
 use lagodb_core::catalog;
+use lagodb_core::handles::search_syscache1;
 use pgrx::{IntoDatum, pg_sys};
 
 use super::catalog::{
@@ -63,28 +64,16 @@ pub(crate) fn runtime_catalog_exists() -> WorkerResult<bool> {
 }
 
 pub(crate) fn database_is_template(database_oid: u32) -> bool {
-    // SAFETY: database_oid is the current backend database OID and Oid has a
-    // stable scalar Datum representation.
-    let tuple = unsafe {
-        pg_sys::SearchSysCache1(
-            pg_sys::SysCacheIdentifier::DATABASEOID as i32,
-            pg_sys::Oid::from(database_oid)
-                .into_datum()
-                .expect("Oid has a Datum representation"),
-        )
-    };
-    assert!(
-        !tuple.is_null(),
-        "current database must have a pg_database syscache entry",
-    );
-    // SAFETY: DATABASEOID returned a pinned pg_database tuple, which remains
-    // valid until ReleaseSysCache below.
-    let is_template = unsafe {
-        (*(pg_sys::GETSTRUCT(tuple) as pg_sys::Form_pg_database)).datistemplate
-    };
-    // SAFETY: tuple is the pinned syscache tuple returned above.
-    unsafe { pg_sys::ReleaseSysCache(tuple) };
-    is_template
+    let tuple = search_syscache1(
+        pg_sys::SysCacheIdentifier::DATABASEOID as i32,
+        pg_sys::Datum::from(database_oid),
+    )
+    .expect("current database must have a pg_database syscache entry");
+    // SAFETY: DATABASEOID pins this pg_database tuple until `tuple` is dropped.
+    unsafe {
+        (*(pg_sys::GETSTRUCT(tuple.as_raw()) as pg_sys::Form_pg_database))
+            .datistemplate
+    }
 }
 
 pub(crate) fn load_if_runtime_installed()

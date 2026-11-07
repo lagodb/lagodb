@@ -9,8 +9,8 @@ use super::path_installation::QueryPathInstallation;
 use super::query_shape::QueryShape;
 use super::relation_plan::RelationPlanBuilder;
 use super::relation_tree::RelationTreePlanner;
-use crate::gucs::{QueryOffloadMode, query_offload_mode};
 use crate::query_host::error::QueryHostError;
+use crate::query_host::gucs::QueryOffloadMode;
 
 pub(super) struct SubPlanCandidate {
     root: *mut pg_sys::PlannerInfo,
@@ -25,7 +25,7 @@ impl SubPlanCandidate {
         rti: pg_sys::Index,
         rte: *mut pg_sys::RangeTblEntry,
     ) -> Option<Self> {
-        if query_offload_mode() == QueryOffloadMode::Off {
+        if QueryOffloadMode::current() == QueryOffloadMode::Off {
             return None;
         }
         let planner = unsafe { &*root };

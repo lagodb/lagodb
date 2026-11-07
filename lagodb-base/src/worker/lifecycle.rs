@@ -1,16 +1,14 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::ffi::{CStr, c_void};
 use std::mem;
 use std::ptr::null_mut;
 
 use pgrx::pg_sys;
 
-use crate::runtime_is_preloaded;
-
 use super::lock::DatabaseLifecycleLock;
 use super::{INVALID_OID, WorkerError, WorkerKey, registry};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PendingActionKind {
     Wake(WorkerKey),
     ReconcileDatabase,
@@ -28,7 +26,6 @@ struct PendingAction {
 
 thread_local! {
     static ACTIONS: RefCell<PendingActions> = const { RefCell::new(PendingActions::new()) };
-    static PREFLIGHT_ENABLED: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(crate) fn init() {
@@ -38,10 +35,9 @@ pub(crate) fn init() {
         pg_sys::RegisterXactCallback(Some(xact_callback), null_mut());
         pg_sys::RegisterSubXactCallback(Some(subxact_callback), null_mut());
     }
-    PREFLIGHT_ENABLED.set(true);
 }
 
-pub(crate) fn request_wakeup(worker_id: i32) {
+pub(super) fn stage_worker_wakeup(worker_id: i32) {
     let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
     push(
         database_oid,
@@ -49,20 +45,20 @@ pub(crate) fn request_wakeup(worker_id: i32) {
     );
 }
 
-pub(crate) fn request_database_reconcile() {
+pub(super) fn stage_database_reconcile() {
     let database_oid = unsafe { pg_sys::MyDatabaseId }.to_u32();
     push(database_oid, PendingActionKind::ReconcileDatabase);
 }
 
-pub(crate) fn request_database_workers_wakeup(database_oid: u32) {
+fn stage_database_workers_wakeup(database_oid: u32) {
     push(database_oid, PendingActionKind::WakeDatabaseWorkers);
 }
 
-pub(crate) fn request_database_drop(database_oid: u32) {
+fn stage_database_drop(database_oid: u32) {
     push(database_oid, PendingActionKind::DropDatabase);
 }
 
-pub(crate) fn request_global_reconcile() {
+fn stage_global_reconcile() {
     push(INVALID_OID, PendingActionKind::RescanAll);
 }
 
@@ -93,7 +89,7 @@ impl PendingActions {
         if self.actions.iter().any(|action| {
             action.database_oid == database_oid
                 && action.nest_level == nest_level
-                && same_action(&action.kind, &kind)
+                && action.kind == kind
         }) {
             return;
         }
@@ -195,23 +191,6 @@ impl PendingAction {
     }
 }
 
-fn same_action(left: &PendingActionKind, right: &PendingActionKind) -> bool {
-    match (left, right) {
-        (PendingActionKind::Wake(a), PendingActionKind::Wake(b)) => a == b,
-        (
-            PendingActionKind::ReconcileDatabase,
-            PendingActionKind::ReconcileDatabase,
-        )
-        | (
-            PendingActionKind::WakeDatabaseWorkers,
-            PendingActionKind::WakeDatabaseWorkers,
-        )
-        | (PendingActionKind::DropDatabase, PendingActionKind::DropDatabase)
-        | (PendingActionKind::RescanAll, PendingActionKind::RescanAll) => true,
-        _ => false,
-    }
-}
-
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn xact_callback(
     event: pg_sys::XactEvent::Type,
@@ -238,9 +217,6 @@ fn apply(committed: bool) {
 }
 
 pub(crate) unsafe fn preflight(node: *mut pg_sys::Node) {
-    if !PREFLIGHT_ENABLED.get() {
-        return;
-    }
     match unsafe { (*node).type_ } {
         pg_sys::NodeTag::T_DropdbStmt => {
             let statement = node.cast::<pg_sys::DropdbStmt>();
@@ -248,16 +224,16 @@ pub(crate) unsafe fn preflight(node: *mut pg_sys::Node) {
                 unsafe { pg_sys::get_database_oid((*statement).dbname, true) };
             if database_oid != pg_sys::InvalidOid {
                 DatabaseLifecycleLock::new(database_oid.to_u32()).acquire_drop();
-                request_database_drop(database_oid.to_u32());
+                stage_database_drop(database_oid.to_u32());
                 super::prepare_database_drop(database_oid.to_u32());
             }
         }
-        pg_sys::NodeTag::T_CreatedbStmt => request_global_reconcile(),
+        pg_sys::NodeTag::T_CreatedbStmt => stage_global_reconcile(),
         pg_sys::NodeTag::T_AlterDatabaseSetStmt => {
             let statement = unsafe { &*node.cast::<pg_sys::AlterDatabaseSetStmt>() };
             let database_oid =
                 unsafe { pg_sys::get_database_oid(statement.dbname, false) };
-            request_database_workers_wakeup(database_oid.to_u32());
+            stage_database_workers_wakeup(database_oid.to_u32());
         }
         _ => {}
     }
@@ -280,13 +256,10 @@ pub(crate) fn drop_extension_workers(
     if runtime_oid == pg_sys::InvalidOid {
         return Ok(());
     }
-    let runtime_preloaded = runtime_is_preloaded();
     if extension_oid == runtime_oid {
-        if runtime_preloaded {
-            DatabaseLifecycleLock::new(database_oid).acquire_drop();
-            request_database_reconcile();
-            super::prepare_database_drop(database_oid);
-        }
+        DatabaseLifecycleLock::new(database_oid).acquire_drop();
+        stage_database_reconcile();
+        super::prepare_database_drop(database_oid);
     } else {
         let has_registrations =
             registry::extension_has_registrations(extension_name)?;
@@ -294,11 +267,9 @@ pub(crate) fn drop_extension_workers(
             return Ok(());
         }
         registry::delete_extension_registrations(extension_name)?;
-        if runtime_preloaded {
-            DatabaseLifecycleLock::new(database_oid).acquire_drop();
-            request_database_reconcile();
-            super::prepare_extension_drop(database_oid, extension_oid.to_u32());
-        }
+        DatabaseLifecycleLock::new(database_oid).acquire_drop();
+        stage_database_reconcile();
+        super::prepare_extension_drop(database_oid, extension_oid.to_u32());
     }
     Ok(())
 }

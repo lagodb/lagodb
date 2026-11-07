@@ -9,6 +9,7 @@ use pgrx::prelude::*;
 
 use crate::{RuntimeNotPreloaded, ensure_runtime_preloaded};
 
+use super::super::gucs;
 use super::control::StorageVolumeControl;
 use super::credential::CredentialConfig;
 use super::domain::{StorageLocation, StorageVolumeError, StorageVolumeName};
@@ -176,7 +177,7 @@ mod lagodb {
         .unwrap_or_else(|error| error.report());
         let (name, volume_key, volume_id, namespace, root_prefix) = metadata;
 
-        let endpoint = crate::storage::resolved_endpoint();
+        let endpoint = gucs::endpoint();
         let probe = BackendStorageService::for_managed(&endpoint, volume_id.get())
             .and_then(|service| {
                 service.probe_store(namespace.as_str(), root_prefix.as_str())

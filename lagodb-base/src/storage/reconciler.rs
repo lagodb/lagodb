@@ -12,11 +12,11 @@ use lagodb_storage::{ManagedStoreRegistry, StorageError, StoreConfig};
 use super::volume_config::{CredentialConfig, StorageLocation, StorageVolumeError};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct VolumeStoreSpec {
-    pub volume_id: u64,
-    pub location: StorageLocation,
-    pub credential: CredentialConfig,
-    pub reload_on_force: bool,
+pub(super) struct VolumeStoreSpec {
+    pub(super) volume_id: u64,
+    pub(super) location: StorageLocation,
+    pub(super) credential: CredentialConfig,
+    pub(super) reload_on_force: bool,
 }
 
 impl VolumeStoreSpec {
@@ -27,12 +27,12 @@ impl VolumeStoreSpec {
     }
 }
 
-pub(crate) trait StoreConfigSource {
+pub(super) trait StoreConfigSource {
     fn load(&mut self) -> Result<Vec<VolumeStoreSpec>, StorageVolumeError>;
 }
 
 #[derive(Debug)]
-pub(crate) enum ReconcileError {
+pub(super) enum ReconcileError {
     Source(StorageVolumeError),
     DuplicateVolumeId(u64),
     PrepareTask(JoinError),
@@ -65,13 +65,13 @@ impl StdError for ReconcileError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum VolumeApplyState {
+pub(super) enum VolumeApplyState {
     Stale,
     Unavailable,
 }
 
 impl VolumeApplyState {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::Stale => "stale",
             Self::Unavailable => "unavailable",
@@ -80,23 +80,23 @@ impl VolumeApplyState {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct VolumeApplyFailure {
-    pub volume_id: u64,
-    pub state: VolumeApplyState,
-    pub message: String,
+pub(super) struct VolumeApplyFailure {
+    pub(super) volume_id: u64,
+    pub(super) state: VolumeApplyState,
+    pub(super) message: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ReconcileReport {
-    pub added: usize,
-    pub removed: usize,
-    pub replaced: usize,
-    pub unchanged: usize,
-    pub desired: usize,
-    pub loaded: usize,
-    pub stale: usize,
-    pub unavailable: usize,
-    pub failures: Vec<VolumeApplyFailure>,
+pub(super) struct ReconcileReport {
+    pub(super) added: usize,
+    pub(super) removed: usize,
+    pub(super) replaced: usize,
+    pub(super) unchanged: usize,
+    pub(super) desired: usize,
+    pub(super) loaded: usize,
+    pub(super) stale: usize,
+    pub(super) unavailable: usize,
+    pub(super) failures: Vec<VolumeApplyFailure>,
 }
 
 #[derive(Debug)]
@@ -136,7 +136,7 @@ impl VolumeApplyError {
     }
 }
 
-pub(crate) struct StoreConfigReconciler<S> {
+pub(super) struct StoreConfigReconciler<S> {
     source: S,
     registry: ManagedStoreRegistry,
     applied: HashMap<u64, VolumeStoreSpec>,
@@ -144,7 +144,7 @@ pub(crate) struct StoreConfigReconciler<S> {
 }
 
 impl<S: StoreConfigSource> StoreConfigReconciler<S> {
-    pub(crate) fn new(source: S, registry: ManagedStoreRegistry) -> Self {
+    pub(super) fn new(source: S, registry: ManagedStoreRegistry) -> Self {
         Self {
             source,
             registry,
@@ -153,7 +153,7 @@ impl<S: StoreConfigSource> StoreConfigReconciler<S> {
         }
     }
 
-    pub(crate) fn load_desired(
+    pub(super) fn load_desired(
         &mut self,
     ) -> Result<HashMap<u64, VolumeStoreSpec>, ReconcileError> {
         let mut desired = HashMap::new();
@@ -168,7 +168,7 @@ impl<S: StoreConfigSource> StoreConfigReconciler<S> {
 
     /// Apply stores independently while retaining each store's last-known-good
     /// registration when its desired replacement cannot be materialized.
-    pub(crate) async fn apply_desired(
+    pub(super) async fn apply_desired(
         &mut self,
         desired: HashMap<u64, VolumeStoreSpec>,
         force_default_chain: bool,

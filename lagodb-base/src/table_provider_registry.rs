@@ -10,7 +10,7 @@ use pgrx::pg_sys::ffi::pg_guard_ffi_boundary;
 use pgrx::{pg_guard, pg_sys};
 
 use crate::descriptor_registry::{
-    DescriptorNode, DescriptorRegistry, DescriptorSnapshot,
+    DescriptorRegistry, DescriptorSnapshot, PreparedDescriptors,
 };
 
 thread_local! {
@@ -29,9 +29,9 @@ impl TableProviderRegistry {
         TABLE_PROVIDERS.with(|registry| registry.snapshot())
     }
 
-    fn prepare(
-        descriptor: &TableProvider,
-    ) -> Result<Option<Box<DescriptorNode<TableProvider>>>, u32> {
+    /// Return the descriptor to publish, or `None` when the same provider is
+    /// already registered.
+    fn admit(descriptor: &TableProvider) -> Result<Option<TableProvider>, u32> {
         let conflict = Self::snapshot().walk(|existing| {
             if existing.name() == descriptor.name() {
                 return ControlFlow::Break(
@@ -49,14 +49,11 @@ impl TableProviderRegistry {
         });
         match conflict {
             ControlFlow::Break(result) => result,
-            // Allocate before any runtime registry is changed. The later commit
-            // is therefore allocation-free and cannot leave provider and hook
-            // registries partially published.
-            ControlFlow::Continue(()) => Ok(Some(DescriptorNode::new(*descriptor))),
+            ControlFlow::Continue(()) => Ok(Some(*descriptor)),
         }
     }
 
-    fn commit(entry: Option<Box<DescriptorNode<TableProvider>>>) {
+    fn commit(entry: PreparedDescriptors<TableProvider>) {
         let _ = TABLE_PROVIDERS.with(|registry| registry.commit(entry));
     }
 
@@ -131,7 +128,7 @@ impl<'a> ValidatedTableProvider<'a> {
 }
 
 pub(crate) struct PreparedTableProviderRegistration {
-    entry: Option<Box<DescriptorNode<TableProvider>>>,
+    entry: PreparedDescriptors<TableProvider>,
 }
 
 impl PreparedTableProviderRegistration {
@@ -140,11 +137,16 @@ impl PreparedTableProviderRegistration {
     ) -> Result<Self, u32> {
         let entry = match provider {
             Some(ValidatedTableProvider(descriptor)) => {
-                TableProviderRegistry::prepare(descriptor)?
+                TableProviderRegistry::admit(descriptor)?
             }
             None => None,
         };
-        Ok(Self { entry })
+        // Allocate before any runtime registry is changed. The later commit is
+        // therefore allocation-free and cannot leave provider and hook
+        // registries partially published.
+        Ok(Self {
+            entry: PreparedDescriptors::new(entry),
+        })
     }
 
     pub(crate) fn commit(self) {

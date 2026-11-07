@@ -8,7 +8,6 @@ The `lagodb_base` runtime extension owns the storage singleton. Access-method
 crates resolve the endpoint with `StorageEndpoint::from_pg_gucs()`, which reads
 PostgreSQL's global GUC registry by name:
 
-- `lagodb.storage_server_enabled`
 - `lagodb.storage_server_socket_path`
 - `lagodb.storage_server_cache_dir`
 - `lagodb.storage_backend_max_idle_connections`

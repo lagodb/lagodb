@@ -6,9 +6,8 @@ use lagodb_core::extension_worker::WorkerTransaction;
 use pgrx::bgworkers::BackgroundWorker;
 use pgrx::prelude::*;
 
-use crate::gucs;
-
 use super::bgworker::{DynamicWorkerRegistration, DynamicWorkerStartResult};
+use super::gucs::SupervisorSettings;
 use super::lock::DatabaseLifecycleLock;
 use super::scheduler::Scheduler;
 use super::store::{CoordinatorRegistration, Store};
@@ -47,17 +46,18 @@ impl Supervisor {
         store.claim_supervisor();
 
         let mut last_full_scan = Instant::now()
-            .checked_sub(gucs::reconcile_interval())
+            .checked_sub(SupervisorSettings::current().reconcile_interval)
             .unwrap_or_else(Instant::now);
         let mut scheduler = Scheduler::new();
 
         loop {
             super::signals::BackgroundWorkerSignals::process_config_reload();
+            let settings = SupervisorSettings::current();
             scheduler.promote_due_retries();
 
             let explicit_full_scan = store.take_full_scan_request();
             let interval_elapsed =
-                last_full_scan.elapsed() >= gucs::reconcile_interval();
+                last_full_scan.elapsed() >= settings.reconcile_interval;
             if explicit_full_scan || interval_elapsed {
                 Self::reconcile_database_list(
                     &store,
@@ -72,7 +72,8 @@ impl Supervisor {
             }
 
             Self::start_pending_coordinators(&store, &mut scheduler);
-            let wait_timeout = Self::next_wait_timeout(&scheduler, last_full_scan);
+            let wait_timeout =
+                Self::next_wait_timeout(settings, &scheduler, last_full_scan);
             if !super::signals::BackgroundWorkerSignals::wait_latch(wait_timeout) {
                 break;
             }
@@ -142,12 +143,19 @@ impl Supervisor {
         store.remove_dropped_databases(&databases.live);
     }
 
-    fn next_wait_timeout(scheduler: &Scheduler, last_full_scan: Instant) -> Duration {
-        let reconcile_interval = gucs::reconcile_interval();
-        let mut timeout = gucs::supervisor_naptime();
+    fn next_wait_timeout(
+        settings: SupervisorSettings,
+        scheduler: &Scheduler,
+        last_full_scan: Instant,
+    ) -> Duration {
+        let mut timeout = settings.naptime;
         for candidate in [
             scheduler.next_deadline_delay(),
-            Some(reconcile_interval.saturating_sub(last_full_scan.elapsed())),
+            Some(
+                settings
+                    .reconcile_interval
+                    .saturating_sub(last_full_scan.elapsed()),
+            ),
         ]
         .into_iter()
         .flatten()

@@ -6,12 +6,12 @@
 //! runtime ABI.
 
 use crate::descriptor_registry::{
-    DescriptorNode, DescriptorRegistry, DescriptorSnapshot,
+    DescriptorRegistry, DescriptorSnapshot, PreparedDescriptors,
 };
 use lagodb_core::hooks::HookError;
 use lagodb_core::runtime_api::{
-    UTILITY_ROUTE_CONSUMED, UTILITY_ROUTE_FALLBACK, UTILITY_ROUTE_PASS_THROUGH,
-    UtilityConsumerDescriptor,
+    REGISTER_INVALID_DESCRIPTOR, UTILITY_ROUTE_CONSUMED, UTILITY_ROUTE_FALLBACK,
+    UTILITY_ROUTE_PASS_THROUGH, UtilityConsumerDescriptor,
 };
 use pgrx::pg_sys;
 
@@ -20,12 +20,7 @@ use super::ProcessUtilityArgs;
 type UtilityConsumerRegistry = DescriptorRegistry<UtilityConsumerDescriptor>;
 
 pub(crate) struct PreparedUtilityConsumers {
-    // Each node is allocated before the runtime registration transaction is
-    // committed. The box keeps its address stable while the registry stores
-    // a raw backend-lifetime pointer; commit therefore cannot allocate or
-    // publish only part of this prepared batch.
-    #[allow(clippy::vec_box)]
-    nodes: Vec<Box<DescriptorNode<UtilityConsumerDescriptor>>>,
+    consumers: PreparedDescriptors<UtilityConsumerDescriptor>,
 }
 
 #[derive(Clone, Copy)]
@@ -171,25 +166,21 @@ pub(super) fn select(
     }
 }
 
-pub(crate) fn prepare_consumers(
-    descriptors: &[UtilityConsumerDescriptor],
-) -> Option<PreparedUtilityConsumers> {
-    if !descriptors.iter().all(valid_descriptor) {
-        return None;
+impl PreparedUtilityConsumers {
+    pub(crate) fn prepare(
+        descriptors: &[UtilityConsumerDescriptor],
+    ) -> Result<Self, u32> {
+        if !descriptors.iter().all(valid_descriptor) {
+            return Err(REGISTER_INVALID_DESCRIPTOR);
+        }
+        Ok(Self {
+            consumers: PreparedDescriptors::new(descriptors.iter().copied()),
+        })
     }
-    Some(PreparedUtilityConsumers {
-        nodes: descriptors
-            .iter()
-            .copied()
-            .map(DescriptorNode::new)
-            .collect(),
-    })
-}
 
-pub(crate) fn commit_consumers(prepared: PreparedUtilityConsumers) {
-    UTILITY_CONSUMERS.with(|registry| {
-        let _ = registry.commit(prepared.nodes);
-    });
+    pub(crate) fn commit(self) {
+        let _ = UTILITY_CONSUMERS.with(|registry| registry.commit(self.consumers));
+    }
 }
 
 #[cfg(test)]

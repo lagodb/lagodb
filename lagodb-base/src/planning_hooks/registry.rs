@@ -3,10 +3,11 @@
 use std::ffi::c_void;
 
 use crate::descriptor_registry::{
-    DescriptorNode, DescriptorRegistry, DescriptorSnapshot,
+    DescriptorRegistry, DescriptorSnapshot, PreparedDescriptors,
 };
 use lagodb_core::runtime_api::{
-    ModifyPlannerDescriptor, RelationScanPlannerDescriptor, RoutedModifyPlannerPost,
+    ModifyPlannerDescriptor, REGISTER_INVALID_DESCRIPTOR,
+    RelationScanPlannerDescriptor, RoutedModifyPlannerPost,
     RoutedModifyQueryPreparation, RoutedModifyUpperPlanner,
     RoutedRelationScanPlanner,
 };
@@ -53,33 +54,37 @@ impl StoredModifyPlanner {
 }
 
 pub(crate) struct PreparedPlanningHooks {
-    relation_scan: Option<Box<DescriptorNode<StoredRelationScanPlanner>>>,
-    modify: Option<Box<DescriptorNode<StoredModifyPlanner>>>,
+    relation_scan: PreparedDescriptors<StoredRelationScanPlanner>,
+    modify: PreparedDescriptors<StoredModifyPlanner>,
 }
 
-pub(crate) fn prepare(
-    relation_scan: Option<&RelationScanPlannerDescriptor>,
-    modify: Option<&ModifyPlannerDescriptor>,
-) -> Option<PreparedPlanningHooks> {
-    let relation_scan = match relation_scan {
-        Some(descriptor) => {
-            Some(StoredRelationScanPlanner::from_descriptor(descriptor)?)
-        }
-        None => None,
-    };
-    let modify = match modify {
-        Some(descriptor) => Some(StoredModifyPlanner::from_descriptor(descriptor)?),
-        None => None,
-    };
-    Some(PreparedPlanningHooks {
-        relation_scan: relation_scan.map(DescriptorNode::new),
-        modify: modify.map(DescriptorNode::new),
-    })
-}
+impl PreparedPlanningHooks {
+    pub(crate) fn prepare(
+        relation_scan: Option<&RelationScanPlannerDescriptor>,
+        modify: Option<&ModifyPlannerDescriptor>,
+    ) -> Result<Self, u32> {
+        let relation_scan = relation_scan
+            .map(|descriptor| {
+                StoredRelationScanPlanner::from_descriptor(descriptor)
+                    .ok_or(REGISTER_INVALID_DESCRIPTOR)
+            })
+            .transpose()?;
+        let modify = modify
+            .map(|descriptor| {
+                StoredModifyPlanner::from_descriptor(descriptor)
+                    .ok_or(REGISTER_INVALID_DESCRIPTOR)
+            })
+            .transpose()?;
+        Ok(Self {
+            relation_scan: PreparedDescriptors::new(relation_scan),
+            modify: PreparedDescriptors::new(modify),
+        })
+    }
 
-pub(crate) fn commit(prepared: PreparedPlanningHooks) {
-    let _ = RELATION_SCAN.with(|registry| registry.commit(prepared.relation_scan));
-    let _ = MODIFY.with(|registry| registry.commit(prepared.modify));
+    pub(crate) fn commit(self) {
+        let _ = RELATION_SCAN.with(|registry| registry.commit(self.relation_scan));
+        let _ = MODIFY.with(|registry| registry.commit(self.modify));
+    }
 }
 
 pub(super) fn relation_scan_snapshot() -> DescriptorSnapshot<StoredRelationScanPlanner>

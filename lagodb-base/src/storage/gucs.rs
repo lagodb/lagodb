@@ -5,7 +5,9 @@
 //! `pg_reload_conf()` or a SIGHUP signal.
 
 use std::ffi::CString;
+use std::path::PathBuf;
 
+use lagodb_core::storage::service::StorageEndpoint;
 use lagodb_storage::{
     DEFAULT_CACHE_CLEANUP_BATCH_BYTES, DEFAULT_CACHE_CLEANUP_BATCH_ITEMS,
     DEFAULT_CACHE_CLEANUP_INTERVAL, DEFAULT_CACHE_CLEANUP_START_PERCENT,
@@ -52,7 +54,7 @@ static CACHE_CLEANUP_BATCH_MB: GucSetting<i32> = GucSetting::<i32>::new(
     (DEFAULT_CACHE_CLEANUP_BATCH_BYTES / (1024 * 1024)) as i32,
 );
 
-pub fn init() {
+pub(super) fn define() {
     GucRegistry::define_string_guc(
         c"lagodb.storage_server_socket_path",
         c"Unix socket path for lagodb-storage",
@@ -228,11 +230,22 @@ pub fn init() {
     );
 }
 
-pub fn socket_path() -> Option<String> {
+/// The storage endpoint resolved from this module's GUC backing statics, for
+/// the bgworker, the postmaster staging cleanup and backend SQL callers alike.
+pub(super) fn endpoint() -> StorageEndpoint {
+    StorageEndpoint::from_config(
+        socket_path().map(PathBuf::from),
+        cache_dir().map(PathBuf::from),
+        backend_max_idle_connections(),
+    )
+    .expect("PostgreSQL DataDir must be initialized before resolving storage paths")
+}
+
+fn socket_path() -> Option<String> {
     SOCKET_PATH.get().and_then(non_empty_lossy_string)
 }
 
-pub fn cache_dir() -> Option<String> {
+fn cache_dir() -> Option<String> {
     CACHE_DIR.get().and_then(non_empty_lossy_string)
 }
 
@@ -249,31 +262,31 @@ fn non_empty_lossy_string(value: CString) -> Option<String> {
     }
 }
 
-pub fn worker_threads() -> usize {
+pub(super) fn worker_threads() -> usize {
     WORKER_THREADS.get().max(1) as usize
 }
 
-pub fn shutdown_timeout_ms() -> u64 {
+pub(super) fn shutdown_timeout_ms() -> u64 {
     SHUTDOWN_TIMEOUT_MS.get().max(100) as u64
 }
 
-pub fn log_channel_capacity() -> usize {
+pub(super) fn log_channel_capacity() -> usize {
     LOG_CHANNEL_CAPACITY.get().max(64) as usize
 }
 
-pub fn max_connections() -> usize {
+pub(super) fn max_connections() -> usize {
     MAX_CONNECTIONS.get().max(1) as usize
 }
 
-pub fn backend_max_idle_connections() -> usize {
+fn backend_max_idle_connections() -> usize {
     BACKEND_MAX_IDLE_CONNECTIONS.get().max(1) as usize
 }
 
-pub fn max_read_size() -> u32 {
+pub(super) fn max_read_size() -> u32 {
     MAX_READ_SIZE.get().max(1) as u32
 }
 
-pub fn storage_volume_retirement_grace_period_ms() -> u64 {
+pub(super) fn storage_volume_retirement_grace_period_ms() -> u64 {
     let seconds = u64::try_from(STORAGE_VOLUME_RETIREMENT_GRACE_PERIOD_SECONDS.get())
         .expect("storage volume retirement grace period GUC is positive");
     seconds
@@ -281,13 +294,13 @@ pub fn storage_volume_retirement_grace_period_ms() -> u64 {
         .expect("storage volume retirement grace period fits in milliseconds")
 }
 
-pub fn cache_touch_granularity() -> std::time::Duration {
+pub(super) fn cache_touch_granularity() -> std::time::Duration {
     std::time::Duration::from_millis(CACHE_TOUCH_GRANULARITY_MS.get().max(0) as u64)
 }
 
 /// Returns `None` (disabled) when the value is `0`; otherwise `Some(bytes)`
 /// converted from MiB.
-pub fn cache_max_bytes() -> Option<u64> {
+pub(super) fn cache_max_bytes() -> Option<u64> {
     let raw = CACHE_MAX_MB.get();
     if raw <= 0 {
         None
@@ -296,16 +309,16 @@ pub fn cache_max_bytes() -> Option<u64> {
     }
 }
 
-pub fn cache_cleanup_start_percent() -> u8 {
+pub(super) fn cache_cleanup_start_percent() -> u8 {
     CACHE_CLEANUP_START_PERCENT.get().clamp(1, 100) as u8
 }
 
-pub fn cache_cleanup_target_percent() -> u8 {
+pub(super) fn cache_cleanup_target_percent() -> u8 {
     CACHE_CLEANUP_TARGET_PERCENT.get().clamp(0, 100) as u8
 }
 
 /// Returns `None` (disabled) when the value is `0`; otherwise `Some(duration)`.
-pub fn cache_cleanup_interval() -> Option<std::time::Duration> {
+pub(super) fn cache_cleanup_interval() -> Option<std::time::Duration> {
     let raw = CACHE_CLEANUP_INTERVAL_MS.get();
     if raw <= 0 {
         None
@@ -314,10 +327,10 @@ pub fn cache_cleanup_interval() -> Option<std::time::Duration> {
     }
 }
 
-pub fn cache_cleanup_batch_items() -> usize {
+pub(super) fn cache_cleanup_batch_items() -> usize {
     CACHE_CLEANUP_BATCH_ITEMS.get().max(1) as usize
 }
 
-pub fn cache_cleanup_batch_bytes() -> u64 {
+pub(super) fn cache_cleanup_batch_bytes() -> u64 {
     (CACHE_CLEANUP_BATCH_MB.get().max(1) as u64) * 1024 * 1024
 }

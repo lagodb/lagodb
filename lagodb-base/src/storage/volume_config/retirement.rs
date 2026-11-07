@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::runtime_is_preloaded;
 use lagodb_core::diag::{PgReportError, SqlStateError, report_warning};
 use lagodb_core::handles::search_syscache1;
 use lagodb_core::storage::volume::StorageVolumeId;
@@ -49,9 +48,6 @@ pub(crate) fn on_object_access(
         || class_id != pg_sys::TableSpaceRelationId
         || sub_id != 0
     {
-        return Ok(());
-    }
-    if !runtime_is_preloaded() {
         return Ok(());
     }
 

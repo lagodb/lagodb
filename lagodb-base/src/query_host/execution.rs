@@ -7,10 +7,9 @@ use std::rc::Rc;
 use std::{mem, ptr};
 
 use lagodb_core::resource::{ResourceHandle, forget_resource, remember_resource};
-use lagodb_query::ExecutionProfile;
 use lagodb_query::datafusion::{
     ExecutionMetricsMode, ParallelExecutionHost, ParallelQueryOptions,
-    PendingQueryExecution, QueryExecution, QueryExecutionError, QueryExecutionLimits,
+    PendingQueryExecution, QueryExecution, QueryExecutionError,
     QueryExecutionRequest,
 };
 use lagodb_query::plan::SelectedQueryPlan;
@@ -18,10 +17,10 @@ use pgrx::{PgMemoryContexts, pg_guard, pg_sys};
 
 use super::error::QueryHostError;
 use super::explain::{ExplainOptions, QueryOffloadExplain};
+use super::gucs::QueryExecutionSettings;
 use super::methods;
 use super::parallel::PgParallelHost;
 use super::table_scan_registry::TableScanRegistry;
-use crate::gucs;
 use owner::QueryExecutionCell;
 
 enum QueryPhase {
@@ -93,38 +92,6 @@ impl Drop for QueryOffloadScanState {
     }
 }
 
-pub(super) struct WorkMemBudget;
-
-impl WorkMemBudget {
-    /// PostgreSQL defines `work_mem` in KiB and enforces its positive GUC range
-    /// before planning or executor startup.
-    pub(super) fn bytes() -> Result<usize, QueryHostError> {
-        // SAFETY: `work_mem` is a backend-local PostgreSQL GUC read on the
-        // backend main thread.
-        usize::try_from(unsafe { pg_sys::work_mem })
-            .ok()
-            .and_then(|kib| kib.checked_mul(1_024))
-            .ok_or(QueryHostError::MemoryBudgetOverflow)
-    }
-
-    /// The complete budget belongs to the DataFusion execution pool; provider
-    /// libraries are outside the engine's memory-accounting contract.
-    fn execution_limits(
-        execution: ExecutionProfile,
-    ) -> Result<QueryExecutionLimits, QueryHostError> {
-        // SAFETY: PostgreSQL derives this backend-local limit from work_mem and
-        // hash_mem_multiplier with the same size_t clamp used by its executor.
-        let hash_memory_bytes = unsafe { pg_sys::get_hash_memory_limit() };
-        QueryExecutionLimits::try_new(
-            Self::bytes()?,
-            hash_memory_bytes,
-            execution,
-            gucs::query_offload_spill(),
-        )
-        .map_err(QueryHostError::from)
-    }
-}
-
 #[pg_guard]
 pub(super) unsafe extern "C-unwind" fn create_state(
     _scan: *mut pg_sys::CustomScan,
@@ -188,12 +155,12 @@ unsafe fn begin_scan(
         state.phase = QueryPhase::ExplainOnly;
         return Ok(());
     }
+    let settings = QueryExecutionSettings::current();
     let parallel_safe = selected.parallel_safe()
-        && selected.largest_scan_rows()
-            >= gucs::query_offload_parallel_min_scan_rows();
+        && selected.largest_scan_rows() >= settings.parallel_min_scan_rows;
     let (query, execution_profile, scans) = selected.into_parts();
 
-    let limits = WorkMemBudget::execution_limits(execution_profile)?;
+    let limits = settings.limits(execution_profile)?;
     let metrics_mode = if instrumented {
         ExecutionMetricsMode::Enabled
     } else {
@@ -214,8 +181,8 @@ unsafe fn begin_scan(
                 host,
                 &scans,
                 workers,
-                gucs::query_offload_parallel_queue_size(),
-                gucs::query_offload_parallel_debug(),
+                settings.parallel_queue_size,
+                settings.parallel_debug,
             )
         })
     } else {

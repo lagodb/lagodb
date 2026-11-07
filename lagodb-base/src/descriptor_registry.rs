@@ -4,17 +4,31 @@ use std::cell::Cell;
 use std::ops::ControlFlow;
 use std::ptr;
 
-pub(crate) struct DescriptorNode<T: Copy> {
+struct DescriptorNode<T: Copy> {
     descriptor: T,
     next: Cell<*const DescriptorNode<T>>,
 }
 
-impl<T: Copy> DescriptorNode<T> {
-    pub(crate) fn new(descriptor: T) -> Box<Self> {
-        Box::new(Self {
-            descriptor,
-            next: Cell::new(ptr::null()),
-        })
+/// Descriptor nodes allocated before an atomic registration commits.
+///
+/// The fixed-length slice is the only allocation. Committing leaks it whole,
+/// so every node keeps a stable backend-lifetime address without a per-node
+/// box, and the commit itself neither allocates nor fails.
+pub(crate) struct PreparedDescriptors<T: Copy> {
+    nodes: Box<[DescriptorNode<T>]>,
+}
+
+impl<T: Copy> PreparedDescriptors<T> {
+    pub(crate) fn new(descriptors: impl IntoIterator<Item = T>) -> Self {
+        Self {
+            nodes: descriptors
+                .into_iter()
+                .map(|descriptor| DescriptorNode {
+                    descriptor,
+                    next: Cell::new(ptr::null()),
+                })
+                .collect(),
+        }
     }
 }
 
@@ -31,8 +45,8 @@ impl<T: Copy> DescriptorRegistry<T> {
         }
     }
 
-    fn append_node(&self, node: Box<DescriptorNode<T>>) {
-        let node = Box::into_raw(node);
+    fn append_node(&self, node: &'static DescriptorNode<T>) {
+        let node = ptr::from_ref(node);
         let tail = self.tail.replace(node);
         if tail.is_null() {
             self.head.set(node);
@@ -43,17 +57,18 @@ impl<T: Copy> DescriptorRegistry<T> {
         }
     }
 
-    pub(crate) fn commit<I>(&self, nodes: I) -> bool
+    /// Publish prepared nodes in order and report whether they are the
+    /// registry's first descriptors.
+    pub(crate) fn commit(&self, prepared: PreparedDescriptors<T>) -> bool
     where
-        I: IntoIterator<Item = Box<DescriptorNode<T>>>,
+        T: 'static,
     {
         let was_empty = self.head.get().is_null();
-        let mut appended = false;
+        let nodes: &'static [DescriptorNode<T>] = Box::leak(prepared.nodes);
         for node in nodes {
-            appended = true;
             self.append_node(node);
         }
-        was_empty && appended
+        was_empty && !nodes.is_empty()
     }
 
     pub(crate) fn snapshot(&self) -> DescriptorSnapshot<T> {
@@ -64,13 +79,19 @@ impl<T: Copy> DescriptorRegistry<T> {
     }
 
     #[cfg(test)]
-    pub(crate) fn append(&self, descriptor: T) {
-        let _ = self.commit(Some(DescriptorNode::new(descriptor)));
+    pub(crate) fn append(&self, descriptor: T)
+    where
+        T: 'static,
+    {
+        let _ = self.register(descriptor);
     }
 
     #[cfg(test)]
-    pub(crate) fn register(&self, descriptor: T) -> bool {
-        self.commit(Some(DescriptorNode::new(descriptor)))
+    pub(crate) fn register(&self, descriptor: T) -> bool
+    where
+        T: 'static,
+    {
+        self.commit(PreparedDescriptors::new(Some(descriptor)))
     }
 }
 

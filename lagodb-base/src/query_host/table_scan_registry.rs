@@ -8,16 +8,15 @@ use arrow_schema::ffi::FFI_ArrowSchema;
 use lagodb_core::diag::PgReportError;
 use lagodb_core::query_contract::{TableScanRoute, TableScanRouteKind};
 use lagodb_core::runtime_api::{
-    CALLBACK_FAILED, CALLBACK_OK, CallbackErrorReport, OwnsForeignServer,
-    PlanTableScan, PlannedTableScanResult, REGISTER_DUPLICATE_TABLE_SCAN_ROUTE,
-    REGISTER_INVALID_DESCRIPTOR, TableScanDescriptor, TableScanPlanningRequest,
-    TableScanWorkerDescriptor,
+    CallbackErrorReport, OwnsForeignServer, PlanTableScan, PlannedTableScanResult,
+    REGISTER_DUPLICATE_TABLE_SCAN_ROUTE, REGISTER_INVALID_DESCRIPTOR,
+    TableScanDescriptor, TableScanPlanningRequest, TableScanWorkerDescriptor,
 };
 use lagodb_query::datafusion::{TableScanCallbacks, WorkerTableScanCallbacks};
 use pgrx::{pg_sys, prelude::PgSqlErrorCode};
 
 use crate::descriptor_registry::{
-    DescriptorNode, DescriptorRegistry, DescriptorSnapshot,
+    DescriptorRegistry, DescriptorSnapshot, PreparedDescriptors,
 };
 
 thread_local! {
@@ -155,35 +154,26 @@ impl StoredTableScan {
         let mut error = CallbackErrorReport::default();
         // SAFETY: registration validated the callback table; output and error
         // storage remain live for this synchronous planning-time call.
-        match unsafe {
+        let status = unsafe {
             (self.callbacks.owns_foreign_server)(
                 self.callbacks.context,
                 server_oid,
                 &mut owned,
                 &mut error,
             )
-        } {
-            CALLBACK_OK => Ok(owned),
-            CALLBACK_FAILED => {
-                // SAFETY: FAILED requires the provider callback to populate
-                // the fixed-layout error record synchronously.
-                Err(unsafe { error.to_error("table scan foreign-server ownership") })
-            }
-            status => Err(PgReportError::from_message(
-                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                format!(
-                    "table-scan foreign-server ownership callback returned unknown status {status}"
-                ),
-            )),
-        }
+        };
+        // SAFETY: a failed callback populated `error` with text owned by the
+        // active PostgreSQL context for this synchronous call.
+        unsafe { error.into_result(status, "table scan foreign-server ownership") }?;
+        Ok(owned)
     }
 }
 
-pub(crate) struct PendingTableScanRegistration {
-    entry: Option<Box<DescriptorNode<StoredTableScan>>>,
+pub(crate) struct PreparedTableScanRegistration {
+    entry: PreparedDescriptors<StoredTableScan>,
 }
 
-impl PendingTableScanRegistration {
+impl PreparedTableScanRegistration {
     pub(crate) fn prepare(
         descriptor: Option<&TableScanDescriptor>,
         worker: Option<&TableScanWorkerDescriptor>,
@@ -200,8 +190,9 @@ impl PendingTableScanRegistration {
         if descriptor.is_some_and(StoredTableScan::conflicts_with_registered_route) {
             return Err(REGISTER_DUPLICATE_TABLE_SCAN_ROUTE);
         }
-        let entry = descriptor.map(DescriptorNode::new);
-        Ok(Self { entry })
+        Ok(Self {
+            entry: PreparedDescriptors::new(descriptor),
+        })
     }
 
     pub(crate) fn commit(self) {
@@ -259,7 +250,7 @@ impl ResolvedTableScan {
 pub(super) struct TableScanRegistry;
 
 impl TableScanRegistry {
-    fn commit(entry: Option<Box<DescriptorNode<StoredTableScan>>>) {
+    fn commit(entry: PreparedDescriptors<StoredTableScan>) {
         let _ = TABLE_SCANS.with(|registry| registry.commit(entry));
     }
 

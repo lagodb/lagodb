@@ -12,8 +12,6 @@ pub(super) enum QueryHostError {
     InvalidPlan { detail: String },
     #[error("query-offload executor contract is invalid: {0}")]
     ExecutorContract(&'static str),
-    #[error("query-offload memory budget exceeds the host address space")]
-    MemoryBudgetOverflow,
     #[error("table scan failed: {0}")]
     TableScan(#[source] PgReportError),
     #[error("query engine failed: {0}")]
@@ -53,9 +51,9 @@ impl SqlStateError for QueryHostError {
         match self {
             Self::TableScan(error) => error.sql_error_code(),
             Self::Execution(error) => error.sql_error_code(),
-            Self::InvalidPlan { .. }
-            | Self::ExecutorContract(_)
-            | Self::MemoryBudgetOverflow => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            Self::InvalidPlan { .. } | Self::ExecutorContract(_) => {
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+            }
         }
     }
 }

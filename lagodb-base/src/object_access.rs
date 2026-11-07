@@ -3,7 +3,7 @@
 use std::ffi::{c_char, c_void};
 use std::sync::OnceLock;
 
-use crate::descriptor_registry::{DescriptorNode, DescriptorRegistry};
+use crate::descriptor_registry::{DescriptorRegistry, PreparedDescriptors};
 use crate::{
     storage::volume_config::{DatabaseDirectoryPolicy, on_object_access},
     worker,
@@ -11,7 +11,8 @@ use crate::{
 use lagodb_core::diag::PgReportError;
 use lagodb_core::runtime_api::{
     OBJECT_ACCESS_EVENTS_KNOWN, ObjectAccessHookDescriptor,
-    ObjectAccessStrHookDescriptor, object_access_event_mask,
+    ObjectAccessStrHookDescriptor, REGISTER_INVALID_DESCRIPTOR,
+    object_access_event_mask,
 };
 use pgrx::{pg_guard, pg_sys};
 
@@ -31,16 +32,19 @@ static PREV_OBJECT_ACCESS_STR_HOOK: OnceLock<pg_sys::object_access_hook_type_str
 pub(crate) struct PreparedObjectAccessHooks {
     // Both node families are allocated completely before atomic registration
     // starts publishing stable backend-lifetime addresses.
-    #[allow(clippy::vec_box)]
-    nodes: Vec<Box<DescriptorNode<ObjectAccessHookDescriptor>>>,
-    #[allow(clippy::vec_box)]
-    str_nodes: Vec<Box<DescriptorNode<ObjectAccessStrHookDescriptor>>>,
+    hooks: PreparedDescriptors<ObjectAccessHookDescriptor>,
+    str_hooks: PreparedDescriptors<ObjectAccessStrHookDescriptor>,
 }
 
+/// Install the object-access router during shared preload, before provider
+/// libraries can register descriptors. The string router has no runtime-owned
+/// consumer and is installed with its first registered descriptor.
 pub(crate) fn init() {
-    if unsafe { pg_sys::process_shared_preload_libraries_in_progress } {
-        install_router();
-    }
+    PREV_OBJECT_ACCESS_HOOK.get_or_init(|| unsafe {
+        let previous = pg_sys::object_access_hook;
+        pg_sys::object_access_hook = Some(object_access_router);
+        previous
+    });
 }
 
 fn valid_filter(event_mask: u32) -> bool {
@@ -59,52 +63,34 @@ fn valid_str_descriptor(descriptor: &ObjectAccessStrHookDescriptor) -> bool {
         && descriptor.on_access.is_some()
 }
 
-pub(crate) fn prepare_hooks(
-    descriptors: &[ObjectAccessHookDescriptor],
-    str_descriptors: &[ObjectAccessStrHookDescriptor],
-) -> Option<PreparedObjectAccessHooks> {
-    if !descriptors.iter().all(valid_descriptor)
-        || !str_descriptors.iter().all(valid_str_descriptor)
-    {
-        return None;
+impl PreparedObjectAccessHooks {
+    pub(crate) fn prepare(
+        descriptors: &[ObjectAccessHookDescriptor],
+        str_descriptors: &[ObjectAccessStrHookDescriptor],
+    ) -> Result<Self, u32> {
+        if !descriptors.iter().all(valid_descriptor)
+            || !str_descriptors.iter().all(valid_str_descriptor)
+        {
+            return Err(REGISTER_INVALID_DESCRIPTOR);
+        }
+        Ok(Self {
+            hooks: PreparedDescriptors::new(descriptors.iter().copied()),
+            str_hooks: PreparedDescriptors::new(str_descriptors.iter().copied()),
+        })
     }
-    Some(PreparedObjectAccessHooks {
-        nodes: descriptors
-            .iter()
-            .copied()
-            .map(DescriptorNode::new)
-            .collect(),
-        str_nodes: str_descriptors
-            .iter()
-            .copied()
-            .map(DescriptorNode::new)
-            .collect(),
-    })
-}
 
-pub(crate) fn commit_hooks(prepared: PreparedObjectAccessHooks) {
-    let install =
-        OBJECT_ACCESS_HOOKS.with(|registry| registry.commit(prepared.nodes));
-    let install_str =
-        OBJECT_ACCESS_STR_HOOKS.with(|registry| registry.commit(prepared.str_nodes));
-    if install {
-        install_router();
+    pub(crate) fn commit(self) {
+        let _ = OBJECT_ACCESS_HOOKS.with(|registry| registry.commit(self.hooks));
+        let install_str =
+            OBJECT_ACCESS_STR_HOOKS.with(|registry| registry.commit(self.str_hooks));
+        if install_str {
+            PREV_OBJECT_ACCESS_STR_HOOK.get_or_init(|| unsafe {
+                let previous = pg_sys::object_access_hook_str;
+                pg_sys::object_access_hook_str = Some(object_access_str_router);
+                previous
+            });
+        }
     }
-    if install_str {
-        PREV_OBJECT_ACCESS_STR_HOOK.get_or_init(|| unsafe {
-            let previous = pg_sys::object_access_hook_str;
-            pg_sys::object_access_hook_str = Some(object_access_str_router);
-            previous
-        });
-    }
-}
-
-fn install_router() {
-    PREV_OBJECT_ACCESS_HOOK.get_or_init(|| unsafe {
-        let previous = pg_sys::object_access_hook;
-        pg_sys::object_access_hook = Some(object_access_router);
-        previous
-    });
 }
 
 #[cfg(test)]

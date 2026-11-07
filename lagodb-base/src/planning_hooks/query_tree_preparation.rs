@@ -9,7 +9,6 @@ use pgrx::pg_sys;
 
 use crate::descriptor_registry::DescriptorSnapshot;
 
-use super::callback_result;
 use super::registry::StoredModifyPlanner;
 
 pub(super) struct QueryTreePreparation {
@@ -58,7 +57,9 @@ impl QueryTreePreparation {
             let status = unsafe {
                 (descriptor.prepare_query)(descriptor.context, parse, &mut error)
             };
-            callback_result(status, &error, "modify query preparation callback")
+            // SAFETY: a failed callback populated `error` with text owned by
+            // the active PostgreSQL context for this synchronous call.
+            unsafe { error.into_result(status, "modify query preparation callback") }
         })?;
 
         // SAFETY: all Query-local mutations are complete before PG reads its

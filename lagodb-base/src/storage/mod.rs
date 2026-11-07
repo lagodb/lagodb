@@ -5,8 +5,8 @@
 //! `_PG_init` registers its GUC backing statics and one static
 //! postmaster-managed background worker.
 
-mod catalog;
 mod config;
+mod config_source;
 mod error;
 mod gucs;
 mod logging;
@@ -18,15 +18,11 @@ mod supervisor;
 mod tasks;
 pub(crate) mod volume_config;
 
-use std::path::PathBuf;
-
 use lagodb_core::diag::{ReportableError, log_info, report_warning};
-use lagodb_core::storage::service::StorageEndpoint;
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::prelude::*;
 
-use state::STORAGE_STATE;
-pub(crate) use state::StorageRuntimeStatus;
+use state::{STORAGE_STATE, StorageRuntimeStatus};
 
 const LIBRARY_NAME: &str = "lagodb_base";
 const WORKER_FUNCTION: &str = "lagodb_base_storage_bgworker_main";
@@ -35,24 +31,21 @@ pub(crate) fn init_shared_memory() {
     pgrx::pg_shmem_init!(STORAGE_STATE);
 }
 
-/// Register storage GUCs and the static storage background worker.
+/// Define the storage GUCs on every load of the runtime library.
 ///
-/// Must be called from `_PG_init`. Only the runtime crate owns this host path;
-/// AM crates discover the endpoint through PostgreSQL GUCs and never register
-/// this worker themselves.
+/// Only the runtime crate owns this host path; AM crates discover the endpoint
+/// through PostgreSQL GUCs and never register the storage worker themselves.
+pub(crate) fn define_gucs() {
+    gucs::define();
+}
+
+/// Clean the postmaster-wide staging directory and register the static storage
+/// background worker.
+///
+/// `_PG_init` calls this only during a normal shared preload: binary upgrade
+/// loads libraries but must not start services, and a backend LOAD must not
+/// disturb live transaction files.
 pub(crate) fn init() {
-    gucs::init();
-
-    // Static workers and postmaster-wide staging cleanup are valid only during
-    // normal shared preload. Binary upgrade loads libraries but must not start
-    // services, and a backend LOAD must not disturb live transaction files.
-    if unsafe {
-        !pg_sys::process_shared_preload_libraries_in_progress
-            || pg_sys::IsBinaryUpgrade
-    } {
-        return;
-    }
-
     cleanup_staging_dir();
 
     // Force the linker to retain the entry-point symbol in the runtime cdylib.
@@ -71,13 +64,13 @@ pub(crate) fn init() {
         .load();
 }
 
-pub(crate) fn runtime_status() -> StorageRuntimeStatus {
-    let (socket_path, cache_dir) = resolved_endpoint().into_parts();
+fn runtime_status() -> StorageRuntimeStatus {
+    let (socket_path, cache_dir) = gucs::endpoint().into_parts();
     state::snapshot(socket_path, cache_dir)
 }
 
 fn cleanup_staging_dir() {
-    let (_, cache_dir) = resolved_endpoint().into_parts();
+    let (_, cache_dir) = gucs::endpoint().into_parts();
     let staging_dir =
         lagodb_storage::StagingPathResolver::new(cache_dir).staging_dir();
     if !staging_dir.exists() {
@@ -93,15 +86,6 @@ fn cleanup_staging_dir() {
             staging_dir.display()
         )),
     }
-}
-
-fn resolved_endpoint() -> StorageEndpoint {
-    StorageEndpoint::from_config(
-        gucs::socket_path().map(PathBuf::from),
-        gucs::cache_dir().map(PathBuf::from),
-        gucs::backend_max_idle_connections(),
-    )
-    .expect("PostgreSQL DataDir must be initialized before resolving storage paths")
 }
 
 /// Background worker entry point called by PostgreSQL after forking.

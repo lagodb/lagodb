@@ -16,8 +16,8 @@ use lagodb_core::backend::BackendLatch;
 use lagodb_core::diag::PgReportError;
 use lagodb_storage::{ManagedStoreRegistry, StorageRuntime};
 
-use super::catalog::VolumeConfigSource;
 use super::config::StorageWorkerConfig;
+use super::config_source::VolumeConfigSource;
 use super::error::StorageWorkerError;
 use super::logging::{self, PgLogBridge};
 use super::reload::{ReconcilePhase, StorageReconciler, SupervisorReloadState};
@@ -25,14 +25,14 @@ use super::state::StorageStatusStore;
 use super::tasks::{StorageTaskEvent, StorageWorkerTasks};
 use super::volume_config::StorageVolumeConfigStore;
 
-pub struct StorageWorkerSupervisor {
+pub(super) struct StorageWorkerSupervisor {
     config: StorageWorkerConfig,
     log_bridge: PgLogBridge,
 }
 
 impl StorageWorkerSupervisor {
     /// Snapshot GUCs and install the tracing subscriber on the bgworker main thread.
-    pub fn from_gucs() -> Self {
+    pub(super) fn from_gucs() -> Self {
         let config = StorageWorkerConfig::from_gucs();
         let (log_bridge, log_writer) =
             logging::new_bridge(config.startup.log_channel_capacity);
@@ -50,7 +50,7 @@ impl StorageWorkerSupervisor {
 
     /// Run until shutdown or task failure, then make a bounded attempt to drain
     /// Rust resources before PostgreSQL terminates this worker process.
-    pub fn run(mut self) -> Result<(), PgReportError> {
+    pub(super) fn run(mut self) -> Result<(), PgReportError> {
         BackgroundWorker::connect_worker_to_spi(Some("postgres"), None);
         // Bootstrap has no running tasks. Construct the Tokio runtime last so
         // every bootstrap error can return without asynchronous teardown.

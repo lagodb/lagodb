@@ -7,12 +7,9 @@ mod registry;
 
 use std::sync::OnceLock;
 
-use lagodb_core::diag::PgReportError;
-use lagodb_core::runtime_api::{CALLBACK_FAILED, CALLBACK_OK, CallbackErrorReport};
 use pgrx::pg_sys;
-use pgrx::prelude::PgSqlErrorCode;
 
-pub(crate) use registry::{PreparedPlanningHooks, commit, prepare};
+pub(crate) use registry::PreparedPlanningHooks;
 
 static PREV_PLANNER: OnceLock<pg_sys::planner_hook_type> = OnceLock::new();
 static PREV_SET_REL_PATHLIST: OnceLock<pg_sys::set_rel_pathlist_hook_type> =
@@ -46,24 +43,5 @@ pub(crate) fn init() {
             pg_sys::create_upper_paths_hook = Some(pathlist::create_upper_paths);
             previous
         });
-    }
-}
-
-fn callback_result(
-    status: u32,
-    error: &CallbackErrorReport,
-    callback: &'static str,
-) -> Result<(), PgReportError> {
-    match status {
-        CALLBACK_OK => Ok(()),
-        CALLBACK_FAILED => {
-            // SAFETY: registered exact-build callbacks must return text owned
-            // by the active PostgreSQL context for this synchronous call.
-            Err(unsafe { error.to_error(callback) })
-        }
-        status => Err(PgReportError::from_message(
-            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-            format!("{callback} returned unknown planning status {status}"),
-        )),
     }
 }

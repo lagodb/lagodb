@@ -4,7 +4,6 @@ use lagodb_core::diag::SqlStateError;
 use pgrx::prelude::*;
 
 mod descriptor_registry;
-mod gucs;
 mod maintenance;
 mod object_access;
 mod planning_hooks;
@@ -25,24 +24,37 @@ extension_sql_file!("../sql/finalize.sql", finalize);
 
 #[pg_guard]
 extern "C-unwind" fn _PG_init() {
-    gucs::init();
-    storage::init();
-    provider_bootstrap::init();
-    runtime_host::init();
+    // Every load defines the GUCs and publishes the runtime ABI table.
+    query_host::define_gucs();
+    worker::define_gucs();
+    maintenance::define_gucs();
+    storage::define_gucs();
+    provider_bootstrap::define_gucs();
+    runtime_host::define_gucs();
+    runtime_host::publish();
 
-    if unsafe {
+    // Hooks, shared memory, transaction callbacks, background workers and
+    // provider libraries exist only in a normal shared preload. A session LOAD
+    // and a binary upgrade install none of them, so subsystems do not repeat
+    // this load-phase check.
+    let normal_shared_preload = unsafe {
         pg_sys::process_shared_preload_libraries_in_progress
             && !pg_sys::IsBinaryUpgrade
-    } {
-        worker::init_shared_memory();
-        storage::init_shared_memory();
-        worker::init_lifecycle();
-        planning_hooks::init();
-        query_host::init();
-        RUNTIME_PRELOADED.store(true, Ordering::Release);
-        worker::init();
-        provider_bootstrap::load_configured();
+    };
+    if !normal_shared_preload {
+        return;
     }
+    storage::init();
+    worker::init_shared_memory();
+    storage::init_shared_memory();
+    worker::init_lifecycle();
+    object_access::init();
+    process_utility::init();
+    planning_hooks::init();
+    query_host::init();
+    RUNTIME_PRELOADED.store(true, Ordering::Release);
+    worker::init();
+    provider_bootstrap::load_configured();
 }
 
 pub(crate) fn runtime_is_preloaded() -> bool {

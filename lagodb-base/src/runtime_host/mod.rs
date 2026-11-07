@@ -1,64 +1,23 @@
 //! Host implementation and publisher for `lagodb_core::runtime_api`.
 //!
 //! Registration transaction ownership lives in a focused submodule. Capability
-//! registries remain with the subsystems that execute them; this module only
-//! assembles the exact-build runtime function table and publishes it through
-//! PostgreSQL's rendezvous variable.
+//! registries and their ABI callbacks remain with the subsystems that own them;
+//! this module assembles the exact-build runtime function table and publishes
+//! it through PostgreSQL's rendezvous variable. It also owns
+//! `lagodb.customscan_mode`, which no base subsystem reads: only providers do,
+//! through the table.
 
+mod customscan_mode;
 mod registration;
-mod storage_volume;
 
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::c_void;
 
-use lagodb_core::runtime_api::{
-    RuntimeApi, STAGE_WORKER_WAKEUP_INVALID_REQUEST,
-    STAGE_WORKER_WAKEUP_LOCATOR_NOT_FOUND, STAGE_WORKER_WAKEUP_OK,
-    STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED, SdkVersion, rendezvous_slot,
-};
-use pgrx::{pg_guard, pg_sys};
+use lagodb_core::runtime_api::{RuntimeApi, SdkVersion, rendezvous_slot};
 
-use crate::{gucs, object_access, process_utility, runtime_is_preloaded, worker};
+use crate::storage::volume_config::load_tablespace_bindings;
+use crate::worker::stage_named_worker_wakeup;
 use crate::{maintenance, table_provider_registry};
-use storage_volume::load_tablespace_bindings;
-
-#[pg_guard]
-unsafe extern "C-unwind" fn customscan_mode() -> u32 {
-    gucs::customscan_mode_code()
-}
-
-#[pg_guard]
-unsafe extern "C-unwind" fn stage_worker_wakeup(
-    extension_name: *const c_char,
-    worker_name: *const c_char,
-) -> u32 {
-    if !runtime_is_preloaded() {
-        return STAGE_WORKER_WAKEUP_RUNTIME_NOT_PRELOADED;
-    }
-    if extension_name.is_null() || worker_name.is_null() {
-        return STAGE_WORKER_WAKEUP_INVALID_REQUEST;
-    }
-    // SAFETY: the runtime ABI requires both non-null inputs to point to live,
-    // NUL-terminated strings for this synchronous call.
-    let extension_name = unsafe { CStr::from_ptr(extension_name) };
-    // SAFETY: the same runtime ABI string contract applies to `worker_name`.
-    let worker_name = unsafe { CStr::from_ptr(worker_name) };
-    if extension_name.is_empty()
-        || worker_name.is_empty()
-        || worker_name.to_bytes().len() > worker::MAX_WORKER_NAME_BYTES
-    {
-        return STAGE_WORKER_WAKEUP_INVALID_REQUEST;
-    }
-    let Ok(worker_name) = worker_name.to_str() else {
-        return STAGE_WORKER_WAKEUP_INVALID_REQUEST;
-    };
-    let Some(worker_id) = worker::resolve_worker_id(extension_name, worker_name)
-        .unwrap_or_else(|error| error.report())
-    else {
-        return STAGE_WORKER_WAKEUP_LOCATOR_NOT_FOUND;
-    };
-    worker::stage_worker_wakeup(worker_id);
-    STAGE_WORKER_WAKEUP_OK
-}
+use customscan_mode::customscan_mode;
 
 static RUNTIME_API: RuntimeApi = RuntimeApi {
     sdk_version: SdkVersion::CURRENT,
@@ -66,11 +25,17 @@ static RUNTIME_API: RuntimeApi = RuntimeApi {
     provider_for_am: table_provider_registry::provider_for_am,
     customscan_mode,
     maintenance_config: maintenance::maintenance_config,
-    stage_worker_wakeup,
+    stage_worker_wakeup: stage_named_worker_wakeup,
     load_tablespace_bindings,
 };
 
-pub(crate) fn init() {
+/// Define the runtime-owned GUCs on every load of the runtime library.
+pub(crate) fn define_gucs() {
+    customscan_mode::define();
+}
+
+/// Publish the runtime ABI table through the rendezvous variable on every load.
+pub(crate) fn publish() {
     // SAFETY: PostgreSQL owns the rendezvous slot and returns its non-null
     // backend-local address for the static name defined by the core runtime ABI.
     let slot = unsafe { rendezvous_slot() };
@@ -90,10 +55,4 @@ pub(crate) fn init() {
             .cast_mut()
             .cast::<c_void>();
     }
-    // SAFETY: PostgreSQL exposes binary-upgrade state as a backend-global flag.
-    if unsafe { pg_sys::IsBinaryUpgrade } {
-        return;
-    }
-    object_access::init();
-    process_utility::init();
 }
