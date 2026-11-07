@@ -651,6 +651,17 @@ SELECT count(*) AS matched_rows
 FROM customscan_partial_pushdown_t AS t
 WHERE (a = 1 AND NOT (t IS NULL)) OR a = 2;
 
+-- Volatile functions and SubPlans block OR widening; the clause stays residual.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT a FROM customscan_partial_pushdown_t
+WHERE (a = 1 AND random() < 2.0) OR a = 2;
+
+EXPLAIN (COSTS OFF)
+SELECT a FROM customscan_partial_pushdown_t AS t
+WHERE (a = 1 AND EXISTS (SELECT 1 FROM (VALUES (1)) AS v(x) WHERE v.x = t.a))
+   OR a = 2;
+
 RESET lagodb.customscan_mode;
 DROP TABLE customscan_partial_pushdown_t;
 -- Auto mode on a read: the provider replaces the table AM SeqScan, so the

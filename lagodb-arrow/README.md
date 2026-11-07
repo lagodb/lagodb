@@ -117,22 +117,8 @@ cargo test -p lagodb-arrow
 ```
 
 Paths that require a live PostgreSQL backend — Arrow⇆PG encode/decode into real
-slots, write/read round trips, buffer/flush behavior, and toast detoast —
-are `#[pg_test]` tests hosted in the aggregator crate
-[pg-backend-tests](../pg-backend-tests):
-
-The aggregator preloads `lagodb_base`. Install that runtime into the
-target pgrx PostgreSQL installation before running the test. The loop covers
-every target major; run only the majors initialized with `cargo pgrx init`:
-
-```bash
-for pg in pg16 pg17 pg18; do
-  cargo pgrx install \
-    --package lagodb-base \
-    --pg-config "$(cargo pgrx info pg-config "${pg}")"
-  cargo pgrx test "${pg}" --package pg-backend-tests
-done
-```
+slots, write/read round trips, buffer/flush behavior, and toast detoast — are
+covered by the `lagodb-iceberg` and `lagodb-connectors` SQL regression suites.
 
 ## License
 

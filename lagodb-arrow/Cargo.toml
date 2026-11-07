@@ -17,7 +17,7 @@ crate-type = ["rlib"]
 [features]
 # Default to pg18 so `cargo test -p lagodb-arrow` (and any direct dependent)
 # selects a Postgres version without an explicit `--features`, matching
-# lagodb-core / lagodb-iceberg / pg-backend-tests.
+# lagodb-core / lagodb-iceberg.
 default = ["pg18"]
 # Thread the supported PostgreSQL majors through to pgrx and core.
 pg16 = ["pgrx/pg16", "lagodb-core/pg16"]

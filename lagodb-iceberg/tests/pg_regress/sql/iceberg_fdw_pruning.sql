@@ -281,6 +281,9 @@ SELECT id FROM iceberg_fdw_pruning.scalars WHERE clock IS NOT NULL ORDER BY id;
 -- Fixed binary equality uses the source width, not UUID semantics.
 SELECT id FROM iceberg_fdw_pruning.scalars WHERE fixed_payload = '\x8000'::bytea ORDER BY id;
 
+-- A write whose length differs from the fixed width is rejected.
+INSERT INTO iceberg_fdw_pruning.scalars (id, fixed_payload) VALUES (100, '\x01');
+
 -- A newly added optional boolean is NULL in every older data file.
 SELECT id FROM iceberg_fdw_pruning.scalars WHERE later_flag IS TRUE ORDER BY id;
 

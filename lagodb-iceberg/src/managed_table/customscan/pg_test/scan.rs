@@ -4,10 +4,7 @@
 //! with varlena columns, a NULL in each varlena, and a reordered projection.
 //! Slot datums are decoded into the scan node's per-tuple memory context (which
 //! `ExecScan` resets each tuple cycle), so a correct read-back of every row
-//! confirms the consumer sees each tuple before that reset reclaims it — the
-//! end-to-end counterpart to the per-tuple-context lifetime asserted directly
-//! in `pg-backend-tests`
-//! (`emit_row_targets_per_tuple_context_and_does_not_grow_tts_mcxt`).
+//! confirms the consumer sees each tuple before that reset reclaims it.
 
 #[pgrx::pg_schema]
 mod tests {

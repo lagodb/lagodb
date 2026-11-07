@@ -5,7 +5,6 @@ use core::ptr;
 
 use pgrx::pg_sys;
 
-use crate::customscan::plan_data::tuple_layout::NeededColumns;
 use crate::customscan::plan_data::tuple_layout::ScanTupleLayout;
 use crate::expr::inspect::{RelationExprAnalyzer, RelationExprUsage, RelationScope};
 use crate::expr::relation::RelationVarsByAttno;
@@ -337,102 +336,4 @@ struct DirectOutput {
     var: *mut pg_sys::Var,
     resname: *mut c_char,
     resjunk: bool,
-}
-
-/// Backend-test view of a planned base-scan tuple contract.
-///
-/// This adapter is compiled only for the dedicated `pg-backend-tests`
-/// extension. Keeping construction here lets those tests exercise the real
-/// private planner without widening the production CustomScan API.
-#[doc(hidden)]
-pub struct ScanTuplePlanProbe {
-    custom_scan_tlist: *mut pg_sys::List,
-    layout: ScanTupleLayout,
-}
-
-/// Raw scan-tuple shape reported by [`ScanTuplePlanProbe`].
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScanTupleShape<'a> {
-    Relation,
-    RowOnly,
-    ProjectedBase(&'a [pg_sys::AttrNumber]),
-}
-
-impl ScanTuplePlanProbe {
-    /// Run the production base-scan tuple planner over backend-owned nodes.
-    ///
-    /// # Safety
-    ///
-    /// Every pointer must be NULL or a live PostgreSQL planner node of the
-    /// documented list shape.
-    pub unsafe fn plan_base_scan(
-        scan_relid: pg_sys::Index,
-        targetlist: *mut pg_sys::List,
-        path_target_exprs: *mut pg_sys::List,
-        qual: *mut pg_sys::List,
-        custom_exprs: *mut pg_sys::List,
-    ) -> Self {
-        let planned = unsafe {
-            BaseScanTuplePlanner::new(scan_relid).plan(
-                targetlist,
-                path_target_exprs,
-                qual,
-                custom_exprs,
-            )
-        };
-        Self {
-            custom_scan_tlist: planned.custom_scan_tlist,
-            layout: planned.layout,
-        }
-    }
-
-    /// Run the relation-shaped storage-pruning planner used by Modify scans.
-    ///
-    /// # Safety
-    ///
-    /// Every pointer must be NULL or a live PostgreSQL planner node of the
-    /// documented list shape.
-    pub unsafe fn plan_relation_scan(
-        scan_relid: pg_sys::Index,
-        targetlist: *mut pg_sys::List,
-        path_target_exprs: *mut pg_sys::List,
-        qual: *mut pg_sys::List,
-        custom_exprs: *mut pg_sys::List,
-    ) -> Self {
-        let planned = unsafe {
-            BaseScanTuplePlanner::new(scan_relid).plan_relation_scan(
-                targetlist,
-                path_target_exprs,
-                qual,
-                custom_exprs,
-            )
-        };
-        Self {
-            custom_scan_tlist: planned.custom_scan_tlist,
-            layout: planned.layout,
-        }
-    }
-
-    pub fn shape(&self) -> ScanTupleShape<'_> {
-        if self.custom_scan_tlist.is_null() {
-            return ScanTupleShape::Relation;
-        }
-        if self.layout.is_row_only() {
-            return ScanTupleShape::RowOnly;
-        }
-
-        match self.layout.required_columns() {
-            NeededColumns::Subset(attnos) => ScanTupleShape::ProjectedBase(attnos),
-            NeededColumns::All => ScanTupleShape::Relation,
-        }
-    }
-
-    pub fn required_columns(&self) -> NeededColumns<'_> {
-        self.layout.required_columns()
-    }
-
-    pub fn custom_scan_tlist(&self) -> *mut pg_sys::List {
-        self.custom_scan_tlist
-    }
 }

@@ -4710,21 +4710,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg-backend-tests"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "bytes",
- "lagodb-arrow",
- "lagodb-core",
- "pgrx",
- "pgrx-tests",
- "proptest",
- "serde_json",
-]
-
-[[package]]
 name = "pg-delta-am"
 version = "0.1.0"
 dependencies = [

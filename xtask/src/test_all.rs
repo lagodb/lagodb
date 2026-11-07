@@ -21,14 +21,7 @@ pub(crate) fn run(pg: &PgInstallation) -> Result<(), String> {
         .arg(pg.label());
     run_command(&mut unit_tests)?;
 
-    println!("\n=== Phase 2: framework pg_test (PostgreSQL) ===\n");
-    // Framework backend tests exercise the same cross-DSO runtime ABI used by
-    // product extensions. Install the runtime before pgrx starts the test
-    // cluster so pg-backend-tests can preload the sole owner of shared GUCs.
-    pg.install(Extension::Runtime)?;
-    pg.test(Extension::BackendTests)?;
-
-    println!("\n=== Phase 3: Extension Rust tests (host + pg_test) ===\n");
+    println!("\n=== Phase 2: Extension Rust tests (host + pg_test) ===\n");
     pg.test(Extension::Runtime)?;
     // `cargo pgrx test` replaces the runtime artifacts in PostgreSQL's shared
     // extension directory with a build containing `pg_test` SQL entities.
@@ -38,13 +31,13 @@ pub(crate) fn run(pg: &PgInstallation) -> Result<(), String> {
     pg.test(Extension::Iceberg)?;
     let regression = RegressionRunner::new(pg)?;
 
-    println!("\n=== Phase 4: lagodb-iceberg SQL regression (PostgreSQL) ===\n");
+    println!("\n=== Phase 3: lagodb-iceberg SQL regression (PostgreSQL) ===\n");
     regression.run(RegressionSuite::Iceberg, None)?;
 
-    println!("\n=== Phase 5: LagoDB connectors SQL regression (PostgreSQL) ===\n");
+    println!("\n=== Phase 4: LagoDB connectors SQL regression (PostgreSQL) ===\n");
     regression.run(RegressionSuite::Connectors, None)?;
 
-    println!("\n=== Phase 6: Isolation tests (PostgreSQL) ===\n");
+    println!("\n=== Phase 5: Isolation tests (PostgreSQL) ===\n");
     isolation::run(pg, &[])?;
 
     println!();

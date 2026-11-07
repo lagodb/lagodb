@@ -529,6 +529,9 @@ SELECT id FROM iceberg_fdw_pruning.scalars WHERE fixed_payload = '\x8000'::bytea
   4
 (2 rows)
 
+-- A write whose length differs from the fixed width is rejected.
+INSERT INTO iceberg_fdw_pruning.scalars (id, fixed_payload) VALUES (100, '\x01');
+ERROR:  FDW provider "lagodb_iceberg" callback ExecForeignBatchInsert failed: FDW provider modify error: Arrow/Datum conversion error: column data type 'fixed[2]' is incompatible: BYTEA length 1
 -- A newly added optional boolean is NULL in every older data file.
 SELECT id FROM iceberg_fdw_pruning.scalars WHERE later_flag IS TRUE ORDER BY id;
  id 

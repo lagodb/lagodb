@@ -98,7 +98,7 @@ Runs Tier 1 pure unit tests instantly without starting PostgreSQL:
   (matches `xtask` Phase 1):
   ```bash
   for pg_feature in pg16 pg17 pg18; do
-    cargo test --workspace --exclude pg-backend-tests --exclude lagodb-base --exclude lagodb-iceberg --exclude pg-delta-am --exclude lagodb-connectors --no-default-features --features "${pg_feature}"
+    cargo test --workspace --exclude lagodb-base --exclude lagodb-iceberg --exclude pg-delta-am --exclude lagodb-connectors --no-default-features --features "${pg_feature}"
   done
   ```
 

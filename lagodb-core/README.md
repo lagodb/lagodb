@@ -141,20 +141,15 @@ The reference implementation is [`lagodb-iceberg`](../lagodb-iceberg), which imp
 
 ## Testing
 
-`lagodb-core` is tested at two levels:
-1. **Pure Rust Unit Tests**: Fast, host-only tests for expression normalization, batch buffers, option parsing, and state machines:
-   ```bash
-   cargo test -p lagodb-core
-   ```
-2. **PostgreSQL Backend Tests**: Tests requiring a live PostgreSQL backend (Datum round-trips, syscache lookups, TableAM C callbacks) are aggregated in the shared [`pg-backend-tests`](../pg-backend-tests) crate:
-   The crate preloads `lagodb_base`, so install that runtime into the target pgrx PostgreSQL installation first. The loop covers every target major; run only the majors initialized with `cargo pgrx init`:
-   ```bash
-   for pg in pg16 pg17 pg18; do
-     cargo pgrx install --package lagodb-base \
-       --pg-config "$(cargo pgrx info pg-config "${pg}")"
-     cargo pgrx test "${pg}" --package pg-backend-tests
-   done
-   ```
+Pure Rust logic (expression normalization, batch buffers, option parsing, and
+state machines) is covered by fast host-only unit tests:
+
+```bash
+cargo test -p lagodb-core
+```
+
+Behavior that needs a live PostgreSQL backend is covered through the product
+extensions' SQL regression suites (`lagodb-iceberg` and `lagodb-connectors`).
 
 ## License
 

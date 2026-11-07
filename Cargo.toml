@@ -7,7 +7,6 @@ members = [
     "lagodb-macros",
     "lagodb-iceberg",
     "lagodb-arrow",
-    "pg-backend-tests",
     "lagodb-connectors",
     "xtask",
 ]

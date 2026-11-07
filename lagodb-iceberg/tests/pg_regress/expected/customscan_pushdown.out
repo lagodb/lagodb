@@ -1165,6 +1165,29 @@ WHERE (a = 1 AND NOT (t IS NULL)) OR a = 2;
             3
 (1 row)
 
+-- Volatile functions and SubPlans block OR widening; the clause stays residual.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT a FROM customscan_partial_pushdown_t
+WHERE (a = 1 AND random() < 2.0) OR a = 2;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Custom Scan (lagodb-iceberg) on customscan_partial_pushdown_t
+   Filter: (((a = 1) AND (random() < '2'::double precision)) OR (a = 2))
+(2 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT a FROM customscan_partial_pushdown_t AS t
+WHERE (a = 1 AND EXISTS (SELECT 1 FROM (VALUES (1)) AS v(x) WHERE v.x = t.a))
+   OR a = 2;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Custom Scan (lagodb-iceberg) on customscan_partial_pushdown_t t
+   Filter: (((a = 1) AND (ANY (a = (hashed SubPlan 2).col1))) OR (a = 2))
+   SubPlan 2
+     ->  Result
+(4 rows)
+
 RESET lagodb.customscan_mode;
 DROP TABLE customscan_partial_pushdown_t;
 -- Auto mode on a read: the provider replaces the table AM SeqScan, so the

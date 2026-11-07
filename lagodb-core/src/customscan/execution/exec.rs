@@ -1,7 +1,7 @@
 //! Stable CustomScan executor facade.
 //!
 //! Lifecycle callbacks live in [`lifecycle`] and [`super::start`]; row production
-//! and EPQ recheck live in [`scan`]. Re-exports keep method-table and test entry points
+//! and EPQ recheck live in [`scan`]. Re-exports keep method-table entry points
 //! independent of that internal split.
 
 pub(crate) use super::lifecycle::end_custom_scan_trampoline;
@@ -11,9 +11,6 @@ pub use super::lifecycle::{
 };
 pub(crate) use super::scan::exec_custom_scan_trampoline;
 pub(crate) use super::start::first_exec_custom_scan_trampoline;
-
-pub use super::lifecycle::check_scan_relation_oid;
-pub use super::scan::next_slot_wrapper;
 
 #[cfg(test)]
 mod tests {

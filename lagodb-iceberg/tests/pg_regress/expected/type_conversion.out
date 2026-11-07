@@ -52,7 +52,7 @@ INSERT INTO iceberg_all_primitives VALUES (
     'varchar value',
     'char val',
     'name_value',
-    '{"json_key": "val"}',
+    '{"json_key": "val", "json_key": "dup"}',
     '{"jsonb_key": "val"}',
     '2024-01-01',
     '12:34:56.789',
@@ -82,13 +82,27 @@ SELECT
     u, 
     encode(by, 'hex') as by_hex
 FROM iceberg_all_primitives ORDER BY id;
- id | b |  si   |     i      |         bi          |    r    |       dp       |   num_spec    |     t      |      vc       |     c      |     n      |          j          |          jb          |     d      |      tm      |              ts              |               tstz               |                  u                   |  by_hex  
-----+---+-------+------------+---------------------+---------+----------------+---------------+------------+---------------+------------+------------+---------------------+----------------------+------------+--------------+------------------------------+----------------------------------+--------------------------------------+----------
-  1 | t | 32767 | 2147483647 | 9223372036854775807 | 3.14159 | 2.718281828459 | 12345678.1234 | text value | varchar value | char val   | name_value | {"json_key": "val"} | {"jsonb_key": "val"} | 01-01-2024 | 12:34:56.789 | Mon Jan 01 12:34:56.789 2024 | Mon Jan 01 12:34:56.789 2024 UTC | a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11 | deadbeef
-  2 |   |       |            |                     |         |                |               |            |               |            |            |                     |                      |            |              |                              |                                  |                                      | 
+ id | b |  si   |     i      |         bi          |    r    |       dp       |   num_spec    |     t      |      vc       |     c      |     n      |                   j                    |          jb          |     d      |      tm      |              ts              |               tstz               |                  u                   |  by_hex  
+----+---+-------+------------+---------------------+---------+----------------+---------------+------------+---------------+------------+------------+----------------------------------------+----------------------+------------+--------------+------------------------------+----------------------------------+--------------------------------------+----------
+  1 | t | 32767 | 2147483647 | 9223372036854775807 | 3.14159 | 2.718281828459 | 12345678.1234 | text value | varchar value | char val   | name_value | {"json_key": "val", "json_key": "dup"} | {"jsonb_key": "val"} | 01-01-2024 | 12:34:56.789 | Mon Jan 01 12:34:56.789 2024 | Mon Jan 01 12:34:56.789 2024 UTC | a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11 | deadbeef
+  2 |   |       |            |                     |         |                |               |            |               |            |            |                                        |                      |            |              |                              |                                  |                                      | 
 (2 rows)
 
 DROP TABLE iceberg_all_primitives;
+-- Out-of-line heap values are detoasted before they are written.
+CREATE TABLE toast_source (b bytea);
+ALTER TABLE toast_source ALTER COLUMN b SET STORAGE EXTERNAL;
+INSERT INTO toast_source VALUES (decode(repeat('ab', 8000), 'hex'));
+CREATE TABLE iceberg_toast_target (b bytea) USING iceberg;
+INSERT INTO iceberg_toast_target SELECT b FROM toast_source;
+SELECT length(t.b) AS bytes, t.b = s.b AS same
+FROM iceberg_toast_target AS t, toast_source AS s;
+ bytes | same 
+-------+------
+  8000 | t
+(1 row)
+
+DROP TABLE iceberg_toast_target, toast_source;
 -- ============================================================================
 -- 2. All Supported Array (List) Types Test
 -- ============================================================================

@@ -86,7 +86,6 @@ Rust tests and `#[pgrx::pg_test]`, is documented in
 - SQL regression inputs: [`lagodb-iceberg/tests/pg_regress/sql`](lagodb-iceberg/tests/pg_regress/sql)
 - SQL expected output: [`lagodb-iceberg/tests/pg_regress/expected`](lagodb-iceberg/tests/pg_regress/expected)
 - Isolation specifications: [`lagodb-iceberg/tests/isolation/specs`](lagodb-iceberg/tests/isolation/specs)
-- Framework backend tests: [`pg-backend-tests`](pg-backend-tests)
 - Storage-service E2E tests: [`lagodb-storage/tests/e2e`](https://github.com/lagodb/lagodb-storage/tree/main/tests/e2e)
 
 The full test command prepares PostgreSQL's upstream `injection_points` test

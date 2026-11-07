@@ -104,64 +104,6 @@ impl<P: LagodbCustomScanProvider> CustomScanStateWrapper<P> {
         // SAFETY: guaranteed by this method's callback-lifecycle contract.
         unsafe { self.provider_state.as_mut().unwrap_unchecked() }
     }
-
-    /// # Safety
-    ///
-    /// `self` must refer to a live wrapper allocated for the current test
-    /// backend memory context.
-    pub unsafe fn test_base_mut(&mut self) -> &mut pg_sys::CustomScanState {
-        &mut self.base
-    }
-
-    /// # Safety
-    ///
-    /// `self` must refer to a live wrapper allocated for the current test
-    /// backend memory context.
-    pub unsafe fn test_base(&self) -> &pg_sys::CustomScanState {
-        &self.base
-    }
-
-    /// # Safety
-    ///
-    /// `self` must refer to a live wrapper allocated for the current test
-    /// backend memory context.
-    pub unsafe fn test_scan_state_ptr(&mut self) -> *mut pg_sys::ScanState {
-        core::ptr::addr_of_mut!(self.base.ss)
-    }
-
-    /// # Safety
-    ///
-    /// `state` must be the provider state created for this wrapper, and the
-    /// wrapper must not already contain an installed provider state.
-    pub unsafe fn test_install_provider_state(&mut self, state: P::State) {
-        self.provider_state = Some(state);
-    }
-
-    /// # Safety
-    ///
-    /// The caller must have installed the provider state and must not use the
-    /// returned reference after teardown begins.
-    pub unsafe fn test_provider_state(&self) -> &P::State {
-        self.provider_state
-            .as_ref()
-            .expect("test provider state was not installed")
-    }
-
-    /// # Safety
-    ///
-    /// `envelope` must describe the live custom scan plan installed in the
-    /// wrapper and must be set before invoking the ReScan callback.
-    pub unsafe fn test_set_cached_envelope(&mut self, envelope: CachedEnvelope) {
-        self.cached_envelope = Some(envelope);
-    }
-
-    /// # Safety
-    ///
-    /// `sections` must reference the live `custom_exprs` plan data for this
-    /// wrapper and must be set before invoking the ReScan callback.
-    pub unsafe fn test_set_expr_sections(&mut self, sections: PgExpressionSections) {
-        self.expr_sections = Some(sections);
-    }
 }
 
 /// `CreateCustomScanState`: allocate wrapper in current memory context,

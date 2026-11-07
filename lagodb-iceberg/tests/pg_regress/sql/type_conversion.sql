@@ -55,7 +55,7 @@ INSERT INTO iceberg_all_primitives VALUES (
     'varchar value',
     'char val',
     'name_value',
-    '{"json_key": "val"}',
+    '{"json_key": "val", "json_key": "dup"}',
     '{"jsonb_key": "val"}',
     '2024-01-01',
     '12:34:56.789',
@@ -84,6 +84,16 @@ SELECT
 FROM iceberg_all_primitives ORDER BY id;
 
 DROP TABLE iceberg_all_primitives;
+
+-- Out-of-line heap values are detoasted before they are written.
+CREATE TABLE toast_source (b bytea);
+ALTER TABLE toast_source ALTER COLUMN b SET STORAGE EXTERNAL;
+INSERT INTO toast_source VALUES (decode(repeat('ab', 8000), 'hex'));
+CREATE TABLE iceberg_toast_target (b bytea) USING iceberg;
+INSERT INTO iceberg_toast_target SELECT b FROM toast_source;
+SELECT length(t.b) AS bytes, t.b = s.b AS same
+FROM iceberg_toast_target AS t, toast_source AS s;
+DROP TABLE iceberg_toast_target, toast_source;
 
 -- ============================================================================
 -- 2. All Supported Array (List) Types Test

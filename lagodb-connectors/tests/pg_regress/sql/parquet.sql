@@ -348,6 +348,10 @@ COPY parquet_integer_array_mismatch FROM :'parquet_exact_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 \set VERBOSITY default
 
+-- A constant-only target list reads no column, so the incompatible column is
+-- never bound.
+SELECT 1 AS one FROM lagodb_connectors_regress.parquet_integer_mismatch LIMIT 1;
+
 -- Native Int16 predicates use the same mapping as scan and COPY.
 SELECT count(*) AS matching_rows
 FROM lagodb_connectors_regress.parquet_exact
@@ -431,6 +435,9 @@ ORDER BY id;
 SELECT text_col, id, bool_col
 FROM lagodb_connectors_regress.scan_projection
 ORDER BY id;
+
+-- A whole-row reference reads every column.
+SELECT p FROM lagodb_connectors_regress.scan_projection AS p ORDER BY p.id;
 
 -- ParquetScanState rescan, schema-drift, and supported-type boundaries.
 SET enable_hashjoin = off;

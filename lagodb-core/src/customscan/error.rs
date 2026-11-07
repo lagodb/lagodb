@@ -289,7 +289,7 @@ impl From<PgReportError> for CustomScanError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::customscan::custom_exprs::PgExpressionSectionsError;
+    use crate::customscan::plan_data::custom_exprs::PgExpressionSectionsError;
     use proptest::prelude::*;
 
     #[derive(Debug, thiserror::Error)]

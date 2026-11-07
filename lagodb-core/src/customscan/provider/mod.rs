@@ -7,7 +7,7 @@ mod context;
 mod contract;
 mod execution;
 mod lifecycle;
-pub mod methods;
+mod methods;
 mod planning;
 mod private_data;
 pub mod registry;
