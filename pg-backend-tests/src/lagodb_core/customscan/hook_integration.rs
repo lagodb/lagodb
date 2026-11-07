@@ -12,10 +12,10 @@ use std::fmt::{self, Display, Formatter};
 use std::sync::OnceLock;
 
 use lagodb_core::customscan::provider::{
-    BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
-    CustomScanError, EndContext, LagodbCustomScanProvider, NextSlotContext,
-    NextSlotResult, PathContext, PathVariant, PathVariantKind, ReScanContext,
-    RelationContext, StartContext, register_provider,
+    BeginContext, CustomPathBuilder, CustomPathPlan, CustomScanError, EndContext,
+    LagodbCustomScanProvider, NextSlotContext, NextSlotResult, PathContext,
+    PathVariant, PathVariantKind, ReScanContext, RelationContext, StartContext,
+    register_provider,
 };
 use lagodb_core::customscan::provider::{
     CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
@@ -354,16 +354,15 @@ impl LagodbCustomScanProvider for HookIntegrationProvider {
         Some(builder.build(HookIntegrationPrivate))
     }
 
-    fn create_state(_ctx: CreateStateContext<Self>) -> Self::State {
-        HookIntegrationState
+    fn begin(_ctx: BeginContext<'_, Self>) -> Result<Self::State, CustomScanError> {
+        Ok(HookIntegrationState)
     }
 
-    fn begin(_ctx: BeginContext<'_, Self>) -> Result<(), CustomScanError> {
-        Ok(())
-    }
-
-    fn start(_ctx: StartContext<'_, Self>) -> Result<(), CustomScanError> {
-        Ok(())
+    fn start(
+        state: Self::State,
+        _ctx: StartContext<'_, Self>,
+    ) -> Result<Self::State, CustomScanError> {
+        Ok(state)
     }
 
     fn next_slot<'a>(

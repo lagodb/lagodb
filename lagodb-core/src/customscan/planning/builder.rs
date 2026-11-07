@@ -230,9 +230,8 @@ mod tests {
     use core::ffi::CStr;
 
     use crate::customscan::provider::{
-        BeginContext, CreateStateContext, CustomScanError, EndContext,
-        NextSlotContext, NextSlotResult, PathContext, ReScanContext, RelationContext,
-        StartContext,
+        BeginContext, CustomScanError, EndContext, NextSlotContext, NextSlotResult,
+        PathContext, ReScanContext, RelationContext, StartContext,
     };
     use crate::customscan::provider::{CustomScanPrivate, PrivateDataReader};
     use crate::expr::RuntimeValueBindings;
@@ -328,23 +327,18 @@ mod tests {
                     None
                 }
 
-                fn create_state(_ctx: CreateStateContext<Self>) -> Self::State {
-                    unreachable!(
-                        "custom scan execution lifecycle is not exercised in builder tests"
-                    )
-                }
-
                 fn begin(
                     _ctx: BeginContext<'_, Self>,
-                ) -> Result<(), CustomScanError> {
+                ) -> Result<Self::State, CustomScanError> {
                     unreachable!(
                         "custom scan execution lifecycle is not exercised in builder tests"
                     )
                 }
 
                 fn start(
+                    _state: Self::State,
                     _ctx: StartContext<'_, Self>,
-                ) -> Result<(), CustomScanError> {
+                ) -> Result<Self::State, CustomScanError> {
                     unreachable!(
                         "custom scan execution lifecycle is not exercised in builder tests"
                     )

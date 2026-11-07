@@ -1,7 +1,6 @@
 //! Iceberg-specific CustomScan lifecycle routing.
 
 use core::ffi::c_void;
-use std::mem;
 
 use crate::error::IcebergError;
 use crate::managed_table::ManagedTableReadView;
@@ -33,12 +32,15 @@ pub(crate) struct IcebergScanState {
     execution: ScanExecutionState,
 }
 
-/// Closed set of CustomScan execution modes and externally visible lifecycle
-/// boundaries.
+/// Closed set of CustomScan execution modes and the lifecycle boundaries
+/// PostgreSQL makes externally visible. Begin constructs the first state; Start
+/// and the outer ModifyTable binding consume a state and return its successor.
 enum ScanExecutionState {
-    Uninitialized,
     SerialAwaitingStart(PreparedRowScan),
     SerialScan(SerialScan),
+    /// Spans Start: Gather initializes DSM before the leader runs its subplan,
+    /// reinitializes it after a rescan whether or not the leader started, and
+    /// a non-participating leader never starts.
     PostgresParallelScan(PostgresParallelScan),
     MutationAwaitingBinding(PreparedManagedMutationScan),
     MutationAwaitingStart {
@@ -46,15 +48,6 @@ enum ScanExecutionState {
         binding: ModifyScanBinding<IcebergModifyQueryState>,
     },
     MutationTargetScan(ManagedMutationScan),
-    Finished,
-}
-
-impl Default for IcebergScanState {
-    fn default() -> Self {
-        Self {
-            execution: ScanExecutionState::Uninitialized,
-        }
-    }
 }
 
 impl IcebergScanState {
@@ -68,7 +61,7 @@ impl IcebergScanState {
 
     pub(super) fn begin(
         ctx: BeginContext<'_, IcebergCustomScanProvider>,
-    ) -> Result<(), CustomScanError> {
+    ) -> Result<Self, CustomScanError> {
         let relation_oid = ctx.relation.oid();
         let scan_tuple = ctx.scan_tuple();
         let projection =
@@ -106,7 +99,7 @@ impl IcebergScanState {
             ReaderPredicate::new(None),
         ));
 
-        ctx.state.execution = if ctx.purpose.is_modify_target() {
+        let execution = if ctx.purpose.is_modify_target() {
             let conflict_filter =
                 BoundIcebergPredicate::conjoin(ctx.filters.static_values())
                     .unwrap_or(Predicate::AlwaysTrue);
@@ -120,18 +113,17 @@ impl IcebergScanState {
         } else {
             ScanExecutionState::SerialAwaitingStart(prepared)
         };
-        Ok(())
+        Ok(Self { execution })
     }
 
     pub(super) fn start(
+        self,
         ctx: StartContext<'_, IcebergCustomScanProvider>,
-    ) -> Result<(), CustomScanError> {
+    ) -> Result<Self, CustomScanError> {
         let predicate = ReaderPredicate::new(
             BoundIcebergPredicate::conjoin_row_filter(ctx.filters.iter()),
         );
-        let prepared =
-            mem::replace(&mut ctx.state.execution, ScanExecutionState::Finished);
-        ctx.state.execution = match prepared {
+        let execution = match self.execution {
             ScanExecutionState::SerialAwaitingStart(prepared) => {
                 ScanExecutionState::SerialScan(SerialScan::new(prepared, predicate)?)
             }
@@ -150,67 +142,52 @@ impl IcebergScanState {
                     ctx.relation.oid(),
                 )?)
             }
-            other => {
-                ctx.state.execution = other;
+            // The outer ModifyTable Begin binds every surviving target scan
+            // before any node executes; this is the one check of that contract.
+            ScanExecutionState::MutationAwaitingBinding(_) => {
                 return Err(CustomScanError::provider(
                     IcebergError::InvariantViolated(
-                        "CustomScan start has no prepared scan or Modify binding",
+                        "ModifyTarget CustomScan started without a ModifyTable binding",
                     ),
                 ));
             }
+            ScanExecutionState::SerialScan(_)
+            | ScanExecutionState::MutationTargetScan(_) => {
+                unreachable!("the CustomScan framework starts a provider scan once")
+            }
         };
-        Ok(())
+        Ok(Self { execution })
     }
 
+    /// Storage context of a begun ModifyTarget scan, read by the outer
+    /// ModifyTable Begin immediately before [`Self::bind_modify`].
     pub(super) fn modify_scan_context(&self) -> Option<IcebergModifyScanContext> {
         match &self.execution {
-            ScanExecutionState::MutationAwaitingBinding(prepared)
-            | ScanExecutionState::MutationAwaitingStart { prepared, .. } => {
+            ScanExecutionState::MutationAwaitingBinding(prepared) => {
                 Some(prepared.context())
             }
-            ScanExecutionState::MutationTargetScan(scan) => Some(scan.context()),
             _ => None,
         }
     }
 
     pub(super) fn bind_modify(
+        self,
         ctx: ModifyBindContext<'_, IcebergCustomScanProvider>,
-    ) -> Result<(), CustomScanError> {
-        let existing = match &ctx.state.execution {
-            ScanExecutionState::MutationAwaitingStart { binding, .. } => {
-                Some(binding)
-            }
-            ScanExecutionState::MutationTargetScan(scan) => Some(scan.binding()),
-            _ => None,
+    ) -> Result<Self, CustomScanError> {
+        let ScanExecutionState::MutationAwaitingBinding(prepared) = self.execution
+        else {
+            unreachable!(
+                "the outer ModifyTable binds each begun ModifyTarget scan once"
+            )
         };
-        if let Some(binding) = existing {
-            return if binding == &ctx.binding {
-                Ok(())
-            } else {
-                Err(CustomScanError::provider(IcebergError::InvariantViolated(
-                    "Modify scan was bound to two relation states",
-                )))
-            };
-        }
-        let current =
-            mem::replace(&mut ctx.state.execution, ScanExecutionState::Finished);
-        match current {
-            ScanExecutionState::MutationAwaitingBinding(prepared) => {
-                // Binding establishes ownership only. Start opens the cursor
-                // after the first dynamic predicates have been evaluated.
-                ctx.state.execution = ScanExecutionState::MutationAwaitingStart {
-                    prepared,
-                    binding: ctx.binding,
-                };
-                Ok(())
-            }
-            other => {
-                ctx.state.execution = other;
-                Err(CustomScanError::provider(IcebergError::InvariantViolated(
-                    "Modify scan binding has no managed mutation state",
-                )))
-            }
-        }
+        // Binding establishes ownership only. Start opens the cursor after the
+        // first dynamic predicates have been evaluated.
+        Ok(Self {
+            execution: ScanExecutionState::MutationAwaitingStart {
+                prepared,
+                binding: ctx.binding,
+            },
+        })
     }
 
     /// Dispatch one PostgreSQL tuple callback to its fixed execution mode.
@@ -232,12 +209,9 @@ impl IcebergScanState {
             ScanExecutionState::SerialAwaitingStart(_)
             | ScanExecutionState::MutationAwaitingBinding(_)
             | ScanExecutionState::MutationAwaitingStart { .. } => {
-                Err(CustomScanError::provider(IcebergError::InvariantViolated(
-                    "CustomScan row production occurred before Start",
-                )))
-            }
-            ScanExecutionState::Uninitialized | ScanExecutionState::Finished => {
-                Ok(emitter.finish_eof())
+                unreachable!(
+                    "the CustomScan framework produces rows only after Start"
+                )
             }
         }
     }
@@ -261,66 +235,63 @@ impl IcebergScanState {
             ScanExecutionState::SerialAwaitingStart(_)
             | ScanExecutionState::MutationAwaitingBinding(_)
             | ScanExecutionState::MutationAwaitingStart { .. } => {
-                Err(CustomScanError::provider(IcebergError::InvariantViolated(
-                    "CustomScan rescan occurred before Start",
-                )))
-            }
-            ScanExecutionState::Uninitialized | ScanExecutionState::Finished => {
-                Ok(())
+                unreachable!(
+                    "the CustomScan framework rescans a provider only after Start"
+                )
             }
         }
     }
 
+    /// The framework drops this state right after End, before the relation
+    /// closes; the wrapper's Drop releases it when ERROR skips End.
     pub(super) fn end(
-        ctx: EndContext<'_, IcebergCustomScanProvider>,
+        _ctx: EndContext<'_, IcebergCustomScanProvider>,
     ) -> Result<(), CustomScanError> {
-        drop(mem::replace(
-            &mut ctx.state.execution,
-            ScanExecutionState::Finished,
-        ));
         Ok(())
     }
 
     pub(super) fn estimate_dsm(&mut self) -> Result<pg_sys::Size, CustomScanError> {
-        self.postgres_parallel_mut()?.estimate_dsm()
+        self.postgres_parallel_mut().estimate_dsm()
     }
 
     pub(super) unsafe fn initialize_dsm(
         &mut self,
         coordinate: *mut c_void,
     ) -> Result<(), CustomScanError> {
-        unsafe { self.postgres_parallel_mut()?.initialize_dsm(coordinate) }
+        unsafe { self.postgres_parallel_mut().initialize_dsm(coordinate) }
     }
 
     pub(super) unsafe fn reinitialize_dsm(
         &mut self,
         coordinate: *mut c_void,
     ) -> Result<(), CustomScanError> {
-        unsafe { self.postgres_parallel_mut()?.reinitialize_dsm(coordinate) }
+        unsafe { self.postgres_parallel_mut().reinitialize_dsm(coordinate) }
     }
 
     pub(super) unsafe fn initialize_worker(
         &mut self,
         coordinate: *mut c_void,
     ) -> Result<(), CustomScanError> {
-        unsafe { self.postgres_parallel_mut()?.initialize_worker(coordinate) }
+        unsafe { self.postgres_parallel_mut().initialize_worker(coordinate) }
     }
 
+    /// PostgreSQL shuts down every CustomScan, parallel-aware or not.
     pub(super) fn shutdown_parallel(&mut self) {
         if let ScanExecutionState::PostgresParallelScan(scan) = &mut self.execution {
             scan.shutdown();
         }
     }
 
-    fn postgres_parallel_mut(
-        &mut self,
-    ) -> Result<&mut PostgresParallelScan, CustomScanError> {
+    /// PostgreSQL invokes the DSM callbacks only for a `parallel_aware` plan,
+    /// which the framework emits only for Read scans, and Begin builds exactly
+    /// those as `PostgresParallelScan`.
+    fn postgres_parallel_mut(&mut self) -> &mut PostgresParallelScan {
         let ScanExecutionState::PostgresParallelScan(scan) = &mut self.execution
         else {
-            return Err(CustomScanError::provider(IcebergError::InvariantViolated(
-                "PostgreSQL parallel callback received a non-parallel Iceberg scan",
-            )));
+            unreachable!(
+                "PostgreSQL DSM callback reached a non-parallel Iceberg scan"
+            )
         };
-        Ok(scan)
+        scan
     }
 }

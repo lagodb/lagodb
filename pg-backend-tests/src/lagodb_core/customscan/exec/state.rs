@@ -7,10 +7,9 @@ mod tests {
         TestScanState, impl_reject_all_filters,
     };
     use lagodb_core::customscan::provider::{
-        BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
-        CustomScanError, EndContext, LagodbCustomScanProvider, NextSlotContext,
-        NextSlotResult, PathContext, PathVariant, ReScanContext, RelationContext,
-        StartContext,
+        BeginContext, CustomPathBuilder, CustomPathPlan, CustomScanError, EndContext,
+        LagodbCustomScanProvider, NextSlotContext, NextSlotResult, PathContext,
+        PathVariant, ReScanContext, RelationContext, StartContext,
     };
     use lagodb_core::customscan::provider::{CustomScanPrivate, NoPrivateData};
     use pgrx::pg_sys;
@@ -37,14 +36,17 @@ mod tests {
             None
         }
 
-        fn create_state(_ctx: CreateStateContext<Self>) -> Self::State {}
-
-        fn begin(_ctx: BeginContext<'_, Self>) -> Result<(), CustomScanError> {
+        fn begin(
+            _ctx: BeginContext<'_, Self>,
+        ) -> Result<Self::State, CustomScanError> {
             Ok(())
         }
 
-        fn start(_ctx: StartContext<'_, Self>) -> Result<(), CustomScanError> {
-            Ok(())
+        fn start(
+            state: Self::State,
+            _ctx: StartContext<'_, Self>,
+        ) -> Result<Self::State, CustomScanError> {
+            Ok(state)
         }
 
         fn next_slot<'a>(

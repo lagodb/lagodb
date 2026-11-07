@@ -11,10 +11,9 @@ mod tests {
     };
     use lagodb_core::customscan::exec::next_slot_wrapper;
     use lagodb_core::customscan::provider::{
-        BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
-        CustomScanError, EndContext, LagodbCustomScanProvider, NextSlotAttempt,
-        NextSlotContext, NextSlotResult, PathContext, PathVariant, ReScanContext,
-        RelationContext, StartContext,
+        BeginContext, CustomPathBuilder, CustomPathPlan, CustomScanError, EndContext,
+        LagodbCustomScanProvider, NextSlotAttempt, NextSlotContext, NextSlotResult,
+        PathContext, PathVariant, ReScanContext, RelationContext, StartContext,
     };
     use lagodb_core::customscan::provider::{
         CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
@@ -134,21 +133,17 @@ mod tests {
             None
         }
 
-        fn create_state(_ctx: CreateStateContext<Self>) -> Self::State {
-            HandleAccessorState {
-                seen_natts: 0,
-                seen_oid: pg_sys::Oid::INVALID,
-                emitted: false,
-            }
-        }
-
-        fn begin(_ctx: BeginContext<'_, Self>) -> Result<(), CustomScanError> {
+        fn begin(
+            _ctx: BeginContext<'_, Self>,
+        ) -> Result<Self::State, CustomScanError> {
             unreachable!("this test drives next_slot directly; begin is not invoked");
         }
 
-        /// Read handle accessors and emit a text varlena via `emit_row`.
-        fn start(_ctx: StartContext<'_, Self>) -> Result<(), CustomScanError> {
-            Ok(())
+        fn start(
+            state: Self::State,
+            _ctx: StartContext<'_, Self>,
+        ) -> Result<Self::State, CustomScanError> {
+            Ok(state)
         }
 
         fn next_slot<'a>(
@@ -415,16 +410,17 @@ mod tests {
             None
         }
 
-        fn create_state(_ctx: CreateStateContext<Self>) -> Self::State {
-            EmitColumnsState { emitted: false }
-        }
-
-        fn begin(_ctx: BeginContext<'_, Self>) -> Result<(), CustomScanError> {
+        fn begin(
+            _ctx: BeginContext<'_, Self>,
+        ) -> Result<Self::State, CustomScanError> {
             unreachable!("this test drives next_slot directly; begin is not invoked");
         }
 
-        fn start(_ctx: StartContext<'_, Self>) -> Result<(), CustomScanError> {
-            Ok(())
+        fn start(
+            state: Self::State,
+            _ctx: StartContext<'_, Self>,
+        ) -> Result<Self::State, CustomScanError> {
+            Ok(state)
         }
 
         fn next_slot<'a>(

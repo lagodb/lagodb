@@ -267,7 +267,7 @@ impl ScanBatchDriver for IcebergScan {
             }
             // ANALYZE samples through its own callbacks, never scan_getnextslot.
             IcebergScanState::Analyze(_) => {
-                panic!("scan_getnextslot used an ANALYZE scan")
+                unreachable!("PostgreSQL ANALYZE never calls scan_getnextslot")
             }
         }
     }

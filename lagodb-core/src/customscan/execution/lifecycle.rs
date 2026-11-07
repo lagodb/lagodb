@@ -13,8 +13,8 @@ use crate::customscan::plan_data::custom_private::{
     EncodedPrivate, assert_provider_name_matches, decode_private,
 };
 use crate::customscan::provider::{
-    BeginContext, CreateStateContext, CustomScanPrivate, EndContext,
-    LagodbCustomScanProvider, PrivateDataReader, ReScanContext, method_tables_for,
+    BeginContext, CustomScanPrivate, EndContext, LagodbCustomScanProvider,
+    PrivateDataReader, ReScanContext, method_tables_for,
 };
 use crate::diag::report_warning;
 use crate::handles::{RelationHandle, SnapshotHandle};
@@ -107,9 +107,6 @@ unsafe fn begin_custom_scan<P: LagodbCustomScanProvider>(
 
     wrapper.decoded_private = Some(provider_private);
 
-    let provider_state = P::create_state(CreateStateContext::<P>::new());
-    wrapper.provider_state = Some(provider_state);
-
     if (eflags as u32) & pg_sys::EXEC_FLAG_EXPLAIN_ONLY != 0 {
         return Ok(());
     }
@@ -153,8 +150,6 @@ unsafe fn begin_custom_scan<P: LagodbCustomScanProvider>(
     // directly instead of borrowing the whole wrapper through accessors.
     let decoded_private_ref: &P::PrivateData =
         unsafe { wrapper.decoded_private.as_ref().unwrap_unchecked() };
-    let provider_state_ref: &mut P::State =
-        unsafe { wrapper.provider_state.as_mut().unwrap_unchecked() };
     let snapshot = unsafe { (*estate).es_snapshot };
     let envelope = wrapper
         .cached_envelope
@@ -167,7 +162,6 @@ unsafe fn begin_custom_scan<P: LagodbCustomScanProvider>(
         .bound();
 
     let begin_ctx = BeginContext::<P> {
-        state: provider_state_ref,
         private_data: decoded_private_ref,
         purpose: envelope.purpose,
         filters,
@@ -178,8 +172,8 @@ unsafe fn begin_custom_scan<P: LagodbCustomScanProvider>(
         parallel_aware: unsafe { (*cscan).scan.plan.parallel_aware },
         _marker: PhantomData,
     };
-    P::begin(begin_ctx)?;
-    wrapper.provider_began = true;
+    let provider_state = P::begin(begin_ctx)?;
+    wrapper.provider_state = Some(provider_state);
     Ok(())
 }
 
@@ -264,11 +258,10 @@ pub unsafe extern "C-unwind" fn end_custom_scan_trampoline<
 ) {
     let wrapper = unsafe { CustomScanStateWrapper::<P>::from_node_ptr(node) };
 
-    if wrapper.provider_began {
-        let provider_state_ref: &mut P::State =
-            unsafe { wrapper.provider_state_mut_unchecked() };
+    // EXPLAIN-only execution never begins the provider and has no state.
+    if let Some(provider_state) = wrapper.provider_state.as_mut() {
         let scan_rel = unsafe { (*node).ss.ss_currentRelation };
-        let end_ctx = EndContext::<P>::new(provider_state_ref, unsafe {
+        let end_ctx = EndContext::<P>::new(provider_state, unsafe {
             RelationHandle::from_raw(scan_rel)
         });
         if let Err(err) = P::end(end_ctx) {
@@ -278,7 +271,6 @@ pub unsafe extern "C-unwind" fn end_custom_scan_trampoline<
                 err,
             ));
         }
-        wrapper.provider_began = false;
     }
 
     wrapper.provider_started = false;

@@ -39,18 +39,17 @@ pub struct CustomScanStateWrapper<P: LagodbCustomScanProvider> {
     /// Decoded provider [`PrivateData`](LagodbCustomScanProvider::PrivateData).
     pub(crate) decoded_private: Option<P::PrivateData>,
 
-    /// Provider-owned runtime state (`P::State`). Present after
-    /// `P::create_state` and removed during teardown.
+    /// Provider-owned runtime state (`P::State`), installed when `P::begin`
+    /// succeeds and taken at teardown. Start and Modify binding move it out
+    /// for their synchronous consuming transition and reinstall it on
+    /// success, so it is present at every callback boundary after Begin.
+    /// EXPLAIN-only execution never installs it.
     pub(crate) provider_state: Option<P::State>,
 
     /// Cached framework envelope fields needed by rescan (avoids re-decoding
     /// the immutable `custom_private` list on every `ReScanCustomScan` call).
     /// Populated once during `BeginCustomScan`; `None` until then.
     pub(crate) cached_envelope: Option<CachedEnvelope>,
-
-    /// Set after `P::begin` succeeds; End calls `P::end` only when true
-    /// (EXPLAIN_ONLY may have state without begin).
-    pub(crate) provider_began: bool,
 
     /// Set after Start succeeds; checked only by lifecycle callbacks.
     pub(crate) provider_started: bool,
@@ -92,14 +91,6 @@ impl<P: LagodbCustomScanProvider> CustomScanStateWrapper<P> {
         // SAFETY: forwarded from this function's contract; the cast is
         // sound under `#[repr(C)]` with `base` as the first field.
         unsafe { &mut *(node as *mut Self) }
-    }
-
-    /// Borrow the provider state after a successful BeginCustomScan.
-    pub(crate) fn active_provider_state_mut(&mut self) -> Option<&mut P::State> {
-        if !self.provider_began {
-            return None;
-        }
-        self.provider_state.as_mut()
     }
 
     /// Borrow provider state from a callback after PostgreSQL has completed Begin.
@@ -144,7 +135,6 @@ impl<P: LagodbCustomScanProvider> CustomScanStateWrapper<P> {
     /// wrapper must not already contain an installed provider state.
     pub unsafe fn test_install_provider_state(&mut self, state: P::State) {
         self.provider_state = Some(state);
-        self.provider_began = true;
     }
 
     /// # Safety
@@ -200,7 +190,6 @@ pub unsafe extern "C-unwind" fn create_custom_scan_state_trampoline<
         decoded_private: None,
         provider_state: None,
         cached_envelope: None,
-        provider_began: false,
         provider_started: false,
         _marker: PhantomData,
     };

@@ -91,9 +91,15 @@ pub trait LagodbCustomModifyProvider: LagodbCustomScanProvider {
         >,
     ) -> Result<<Self::AccessMethod as TableAccessMethod>::ScanSession, CustomScanError>;
 
-    /// Attach this provider's ModifyTarget-purpose scan to the stable relation state
-    /// owned by the outer ModifyTable execution.
-    fn bind_modify(ctx: ModifyBindContext<'_, Self>) -> Result<(), CustomScanError>
+    /// Consume this provider's begun ModifyTarget-purpose scan state and
+    /// return it attached to the stable relation state owned by the outer
+    /// ModifyTable execution. The outer Begin binds each such scan once,
+    /// before its Start. On failure the consumed state is dropped before the
+    /// framework reports the error.
+    fn bind_modify(
+        state: Self::State,
+        ctx: ModifyBindContext<'_, Self>,
+    ) -> Result<Self::State, CustomScanError>
     where
         Self: Sized;
 

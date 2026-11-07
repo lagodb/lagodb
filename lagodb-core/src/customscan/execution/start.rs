@@ -42,15 +42,20 @@ impl<P: LagodbCustomScanProvider> CustomScanStateWrapper<P> {
                 .as_ref()
                 .expect("Begin installed scan envelope");
             let context = StartContext::<P>::new(
-                self.provider_state
-                    .as_mut()
-                    .expect("Begin initialized provider state"),
                 envelope.purpose,
                 filters.bound(),
                 unsafe { RelationHandle::from_raw(self.base.ss.ss_currentRelation) },
                 unsafe { SnapshotHandle::from_raw((*estate).es_snapshot) },
             );
-            P::start(context)
+            // Start runs synchronously, so no executor callback observes the
+            // wrapper while the state is moved out. A failed Start reports an
+            // ERROR and PostgreSQL never calls this node again.
+            let state = self
+                .provider_state
+                .take()
+                .expect("Begin installed provider state");
+            self.provider_state = Some(P::start(state, context)?);
+            Ok(())
         })();
         unsafe { pg_sys::MemoryContextSwitchTo(previous_context) };
         self.provider_started = result.is_ok();

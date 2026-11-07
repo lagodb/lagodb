@@ -90,14 +90,6 @@ impl ManagedMutationScan {
         })
     }
 
-    pub(crate) fn binding(&self) -> &ModifyScanBinding<IcebergModifyQueryState> {
-        &self.binding
-    }
-
-    pub(crate) fn context(&self) -> IcebergModifyScanContext {
-        self.prepared.context()
-    }
-
     pub(crate) fn rescan(
         &mut self,
         replacement: Option<ReaderPredicate>,

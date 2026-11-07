@@ -8,10 +8,9 @@ mod tests {
     use crate::lagodb_core::customscan::support::impl_reject_all_filters;
     use lagodb_core::customscan::provider::methods::method_tables_for;
     use lagodb_core::customscan::provider::{
-        BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
-        CustomScanError, EndContext, LagodbCustomScanProvider, NextSlotContext,
-        NextSlotResult, PathContext, PathVariant, ReScanContext, RelationContext,
-        StartContext,
+        BeginContext, CustomPathBuilder, CustomPathPlan, CustomScanError, EndContext,
+        LagodbCustomScanProvider, NextSlotContext, NextSlotResult, PathContext,
+        PathVariant, ReScanContext, RelationContext, StartContext,
     };
     use lagodb_core::customscan::provider::{
         CustomScanPrivate, PrivateDataReader, PrivateDataWriter,
@@ -60,22 +59,19 @@ mod tests {
                     None
                 }
 
-                fn create_state(_ctx: CreateStateContext<Self>) -> Self::State {
-                    unreachable!(
-                        "glue method-table tests only verify FFI method tables and do not invoke scan lifecycle"
-                    );
-                }
-
                 fn begin(
                     _ctx: BeginContext<'_, Self>,
-                ) -> Result<(), CustomScanError> {
+                ) -> Result<Self::State, CustomScanError> {
                     unreachable!(
                         "glue method-table tests only verify FFI method tables and do not invoke scan lifecycle"
                     );
                 }
 
-                fn start(_ctx: StartContext<'_, Self>) -> Result<(), CustomScanError> {
-                    Ok(())
+                fn start(
+                    state: Self::State,
+                    _ctx: StartContext<'_, Self>,
+                ) -> Result<Self::State, CustomScanError> {
+                    Ok(state)
                 }
 
                 fn next_slot<'a>(

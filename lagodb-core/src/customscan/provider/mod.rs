@@ -20,9 +20,7 @@ pub use contract::{LagodbCustomScanProvider, TableAmSeqScan};
 pub use execution::{
     NextSlotAttempt, NextSlotContext, NextSlotEmitter, NextSlotResult,
 };
-pub use lifecycle::{
-    BeginContext, CreateStateContext, EndContext, ReScanContext, StartContext,
-};
+pub use lifecycle::{BeginContext, EndContext, ReScanContext, StartContext};
 pub(crate) use methods::method_tables_for;
 pub use planning::*;
 pub use private_data::{

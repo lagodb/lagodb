@@ -14,11 +14,10 @@ use lagodb_core::customscan::modify::{
     PreparedModifyScan, register_provider as register_modify_provider,
 };
 use lagodb_core::customscan::provider::{
-    BeginContext, CreateStateContext, CustomPathBuilder, CustomPathPlan,
-    CustomScanError, EndContext, LagodbCustomScanProvider, NeededColumns,
-    NextSlotContext, NextSlotResult, NoPrivateData, PathContext, PathVariant,
-    ReScanContext, RelationContext, StartContext, TableAmSeqScan,
-    register_provider as register_scan_provider,
+    BeginContext, CustomPathBuilder, CustomPathPlan, CustomScanError, EndContext,
+    LagodbCustomScanProvider, NeededColumns, NextSlotContext, NextSlotResult,
+    NoPrivateData, PathContext, PathVariant, ReScanContext, RelationContext,
+    StartContext, TableAmSeqScan, register_provider as register_scan_provider,
 };
 use lagodb_core::expr::RuntimeValueBindings;
 use lagodb_core::expr::pushdown::{
@@ -144,16 +143,15 @@ impl LagodbCustomScanProvider for IcebergCustomScanProvider {
         Some(builder.build(NoPrivateData))
     }
 
-    fn create_state(_ctx: CreateStateContext<Self>) -> Self::State {
-        IcebergScanState::default()
-    }
-
-    fn begin(ctx: BeginContext<'_, Self>) -> Result<(), CustomScanError> {
+    fn begin(ctx: BeginContext<'_, Self>) -> Result<Self::State, CustomScanError> {
         IcebergScanState::begin(ctx)
     }
 
-    fn start(ctx: StartContext<'_, Self>) -> Result<(), CustomScanError> {
-        IcebergScanState::start(ctx)
+    fn start(
+        state: Self::State,
+        ctx: StartContext<'_, Self>,
+    ) -> Result<Self::State, CustomScanError> {
+        state.start(ctx)
     }
 
     fn next_slot<'a>(
@@ -240,8 +238,11 @@ impl LagodbCustomModifyProvider for IcebergCustomScanProvider {
         prepared.open(binding).map_err(Into::into)
     }
 
-    fn bind_modify(ctx: ModifyBindContext<'_, Self>) -> Result<(), CustomScanError> {
-        IcebergScanState::bind_modify(ctx)
+    fn bind_modify(
+        state: Self::State,
+        ctx: ModifyBindContext<'_, Self>,
+    ) -> Result<Self::State, CustomScanError> {
+        state.bind_modify(ctx)
     }
 
     fn supports_modify_target(ctx: &RelationContext<'_>) -> bool {

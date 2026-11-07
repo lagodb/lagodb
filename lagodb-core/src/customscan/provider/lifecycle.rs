@@ -15,24 +15,8 @@ use crate::tuple::RowDatumCodec;
 use super::contract::LagodbCustomScanProvider;
 use super::planning::ScanPurpose;
 
-/// Context for [`LagodbCustomScanProvider::create_state`].
-pub struct CreateStateContext<P: LagodbCustomScanProvider + ?Sized> {
-    _marker: PhantomData<fn() -> P>,
-}
-
-impl<P: LagodbCustomScanProvider + ?Sized> CreateStateContext<P> {
-    /// Construct a context with every field explicitly initialized.
-    pub(crate) fn new() -> Self {
-        Self {
-            _marker: PhantomData,
-        }
-    }
-}
-
 /// Context for [`LagodbCustomScanProvider::begin`].
 pub struct BeginContext<'a, P: LagodbCustomScanProvider + ?Sized> {
-    /// Provider's per-scan runtime state.
-    pub state: &'a mut P::State,
     /// Decoded provider `PrivateData` for this scan.
     pub private_data: &'a P::PrivateData,
     /// Query or modification-target purpose selected by the planner.
@@ -74,7 +58,6 @@ impl<'a, P: LagodbCustomScanProvider> BeginContext<'a, P> {
 /// Begin has prepared the scan; PostgreSQL now supplies valid dynamic values.
 /// This callback opens the first cursor and runs once before row production.
 pub struct StartContext<'a, P: LagodbCustomScanProvider + ?Sized> {
-    pub state: &'a mut P::State,
     pub purpose: ScanPurpose,
     /// Complete predicates, including the first dynamic parameter values.
     pub filters: BoundFilterSet<'a, P::BoundPredicate>,
@@ -84,14 +67,12 @@ pub struct StartContext<'a, P: LagodbCustomScanProvider + ?Sized> {
 
 impl<'a, P: LagodbCustomScanProvider> StartContext<'a, P> {
     pub(crate) fn new(
-        state: &'a mut P::State,
         purpose: ScanPurpose,
         filters: BoundFilterSet<'a, P::BoundPredicate>,
         relation: RelationHandle<'a>,
         snapshot: SnapshotHandle<'a>,
     ) -> Self {
         Self {
-            state,
             purpose,
             filters,
             relation,

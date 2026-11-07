@@ -15,7 +15,7 @@ use crate::handles::{OwnedScanKeys, RelationHandle, SnapshotHandle};
 use crate::table_am::{TableAccessMethod, TableAmScanDesc};
 
 use super::LagodbCustomModifyProvider;
-use super::binding::bind_modify_scan;
+use super::binding::ModifyBindContext;
 use super::bridge::ModifyNodeCell;
 use super::scan_filters::ModifyScanFilters;
 
@@ -103,20 +103,30 @@ impl<'a, P: LagodbCustomModifyProvider> ModifyScanBinder<'a, P> {
                 "required Modify relation was planned with an unbindable CustomScan",
             ));
         }
-        let context = unsafe { CustomScanStateWrapper::<P>::from_node_ptr(scan) }
-            .active_provider_state_mut()
-            .and_then(|state| P::modify_scan_context(state))
-            .ok_or_else(|| {
-                CustomScanError::modify_binding(
-                    "ModifyTarget CustomScan provider state is not active",
-                )
-            })?;
-        let relation = unsafe { (*scan).ss.ss_currentRelation };
+        // PostgreSQL created this state through the plan's provider methods
+        // checked above and opened its relation because `scanrelid > 0`.
+        let relation =
+            unsafe { RelationHandle::from_raw((*scan).ss.ss_currentRelation) };
+        let wrapper = unsafe { CustomScanStateWrapper::<P>::from_node_ptr(scan) };
+        // Binding runs synchronously inside the outer ModifyTable's Begin, so no
+        // executor callback observes the wrapper while the state is moved out. A
+        // failed binding reports an ERROR and PostgreSQL never runs this node.
+        let state = wrapper
+            .provider_state
+            .take()
+            .expect("non-EXPLAIN Begin installed the ModifyTarget provider state");
+        let context = P::modify_scan_context(&state).ok_or_else(|| {
+            CustomScanError::modify_binding(
+                "ModifyTarget CustomScan provider state is not awaiting binding",
+            )
+        })?;
         let binding = unsafe {
             self.execution
-                .with_mut(|execution| execution.bind_scan((*relation).rd_id, context))
+                .with_mut(|execution| execution.bind_scan(relation.oid(), context))
         }?;
-        unsafe { bind_modify_scan::<P>(scan, binding) }
+        let ctx = ModifyBindContext::new(relation, binding);
+        wrapper.provider_state = Some(P::bind_modify(state, ctx)?);
+        Ok(())
     }
 
     unsafe fn bind_seq_scan(

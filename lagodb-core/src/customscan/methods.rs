@@ -6,7 +6,6 @@
 
 use core::ffi::c_int;
 use std::ffi::CStr;
-use std::ptr;
 
 use pgrx::pg_sys;
 
@@ -177,12 +176,5 @@ impl CustomScanMethodTables {
 
     pub fn initial_exec(&'static self) -> &'static pg_sys::CustomExecMethods {
         self.first_exec.as_ref().unwrap_or(&self.exec)
-    }
-
-    pub(crate) fn owns_exec(
-        &'static self,
-        methods: *const pg_sys::CustomExecMethods,
-    ) -> bool {
-        ptr::eq(methods, self.exec()) || ptr::eq(methods, self.initial_exec())
     }
 }

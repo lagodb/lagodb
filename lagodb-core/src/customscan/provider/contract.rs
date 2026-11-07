@@ -9,9 +9,7 @@ use crate::expr::pushdown::FilterPushdown;
 use crate::runtime_api::TableScanTaskMetrics;
 
 use super::execution::{NextSlotContext, NextSlotResult};
-use super::lifecycle::{
-    BeginContext, CreateStateContext, EndContext, ReScanContext, StartContext,
-};
+use super::lifecycle::{BeginContext, EndContext, ReScanContext, StartContext};
 use super::planning::{
     CustomPathBuilder, CustomPathPlan, PathContext, PathVariant, RelationContext,
 };
@@ -72,17 +70,21 @@ pub trait LagodbCustomScanProvider: FilterPushdown {
     where
         Self: Sized;
 
-    /// Construct per-scan state before [`Self::begin`].
-    fn create_state(ctx: CreateStateContext<Self>) -> Self::State;
+    /// Construct the per-scan state at Begin from statement-stable inputs.
+    /// Dynamic inputs and the first row cursor belong to Start. The framework
+    /// installs the state only when this succeeds; EXPLAIN-only execution never
+    /// calls Begin and therefore has no provider state.
+    fn begin(ctx: BeginContext<'_, Self>) -> Result<Self::State, CustomScanError>;
 
-    /// Prepare scan resources and statement-stable predicates at Begin.
-    /// Dynamic inputs and the first row cursor belong to Start.
-    fn begin(ctx: BeginContext<'_, Self>) -> Result<(), CustomScanError>;
-
-    /// Open the first cursor with the framework's bound dynamic predicates
-    /// after executor initialization, before the first row. This runs once,
-    /// including when PostgreSQL rescans the node before its first execution.
-    fn start(ctx: StartContext<'_, Self>) -> Result<(), CustomScanError>;
+    /// Consume the begun state and return the state that opened the first
+    /// cursor with the framework's bound dynamic predicates. This runs once,
+    /// after executor initialization and before the first row, including when
+    /// PostgreSQL rescans the node before its first execution. On failure the
+    /// consumed state is dropped before the framework reports the error.
+    fn start(
+        state: Self::State,
+        ctx: StartContext<'_, Self>,
+    ) -> Result<Self::State, CustomScanError>;
 
     /// Produce the next row through the framework-owned slot publication path.
     fn next_slot<'a>(
