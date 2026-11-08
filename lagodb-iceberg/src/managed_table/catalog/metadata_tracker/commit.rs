@@ -21,7 +21,7 @@ use crate::managed_table::catalog::metadata_table::{
 };
 use crate::managed_table::gucs;
 use crate::managed_table::maintenance::{
-    PreparedVacuum, VacuumAttemptOutcome, VacuumAttemptResult, VacuumCommitAttempt,
+    PreparedVacuum, VacuumAttemptResult, VacuumCommitAttempt,
 };
 use crate::storage::transaction_resources::{
     MetadataMaterializationAttempt, register_canceled_files_for_commit,
@@ -30,10 +30,20 @@ use crate::write::TxTableCommitPlan;
 
 use super::{TableCommitInput, TxMetadata};
 
+/// Catalog-accepted result of one materialization attempt.
+struct PublishedAttempt<'a> {
+    maintenance_deadline_advanced: bool,
+    vacuum: Option<VacuumAttemptResult<'a>>,
+}
+
 struct TableCommitCoordinator<'a> {
     relid: pg_sys::Oid,
     plan: TxTableCommitPlan<'a, PreparedVacuum, String>,
     file_io: FileIO,
+    /// Schedule published by a non-VACUUM plan; VACUUM derives its own per
+    /// attempt from the catalog location it rebased on.
+    data_schedule: MaintenanceScheduleUpdate,
+    commit_started: Instant,
 }
 
 impl<'a> TableCommitCoordinator<'a> {
@@ -42,26 +52,7 @@ impl<'a> TableCommitCoordinator<'a> {
         plan: TxTableCommitPlan<'a, PreparedVacuum, String>,
         file_io: FileIO,
     ) -> Self {
-        Self {
-            relid,
-            plan,
-            file_io,
-        }
-    }
-
-    fn commit(self) -> IcebergResult<bool> {
-        let Self {
-            relid,
-            plan,
-            file_io,
-        } = self;
-        let has_maintenance_action = plan.has_data_change();
-        let mut retries = 0_u32;
-        let max_retries = gucs::max_commit_retries();
-        let max_retry_count = u32::try_from(max_retries)
-            .expect("max_commit_retries is constrained to non-negative values");
-        let vacuum_commit_started = plan.exclusive_action.map(|_| Instant::now());
-        let write_maintenance_schedule = if has_maintenance_action {
+        let data_schedule = if plan.has_data_change() {
             let naptime = gucs::auto_maintenance_naptime();
             let micros = i64::try_from(naptime.as_micros()).unwrap_or(i64::MAX);
             let due_at = unsafe { pg_sys::GetCurrentTransactionStartTimestamp() }
@@ -70,161 +61,179 @@ impl<'a> TableCommitCoordinator<'a> {
         } else {
             MaintenanceScheduleUpdate::Preserve
         };
+        Self {
+            relid,
+            plan,
+            file_io,
+            data_schedule,
+            commit_started: Instant::now(),
+        }
+    }
 
-        let outcome = loop {
-            if retries > max_retry_count {
-                return Err(IcebergError::MetadataCommitConflict {
-                    relid,
-                    max_retries,
-                });
+    fn commit(self) -> IcebergResult<bool> {
+        let max_retries = gucs::max_commit_retries();
+        let max_retry_count = u32::try_from(max_retries)
+            .expect("max_commit_retries is constrained to non-negative values");
+        for retry_count in 0..=max_retry_count {
+            if let Some(published) = self.attempt(retry_count)? {
+                return self.complete(published);
             }
-            retries += 1;
+            diag::report_notice("Concurrent Iceberg update detected, rebasing...");
+        }
+        Err(IcebergError::MetadataCommitConflict {
+            relid: self.relid,
+            max_retries,
+        })
+    }
 
-            let latest_global_location = IcebergMetadata::get(relid)?
-                .metadata_location
-                .ok_or(IcebergError::MetadataLocationNull)?;
-            let maintenance_schedule = match plan.exclusive_action {
-                Some(vacuum)
-                    if vacuum.completion_token.metadata_location.as_str()
-                        == latest_global_location.as_str() =>
-                {
-                    MaintenanceScheduleUpdate::CompleteIfDueMatches(
-                        vacuum.completion_token.maintenance_due_at,
-                    )
-                }
-                Some(_) => MaintenanceScheduleUpdate::Preserve,
-                None => write_maintenance_schedule,
-            };
-            if plan.truncate_guard.is_some_and(|expected| {
-                expected.as_str() != latest_global_location.as_str()
-            }) {
-                return Err(IcebergError::TruncateCommitConflict { relid });
-            }
-            let metadata =
-                TableMetadata::read_from(&file_io, &latest_global_location)?;
-            let base_table = Table::builder()
-                .metadata_location(latest_global_location.clone())
-                .metadata(metadata)
-                .identifier(IcebergTableId::for_relation(relid).into_table_ident())
-                .file_io(file_io.clone())
-                .build()?;
-
-            let catalog = StagedCatalog::new(&base_table);
-            // Manifest, manifest-list and metadata files can be created while
-            // transaction actions are applied, before `tx.commit()` writes the
-            // final metadata JSON. Scope the whole materialization so every
-            // failed CAS attempt is discarded as one unit.
-            let metadata_attempt = MetadataMaterializationAttempt::begin()?;
-            let mut tx = Transaction::new(&base_table);
-            let vacuum_attempt = plan.exclusive_action.map(|vacuum| {
-                VacuumCommitAttempt::new(
-                    vacuum,
-                    &base_table,
-                    &latest_global_location,
-                    retries.saturating_sub(1),
-                )
-            });
-            if let Some(attempt) = &vacuum_attempt {
-                tx = attempt.apply_actions(tx)?;
-            }
-            tx = plan.apply_to_transaction(tx, base_table.metadata())?;
-            let updated_table = tx.commit(&catalog)?;
-            let new_metadata_location = updated_table
-                .metadata_location()
-                .ok_or(IcebergError::MetadataLocationNull)?;
-            let vacuum_outcome = vacuum_attempt
-                .map(|attempt| attempt.finish(&updated_table))
-                .transpose()?;
-            if let Some(outcome) = &vacuum_outcome {
-                debug_assert_eq!(
-                    outcome.changes_metadata(),
-                    new_metadata_location != latest_global_location
-                );
-            }
-            let mut vacuum_result =
-                vacuum_outcome.map(VacuumAttemptOutcome::into_result);
-            if new_metadata_location == latest_global_location {
-                metadata_attempt.discard()?;
-                if plan.exclusive_action.is_some() {
-                    match IcebergMetadata::finish_maintenance(
-                        relid,
-                        &latest_global_location,
-                        maintenance_schedule,
-                    ) {
-                        Ok(()) => {
-                            if vacuum_result
-                                .as_ref()
-                                .is_some_and(VacuumAttemptResult::has_cleanup)
-                            {
-                                vacuum_result
-                                    .as_mut()
-                                    .expect("checked VACUUM result")
-                                    .register_cleanup(relid, &file_io)?;
-                            }
-                        }
-                        Err(IcebergError::MetadataCatalog(
-                            MetadataCatalogError::Conflict,
-                        )) => {
-                            diag::report_notice(
-                                "Concurrent Iceberg update detected, rebasing...",
-                            );
-                            continue;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                if let (Some(vacuum), Some(result)) =
-                    (plan.exclusive_action, vacuum_result.take())
-                {
-                    result.report_success(vacuum, vacuum_commit_started.as_ref())?;
-                }
-                register_canceled_files_for_commit(
-                    file_io.clone(),
-                    plan.canceled_created_paths.clone(),
-                );
-                break false;
-            }
-
-            match IcebergMetadata::cas_update(
-                relid,
-                Some(&latest_global_location),
-                CasUpdate {
-                    metadata_location: Some(new_metadata_location),
-                    previous_metadata_location: Some(&latest_global_location),
-                    maintenance_schedule,
-                },
-            ) {
-                Ok(maintenance_deadline_advanced) => {
-                    metadata_attempt.promote()?;
-                    if let Some(result) = &mut vacuum_result {
-                        result.register_cleanup(relid, &file_io)?;
-                    }
-                    if let (Some(vacuum), Some(result)) =
-                        (plan.exclusive_action, vacuum_result.take())
-                    {
-                        result
-                            .report_success(vacuum, vacuum_commit_started.as_ref())?;
-                    }
-                    register_canceled_files_for_commit(
-                        file_io.clone(),
-                        plan.canceled_created_paths.clone(),
-                    );
-                    break maintenance_deadline_advanced;
-                }
-                Err(IcebergError::MetadataCatalog(
-                    MetadataCatalogError::Conflict,
-                )) => {
-                    metadata_attempt.discard()?;
-                    diag::report_notice(
-                        "Concurrent Iceberg update detected, rebasing...",
-                    );
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
+    /// Rebase on the current catalog location, materialize the plan, and
+    /// publish it. `None` means a concurrent catalog update rejected the
+    /// attempt and it must be rebuilt from scratch.
+    fn attempt(
+        &self,
+        retry_count: u32,
+    ) -> IcebergResult<Option<PublishedAttempt<'a>>> {
+        let latest_location = IcebergMetadata::get(self.relid)?
+            .metadata_location
+            .ok_or(IcebergError::MetadataLocationNull)?;
+        let schedule = match self.plan.exclusive_action {
+            Some(vacuum) => vacuum
+                .completion_token
+                .completion_schedule(&latest_location),
+            None => self.data_schedule,
         };
+        if self
+            .plan
+            .truncate_guard
+            .is_some_and(|expected| expected.as_str() != latest_location.as_str())
+        {
+            return Err(IcebergError::TruncateCommitConflict { relid: self.relid });
+        }
+        let base_table = self.base_table(&latest_location)?;
 
-        Ok(outcome)
+        let catalog = StagedCatalog::new(&base_table);
+        // Manifest, manifest-list and metadata files can be created while
+        // transaction actions are applied, before `tx.commit()` writes the
+        // final metadata JSON. Scope the whole materialization so every
+        // failed CAS attempt is discarded as one unit.
+        let metadata_attempt = MetadataMaterializationAttempt::begin()?;
+        let mut tx = Transaction::new(&base_table);
+        let vacuum_attempt = self.plan.exclusive_action.map(|vacuum| {
+            VacuumCommitAttempt::new(
+                vacuum,
+                &base_table,
+                &latest_location,
+                retry_count,
+            )
+        });
+        if let Some(attempt) = &vacuum_attempt {
+            tx = attempt.apply_actions(tx)?;
+        }
+        let updated_table = self
+            .plan
+            .apply_to_transaction(tx, base_table.metadata())?
+            .commit(&catalog)?;
+        let new_location = updated_table
+            .metadata_location()
+            .ok_or(IcebergError::MetadataLocationNull)?;
+        let vacuum = vacuum_attempt
+            .map(|attempt| attempt.finish(&updated_table))
+            .transpose()?;
+
+        let accepted = if new_location == latest_location {
+            metadata_attempt.discard()?;
+            self.publish_unchanged(&latest_location, schedule)?
+        } else {
+            self.publish_metadata(
+                metadata_attempt,
+                &latest_location,
+                new_location,
+                schedule,
+            )?
+        };
+        Ok(
+            accepted.map(|maintenance_deadline_advanced| PublishedAttempt {
+                maintenance_deadline_advanced,
+                vacuum,
+            }),
+        )
+    }
+
+    fn base_table(&self, metadata_location: &str) -> IcebergResult<Table> {
+        let metadata = TableMetadata::read_from(&self.file_io, metadata_location)?;
+        Ok(Table::builder()
+            .metadata_location(metadata_location)
+            .metadata(metadata)
+            .identifier(IcebergTableId::for_relation(self.relid).into_table_ident())
+            .file_io(self.file_io.clone())
+            .build()?)
+    }
+
+    /// An attempt that produced no new metadata publishes no location. Only
+    /// VACUUM still completes its maintenance deadline against the location
+    /// it was assessed on. Returns `None` on a catalog conflict.
+    fn publish_unchanged(
+        &self,
+        latest_location: &str,
+        schedule: MaintenanceScheduleUpdate,
+    ) -> IcebergResult<Option<bool>> {
+        if self.plan.exclusive_action.is_none() {
+            return Ok(Some(false));
+        }
+        match IcebergMetadata::finish_maintenance(
+            self.relid,
+            latest_location,
+            schedule,
+        ) {
+            Ok(()) => Ok(Some(false)),
+            Err(IcebergError::MetadataCatalog(MetadataCatalogError::Conflict)) => {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// CAS the new metadata location and resolve the materialization attempt
+    /// with the catalog outcome. Returns whether the maintenance deadline
+    /// advanced, or `None` on a catalog conflict.
+    fn publish_metadata(
+        &self,
+        metadata_attempt: MetadataMaterializationAttempt,
+        latest_location: &str,
+        new_location: &str,
+        schedule: MaintenanceScheduleUpdate,
+    ) -> IcebergResult<Option<bool>> {
+        match IcebergMetadata::cas_update(
+            self.relid,
+            Some(latest_location),
+            CasUpdate {
+                metadata_location: Some(new_location),
+                previous_metadata_location: Some(latest_location),
+                maintenance_schedule: schedule,
+            },
+        ) {
+            Ok(maintenance_deadline_advanced) => {
+                metadata_attempt.promote()?;
+                Ok(Some(maintenance_deadline_advanced))
+            }
+            Err(IcebergError::MetadataCatalog(MetadataCatalogError::Conflict)) => {
+                metadata_attempt.discard()?;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Post-publication work for the accepted attempt.
+    fn complete(self, published: PublishedAttempt<'a>) -> IcebergResult<bool> {
+        if let Some(vacuum) = published.vacuum {
+            vacuum.complete(self.relid, &self.file_io, self.commit_started)?;
+        }
+        register_canceled_files_for_commit(
+            self.file_io,
+            self.plan.canceled_created_paths,
+        );
+        Ok(published.maintenance_deadline_advanced)
     }
 }
 

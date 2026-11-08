@@ -2,7 +2,7 @@
 //!
 //! The value is deliberately rebuilt after every catalog CAS conflict. It owns
 //! VACUUM action materialization, attempt-local reporting, reachability, and
-//! the typed distinction between metadata-changing and no-metadata outcomes.
+//! cleanup registration once the catalog accepts the attempt.
 
 use std::collections::HashSet;
 use std::time::Instant;
@@ -11,6 +11,7 @@ use iceberg_lite::io::FileIO;
 use iceberg_lite::table::Table;
 use iceberg_lite::transaction::{ApplyTransactionAction, Transaction};
 use lagodb_core::table_maintenance::TableMaintenanceReport;
+use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult};
 
@@ -20,88 +21,65 @@ use super::{
     VacuumCleanup, record_metric,
 };
 
-pub(crate) struct VacuumAttemptResult {
-    pub(crate) report: TableMaintenanceReport,
-    pub(crate) cleanup_candidates: HashSet<String>,
+/// Assessment of one VACUUM attempt, completed once the catalog accepts it.
+pub(crate) struct VacuumAttemptResult<'v> {
+    vacuum: &'v PreparedVacuum,
+    report: TableMaintenanceReport,
+    cleanup_candidates: HashSet<String>,
 }
 
-impl VacuumAttemptResult {
-    pub(crate) fn has_cleanup(&self) -> bool {
-        !self.cleanup_candidates.is_empty()
-    }
-
-    pub(crate) fn register_cleanup(
-        &mut self,
-        relid: pgrx::pg_sys::Oid,
+impl VacuumAttemptResult<'_> {
+    /// Register the attempt's cleanup candidates and report its success.
+    pub(crate) fn complete(
+        self,
+        relid: pg_sys::Oid,
         file_io: &FileIO,
+        commit_started: Instant,
     ) -> IcebergResult<()> {
-        self.report.objects_scheduled_for_deletion =
-            u64::try_from(self.cleanup_candidates.len()).map_err(|_| {
+        let Self {
+            vacuum,
+            mut report,
+            cleanup_candidates,
+        } = self;
+        report.objects_scheduled_for_deletion =
+            u64::try_from(cleanup_candidates.len()).map_err(|_| {
                 IcebergError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "cleanup candidate count does not fit u64".to_owned(),
                     ),
                 }
             })?;
-        let registration = VacuumCleanup::register(
-            relid,
-            file_io,
-            std::mem::take(&mut self.cleanup_candidates),
+        VacuumCleanup::register(relid, file_io, cleanup_candidates)?
+            .record(&mut report)?;
+        record_metric(
+            &mut report,
+            c"commit_ms",
+            u64::try_from(commit_started.elapsed().as_millis()).map_err(|_| {
+                IcebergError::Vacuum {
+                    source: IcebergVacuumError::ResourceLimit(
+                        "VACUUM commit duration does not fit u64 milliseconds"
+                            .to_owned(),
+                    ),
+                }
+            })?,
         )?;
-        registration.record(&mut self.report)
-    }
-
-    pub(crate) fn report_success(
-        mut self,
-        vacuum: &PreparedVacuum,
-        commit_started: Option<&Instant>,
-    ) -> IcebergResult<()> {
-        if let Some(started) = commit_started {
-            record_metric(
-                &mut self.report,
-                c"commit_ms",
-                u64::try_from(started.elapsed().as_millis()).map_err(|_| {
-                    IcebergError::Vacuum {
-                        source: IcebergVacuumError::ResourceLimit(
-                            "VACUUM commit duration does not fit u64 milliseconds"
-                                .to_owned(),
-                        ),
-                    }
-                })?,
-            )?;
-        }
-        vacuum.report_success(&self.report);
+        vacuum.report_success(&report);
         Ok(())
     }
 }
 
-pub(crate) enum VacuumAttemptOutcome {
-    NoMetadataChange(VacuumAttemptResult),
-    MetadataUpdate(VacuumAttemptResult),
-}
-
-impl VacuumAttemptOutcome {
-    pub(crate) fn into_result(self) -> VacuumAttemptResult {
-        match self {
-            Self::NoMetadataChange(result) | Self::MetadataUpdate(result) => result,
-        }
-    }
-
-    pub(crate) fn changes_metadata(&self) -> bool {
-        matches!(self, Self::MetadataUpdate(_))
-    }
-}
-
-pub(crate) struct VacuumCommitAttempt<'a> {
-    vacuum: &'a PreparedVacuum,
+/// `'v` borrows the prepared VACUUM, which outlives every attempt; `'a`
+/// borrows attempt-local catalog state.
+pub(crate) struct VacuumCommitAttempt<'v, 'a> {
+    vacuum: &'v PreparedVacuum,
     base_table: &'a Table,
     latest_metadata_location: &'a str,
     retry_count: u32,
 }
 
-impl<'a> VacuumCommitAttempt<'a> {
+impl<'v, 'a> VacuumCommitAttempt<'v, 'a> {
     pub(crate) fn new(
-        vacuum: &'a PreparedVacuum,
+        vacuum: &'v PreparedVacuum,
         base_table: &'a Table,
         latest_metadata_location: &'a str,
         retry_count: u32,
@@ -158,7 +136,7 @@ impl<'a> VacuumCommitAttempt<'a> {
     pub(crate) fn finish(
         &self,
         updated_table: &Table,
-    ) -> IcebergResult<VacuumAttemptOutcome> {
+    ) -> IcebergResult<VacuumAttemptResult<'v>> {
         let new_metadata_location = updated_table
             .metadata_location()
             .ok_or(IcebergError::MetadataLocationNull)?;
@@ -202,15 +180,11 @@ impl<'a> VacuumCommitAttempt<'a> {
         let mut cleanup_candidates = expiration_candidates.paths;
         cleanup_candidates.extend(orphan_candidates);
 
-        let result = VacuumAttemptResult {
+        Ok(VacuumAttemptResult {
+            vacuum: self.vacuum,
             report,
             cleanup_candidates,
-        };
-        if new_metadata_location == self.latest_metadata_location {
-            Ok(VacuumAttemptOutcome::NoMetadataChange(result))
-        } else {
-            Ok(VacuumAttemptOutcome::MetadataUpdate(result))
-        }
+        })
     }
 
     fn record_snapshot_report(

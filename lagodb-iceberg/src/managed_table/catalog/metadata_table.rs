@@ -281,6 +281,22 @@ pub(crate) struct MaintenanceCompletionToken {
     pub(crate) maintenance_due_at: Option<pg_sys::TimestampTz>,
 }
 
+impl MaintenanceCompletionToken {
+    /// Schedule update for a commit rebased on `latest_location`. The due
+    /// deadline is completed only while the catalog still points at the
+    /// metadata this token was issued for.
+    pub(crate) fn completion_schedule(
+        &self,
+        latest_location: &str,
+    ) -> MaintenanceScheduleUpdate {
+        if self.metadata_location == latest_location {
+            MaintenanceScheduleUpdate::CompleteIfDueMatches(self.maintenance_due_at)
+        } else {
+            MaintenanceScheduleUpdate::Preserve
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct MaintenanceCandidate {
     pub(crate) relid: pg_sys::Oid,
