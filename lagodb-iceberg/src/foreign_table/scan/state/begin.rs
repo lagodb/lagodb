@@ -4,21 +4,22 @@ use lagodb_core::fdw::{
     BeginForeignScanContext, ForeignRowIdentityRequirement, ForeignScanError,
 };
 use lagodb_core::handles::ExecutorHandle;
-use pgrx::pg_sys;
 
-use super::{ForeignScanPhase, IcebergFdwScanState};
+use super::execution::PostgresParallelScan;
+use super::mutation::PreparedMutationScan;
+use super::{IcebergFdwScanState, ScanExecutionState};
 use crate::foreign_table::scan::ForeignMutationScan;
 use crate::foreign_table::{
     ForeignSchemaBinding, ForeignTransaction, IcebergFdwError, LagodbIceberg,
     PlanSourceIdentity, ResolvedForeignTableBinding,
 };
 use crate::predicate::BoundIcebergPredicate;
-use crate::scan::parallel::PostgresParallelExecution;
 use crate::scan::{
     IcebergReadSnapshot, PreparedRowScan, ReaderPredicate, ScanPredicates,
     StablePruningPredicate,
 };
 use crate::schema::projection::{ProjectedAttribute, SlotProjection};
+use crate::schema::relation::RelationLayout;
 
 impl IcebergFdwScanState {
     pub(crate) fn begin(
@@ -34,42 +35,36 @@ impl IcebergFdwScanState {
         if resolved.identity() != context.private_data.identity() {
             return Err(IcebergFdwError::PlanIdentityChanged.into());
         }
-        let mutation = matches!(
-            context.row_identity_requirement,
-            ForeignRowIdentityRequirement::ItemPointer
-        );
-        if mutation && context.parallel_aware {
-            return Err(IcebergFdwError::InvalidPlan {
-                detail: "mutation ForeignScan cannot be parallel-aware",
+        let execution = match context.row_identity_requirement {
+            ForeignRowIdentityRequirement::ItemPointer => {
+                Self::begin_mutation(&context, resolved)?
             }
-            .into());
-        }
+            ForeignRowIdentityRequirement::None => {
+                Self::begin_read(&context, resolved)?
+            }
+        };
+        Ok(Self { execution })
+    }
+
+    fn begin_read(
+        context: &BeginForeignScanContext<'_, LagodbIceberg>,
+        resolved: ResolvedForeignTableBinding,
+    ) -> Result<ScanExecutionState, ForeignScanError> {
         // A cached partial plan can outlive its planner-time eligibility.
         // Capture this execution's state before consuming the resolved table.
-        let parallel_workers_allowed = !context.parallel_aware
-            || !ForeignTransaction::has_local_actions(resolved.key());
-        let command_id = context.snapshot.command_id();
-        let catalog_table = resolved.into_catalog_table();
-        let view = if mutation {
-            ForeignTransaction::begin_write(
-                catalog_table,
-                command_id,
-                context.private_data.source(),
-            )?
-        } else {
-            ForeignTransaction::scan_view(catalog_table, command_id)?
-        };
-        if !mutation
-            && context.private_data.source().is_some_and(|planned| {
-                planned != &PlanSourceIdentity::from_metadata(view.metadata())
-            })
-        {
+        let workers_allowed = context.parallel_aware
+            && !ForeignTransaction::has_local_actions(resolved.key());
+        let view = ForeignTransaction::scan_view(
+            resolved.into_catalog_table(),
+            context.snapshot.command_id(),
+        )?;
+        if context.private_data.source().is_some_and(|planned| {
+            planned != &PlanSourceIdentity::from_metadata(view.metadata())
+        }) {
             return Err(IcebergFdwError::PlanSourceChanged.into());
         }
         let binding = ForeignSchemaBinding::new(&context.relation)?;
-        if mutation {
-            binding.validate_write(view.metadata().current_schema())?;
-        } else if context.required_columns.needs_all_columns() {
+        if context.required_columns.needs_all_columns() {
             binding.validate_read(
                 view.metadata(),
                 context.private_data.identity(),
@@ -87,6 +82,62 @@ impl IcebergFdwScanState {
             )?;
         }
         let layout = binding.into_relation_layout();
+        let (_, table, delta) = view.into_parts();
+        let prepared = Self::prepare_rows(
+            context,
+            IcebergReadSnapshot::new(table, delta),
+            &layout,
+        )?;
+        Ok(if context.parallel_aware {
+            ScanExecutionState::PostgresParallelScan(PostgresParallelScan::new(
+                prepared,
+                workers_allowed,
+            )?)
+        } else {
+            ScanExecutionState::SerialAwaitingStart(prepared)
+        })
+    }
+
+    fn begin_mutation(
+        context: &BeginForeignScanContext<'_, LagodbIceberg>,
+        resolved: ResolvedForeignTableBinding,
+    ) -> Result<ScanExecutionState, ForeignScanError> {
+        let view = ForeignTransaction::begin_write(
+            resolved.into_catalog_table(),
+            context.snapshot.command_id(),
+            context.private_data.source(),
+        )?;
+        let binding = ForeignSchemaBinding::new(&context.relation)?;
+        binding.validate_write(view.metadata().current_schema())?;
+        let layout = binding.into_relation_layout();
+        let (key, table, delta) = view.into_parts();
+        let prepared = Self::prepare_rows(
+            context,
+            IcebergReadSnapshot::new(table.clone(), delta),
+            &layout,
+        )?;
+        let tasks = prepared.plan_row_location_tasks()?;
+        let registry = ForeignTransaction::row_registry(&key)?;
+        let mutation = ForeignMutationScan::new(
+            context.private_data.identity().clone(),
+            key,
+            table,
+            layout,
+            prepared.starting_snapshot_id(),
+            tasks,
+        );
+        Ok(ScanExecutionState::MutationAwaitingStart(
+            PreparedMutationScan::new(prepared, registry, mutation),
+        ))
+    }
+
+    /// Bind this scan's output projection and statement-stable predicates to
+    /// the read snapshot. Start installs the complete reader predicate.
+    fn prepare_rows(
+        context: &BeginForeignScanContext<'_, LagodbIceberg>,
+        snapshot: IcebergReadSnapshot,
+        layout: &RelationLayout,
+    ) -> Result<PreparedRowScan, ForeignScanError> {
         let projection = SlotProjection::from_outputs(
             context
                 .output_layout
@@ -105,59 +156,12 @@ impl IcebergFdwScanState {
                 context.filters.rescan_stable(),
             )),
         );
-        let (key, table, delta) = view.into_parts();
-        let mutation_table = mutation.then(|| table.clone());
-        let mut prepared = PreparedRowScan::projected(
-            IcebergReadSnapshot::new(table, delta),
+        Ok(PreparedRowScan::projected(
+            snapshot,
             projection,
             predicates,
-            &layout,
+            layout,
             context.output_layout.slot_types(),
-        )
-        .map_err(IcebergFdwError::from)?;
-
-        let phase = if mutation {
-            let tasks = prepared
-                .plan_row_location_tasks()
-                .map_err(IcebergFdwError::from)?;
-            let registry = ForeignTransaction::row_registry(&key)?;
-            let mutation_table =
-                mutation_table.ok_or_else(|| IcebergFdwError::InvalidPlan {
-                    detail: "mutation scan did not retain its transaction table",
-                })?;
-            let mutation_context = ForeignMutationScan::new(
-                context.private_data.identity().clone(),
-                key,
-                mutation_table,
-                layout,
-                prepared.starting_snapshot_id(),
-                tasks,
-            );
-            ForeignScanPhase::PreparedMutation {
-                prepared,
-                registry,
-                context: mutation_context,
-            }
-        } else if context.parallel_aware {
-            let mut execution = PostgresParallelExecution::new();
-            // Without workers, core skips provider DSM setup. Keep execution
-            // unattached so its existing fallback opens one complete cursor.
-            if parallel_workers_allowed && unsafe { pg_sys::ParallelWorkerNumber } < 0
-            {
-                execution
-                    .prepare(&mut prepared)
-                    .map_err(ForeignScanError::provider)?;
-            }
-            ForeignScanPhase::ParallelQuery {
-                execution,
-                prepared,
-            }
-        } else {
-            ForeignScanPhase::PreparedQuery { prepared }
-        };
-        Ok(Self {
-            phase,
-            parallel_workers_allowed,
-        })
+        )?)
     }
 }

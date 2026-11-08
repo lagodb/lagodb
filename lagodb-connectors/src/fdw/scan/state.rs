@@ -1,7 +1,5 @@
 //! Executor-side scan state and format delegation.
 
-use core::mem;
-
 use lagodb_core::fdw::{
     BeginForeignScanContext, ForeignScanError, ReScanForeignScanContext,
     ScanSlotWriter, StartForeignScanContext,
@@ -24,7 +22,6 @@ enum ConnectorScanPhase {
         files: InputFiles,
     },
     Active(Box<dyn FormatScanState>),
-    Transitioning,
 }
 
 impl ConnectorScanState {
@@ -46,16 +43,15 @@ impl ConnectorScanState {
     }
 
     pub(crate) fn start(
-        &mut self,
+        self,
         context: StartForeignScanContext<'_, LagodbConnectors>,
-    ) -> Result<(), ForeignScanError> {
-        let ConnectorScanPhase::Prepared { reader, files } =
-            mem::replace(&mut self.phase, ConnectorScanPhase::Transitioning)
-        else {
+    ) -> Result<Self, ForeignScanError> {
+        let ConnectorScanPhase::Prepared { reader, files } = self.phase else {
             unreachable!("core starts the connector scan exactly once");
         };
-        self.phase = ConnectorScanPhase::Active(reader.begin(context, files)?);
-        Ok(())
+        Ok(Self {
+            phase: ConnectorScanPhase::Active(reader.begin(context, files)?),
+        })
     }
 
     pub(crate) fn next_slot(

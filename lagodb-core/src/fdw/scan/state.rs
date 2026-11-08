@@ -176,7 +176,13 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
         }?;
         unsafe { self.refresh_runtime_values(econtext) }?;
 
-        let state_ptr = unsafe { self.payload.provider_state_ptr_unchecked() };
+        // Start runs synchronously, so no executor callback observes the
+        // wrapper while the state is moved out. A failed Start drops the
+        // consumed state and reports an ERROR; PostgreSQL never calls this
+        // node again, and wrapper cleanup finds no provider state to drop.
+        // SAFETY: provider initialization installed P::State, and cleanup has
+        // not started.
+        let state = unsafe { self.payload.take_provider_state_unchecked() };
         let context = StartForeignScanContext {
             private_data: self.private_data(),
             relation: unsafe { RelationHandle::from_raw(relation) },
@@ -195,13 +201,11 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
             econtext,
         };
         let entry_context = unsafe { pg_sys::MemoryContextSwitchTo(query_context) };
-        // SAFETY: provider initialization installed P::State at state_ptr. The
-        // callback is synchronous and the context borrows only sibling wrapper
-        // fields that remain live for its duration.
-        let result = unsafe { P::start(&mut *state_ptr, context) };
+        let result = P::start(state, context);
         unsafe { pg_sys::MemoryContextSwitchTo(entry_context) };
-        self.provider_started = result.is_ok();
-        result
+        self.install_provider_state(result?);
+        self.provider_started = true;
+        Ok(())
     }
 
     /// Evaluate all provider runtime expressions in their plan-list order.

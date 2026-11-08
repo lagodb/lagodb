@@ -71,6 +71,21 @@ impl<D, S> ProviderPayload<D, S> {
         self.provider_state.as_mut_ptr()
     }
 
+    /// Move the initialized provider state out for a consuming transition.
+    /// The payload is uninitialized until the successor is installed.
+    ///
+    /// # Safety
+    ///
+    /// `install_provider_state` must have completed and `cleanup` must not
+    /// have started.
+    pub(crate) unsafe fn take_provider_state_unchecked(&mut self) -> S {
+        debug_assert!(self.provider_state_initialized);
+        self.provider_state_initialized = false;
+        // SAFETY: the caller guarantees the state is initialized; clearing the
+        // flag first transfers its only drop obligation to the caller.
+        unsafe { self.provider_state.assume_init_read() }
+    }
+
     /// Borrow the initialized provider state without repeating a lifecycle
     /// branch at a caller that already owns that invariant.
     ///

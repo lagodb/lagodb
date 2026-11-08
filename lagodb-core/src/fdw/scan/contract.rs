@@ -136,11 +136,15 @@ pub trait FdwScan: ForeignDataWrapper + FilterPushdown + 'static {
         ctx: BeginForeignScanContext<'_, Self>,
     ) -> Result<Self::State, ForeignScanError>;
 
-    /// Bind the first valid dynamic parameter set and open the provider cursor.
+    /// Consume the begun state and return the state that opened the provider
+    /// cursor with the first valid dynamic parameter set. This runs once,
+    /// before the first row, including when PostgreSQL rescans the node before
+    /// its first execution. On failure the consumed state is dropped before
+    /// the framework reports the error.
     fn start(
-        state: &mut Self::State,
+        state: Self::State,
         ctx: StartForeignScanContext<'_, Self>,
-    ) -> Result<(), ForeignScanError>;
+    ) -> Result<Self::State, ForeignScanError>;
 
     /// Produce the next row and finalize it through [`ScanSlotWriter::finish`].
     ///

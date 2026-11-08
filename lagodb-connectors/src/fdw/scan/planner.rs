@@ -87,9 +87,9 @@ impl FdwScan for LagodbConnectors {
     }
 
     fn start(
-        state: &mut Self::State,
+        state: Self::State,
         context: StartForeignScanContext<'_, Self>,
-    ) -> Result<(), ForeignScanError> {
+    ) -> Result<Self::State, ForeignScanError> {
         state.start(context)
     }
 

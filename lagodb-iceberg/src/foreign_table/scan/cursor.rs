@@ -86,8 +86,15 @@ impl ForeignMutationCursor {
         }
     }
 
-    pub(super) fn registry(&self) -> RelationRowRegistry {
-        self.registry.clone()
+    /// Restart over a reopened row-location scan of the same planned tasks.
+    /// Registry path-to-ID mappings survive rollback for the registry's
+    /// lifetime, so the last-file cache stays valid.
+    pub(super) fn reopen(&mut self, input: RowLocationScanInput) {
+        self.current = None;
+        self.source = input.source;
+        self.decoder = input.decoder;
+        self.row_location_layout = None;
+        self.row_index = 0;
     }
 
     fn bind_batch(

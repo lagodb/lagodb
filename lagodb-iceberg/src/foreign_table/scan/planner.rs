@@ -172,9 +172,9 @@ impl FdwScan for LagodbIceberg {
     }
 
     fn start(
-        state: &mut Self::State,
+        state: Self::State,
         context: StartForeignScanContext<'_, Self>,
-    ) -> Result<(), ForeignScanError> {
+    ) -> Result<Self::State, ForeignScanError> {
         state.start(context)
     }
 
@@ -185,8 +185,9 @@ impl FdwScan for LagodbIceberg {
         state.rescan(context)
     }
 
-    fn end(state: &mut Self::State) -> Result<(), ForeignScanError> {
-        state.end();
+    /// Core drops the state right after End, inside the same callback; the
+    /// wrapper's Drop releases it when an ERROR skips End.
+    fn end(_state: &mut Self::State) -> Result<(), ForeignScanError> {
         Ok(())
     }
 
