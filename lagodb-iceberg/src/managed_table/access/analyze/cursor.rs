@@ -7,7 +7,7 @@ use std::vec;
 
 use iceberg_lite::arrow::SelectedRowsReadRequest;
 use iceberg_lite::scan::{FileScanTask, TableScan};
-use lagodb_arrow::{ArrowBatchSource, ArrowColumnDecoder};
+use lagodb_arrow::ArrowColumnDecoder;
 use lagodb_core::prelude::*;
 
 use super::returned::ReturnedRows;
@@ -48,7 +48,7 @@ impl AnalyzeReadPlan {
             .into_iter()
             .map(|file| (file.path, file.positions))
             .unzip();
-        let source = ArrowBatchSource::new(InterruptibleArrowBatches(batches));
+        let source = InterruptibleArrowBatches(batches);
         // SAFETY: the caller pairs `decoder` with this scan's projection.
         let returned = unsafe { ReturnedRows::new(source, decoder, paths) };
         Ok((returned, ExpectedCursor::new(positions)))

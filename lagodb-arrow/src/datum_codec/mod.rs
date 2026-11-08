@@ -204,9 +204,8 @@ impl BoundDatumPlan {
                 return Err(Self::incompatible_type_error(field, pg_type));
             };
             // Component nullability is part of the interval representation,
-            // not a per-row constraint. Checked binding verifies it in `accepts_arrow_type`;
-            // trusted binding inherits it from the producer's scan schema.
-            // Both readers therefore need only the parent bitmap.
+            // not a per-row constraint. Binding inherits it from the
+            // producer's scan schema, so readers need only the parent bitmap.
             if fields.len() != 3
                 || fields.iter().zip(["months", "days", "microseconds"]).any(
                     |(f, name)| {
@@ -308,39 +307,6 @@ impl BoundDatumPlan {
             | NodePlan::List { .. }
             | NodePlan::Struct(_)
             | NodePlan::Interval => true,
-        }
-    }
-
-    pub(crate) fn accepts_arrow_type(&self, data_type: &DataType) -> bool {
-        match (&self.node, data_type) {
-            (NodePlan::Scalar { rule, .. }, data_type) => rule.accepts(data_type),
-            (NodePlan::NativeList { element, .. }, data_type) => {
-                element.accepts_list(data_type)
-            }
-            (NodePlan::NestedJsonb(plan), data_type) => plan.accepts(data_type),
-            (NodePlan::TextIo { .. }, DataType::Utf8 | DataType::LargeUtf8) => true,
-            (NodePlan::Oid, DataType::Int64) => true,
-            (NodePlan::List { element, .. }, DataType::List(field)) => {
-                element.accepts_arrow_type(field.data_type())
-            }
-            (NodePlan::Struct(children), DataType::Struct(fields)) => {
-                children.len() == fields.len()
-                    && children.iter().zip(fields).all(|((_, child), field)| {
-                        child.field.name() == field.name()
-                            && child.accepts_arrow_type(field.data_type())
-                    })
-            }
-            (NodePlan::Interval, DataType::Struct(fields)) => {
-                fields.len() == 3
-                    && fields.iter().zip(["months", "days", "microseconds"]).all(
-                        |(field, name)| {
-                            field.name() == name
-                                && *field.data_type() == DataType::Int64
-                                && !field.is_nullable()
-                        },
-                    )
-            }
-            _ => false,
         }
     }
 

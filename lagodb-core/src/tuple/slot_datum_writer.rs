@@ -163,3 +163,57 @@ impl<'a> SlotDatumWriter<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Owns the backing arrays a [`SlotDatumWriter`] writes through. The
+    /// buffers never reallocate after construction, so the raw pointers handed
+    /// to the slot stay valid for the slot's lifetime.
+    struct HostSlot {
+        slot: pg_sys::TupleTableSlot,
+        tuple_desc: Box<pg_sys::TupleDescData>,
+        values: Vec<pg_sys::Datum>,
+        nulls: Vec<bool>,
+    }
+
+    impl HostSlot {
+        fn new(natts: usize) -> Box<Self> {
+            // `nulls` starts all-true so the test can assert the writer flips
+            // only the positions it actually writes. This is the test harness's
+            // own initial state, not what a PostgreSQL slot starts with.
+            let mut tuple_desc: Box<pg_sys::TupleDescData> =
+                Box::new(unsafe { std::mem::zeroed() });
+            tuple_desc.natts = natts as i32;
+            let mut boxed = Box::new(HostSlot {
+                slot: unsafe { std::mem::zeroed() },
+                tuple_desc,
+                values: vec![pg_sys::Datum::from(0usize); natts],
+                nulls: vec![true; natts],
+            });
+            boxed.slot.tts_values = boxed.values.as_mut_ptr();
+            boxed.slot.tts_isnull = boxed.nulls.as_mut_ptr();
+            boxed.slot.tts_tupleDescriptor = &mut *boxed.tuple_desc;
+            boxed
+        }
+
+        fn columns(&mut self) -> SlotDatumWriter<'_> {
+            unsafe { SlotDatumWriter::new(&mut self.slot, std::ptr::null_mut()) }
+        }
+    }
+
+    #[test]
+    fn set_datum_writes_only_the_given_positions() {
+        let mut host = HostSlot::new(3);
+        {
+            let mut cols = host.columns();
+            cols.set_datum(0, Some(pg_sys::Datum::from(42usize)));
+            cols.set_datum(1, None);
+            // Index 2 is intentionally never written.
+        }
+
+        assert_eq!(host.nulls, vec![false, true, true]);
+        assert_eq!(host.values[0].value() as i64, 42);
+    }
+}

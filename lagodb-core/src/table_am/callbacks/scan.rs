@@ -5,7 +5,6 @@
 
 mod descriptor;
 
-use crate::batch::ScanBatchDriver;
 use crate::diag::ReportableError;
 #[cfg(any(feature = "pg17", feature = "pg18"))]
 use crate::handles::AnalyzeReadStreamHandle;
@@ -212,21 +211,15 @@ where
         let state = (*custom_scan).session_mut();
         state.reset_tmp_context();
 
-        let direction = ScanDirection::try_from_raw(direction).report_unwrap();
-
+        let direction = ScanDirection::from_fetch_raw(direction);
         let tmp_ctx = state.tmp_ctx;
 
-        // One uniform slot-filling path: ask the session's driver for the next
-        // tuple. row-vs-column is the driver's own concern. Switch the current
-        // context to the just-reset `tmp_ctx` so the driver's varlena palloc
+        // Switch to the just-reset `tmp_ctx` so the session's varlena palloc
         // lands there and is freed on the next fetch's reset.
         let found = PgMemoryContexts::For(tmp_ctx)
             .switch_to(|_| {
                 let mut cols = state.slot_writer(slot);
-                state
-                    .am_instance
-                    .scan_driver()
-                    .next_into_slot(direction, &mut cols)
+                state.am_instance.scan_getnextslot(direction, &mut cols)
             })
             .report_unwrap();
 
@@ -281,7 +274,7 @@ where
         let state = (*custom_scan).session_mut();
         state.reset_tmp_context();
 
-        let direction_handle = ScanDirection::try_from_raw(direction).report_unwrap();
+        let direction_handle = ScanDirection::from_fetch_raw(direction);
         let Some(operations) = <A::ScanSession as AmScanSession>::TID_RANGE else {
             unreachable!("TID-range trampoline registered without TID_RANGE");
         };

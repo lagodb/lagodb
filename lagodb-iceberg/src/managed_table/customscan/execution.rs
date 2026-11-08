@@ -12,7 +12,6 @@ use pgrx::pg_sys;
 
 /// Serial PostgreSQL CustomScan execution.
 pub(super) struct SerialScan {
-    // Keep the cursor before its preparation so reader resources close first.
     cursor: PgRowCursor,
     prepared: PreparedRowScan,
 }
@@ -36,7 +35,10 @@ impl SerialScan {
         &mut self,
         emitter: NextSlotEmitter<'a>,
     ) -> Result<NextSlotResult<'a>, CustomScanError> {
-        emitter.emit_columns(|columns| self.cursor.next_into_slot(columns))
+        // SAFETY: Begin bound the prepared read to this node's scan-slot
+        // layout. The framework writes the scan slot with the per-tuple
+        // context selected.
+        emitter.emit_columns(|columns| unsafe { self.cursor.next_into_slot(columns) })
     }
 
     pub(super) fn rescan(
@@ -53,8 +55,6 @@ impl SerialScan {
 
 /// PostgreSQL native-parallel CustomScan execution under `Gather`.
 pub(super) struct PostgresParallelScan {
-    // The worker-local cursor is owned by execution and must close before the
-    // prepared read it was opened from.
     execution: PostgresParallelExecution,
     prepared: PreparedRowScan,
 }
@@ -89,20 +89,20 @@ impl PostgresParallelScan {
         mut emitter: NextSlotEmitter<'a>,
     ) -> Result<NextSlotResult<'a>, CustomScanError> {
         loop {
-            if let Some(cursor) = self.execution.cursor() {
-                match emitter
-                    .try_emit_columns(|columns| cursor.next_into_slot(columns))?
-                {
-                    NextSlotAttempt::Produced(produced) => return Ok(produced),
-                    NextSlotAttempt::Exhausted(exhausted) => {
-                        emitter = exhausted;
-                    }
-                }
-                self.execution.finish_cursor();
-            }
-            if !self.execution.open_next(&mut self.prepared)? {
+            let Some(cursor) = self.execution.cursor_or_open(&mut self.prepared)?
+            else {
                 return Ok(emitter.finish_eof());
+            };
+            // SAFETY: Begin bound the prepared read to this node's scan-slot
+            // layout. The framework writes the scan slot with the per-tuple
+            // context selected.
+            match emitter.try_emit_columns(|columns| unsafe {
+                cursor.next_into_slot(columns)
+            })? {
+                NextSlotAttempt::Produced(produced) => return Ok(produced),
+                NextSlotAttempt::Exhausted(exhausted) => emitter = exhausted,
             }
+            self.execution.finish_cursor();
         }
     }
 

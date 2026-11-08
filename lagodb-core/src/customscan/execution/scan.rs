@@ -3,7 +3,7 @@
 use crate::customscan::error::{CustomScanError, CustomScanPhase};
 use crate::customscan::execution::state::CustomScanStateWrapper;
 use crate::customscan::provider::{LagodbCustomScanProvider, NextSlotContext};
-use crate::handles::{RelationHandle, ScanDirection};
+use crate::handles::RelationHandle;
 use pgrx::{pg_guard, pg_sys};
 
 /// `ExecCustomScan`: delegate to PostgreSQL's `ExecScan` with framework
@@ -58,11 +58,7 @@ unsafe fn next_slot<P: LagodbCustomScanProvider>(
     let _ = unsafe { pg_sys::ExecClearTuple(slot) };
     let scan_rel = wrapper.base.ss.ss_currentRelation;
     let econtext = wrapper.base.ss.ps.ps_ExprContext;
-    let estate = wrapper.base.ss.ps.state;
     let per_tuple_ctx = unsafe { (*econtext).ecxt_per_tuple_memory };
-    let scan_direction =
-        ScanDirection::try_from_raw(unsafe { (*estate).es_direction })
-            .map_err(CustomScanError::internal)?;
 
     let _ = unsafe { pg_sys::MemoryContextSwitchTo(per_tuple_ctx) };
     let provider_state_ref: &mut P::State =
@@ -71,7 +67,6 @@ unsafe fn next_slot<P: LagodbCustomScanProvider>(
         provider_state_ref,
         unsafe { RelationHandle::from_raw(scan_rel) },
         slot,
-        scan_direction,
         per_tuple_ctx,
     );
 

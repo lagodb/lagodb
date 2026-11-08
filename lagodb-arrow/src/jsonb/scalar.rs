@@ -11,7 +11,7 @@ use arrow_array::{
     LargeBinaryArray, LargeStringArray, StringArray, Time64MicrosecondArray,
     TimestampMicrosecondArray, TimestampNanosecondArray,
 };
-use arrow_schema::{DataType, TimeUnit};
+use arrow_schema::DataType;
 use lagodb_core::datum::{Decimal128NumericCodec, JsonbBuilder, JsonbPosition};
 use uuid::Uuid;
 
@@ -62,36 +62,8 @@ impl ScalarPlan {
         })
     }
 
-    pub(super) fn accepts(&self, dt: &DataType) -> bool {
-        match self {
-            Self::Bool => matches!(dt, DataType::Boolean),
-            Self::I32 => matches!(dt, DataType::Int32),
-            Self::I64 => matches!(dt, DataType::Int64),
-            Self::F32 => matches!(dt, DataType::Float32),
-            Self::F64 => matches!(dt, DataType::Float64),
-            Self::String => matches!(dt, DataType::Utf8 | DataType::LargeUtf8),
-            Self::Binary => matches!(dt, DataType::Binary | DataType::LargeBinary),
-            Self::FixedBinary(len) => {
-                matches!(dt, DataType::FixedSizeBinary(n) if *n as usize == *len)
-            }
-            Self::Uuid => matches!(dt, DataType::FixedSizeBinary(16)),
-            Self::Date => matches!(dt, DataType::Date32),
-            Self::Time => matches!(dt, DataType::Time64(TimeUnit::Microsecond)),
-            Self::Timestamp { nanos, tz } => {
-                let unit = if *nanos {
-                    TimeUnit::Nanosecond
-                } else {
-                    TimeUnit::Microsecond
-                };
-                matches!(dt, DataType::Timestamp(u, zone) if *u == unit && zone.is_some() == *tz)
-            }
-            Self::Decimal(codec) => matches!(dt, DataType::Decimal128(p, s)
-                if u32::from(*p) == codec.precision() && i32::from(*s) == codec.scale() as i32),
-        }
-    }
-
     /// # Safety
-    /// `self.accepts(array.data_type())` must hold.
+    /// `array` must have the Arrow type this plan was resolved from.
     pub(super) unsafe fn bind(&self, array: &dyn Array) -> ScalarReader {
         match self {
             Self::Bool => ScalarReader::Bool(array.as_boolean().clone()),

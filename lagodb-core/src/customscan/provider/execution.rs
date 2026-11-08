@@ -5,7 +5,7 @@ use core::marker::PhantomData;
 use pgrx::pg_sys;
 
 use crate::customscan::error::CustomScanError;
-use crate::handles::{RelationHandle, ScanDirection};
+use crate::handles::RelationHandle;
 use crate::table_am::AmResult;
 use crate::tuple::{Row, RowDatumCodec, RowSlotWriter, SlotDatumWriter};
 
@@ -37,7 +37,6 @@ impl NextSlotResult<'_> {
 pub struct NextSlotEmitter<'a> {
     relation: RelationHandle<'a>,
     slot: *mut pg_sys::TupleTableSlot,
-    scan_direction: ScanDirection,
     per_tuple_memory_context: pg_sys::MemoryContext,
     _marker: PhantomData<&'a ()>,
 }
@@ -58,11 +57,6 @@ impl<'a> NextSlotEmitter<'a> {
     #[inline]
     pub fn relation(&self) -> &RelationHandle<'_> {
         &self.relation
-    }
-
-    #[inline]
-    pub fn scan_direction(&self) -> ScanDirection {
-        self.scan_direction
     }
 
     /// Attempt to emit one row from a forward-only slot-first source.
@@ -152,7 +146,6 @@ impl<'a, P: LagodbCustomScanProvider> NextSlotContext<'a, P> {
         state: &'a mut P::State,
         relation: RelationHandle<'a>,
         slot: *mut pg_sys::TupleTableSlot,
-        scan_direction: ScanDirection,
         per_tuple_memory_context: pg_sys::MemoryContext,
     ) -> Self {
         Self {
@@ -160,7 +153,6 @@ impl<'a, P: LagodbCustomScanProvider> NextSlotContext<'a, P> {
             emitter: NextSlotEmitter {
                 relation,
                 slot,
-                scan_direction,
                 per_tuple_memory_context,
                 _marker: PhantomData,
             },
@@ -181,12 +173,6 @@ impl<'a, P: LagodbCustomScanProvider> NextSlotContext<'a, P> {
     #[inline]
     pub fn relation(&self) -> &RelationHandle<'_> {
         self.emitter.relation()
-    }
-
-    /// PostgreSQL's current executor scan direction.
-    #[inline]
-    pub fn scan_direction(&self) -> ScanDirection {
-        self.emitter.scan_direction()
     }
 
     /// Write a row into the scan slot.

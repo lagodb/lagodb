@@ -3,7 +3,6 @@
 use std::rc::Rc;
 
 use arrow_array::RecordBatch;
-use lagodb_core::batch::BatchRowDecoder;
 use lagodb_core::datum::ColumnDatumTarget;
 use lagodb_core::diag::PgReportError;
 use lagodb_core::tuple::SlotDatumWriter;
@@ -13,7 +12,7 @@ use super::batch::{BoundBatch, BoundColumn};
 use super::reader::ScalarRead;
 use super::state::DatumReadState;
 use super::{BoundDatumPlan, DatumCodec};
-use crate::error::{ArrowConversionError, ArrowConversionResult};
+use crate::error::ArrowConversionResult;
 use crate::rule::CellRule;
 
 /// One mapped column: which Arrow batch column to read, its bound conversion
@@ -30,7 +29,6 @@ pub struct DecodedColumn {
 
 enum DecoderSource {
     Physical {
-        rule: CellRule,
         read: ScalarRead,
     },
     Declared {
@@ -92,7 +90,7 @@ impl DecodedColumn {
         }
         let read = ScalarRead::bind(&rule, codec, None)?;
         Ok(Self {
-            source: DecoderSource::Physical { rule, read },
+            source: DecoderSource::Physical { read },
             src_col,
             dest,
             target_oid,
@@ -143,17 +141,16 @@ impl ArrowColumnDecoder {
         }
     }
 
-    /// Bind fresh arrays from a producer that already guarantees the scan
-    /// schema. Only the repeated recursive type comparisons are skipped; this
+    /// Bind fresh arrays from a producer that guarantees the scan schema. This
     /// cannot fail because all conversion state was bound with the columns.
     ///
     /// # Safety
     /// Every mapped source column must exist and satisfy its complete conversion
     /// plan, including nested field order, decimal precision/scale, fixed binary
     /// width and required interval components. The batch must come from the
-    /// projection/execution schema used to construct this decoder (or have been
-    /// checked against it). File schema evolution belongs to the producer, not
-    /// this binding layer. Unrelated, unmapped columns are permitted.
+    /// projection/execution schema used to construct this decoder. File schema
+    /// evolution belongs to the producer, not this binding layer. Unrelated,
+    /// unmapped columns are permitted.
     pub unsafe fn bind_batch_unchecked(&self, batch: RecordBatch) -> BoundBatch {
         let columns = self
             .columns
@@ -168,9 +165,7 @@ impl ArrowColumnDecoder {
                         DecoderSource::Declared { plan, state } => {
                             plan.bind_reader_unchecked(array, state)
                         }
-                        DecoderSource::Physical { read, .. } => {
-                            read.bind_array(array)
-                        }
+                        DecoderSource::Physical { read } => read.bind_array(array),
                     }
                 };
                 BoundColumn {
@@ -188,11 +183,8 @@ impl ArrowColumnDecoder {
     /// Decode one row directly into a slot whose layout is the one used to
     /// validate the decoder's [`DecodedColumn`] destinations.
     ///
-    /// This is the trusted-provider physical path. It is deliberately an
-    /// unsafe method instead of being the implementation of the safe
-    /// [`BatchRowDecoder::write_row`] API: the decoder stores scalar
-    /// destinations, not a type-level association with a particular
-    /// `SlotDatumWriter` descriptor.
+    /// This is unsafe because the decoder stores scalar destinations, not a
+    /// type-level association with a particular `SlotDatumWriter` descriptor.
     ///
     /// # Safety
     ///
@@ -211,81 +203,5 @@ impl ArrowColumnDecoder {
         out: &mut SlotDatumWriter<'_>,
     ) -> Result<(), PgReportError> {
         Ok(unsafe { bound.write_row_unchecked(row_idx, out) }?)
-    }
-}
-
-impl BatchRowDecoder for ArrowColumnDecoder {
-    type Batch = RecordBatch;
-    type Bound = BoundBatch;
-
-    /// Resolve every mapped column to its concrete typed array, once per batch.
-    /// Each mapped column's complete type is checked once before sharing the
-    /// trusted array-binding implementation. This includes NestedJsonb leaves,
-    /// where array kinds alone cannot establish scale or UUID width. Type drift
-    /// surfaces as a clean
-    /// [`ArrowConversionError::ArrowTypeMismatch`] at the batch boundary.
-    fn bind(&self, batch: RecordBatch) -> Result<BoundBatch, PgReportError> {
-        for col in self.columns.iter() {
-            let array = batch.columns().get(col.src_col).ok_or_else(|| {
-                ArrowConversionError::ArrowTypeMismatch(
-                    format!(
-                        "batch has {} columns but the plan reads column {}",
-                        batch.num_columns(),
-                        col.src_col
-                    )
-                    .into(),
-                )
-            })?;
-            let accepts = match &col.source {
-                DecoderSource::Declared { plan, .. } => {
-                    plan.accepts_arrow_type(array.data_type())
-                }
-                DecoderSource::Physical { rule, .. } => {
-                    rule.accepts(array.data_type())
-                }
-            };
-            if !accepts {
-                return Err(ArrowConversionError::ArrowTypeMismatch(
-                    format!(
-                        "batch column {} has type {:?}, incompatible with its conversion plan",
-                        col.src_col,
-                        array.data_type()
-                    )
-                    .into(),
-                )
-                .into());
-            }
-        }
-        // SAFETY: each mapped column was checked once above, recursively,
-        // including NestedJsonb's decimal scale and UUID width prerequisites.
-        Ok(unsafe { self.bind_batch_unchecked(batch) })
-    }
-
-    fn num_rows(&self, bound: &BoundBatch) -> usize {
-        bound.num_rows
-    }
-
-    /// Safe generic path: the destination bound is checked by `SlotDatumWriter`.
-    /// Trusted relation-bound providers can use
-    /// [`Self::write_row_unchecked`] after upholding its layout contract.
-    fn write_row(
-        &self,
-        bound: &BoundBatch,
-        row_idx: usize,
-        out: &mut SlotDatumWriter<'_>,
-    ) -> Result<(), PgReportError> {
-        if row_idx >= bound.num_rows {
-            return Err(ArrowConversionError::InvariantViolated(
-                "batch row index is out of bounds",
-            )
-            .into());
-        }
-        for col in bound.columns.iter() {
-            // The shim already switched to the slot's target context, so the
-            // varlena/array palloc lands where the per-row reset expects it.
-            let datum = unsafe { col.reader.read_datum_unchecked(row_idx) }?;
-            out.set_datum(col.dest, datum);
-        }
-        Ok(())
     }
 }

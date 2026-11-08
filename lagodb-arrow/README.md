@@ -66,9 +66,10 @@ format-neutral resolver never infers that representation from a PostgreSQL OID.
 
 ## Read and write paths
 
-- **Read:** `ArrowBatchSource` yields one `RecordBatch` at a time to
-  `lagodb-core`'s `AmScanBatchSource`, and `ArrowColumnDecoder` (a
-  `BatchRowDecoder`) writes one batch row straight into a slot.
+- **Read:** `ArrowColumnDecoder` binds each `RecordBatch` once with
+  `bind_batch_unchecked`, trusting the producer to emit the scan schema the
+  decoder was built from, and writes one batch row straight into a slot. The
+  producing crate owns its batch iterator and error conversion.
 - **Write:** `BoundWriteBuffer` appends relation slot rows and
   `BoundDatumBuffer` appends slot-free datum streams such as COPY into one Arrow
   builder per column; both implement `BatchBuffer` and produce a `RecordBatch`

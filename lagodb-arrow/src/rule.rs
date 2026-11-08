@@ -336,61 +336,6 @@ impl CellRule {
         }
     }
 
-    /// Whether an Arrow array of `dt` can be decoded by this already-resolved
-    /// rule.
-    ///
-    /// This is the batch-boundary check behind trusted array binding: several
-    /// Arrow types share a concrete array kind while differing in the
-    /// `DataType` parameters the value math depends on — decimal
-    /// precision/scale, fixed-binary width, timestamp unit/timezone. Validating
-    /// the full `DataType` once per batch (against the type the plan resolved
-    /// from the schema) turns a producer/plan drift into a clean
-    /// [`ArrowConversionError::ArrowTypeMismatch`] at the boundary instead of a
-    /// panic or a value silently decoded at the wrong scale/width.
-    ///
-    /// The accepted set mirrors [`Self::resolve`] (e.g. `Utf8` accepts
-    /// `Utf8`/`LargeUtf8`) and the exact unit the decoder reads for timestamps.
-    pub fn accepts(&self, dt: &DataType) -> bool {
-        match self {
-            CellRule::Bool => matches!(dt, DataType::Boolean),
-            CellRule::I16 => matches!(dt, DataType::Int16),
-            CellRule::I32 => matches!(dt, DataType::Int32),
-            CellRule::I64 => matches!(dt, DataType::Int64),
-            CellRule::F32 => matches!(dt, DataType::Float32),
-            CellRule::F64 => matches!(dt, DataType::Float64),
-            CellRule::Utf8 => matches!(dt, DataType::Utf8 | DataType::LargeUtf8),
-            CellRule::Binary => {
-                matches!(dt, DataType::Binary | DataType::LargeBinary)
-            }
-            CellRule::FixedBinary { len } => {
-                matches!(dt, DataType::FixedSizeBinary(n) if *n as usize == *len)
-            }
-            CellRule::Uuid => matches!(dt, DataType::FixedSizeBinary(16)),
-            CellRule::Date32 => matches!(dt, DataType::Date32),
-            CellRule::Time64Micros => {
-                matches!(dt, DataType::Time64(TimeUnit::Microsecond))
-            }
-            CellRule::Timestamp { nanos, tz } => {
-                let want_unit = if *nanos {
-                    TimeUnit::Nanosecond
-                } else {
-                    TimeUnit::Microsecond
-                };
-                matches!(
-                    dt,
-                    DataType::Timestamp(unit, zone)
-                        if *unit == want_unit && zone.is_some() == *tz
-                )
-            }
-            CellRule::Decimal128 { precision, scale } => matches!(
-                dt,
-                DataType::Decimal128(p, s)
-                    if *p as u32 == *precision && *s as u32 == *scale
-            ),
-            CellRule::List { element, .. } => element.accepts_list(dt),
-        }
-    }
-
     /// Whether decoding or encoding this rule crosses the PostgreSQL/Arrow
     /// semantic UTF-8 boundary.
     pub(crate) fn requires_utf8_server_encoding(&self) -> bool {
@@ -447,36 +392,9 @@ impl ListElementRule {
         }
     }
 
-    /// Whether an Arrow `List` column carries elements of this kind.
-    pub(crate) fn accepts_list(&self, dt: &DataType) -> bool {
-        matches!(dt, DataType::List(field) if self.accepts_data_type(field.data_type()))
-    }
-
     /// String elements require the UTF-8 server-encoding capability.
     pub(crate) fn requires_utf8_server_encoding(&self) -> bool {
         matches!(self, Self::String)
-    }
-
-    /// Whether an Arrow list-element `DataType` can be decoded by this element
-    /// rule — the element-level counterpart of [`CellRule::accepts`], used to
-    /// validate a list column's element type at the batch boundary.
-    ///
-    /// This is kept in lockstep with the physical types the list reader binds:
-    /// `String` accepts `Utf8`/`LargeUtf8`, and every other kind matches exactly. Element
-    /// types the resolver rejects (e.g. `Binary`, `UInt32`, a nested `List`)
-    /// therefore fail here rather than slipping through as "some list".
-    pub(crate) fn accepts_data_type(&self, dt: &DataType) -> bool {
-        match self {
-            ListElementRule::Bool => matches!(dt, DataType::Boolean),
-            ListElementRule::Short => matches!(dt, DataType::Int16),
-            ListElementRule::Int => matches!(dt, DataType::Int32),
-            ListElementRule::Long => matches!(dt, DataType::Int64),
-            ListElementRule::Float => matches!(dt, DataType::Float32),
-            ListElementRule::Double => matches!(dt, DataType::Float64),
-            ListElementRule::String => {
-                matches!(dt, DataType::Utf8 | DataType::LargeUtf8)
-            }
-        }
     }
 
     /// Whether this element kind can materialize into the array column's

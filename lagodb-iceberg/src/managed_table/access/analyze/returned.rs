@@ -6,7 +6,9 @@ use lagodb_core::prelude::*;
 
 use super::cursor::RowIdentity;
 use crate::error::{IcebergError, IcebergResult};
-use crate::scan::batch::{AnalyzeBatchSource, RowLocationLayout, position_unchecked};
+use crate::scan::batch::{
+    InterruptibleArrowBatches, RowLocationLayout, position_unchecked,
+};
 
 /// Reader output in planned `(file, position)` order.
 ///
@@ -14,7 +16,7 @@ use crate::scan::batch::{AnalyzeBatchSource, RowLocationLayout, position_uncheck
 /// order and positions ascend within each file. Rows removed by deletes are
 /// simply absent, which makes this a subsequence of the planned candidates.
 pub(super) struct ReturnedRows {
-    source: AnalyzeBatchSource,
+    source: InterruptibleArrowBatches,
     decoder: ArrowColumnDecoder,
     layout: Option<RowLocationLayout>,
     /// Planned data-file paths; `file_index` only moves forward over them.
@@ -41,7 +43,7 @@ impl ReturnedRows {
     /// # Safety
     /// `source` must emit the projected schema used to construct `decoder`.
     pub(super) unsafe fn new(
-        source: AnalyzeBatchSource,
+        source: InterruptibleArrowBatches,
         decoder: ArrowColumnDecoder,
         planned_paths: Vec<Box<str>>,
     ) -> Self {
@@ -60,7 +62,7 @@ impl ReturnedRows {
     pub(super) fn current(&mut self) -> AmResult<Option<ReturnedRow<'_>>> {
         while !self.has_row() {
             self.batch = None;
-            let Some(batch) = self.source.next_batch()? else {
+            let Some(batch) = self.source.next().transpose()? else {
                 return Ok(None);
             };
             self.batch = self.bind(batch)?;

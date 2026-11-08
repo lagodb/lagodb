@@ -22,9 +22,9 @@ impl BoundDatumPlan {
     /// dispatch. Conversion state remains owned by the scan across batches.
     ///
     /// # Safety
-    /// `self.accepts_arrow_type(array.data_type())` must hold for the entire
-    /// tree, either checked at the decoder boundary or guaranteed by its
-    /// producer, and `state` must have been built from this plan.
+    /// `array` must have the Arrow type this plan was bound from, for the
+    /// entire tree, as guaranteed by its producer, and `state` must have been
+    /// built from this plan.
     pub(crate) unsafe fn bind_reader_unchecked(
         &self,
         array: &dyn Array,
@@ -100,7 +100,7 @@ impl TextArray {
 
 impl RecursiveDatumReader {
     /// # Safety
-    /// `plan.accepts_arrow_type(array.data_type())` must hold for the entire
+    /// `array` must have the Arrow type `plan` was bound from, for the entire
     /// subtree, and `state` must have been built from `plan`.
     unsafe fn bind_unchecked(
         plan: &BoundDatumPlan,

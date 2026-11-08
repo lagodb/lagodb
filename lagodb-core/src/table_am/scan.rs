@@ -3,12 +3,11 @@
 use pgrx::pg_sys;
 
 use super::{AmResult, BitmapScanOps, TidRangeOps, unsupported_callback};
-use crate::batch::ScanBatchDriver;
 #[cfg(any(feature = "pg17", feature = "pg18"))]
 use crate::handles::AnalyzeReadStreamHandle;
 use crate::handles::{
     ItemPointer, OwnedScanKeys, ParallelTableScanDescHandle, RelationHandle,
-    SampleScanStateHandle, SnapshotHandle,
+    SampleScanStateHandle, ScanDirection, SnapshotHandle,
 };
 use crate::tuple::{Row, SlotDatumWriter};
 
@@ -139,12 +138,6 @@ pub trait AmScanSession {
     /// Bitmap table-scan support and its complete callback implementation.
     const BITMAP: Option<BitmapScanOps<Self>> = None;
 
-    /// Concrete slot-filling scan driver (implements [`ScanBatchDriver`]).
-    /// A columnar AM sets this to its cursor type (e.g. an Arrow batch
-    /// cursor). Binding a concrete type (rather than `dyn ScanBatchDriver`)
-    /// keeps the per-row decode a static call.
-    type BatchDriver: ScanBatchDriver;
-
     /// Begin the scan and construct the complete, row-ready session.
     ///
     /// Like `heap_beginscan`, this is the single construction step for a
@@ -171,20 +164,22 @@ pub trait AmScanSession {
     where
         Self: Sized;
 
-    /// The scan's slot-filling driver for this session.
+    /// Fetch the next tuple in `direction` into `out`, like PostgreSQL's
+    /// `scan_getnextslot`.
     ///
-    /// The framework drives every TableAM scan through the one uniform
-    /// [`ScanBatchDriver::next_into_slot`] path: the C shim calls this once per
-    /// `scan_getnextslot`, passes PostgreSQL's requested scan direction, and
-    /// asks the returned driver to fill the slot with the next tuple.
-    /// row-vs-column and direction support are implementation details *inside*
-    /// the driver (a forward-only AM must report unsupported directions).
-    /// There is no separate row callback: a TableAM is columnar by contract,
-    /// and a row-at-a-time source (FDW) is a different framework, not an
-    /// `AmScanSession`.
+    /// The framework clears the slot, resets the per-fetch memory context and
+    /// selects it before this call, and stores the virtual tuple only when
+    /// this returns `true`. Pass-by-reference datums written through `out`
+    /// must be allocated in the current memory context. The framework has
+    /// already set every dropped attribute in `out` to NULL.
     ///
-    /// [`Self::scan_begin`] returns a session whose driver is already ready.
-    fn scan_driver(&mut self) -> &mut Self::BatchDriver;
+    /// A session that cannot fetch in `direction` must return an error rather
+    /// than treat it as [`ScanDirection::Forward`].
+    fn scan_getnextslot(
+        &mut self,
+        direction: ScanDirection,
+        out: &mut SlotDatumWriter<'_>,
+    ) -> AmResult<bool>;
 
     /// Restart the scan.
     ///

@@ -9,7 +9,7 @@ use crate::managed_table::access::mutation::{
     IcebergFileSource, IcebergModifyQueryState,
 };
 use crate::scan::RowLocationScanInput;
-use crate::scan::batch::{RowLocationLayout, ScanBatchSource, position_unchecked};
+use crate::scan::batch::{ArrowBatches, RowLocationLayout, position_unchecked};
 use crate::write::IcebergFileId;
 
 /// Row-location-bearing cursor for a managed-table modification scan.
@@ -54,7 +54,7 @@ struct MutationBoundBatch {
 }
 
 struct MutationBatchCursor {
-    source: ScanBatchSource,
+    source: ArrowBatches,
     decoder: ArrowColumnDecoder,
     current: Option<MutationBoundBatch>,
     row_location_layout: Option<RowLocationLayout>,
@@ -98,7 +98,7 @@ impl MutationBatchCursor {
     fn next_into_slot(&mut self, out: &mut SlotDatumWriter<'_>) -> AmResult<bool> {
         loop {
             if let Some(bound) = self.current.as_ref()
-                && self.row_index < self.decoder.num_rows(&bound.decoded)
+                && self.row_index < bound.decoded.num_rows()
             {
                 let row_index = self.row_index;
                 // SAFETY: PgReadPlan compiled the decoder from the relation
@@ -123,7 +123,7 @@ impl MutationBatchCursor {
             }
 
             self.current = None;
-            let Some(batch) = self.source.next_batch()? else {
+            let Some(batch) = self.source.next().transpose()? else {
                 return Ok(false);
             };
             let Some(bound) = self.bind_batch(batch)? else {

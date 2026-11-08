@@ -301,12 +301,13 @@ impl<'a> ScanSlotWriter<'a> {
     ///
     /// # Safety
     ///
-    /// This method may be called at most once for a produced row and must not
-    /// be mixed with [`Self::datum_writer`] or [`Self::store_heap_tuple`]. The
-    /// decoder must write every column exposed by the scan's output layout,
-    /// and every bound destination must have been validated against this scan
-    /// slot. Pass-by-reference datums are allocated in PostgreSQL's current
-    /// per-tuple memory context.
+    /// This method may be called at most once per iterate callback, before the
+    /// provider knows whether it produces a row, and must not be mixed with
+    /// [`Self::datum_writer`] or [`Self::store_heap_tuple`]. Before the
+    /// provider returns a produced row, the decoder must write every column
+    /// exposed by the scan's output layout, and every bound destination must
+    /// have been validated against this scan slot. Pass-by-reference datums are
+    /// allocated in PostgreSQL's current per-tuple memory context.
     #[inline]
     pub unsafe fn datum_columns(&mut self) -> SlotDatumWriter<'_> {
         unsafe { self.begin_datum_output() };
@@ -337,7 +338,7 @@ impl<'a> ScanSlotWriter<'a> {
     /// # Safety
     ///
     /// The writer must own the validated slot and layout for the current
-    /// callback, and this method must run at most once for the row.
+    /// callback, and this method must run at most once per callback.
     #[inline]
     unsafe fn begin_datum_output(&mut self) {
         unsafe { pg_sys::ExecClearTuple(self.slot) };

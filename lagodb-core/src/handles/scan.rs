@@ -1,8 +1,5 @@
 use super::borrowed::PgBorrowed;
 use pgrx::pg_sys;
-use pgrx::pg_sys::panic::ErrorReport;
-use pgrx::prelude::PgSqlErrorCode;
-use std::fmt;
 use std::ptr::NonNull;
 
 #[cfg(any(feature = "pg17", feature = "pg18"))]
@@ -461,70 +458,27 @@ impl<'a> ParallelTableScanDescHandle<'a> {
     }
 }
 
-/// Safe wrapper for PostgreSQL ScanDirection.
+/// Direction PostgreSQL passes to a Table AM tuple fetch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanDirection {
     Forward,
     Backward,
-    NoMovement,
-}
-
-/// Raw PostgreSQL scan direction value outside the supported enum set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InvalidScanDirection {
-    raw: pg_sys::ScanDirection::Type,
-}
-
-impl InvalidScanDirection {
-    #[inline]
-    pub fn raw(&self) -> pg_sys::ScanDirection::Type {
-        self.raw
-    }
-}
-
-impl fmt::Display for InvalidScanDirection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "invalid PostgreSQL ScanDirection: {}", self.raw)
-    }
-}
-
-impl std::error::Error for InvalidScanDirection {}
-
-impl From<InvalidScanDirection> for ErrorReport {
-    fn from(value: InvalidScanDirection) -> Self {
-        ErrorReport::new(
-            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-            value.to_string(),
-            "",
-        )
-    }
 }
 
 impl ScanDirection {
+    /// Convert the direction of a `scan_getnextslot` or
+    /// `scan_getnextslot_tidrange` call.
+    ///
+    /// PostgreSQL's `table_scan_getnextslot` and
+    /// `table_scan_getnextslot_tidrange` wrappers assert that a fetch is never
+    /// `NoMovementScanDirection`, so a fetch direction is either backward or
+    /// forward.
     #[inline]
-    pub fn try_from_raw(
-        direction: pg_sys::ScanDirection::Type,
-    ) -> Result<Self, InvalidScanDirection> {
-        match direction {
-            pg_sys::ScanDirection::ForwardScanDirection => Ok(ScanDirection::Forward),
-            pg_sys::ScanDirection::BackwardScanDirection => {
-                Ok(ScanDirection::Backward)
-            }
-            pg_sys::ScanDirection::NoMovementScanDirection => {
-                Ok(ScanDirection::NoMovement)
-            }
-            raw => Err(InvalidScanDirection { raw }),
-        }
-    }
-
-    #[inline]
-    pub fn to_raw(&self) -> pg_sys::ScanDirection::Type {
-        match self {
-            ScanDirection::Forward => pg_sys::ScanDirection::ForwardScanDirection,
-            ScanDirection::Backward => pg_sys::ScanDirection::BackwardScanDirection,
-            ScanDirection::NoMovement => {
-                pg_sys::ScanDirection::NoMovementScanDirection
-            }
+    pub fn from_fetch_raw(direction: pg_sys::ScanDirection::Type) -> Self {
+        if direction == pg_sys::ScanDirection::BackwardScanDirection {
+            ScanDirection::Backward
+        } else {
+            ScanDirection::Forward
         }
     }
 }

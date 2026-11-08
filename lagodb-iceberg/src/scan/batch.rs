@@ -7,13 +7,12 @@ use iceberg_lite::metadata_columns::{
     RESERVED_FIELD_ID_POS,
 };
 use iceberg_lite::scan::ArrowRecordBatchIterator;
-use lagodb_arrow::ArrowBatchSource;
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult};
 
-/// Adapts Iceberg's batch iterator to the format-neutral conversion source.
+/// Iceberg's batch iterator with errors lifted to [`IcebergError`].
 ///
 /// Executor-driven scans enter through PostgreSQL's `ExecScanFetch` (or the
 /// CustomScan executor wrapper), which already checks interrupts before every
@@ -30,8 +29,6 @@ impl Iterator for ArrowBatches {
     }
 }
 
-pub(crate) type ScanBatchSource = ArrowBatchSource<ArrowBatches>;
-
 /// ANALYZE batch adapter for paths not driven by `ExecScanFetch`.
 pub(crate) struct InterruptibleArrowBatches(pub(crate) ArrowRecordBatchIterator);
 
@@ -43,8 +40,6 @@ impl Iterator for InterruptibleArrowBatches {
         self.0.next().map(|batch| batch.map_err(IcebergError::from))
     }
 }
-
-pub(crate) type AnalyzeBatchSource = ArrowBatchSource<InterruptibleArrowBatches>;
 
 /// Stable positions of Iceberg's row-location metadata columns.
 #[derive(Clone, Copy)]

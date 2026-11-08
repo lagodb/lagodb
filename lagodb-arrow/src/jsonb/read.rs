@@ -34,9 +34,8 @@ enum BoundValue {
 
 impl BoundNestedJsonb {
     /// # Safety
-    /// `plan.accepts(array.data_type())` must hold for the complete tree.
-    /// The decoder's checked entry validates it once; trusted scans instead
-    /// establish it through their producer's fixed projection schema. The
+    /// `array` must have the Arrow type `plan` was bound from, for the complete
+    /// tree, as established by the producer's fixed projection schema. The
     /// concrete array kind alone does not establish decimal scale or fixed
     /// binary UUID width.
     pub(crate) unsafe fn bind_unchecked(

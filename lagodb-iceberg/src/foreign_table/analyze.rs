@@ -75,7 +75,9 @@ impl FdwAnalyze for LagodbIceberg {
             let produced = row_context.with(|| {
                 let mut columns =
                     unsafe { SlotDatumWriter::new(slot.raw(), row_context.raw()) };
-                cursor.next_into_slot(&mut columns)
+                // SAFETY: the slot uses the relation descriptor whose full
+                // layout bound the decoder, and `with` selected the row context.
+                unsafe { cursor.next_into_slot(&mut columns) }
             });
             if !produced? {
                 break;

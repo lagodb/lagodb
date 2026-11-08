@@ -2,12 +2,11 @@
 
 use arrow_array::{Int64Array, RecordBatch};
 use lagodb_arrow::{ArrowColumnDecoder, BoundBatch};
-use lagodb_core::batch::{AmScanBatchSource, BatchRowDecoder};
 use lagodb_core::fdw::{ForeignScanError, ScanSlotWriter};
 use lagodb_core::handles::ValidItemPointer;
 
 use crate::scan::RowLocationScanInput;
-use crate::scan::batch::{RowLocationLayout, ScanBatchSource, position_unchecked};
+use crate::scan::batch::{ArrowBatches, RowLocationLayout, position_unchecked};
 use crate::write::{IcebergFileId, IcebergRowIdentity, RelationRowRegistry};
 
 struct MutationBoundBatch {
@@ -17,7 +16,7 @@ struct MutationBoundBatch {
 }
 
 pub(super) struct ForeignMutationCursor {
-    source: ScanBatchSource,
+    source: ArrowBatches,
     decoder: ArrowColumnDecoder,
     registry: RelationRowRegistry,
     current: Option<MutationBoundBatch>,
@@ -48,7 +47,7 @@ impl ForeignMutationCursor {
     ) -> Result<bool, ForeignScanError> {
         loop {
             if let Some(bound) = self.current.as_ref()
-                && self.row_index < self.decoder.num_rows(&bound.decoded)
+                && self.row_index < bound.decoded.num_rows()
             {
                 let row_index = self.row_index;
                 let mut columns = unsafe { output.datum_columns() };
@@ -74,7 +73,7 @@ impl ForeignMutationCursor {
             }
 
             self.current = None;
-            let Some(batch) = self.source.next_batch()? else {
+            let Some(batch) = self.source.next().transpose()? else {
                 return Ok(false);
             };
             let Some(bound) = self.bind_batch(batch)? else {

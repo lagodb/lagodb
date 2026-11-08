@@ -9,7 +9,7 @@ use iceberg_lite::overlay::SnapshotDelta;
 use iceberg_lite::scan::{ArrowRecordBatchIterator, FileScanTask, TableScan};
 use iceberg_lite::spec::Schema as IcebergSchema;
 use iceberg_lite::table::Table;
-use lagodb_arrow::{ArrowBatchSource, ArrowColumnDecoder};
+use lagodb_arrow::ArrowColumnDecoder;
 use lagodb_core::runtime_api::TableScanTaskMetrics;
 use pgrx::pg_sys;
 
@@ -18,9 +18,7 @@ use crate::schema::column_plan::PgReadPlan;
 use crate::schema::projection::{SlotProjection, StorageProjection};
 use crate::schema::relation::RelationLayout;
 
-use super::batch::{
-    AnalyzeBatchSource, ArrowBatches, InterruptibleArrowBatches, ScanBatchSource,
-};
+use super::batch::{ArrowBatches, InterruptibleArrowBatches};
 use super::columnar::{ScanSourceBinding, ScanTaskPlanner};
 use super::{IcebergTaskMetrics, PgRowCursor};
 
@@ -384,12 +382,12 @@ impl PreparedRowScan {
 
     pub(crate) fn open_analyze_row_cursor(
         &mut self,
-    ) -> IcebergResult<PgRowCursor<AnalyzeBatchSource>> {
+    ) -> IcebergResult<PgRowCursor<InterruptibleArrowBatches>> {
         let tasks = self.read.planned_query_tasks()?;
-        let source = ArrowBatchSource::new(InterruptibleArrowBatches(
+        let source = InterruptibleArrowBatches(
             self.read
                 .read_planned_tasks(RowLocationProjection::Exclude, tasks)?,
-        ));
+        );
         // SAFETY: from_plan derives projection and decoder from one PgReadPlan;
         // iceberg-lite transforms each file batch to that projected scan schema.
         Ok(unsafe { PgRowCursor::new(source, self.decoder.clone()) })
@@ -399,10 +397,10 @@ impl PreparedRowScan {
         &self,
         tasks: Arc<[FileScanTask]>,
     ) -> IcebergResult<PgRowCursor> {
-        let source = ArrowBatchSource::new(ArrowBatches(
+        let source = ArrowBatches(
             self.read
                 .read_planned_tasks(RowLocationProjection::Exclude, tasks)?,
-        ));
+        );
         // SAFETY: from_plan derives projection and decoder from one PgReadPlan;
         // iceberg-lite transforms each file batch to that projected scan schema.
         Ok(unsafe { PgRowCursor::new(source, self.decoder.clone()) })
@@ -458,10 +456,10 @@ impl PreparedRowScan {
         &self,
         tasks: Arc<[FileScanTask]>,
     ) -> IcebergResult<RowLocationScanInput> {
-        let source = ArrowBatchSource::new(ArrowBatches(
+        let source = ArrowBatches(
             self.read
                 .read_planned_tasks(RowLocationProjection::Include, tasks)?,
-        ));
+        );
         Ok(RowLocationScanInput {
             source,
             decoder: self.decoder.clone(),
@@ -491,6 +489,6 @@ pub(crate) struct AnalyzeScanInput {
 /// Constructed by PreparedRowScan from one PgReadPlan. Keep source and decoder
 /// paired: the reader transforms file batches to the decoder's scan projection.
 pub(crate) struct RowLocationScanInput {
-    pub(crate) source: ScanBatchSource,
+    pub(crate) source: ArrowBatches,
     pub(crate) decoder: ArrowColumnDecoder,
 }

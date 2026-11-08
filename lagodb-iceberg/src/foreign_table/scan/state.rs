@@ -135,45 +135,38 @@ impl IcebergFdwScanState {
         output: &mut ScanSlotWriter<'_>,
     ) -> Result<bool, ForeignScanError> {
         match &mut self.phase {
-            ForeignScanPhase::SerialQuery { cursor, .. } => cursor
-                .next_with(|decoder, batch, row_index| {
-                    let mut columns = unsafe { output.datum_columns() };
-                    unsafe {
-                        decoder.write_row_unchecked(batch, row_index, &mut columns)
-                    }?;
-                    Ok(())
-                })
-                .map_err(ForeignScanError::from),
+            ForeignScanPhase::SerialQuery { cursor, .. } => {
+                // SAFETY: this is the callback's only output. Begin bound the
+                // decoder to every output-layout column of this scan slot.
+                let mut columns = unsafe { output.datum_columns() };
+                // SAFETY: the decoder was bound to the validated scan-slot
+                // types; ForeignNext selected the per-tuple context.
+                unsafe { cursor.next_into_slot(&mut columns) }
+                    .map_err(ForeignScanError::from)
+            }
             ForeignScanPhase::ParallelQuery {
                 execution,
                 prepared,
-            } => loop {
-                if let Some(cursor) = execution.cursor() {
-                    let produced = cursor
-                        .next_with(|decoder, batch, row_index| {
-                            let mut columns = unsafe { output.datum_columns() };
-                            unsafe {
-                                decoder.write_row_unchecked(
-                                    batch,
-                                    row_index,
-                                    &mut columns,
-                                )
-                            }?;
-                            Ok(())
-                        })
-                        .map_err(ForeignScanError::from)?;
-                    if produced {
+            } => {
+                // SAFETY: as for SerialQuery; every task-group cursor uses the
+                // same prepared read and its decoder.
+                let mut columns = unsafe { output.datum_columns() };
+                loop {
+                    let Some(cursor) = execution
+                        .cursor_or_open(prepared)
+                        .map_err(ForeignScanError::provider)?
+                    else {
+                        return Ok(false);
+                    };
+                    // SAFETY: as for SerialQuery.
+                    if unsafe { cursor.next_into_slot(&mut columns) }
+                        .map_err(ForeignScanError::from)?
+                    {
                         return Ok(true);
                     }
                     execution.finish_cursor();
                 }
-                if !execution
-                    .open_next(prepared)
-                    .map_err(ForeignScanError::provider)?
-                {
-                    return Ok(false);
-                }
-            },
+            }
             ForeignScanPhase::ForeignMutation { cursor, .. } => {
                 cursor.next_slot(output)
             }

@@ -10,14 +10,9 @@ use crate::scan::{PgRowCursor, PreparedRowScan, ScanError};
 
 /// PostgreSQL DSM attachment, task inventory, and worker-local cursor.
 pub(crate) struct PostgresParallelExecution {
-    cursor: ParallelCursorState,
+    cursor: Option<PgRowCursor>,
     source: ScanSource,
     coordinator: ParallelScanCoordinator,
-}
-
-enum ParallelCursorState {
-    Idle,
-    Open(PgRowCursor),
 }
 
 enum ScanSource {
@@ -29,7 +24,7 @@ enum ScanSource {
 impl PostgresParallelExecution {
     pub(crate) fn new() -> Self {
         Self {
-            cursor: ParallelCursorState::Idle,
+            cursor: None,
             source: ScanSource::Unattached,
             coordinator: ParallelScanCoordinator::default(),
         }
@@ -89,58 +84,58 @@ impl PostgresParallelExecution {
     }
 
     pub(crate) fn reset_local(&mut self) {
-        self.cursor = ParallelCursorState::Idle;
+        self.cursor = None;
         if matches!(self.source, ScanSource::SerialComplete) {
             self.source = ScanSource::Unattached;
         }
     }
 
-    pub(crate) fn cursor(&mut self) -> Option<&mut PgRowCursor> {
-        match &mut self.cursor {
-            ParallelCursorState::Idle => None,
-            ParallelCursorState::Open(cursor) => Some(cursor),
-        }
-    }
-
-    pub(crate) fn finish_cursor(&mut self) {
-        self.cursor = ParallelCursorState::Idle;
-    }
-
-    /// Claim and open the next task group. Returns `false` at global EOF.
-    pub(crate) fn open_next(
+    /// The open task-group cursor, opening the next claimed group when none
+    /// is open. Returns `None` at global EOF.
+    pub(crate) fn cursor_or_open(
         &mut self,
         read: &mut PreparedRowScan,
-    ) -> Result<bool, ScanError> {
-        if matches!(self.cursor, ParallelCursorState::Open(_)) {
-            return Err(ScanError::WorkerPayload(
-                "parallel Iceberg cursor is already open".to_owned(),
-            ));
+    ) -> Result<Option<&mut PgRowCursor>, ScanError> {
+        if self.cursor.is_none() {
+            self.cursor = self.open_next(read)?;
         }
+        Ok(self.cursor.as_mut())
+    }
+
+    /// Close an exhausted task-group cursor.
+    pub(crate) fn finish_cursor(&mut self) {
+        self.cursor = None;
+    }
+
+    /// Claim and open the next task group. Returns `None` at global EOF.
+    fn open_next(
+        &mut self,
+        read: &mut PreparedRowScan,
+    ) -> Result<Option<PgRowCursor>, ScanError> {
         let source = match &self.source {
             ScanSource::Shared(source) => source,
-            ScanSource::SerialComplete => return Ok(false),
+            ScanSource::SerialComplete => return Ok(None),
             ScanSource::Unattached => {
                 // PostgreSQL can execute a parallel-aware plan without
                 // entering parallel mode (including SPI and zero-worker
                 // execution). No InitializeDSM callback runs in that case;
                 // the leader must scan the complete input exactly once.
-                self.cursor = ParallelCursorState::Open(read.open_row_cursor()?);
+                let cursor = read.open_row_cursor()?;
                 self.source = ScanSource::SerialComplete;
-                return Ok(true);
+                return Ok(Some(cursor));
             }
         };
         let Some(work_id) = self.coordinator.claim()? else {
-            return Ok(false);
+            return Ok(None);
         };
         let tasks = source.take_tasks(work_id)?;
-        self.cursor = ParallelCursorState::Open(
-            read.open_row_cursor_with_tasks(Arc::from(tasks.into_boxed_slice()))?,
-        );
-        Ok(true)
+        let cursor =
+            read.open_row_cursor_with_tasks(Arc::from(tasks.into_boxed_slice()))?;
+        Ok(Some(cursor))
     }
 
     pub(crate) fn shutdown(&mut self) {
-        self.cursor = ParallelCursorState::Idle;
+        self.cursor = None;
         self.source = ScanSource::Unattached;
         self.coordinator.detach();
     }
@@ -158,7 +153,7 @@ impl PostgresParallelExecution {
                     .to_owned(),
             ));
         }
-        self.cursor = ParallelCursorState::Idle;
+        self.cursor = None;
         self.source = ScanSource::Shared(source);
         Ok(())
     }

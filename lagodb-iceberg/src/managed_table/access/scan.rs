@@ -19,7 +19,7 @@
 mod mutation;
 
 use lagodb_core::prelude::*;
-use pgrx::pg_sys;
+use pgrx::{PgSqlErrorCode, pg_sys};
 
 use crate::error::IcebergError;
 use crate::managed_table::access::analyze::{AnalyzePreparation, AnalyzeScanState};
@@ -82,6 +82,33 @@ impl RegularScanState {
         self.cursor = self.prepared.open_row_cursor()?;
         Ok(())
     }
+
+    fn next_into_slot(
+        &mut self,
+        direction: ScanDirection,
+        out: &mut SlotDatumWriter<'_>,
+    ) -> AmResult<bool> {
+        // ExecSupportsBackwardScan treats every SeqScan as backward-capable,
+        // so PostgreSQL adds no Material node for a SCROLL cursor over this
+        // scan. A Sort above the scan fetches backward itself and reads this
+        // scan forward.
+        if direction == ScanDirection::Backward {
+            return Err(PgReportError::from_parts(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                "Iceberg table scans do not support backward fetches",
+                None,
+                Some(
+                    "Add ORDER BY to the cursor query so PostgreSQL sorts the \
+                     rows before fetching them backward."
+                        .to_owned(),
+                ),
+            ));
+        }
+        // SAFETY: PostgreSQL passes a slot created from this relation's
+        // descriptor, and `begin` bound the decoder to that relation's full
+        // layout. The scan trampoline selected its reset per-fetch context.
+        unsafe { self.cursor.next_into_slot(out) }
+    }
 }
 
 // Row-producing states stay inline intentionally: boxing them would add an
@@ -140,8 +167,6 @@ impl AmScan for IcebergTableAm {
 }
 
 impl AmScanSession for IcebergScan {
-    type BatchDriver = Self;
-
     fn scan_begin(
         rel: &RelationHandle,
         snapshot: Option<&SnapshotHandle>,
@@ -161,9 +186,25 @@ impl AmScanSession for IcebergScan {
         Ok(Self { state })
     }
 
+    /// One mode dispatch per row.
     #[inline]
-    fn scan_driver(&mut self) -> &mut Self::BatchDriver {
-        self
+    fn scan_getnextslot(
+        &mut self,
+        direction: ScanDirection,
+        out: &mut SlotDatumWriter<'_>,
+    ) -> AmResult<bool> {
+        match &mut self.state {
+            IcebergScanState::Regular(state) => state.next_into_slot(direction, out),
+            IcebergScanState::Mutation(state) => {
+                // ModifyTable target scans run forward. RETURNING cursor
+                // movement reads the portal's tuplestore instead.
+                state.next_into_slot(out)
+            }
+            // ANALYZE samples through its own callbacks, never scan_getnextslot.
+            IcebergScanState::Analyze(_) => {
+                unreachable!("PostgreSQL ANALYZE never calls scan_getnextslot")
+            }
+        }
     }
 
     /// Restart the scan, re-translating the current effective scan keys.
@@ -240,34 +281,6 @@ impl AmScanSession for IcebergScan {
                 "ANALYZE tuple callback used a non-ANALYZE scan",
             )
             .into()),
-        }
-    }
-}
-
-impl ScanBatchDriver for IcebergScan {
-    /// One mode dispatch per row, matching the previous scan_driver dispatch.
-    #[inline]
-    fn next_into_slot(
-        &mut self,
-        direction: ScanDirection,
-        out: &mut SlotDatumWriter<'_>,
-    ) -> AmResult<bool> {
-        match &mut self.state {
-            IcebergScanState::Regular(state) => {
-                if direction != ScanDirection::Forward {
-                    return unsupported_callback("non-forward Iceberg scan");
-                }
-                state.cursor.next_into_slot(out)
-            }
-            IcebergScanState::Mutation(state) => {
-                // ModifyTable target scans run forward. RETURNING cursor
-                // movement reads the portal's tuplestore instead.
-                state.next_into_slot(out)
-            }
-            // ANALYZE samples through its own callbacks, never scan_getnextslot.
-            IcebergScanState::Analyze(_) => {
-                unreachable!("PostgreSQL ANALYZE never calls scan_getnextslot")
-            }
         }
     }
 }

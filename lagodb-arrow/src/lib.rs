@@ -20,8 +20,6 @@
 //!   appends slot-free datum streams such as COPY, into Arrow batches.
 //! - [`PgDatumArrayReader`] / [`PgDatumArrayBuilder`] bind one Arrow array to
 //!   a PostgreSQL expression argument or result type.
-//! - [`ArrowBatchSource`] adapts an Arrow batch iterator to the core
-//!   access-method scan loop.
 //! - [`scan`] is the typed table-scan boundary between table providers and
 //!   the query engine.
 //! - [`pg_epoch_days_to_unix_days`] / [`pg_epoch_micros_to_unix_micros`] expose
@@ -32,7 +30,6 @@
 //! Conversion errors are returned as [`ArrowConversionError`] and reported
 //! once at the caller's PostgreSQL boundary.
 
-mod batch_source;
 mod datum_codec;
 mod encoder;
 mod error;
@@ -41,7 +38,6 @@ mod rule;
 pub mod scan;
 mod temporal;
 
-pub use batch_source::ArrowBatchSource;
 pub use datum_codec::{
     ArrowColumnDecoder, BoundBatch, BoundColumn, BoundDatumBuffer, BoundDatumPlan,
     BoundWriteBuffer, BoundWriteColumnPlan, DatumCodec, DecodedColumn,

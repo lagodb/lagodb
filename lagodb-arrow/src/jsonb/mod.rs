@@ -13,7 +13,7 @@ mod write_scalar;
 
 use std::sync::Arc;
 
-use arrow_schema::{DataType, Field, FieldRef};
+use arrow_schema::{Field, FieldRef};
 use lagodb_core::datum::JsonbBuilder;
 
 use crate::{ArrowConversionResult, CellRule};
@@ -106,34 +106,6 @@ impl NestedJsonbPlan {
                 value: Box::new(value),
                 object,
             },
-        }
-    }
-
-    /// Whether a physical array has the shape this plan was compiled for.
-    /// Used by checked batch binding, never for each nested value. Trusted
-    /// producers establish this contract without repeating the traversal.
-    pub fn accepts(&self, data_type: &DataType) -> bool {
-        match (&self.node, data_type) {
-            (NodePlan::Scalar(plan), data_type) => plan.accepts(data_type),
-            (NodePlan::Struct(plans), DataType::Struct(fields)) => {
-                plans.len() == fields.len()
-                    && plans.iter().zip(fields).all(|(plan, field)| {
-                        plan.name.as_ref() == field.name()
-                            && plan.value.accepts(field.data_type())
-                    })
-            }
-            (NodePlan::List(plan), DataType::List(field)) => {
-                plan.accepts(field.data_type())
-            }
-            (NodePlan::Map { key, value, .. }, DataType::Map(entries, _)) => {
-                let DataType::Struct(fields) = entries.data_type() else {
-                    return false;
-                };
-                fields.len() == 2
-                    && key.accepts(fields[0].data_type())
-                    && value.accepts(fields[1].data_type())
-            }
-            _ => false,
         }
     }
 
