@@ -4,6 +4,7 @@ use std::error::Error;
 use std::io;
 
 use datafusion::common::DataFusionError;
+use lagodb_arrow::ArrowConversionError;
 use lagodb_core::diag::{PgReportError, SqlStateError};
 use lagodb_core::expr::RuntimeValueStateError;
 use pgrx::prelude::PgSqlErrorCode;
@@ -32,7 +33,7 @@ pub enum QueryExecutionError {
     #[error("DataFusion query output has {columns} columns and {rows} rows")]
     InvalidQueryOutput { columns: usize, rows: usize },
     #[error("failed to convert the DataFusion result batch: {0}")]
-    OutputConversion(#[from] PgReportError),
+    OutputConversion(#[from] ArrowConversionError),
     #[error("bound table scan {scan} remained shared while closing execution")]
     BoundScanStillShared { scan: usize },
     #[error("query fragment is missing metadata for table scan {scan}")]
@@ -56,8 +57,8 @@ impl SqlStateError for QueryExecutionError {
             Self::ScanBind(error)
             | Self::ScanPlan(error)
             | Self::ScanRelease(error)
-            | Self::ParallelHost(error)
-            | Self::OutputConversion(error) => error.sql_error_code(),
+            | Self::ParallelHost(error) => error.sql_error_code(),
+            Self::OutputConversion(error) => error.sql_error_code(),
             Self::Initialization { primary, .. } => primary.sql_error_code(),
             Self::InvalidQueryOutput { .. } => PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
             Self::InvalidLimits
@@ -80,9 +81,9 @@ impl QueryExecutionError {
             Self::DataFusion(error) => Self::datafusion_report(error),
             Self::ScanBind(error)
             | Self::ScanPlan(error)
-            | Self::OutputConversion(error)
             | Self::ParallelHost(error)
             | Self::ScanRelease(error) => error,
+            Self::OutputConversion(error) => error.into(),
             Self::Initialization { primary, cleanup } => {
                 let cleanup = cleanup.map(|error| {
                     format!("query initialization cleanup failed: {error}")

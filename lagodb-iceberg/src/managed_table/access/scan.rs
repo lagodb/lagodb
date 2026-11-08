@@ -107,7 +107,7 @@ impl RegularScanState {
         // SAFETY: PostgreSQL passes a slot created from this relation's
         // descriptor, and `begin` bound the decoder to that relation's full
         // layout. The scan trampoline selected its reset per-fetch context.
-        unsafe { self.cursor.next_into_slot(out) }
+        Ok(unsafe { self.cursor.next_into_slot(out) }?)
     }
 }
 

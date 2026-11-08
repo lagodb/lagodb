@@ -3,11 +3,10 @@
 use arrow_array::RecordBatch;
 use arrow_schema::{DataType, SchemaRef};
 use lagodb_arrow::{
-    ArrowColumnDecoder, BoundBatch, BoundDatumPlan, CellRule, DatumCodec,
-    DecodedColumn,
+    ArrowColumnDecoder, ArrowConversionResult, BoundBatch, BoundDatumPlan, CellRule,
+    DatumCodec, DecodedColumn,
 };
 use lagodb_core::datum::PgType;
-use lagodb_core::diag::PgReportError;
 use lagodb_core::tuple::SlotDatumWriter;
 use pgrx::{PgMemoryContexts, pg_sys};
 
@@ -80,11 +79,9 @@ impl QueryOutputDecoder {
                         field,
                         PgType::new(slot.type_oid(), slot.typmod()),
                     )
-                }
-                .map_err(PgReportError::from_domain_error)?;
+                }?;
                 unsafe { DecodedColumn::bind(plan, position, position) }
-            }
-            .map_err(PgReportError::from_domain_error)?;
+            }?;
             columns.push(column);
             nullable.push(slot.nullable());
         }
@@ -119,7 +116,7 @@ impl QueryOutputDecoder {
         row: usize,
         slot: *mut pg_sys::TupleTableSlot,
         datum_context: pg_sys::MemoryContext,
-    ) -> Result<(), PgReportError> {
+    ) -> ArrowConversionResult<()> {
         let mut columns = unsafe { SlotDatumWriter::new(slot, datum_context) };
         // SAFETY: decoder construction bound every destination to the
         // CustomScan output layout; batch iteration proves `row` exists.

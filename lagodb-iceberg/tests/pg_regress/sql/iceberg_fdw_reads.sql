@@ -369,14 +369,19 @@ SELECT reltuples::integer AS sampled_rows
 FROM pg_class WHERE oid = 'iceberg_fdw_read.batches'::regclass;
 
 -- Invalid Arrow strings must fail at the statement boundary, then permit another scan.
+-- The UPDATE target scan decodes every column and reports the same provider
+-- error and SQLSTATE.
 CREATE FOREIGN TABLE iceberg_fdw_read.invalid_string ()
 SERVER iceberg_read_rest
 OPTIONS (
     table 'fdw_nested.invalid_string_v2'
 );
 
-\set VERBOSITY sqlstate
+\set VERBOSITY terse
 SELECT value FROM iceberg_fdw_read.invalid_string;
+\echo :LAST_ERROR_SQLSTATE
+UPDATE iceberg_fdw_read.invalid_string SET id = id;
+\echo :LAST_ERROR_SQLSTATE
 \set VERBOSITY default
 
 SELECT count(*) AS rows_after_error

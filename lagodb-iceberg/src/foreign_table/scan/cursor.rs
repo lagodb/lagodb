@@ -5,6 +5,7 @@ use lagodb_arrow::{ArrowColumnDecoder, BoundBatch};
 use lagodb_core::fdw::{ForeignScanError, ScanSlotWriter};
 use lagodb_core::handles::ValidItemPointer;
 
+use crate::error::IcebergError;
 use crate::scan::RowLocationScanInput;
 use crate::scan::batch::{ArrowBatches, RowLocationLayout, position_unchecked};
 use crate::write::{IcebergFileId, IcebergRowIdentity, RelationRowRegistry};
@@ -57,7 +58,8 @@ impl ForeignMutationCursor {
                         row_index,
                         &mut columns,
                     )
-                }?;
+                }
+                .map_err(IcebergError::from)?;
                 let position =
                     unsafe { position_unchecked(&bound.positions, row_index) };
                 let identity = IcebergRowIdentity::encode(bound.file_id, position)?;

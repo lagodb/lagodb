@@ -4,7 +4,6 @@ use std::rc::Rc;
 
 use arrow_array::RecordBatch;
 use lagodb_core::datum::ColumnDatumTarget;
-use lagodb_core::diag::PgReportError;
 use lagodb_core::tuple::SlotDatumWriter;
 use pgrx::pg_sys;
 
@@ -201,7 +200,7 @@ impl ArrowColumnDecoder {
         bound: &BoundBatch,
         row_idx: usize,
         out: &mut SlotDatumWriter<'_>,
-    ) -> Result<(), PgReportError> {
-        Ok(unsafe { bound.write_row_unchecked(row_idx, out) }?)
+    ) -> ArrowConversionResult<()> {
+        unsafe { bound.write_row_unchecked(row_idx, out) }
     }
 }

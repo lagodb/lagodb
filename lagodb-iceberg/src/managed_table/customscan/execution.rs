@@ -38,7 +38,9 @@ impl SerialScan {
         // SAFETY: Begin bound the prepared read to this node's scan-slot
         // layout. The framework writes the scan slot with the per-tuple
         // context selected.
-        emitter.emit_columns(|columns| unsafe { self.cursor.next_into_slot(columns) })
+        emitter.emit_columns(|columns| {
+            Ok(unsafe { self.cursor.next_into_slot(columns) }?)
+        })
     }
 
     pub(super) fn rescan(
@@ -96,8 +98,8 @@ impl PostgresParallelScan {
             // SAFETY: Begin bound the prepared read to this node's scan-slot
             // layout. The framework writes the scan slot with the per-tuple
             // context selected.
-            match emitter.try_emit_columns(|columns| unsafe {
-                cursor.next_into_slot(columns)
+            match emitter.try_emit_columns(|columns| {
+                Ok(unsafe { cursor.next_into_slot(columns) }?)
             })? {
                 NextSlotAttempt::Produced(produced) => return Ok(produced),
                 NextSlotAttempt::Exhausted(exhausted) => emitter = exhausted,

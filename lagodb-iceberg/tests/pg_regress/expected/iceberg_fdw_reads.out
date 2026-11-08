@@ -557,14 +557,22 @@ FROM pg_class WHERE oid = 'iceberg_fdw_read.batches'::regclass;
 (1 row)
 
 -- Invalid Arrow strings must fail at the statement boundary, then permit another scan.
+-- The UPDATE target scan decodes every column and reports the same provider
+-- error and SQLSTATE.
 CREATE FOREIGN TABLE iceberg_fdw_read.invalid_string ()
 SERVER iceberg_read_rest
 OPTIONS (
     table 'fdw_nested.invalid_string_v2'
 );
-\set VERBOSITY sqlstate
+\set VERBOSITY terse
 SELECT value FROM iceberg_fdw_read.invalid_string;
-ERROR:  22P05
+ERROR:  FDW "lagodb_iceberg" IterateForeignScan callback failed: FDW provider error: JSONB conversion error: JSONB strings cannot contain a NUL byte
+\echo :LAST_ERROR_SQLSTATE
+22P05
+UPDATE iceberg_fdw_read.invalid_string SET id = id;
+ERROR:  FDW "lagodb_iceberg" IterateForeignScan callback failed: FDW provider error: JSONB conversion error: JSONB strings cannot contain a NUL byte
+\echo :LAST_ERROR_SQLSTATE
+22P05
 \set VERBOSITY default
 SELECT count(*) AS rows_after_error
 FROM iceberg_fdw_read.batches

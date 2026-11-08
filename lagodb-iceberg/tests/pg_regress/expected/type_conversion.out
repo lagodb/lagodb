@@ -633,7 +633,7 @@ INSERT INTO storage_time_target SELECT * FROM storage_time_source;
 \set VERBOSITY terse
 INSERT INTO storage_time_target (id, entries)
 VALUES (5, ARRAY[ROW('24:00:00')::storage_time_record]);
-ERROR:  Arrow/Datum conversion error: conversion value is out of range: PostgreSQL time 24:00:00 is outside the Arrow time range
+ERROR:  conversion value is out of range: PostgreSQL time 24:00:00 is outside the Arrow time range
 \set VERBOSITY default
 SELECT coalesce(a.id, b.id) AS id,
        to_jsonb(a) IS NOT DISTINCT FROM to_jsonb(b) AS roundtrip

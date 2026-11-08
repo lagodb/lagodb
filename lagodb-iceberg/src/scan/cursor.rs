@@ -2,7 +2,6 @@
 
 use arrow_array::RecordBatch;
 use lagodb_arrow::{ArrowColumnDecoder, BoundBatch};
-use lagodb_core::diag::PgReportError;
 use lagodb_core::tuple::SlotDatumWriter;
 
 use super::batch::ArrowBatches;
@@ -43,7 +42,7 @@ where
     pub(crate) unsafe fn next_into_slot(
         &mut self,
         out: &mut SlotDatumWriter<'_>,
-    ) -> Result<bool, PgReportError> {
+    ) -> IcebergResult<bool> {
         loop {
             if let Some(bound) = self.current.as_ref()
                 && self.row_index < bound.num_rows()

@@ -109,7 +109,7 @@ pub enum IcebergError {
     #[error(transparent)]
     Postgres(PgReportError),
 
-    #[error("Arrow/Datum conversion error: {0}")]
+    #[error(transparent)]
     ArrowConversion(#[from] lagodb_arrow::ArrowConversionError),
 
     #[error("tablespace options not found")]
