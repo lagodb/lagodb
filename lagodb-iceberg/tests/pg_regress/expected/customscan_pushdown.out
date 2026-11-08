@@ -1178,15 +1178,16 @@ WHERE (a = 1 AND random() < 2.0) OR a = 2;
 
 EXPLAIN (COSTS OFF)
 SELECT a FROM customscan_partial_pushdown_t AS t
-WHERE (a = 1 AND EXISTS (SELECT 1 FROM (VALUES (1)) AS v(x) WHERE v.x = t.a))
+WHERE (a = 1 AND (SELECT v.x FROM (VALUES (1)) AS v(x) WHERE v.x = t.a) = 1)
    OR a = 2;
-                                QUERY PLAN                                
---------------------------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Custom Scan (lagodb-iceberg) on customscan_partial_pushdown_t t
-   Filter: (((a = 1) AND (ANY (a = (hashed SubPlan 2).col1))) OR (a = 2))
-   SubPlan 2
+   Filter: (((a = 1) AND ((SubPlan 1) = 1)) OR (a = 2))
+   SubPlan 1
      ->  Result
-(4 rows)
+           One-Time Filter: (1 = t.a)
+(5 rows)
 
 RESET lagodb.customscan_mode;
 DROP TABLE customscan_partial_pushdown_t;

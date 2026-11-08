@@ -659,7 +659,7 @@ WHERE (a = 1 AND random() < 2.0) OR a = 2;
 
 EXPLAIN (COSTS OFF)
 SELECT a FROM customscan_partial_pushdown_t AS t
-WHERE (a = 1 AND EXISTS (SELECT 1 FROM (VALUES (1)) AS v(x) WHERE v.x = t.a))
+WHERE (a = 1 AND (SELECT v.x FROM (VALUES (1)) AS v(x) WHERE v.x = t.a) = 1)
    OR a = 2;
 
 RESET lagodb.customscan_mode;
