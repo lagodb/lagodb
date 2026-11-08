@@ -131,14 +131,17 @@ impl PgInstallation {
         )
     }
 
-    pub(crate) fn install_pg_test(&self, extension: Extension) -> Result<(), String> {
+    pub(crate) fn install_regress_probes(
+        &self,
+        extension: Extension,
+    ) -> Result<(), String> {
         run_command(
             cargo_pgrx()
                 .arg("install")
                 .arg("--package")
                 .arg(extension.package())
                 .arg("--features")
-                .arg("pg_test")
+                .arg("regress_probes")
                 .arg("--pg-config")
                 .arg(&self.pg_config),
         )

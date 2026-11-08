@@ -1,7 +1,7 @@
 -- A second provider loaded by the runtime must join the unified directory.
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION lagodb_iceberg;
-CREATE EXTENSION pg_delta_am;
+CREATE EXTENSION lagodb_delta;
 
 CREATE TABLE multi_am_delta (id integer) USING delta;
 INSERT INTO multi_am_delta VALUES (1), (2);
@@ -38,5 +38,5 @@ SELECT delta.object_access_drop_count() AS object_drop_before \gset
 DROP TABLE multi_am_delta;
 SELECT delta.object_access_drop_count() > :object_drop_before
        AS delta_saw_target_relation_drop;
-DROP EXTENSION pg_delta_am;
+DROP EXTENSION lagodb_delta;
 DROP EXTENSION lagodb_iceberg CASCADE;

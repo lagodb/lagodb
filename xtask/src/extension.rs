@@ -3,23 +3,19 @@
 pub(crate) enum Extension {
     Runtime,
     Iceberg,
-    DeltaAm,
+    Delta,
     Connectors,
 }
 
 impl Extension {
-    pub(crate) const ALL: [Self; 4] = [
-        Self::Runtime,
-        Self::Iceberg,
-        Self::DeltaAm,
-        Self::Connectors,
-    ];
+    pub(crate) const ALL: [Self; 4] =
+        [Self::Runtime, Self::Iceberg, Self::Delta, Self::Connectors];
 
     pub(crate) const fn package(self) -> &'static str {
         match self {
             Self::Runtime => "lagodb-base",
             Self::Iceberg => "lagodb-iceberg",
-            Self::DeltaAm => "pg-delta-am",
+            Self::Delta => "lagodb-delta",
             Self::Connectors => "lagodb-connectors",
         }
     }
@@ -28,7 +24,7 @@ impl Extension {
         match self {
             Self::Runtime => "lagodb_base",
             Self::Iceberg => "lagodb_iceberg",
-            Self::DeltaAm => "pg_delta_am",
+            Self::Delta => "lagodb_delta",
             Self::Connectors => "lagodb_connectors",
         }
     }

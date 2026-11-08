@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "lagodb-base",
-    "pg-delta-am",
+    "lagodb-delta",
     "lagodb-core",
     "lagodb-query",
     "lagodb-macros",

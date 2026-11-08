@@ -127,11 +127,6 @@ impl PgExpressionSections {
     }
 
     #[inline]
-    pub fn runtime_bindings(&self) -> &[*mut pg_sys::Expr] {
-        &self.runtime_bindings
-    }
-
-    #[inline]
     pub fn relation_pushdown_provenance(&self) -> &[*mut pg_sys::Expr] {
         &self.relation_pushdown_provenance
     }

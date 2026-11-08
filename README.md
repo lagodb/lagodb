@@ -18,7 +18,7 @@ engines such as Apache Spark can read the same tables from object storage.
 > LagoDB is under active development and is not ready for production
 > workloads. [`lagodb-iceberg`](lagodb-iceberg) and
 > [`lagodb-connectors`](lagodb-connectors) provide the user-facing features.
-> [`pg-delta-am`](pg-delta-am) is a framework skeleton, not a Delta Lake
+> [`lagodb-delta`](lagodb-delta) is a framework skeleton, not a Delta Lake
 > implementation.
 
 ## Why LagoDB?

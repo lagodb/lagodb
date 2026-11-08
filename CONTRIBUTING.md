@@ -16,7 +16,7 @@ a second implementation.
 | [`lagodb-arrow`](lagodb-arrow) | PostgreSQL/Arrow conversion and typed table-scan bridge |
 | [`iceberg-lite`](https://github.com/lagodb/iceberg-lite) | Synchronous Iceberg library |
 | [`lagodb-storage`](https://github.com/lagodb/lagodb-storage) | Local cache and object-storage service maintained in a separate repository |
-| [`pg-delta-am`](pg-delta-am) | Experimental access-method skeleton; not Delta storage |
+| [`lagodb-delta`](lagodb-delta) | Experimental access-method skeleton; not Delta storage |
 | [`xtask`](xtask) | Workspace test orchestration |
 
 See [Build from source](docs/build-from-source.md) for local installation.

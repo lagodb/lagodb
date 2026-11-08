@@ -15,15 +15,15 @@ use pgrx::prelude::*;
 
 pgrx::pg_module_magic!();
 
-#[cfg(feature = "pg_test")]
-mod pg_test_support;
+#[cfg(feature = "regress_probes")]
+mod regress_probes;
 
 struct DeltaTableProvider;
 
 impl LagodbTableProvider for DeltaTableProvider {
     const NAME: &'static std::ffi::CStr = c"delta";
-    const EXTENSION_NAME: &'static std::ffi::CStr = c"pg_delta_am";
-    const LIBRARY_NAME: &'static std::ffi::CStr = c"pg_delta_am";
+    const EXTENSION_NAME: &'static std::ffi::CStr = c"lagodb_delta";
+    const LIBRARY_NAME: &'static std::ffi::CStr = c"lagodb_delta";
     const ACCESS_METHOD_NAME: &'static std::ffi::CStr = c"delta";
 
     fn access_method_oid() -> Option<pg_sys::Oid> {
@@ -80,7 +80,7 @@ pgrx::extension_sql!(
 
 #[pg_guard]
 extern "C-unwind" fn _PG_init() {
-    #[cfg(feature = "pg_test")]
-    pg_test_support::init_hooks();
+    #[cfg(feature = "regress_probes")]
+    regress_probes::init_hooks();
     register_provider::<DeltaTableProvider>();
 }

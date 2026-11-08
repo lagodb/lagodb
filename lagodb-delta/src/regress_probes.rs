@@ -102,8 +102,8 @@ mod delta {
         );
         let identity = ProviderIdentity::access_method(
             c"delta-duplicate",
-            c"pg_delta_am",
-            c"pg_delta_am",
+            c"lagodb_delta",
+            c"lagodb_delta",
         );
         let registration = ProviderRegistration::new(&identity)
             .with_table_provider(Some(&descriptor));

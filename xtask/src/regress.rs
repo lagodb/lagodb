@@ -24,7 +24,7 @@ impl RegressionSuite {
             Self::Iceberg => format!(
                 "{},{}",
                 Extension::Iceberg.library(),
-                Extension::DeltaAm.library()
+                Extension::Delta.library()
             ),
             Self::Connectors => Extension::Connectors.library().to_owned(),
         }
@@ -48,7 +48,7 @@ impl<'a> RegressionRunner<'a> {
         test: Option<&OsStr>,
     ) -> Result<(), String> {
         if matches!(suite, RegressionSuite::Iceberg) {
-            self.pg.install_pg_test(Extension::DeltaAm)?;
+            self.pg.install_regress_probes(Extension::Delta)?;
         }
 
         let mut command = cargo_pgrx();

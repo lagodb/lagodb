@@ -3804,6 +3804,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lagodb-delta"
+version = "0.1.0"
+dependencies = [
+ "lagodb-core",
+ "pgrx",
+]
+
+[[package]]
 name = "lagodb-iceberg"
 version = "0.1.0"
 dependencies = [
@@ -4707,14 +4715,6 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap 2.14.1",
  "serde",
-]
-
-[[package]]
-name = "pg-delta-am"
-version = "0.1.0"
-dependencies = [
- "lagodb-core",
- "pgrx",
 ]
 
 [[package]]
