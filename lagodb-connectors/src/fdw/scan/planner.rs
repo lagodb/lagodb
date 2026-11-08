@@ -11,7 +11,7 @@ use lagodb_core::fdw::{
 use crate::fdw::format_adapters::FormatScanPlanner;
 
 use super::super::{LagodbConnectors, ResolvedForeignRelation};
-use super::private::ConnectorScanPrivate;
+use super::plan_private::ConnectorScanPrivate;
 use super::state::ConnectorScanState;
 
 /// Planner state contains the selected format reader's scan planner. The

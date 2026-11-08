@@ -17,7 +17,7 @@ use crate::fdw::{ForeignPrivateReader, ForeignPrivateWriter};
 use super::contract::FdwScan;
 use super::error::{ForeignScanError, ForeignScanPhase};
 use super::plan_filter::ForeignFilterExplainValues;
-use super::private::decode_scan_explain_private;
+use super::plan_private::decode_scan_explain_private;
 use super::state::ForeignScanStateWrapper;
 
 const GROUP_LABEL: &CStr = c"LagoDB Pushdown";

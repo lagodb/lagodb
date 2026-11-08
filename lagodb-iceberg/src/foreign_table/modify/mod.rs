@@ -1,6 +1,6 @@
 //! PostgreSQL FDW modify adapter for the shared Iceberg write engine.
 
-mod private;
+mod plan_private;
 mod state;
 
 use lagodb_core::fdw::{
@@ -18,7 +18,7 @@ use super::relation::ResolvedForeignTableBinding;
 use super::scan::ForeignMutationScan;
 use super::schema::ForeignSchemaBinding;
 use super::transaction::ForeignTransaction;
-use private::IcebergFdwModifyPrivate;
+use plan_private::IcebergFdwModifyPrivate;
 use state::IcebergFdwModifyState;
 
 impl FdwModify for LagodbIceberg {

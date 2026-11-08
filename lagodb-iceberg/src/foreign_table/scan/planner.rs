@@ -19,7 +19,7 @@ use super::super::error::IcebergFdwError;
 use super::super::filter::IcebergFdwFilterPlanner;
 use super::super::planning_source::ForeignPlanningSource;
 use super::super::provider::LagodbIceberg;
-use super::private::IcebergFdwScanPrivate;
+use super::plan_private::IcebergFdwScanPrivate;
 use super::state::IcebergFdwScanState;
 
 const UNANALYZED_FALLBACK_PAGES: pg_sys::BlockNumber = 10;

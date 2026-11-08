@@ -2,8 +2,8 @@
 
 mod cursor;
 mod mutation;
+mod plan_private;
 mod planner;
-mod private;
 mod state;
 
 pub(crate) use mutation::ForeignMutationScan;

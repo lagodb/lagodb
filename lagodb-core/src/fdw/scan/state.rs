@@ -12,7 +12,7 @@ use super::super::row_identity::ForeignRowIdentityRequirement;
 use super::contract::FdwScan;
 use super::error::ForeignScanError;
 use super::filter::ForeignScanFilters;
-use super::private::DecodedScanPrivate;
+use super::plan_private::DecodedScanPrivate;
 use super::projection::{ColumnRequirements, ScanProjection};
 use super::pushdown::{
     BeginForeignScanContext, ForeignExpressionValue, RuntimeExpressionValues,

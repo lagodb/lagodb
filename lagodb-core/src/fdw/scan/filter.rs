@@ -14,7 +14,7 @@ use crate::expr::pushdown::{
 };
 
 use super::error::ForeignScanError;
-use super::private::DecodedScanPrivate;
+use super::plan_private::DecodedScanPrivate;
 
 pub(crate) struct ForeignScanFilters<P: FilterPushdown> {
     runtime: RelationFilterBinding<P>,

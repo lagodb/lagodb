@@ -10,11 +10,11 @@ use super::super::row_identity_registry::RowIdentityRegistry;
 use super::super::system_column::SystemColumnRequirement;
 use super::contract::{FdwModify, ForeignModifyOperation};
 use super::error::{ForeignModifyError, ForeignModifyPhase};
+use super::plan_private::ModifyPrivateEnvelope;
 use super::planning_context::{
     ForeignModifyPlanContext, ForeignModifyRelationContext,
     ForeignUpdateTargetContext,
 };
-use super::private::ModifyPrivateEnvelope;
 use super::return_requirements::ForeignModifyReturnRequirements;
 
 /// # Safety

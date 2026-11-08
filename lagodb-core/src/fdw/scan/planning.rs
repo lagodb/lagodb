@@ -26,7 +26,9 @@ use super::filter::ForeignScanFilters;
 use super::path_builder::build_path_variants;
 use super::pathkeys::ForeignPathKeys;
 use super::plan_filter::ForeignPlanFilters;
-use super::private::{DecodedPathPrivate, decode_path_private, encode_scan_private};
+use super::plan_private::{
+    DecodedPathPrivate, decode_path_private, encode_scan_private,
+};
 use super::projection::{ProjectionAnalysis, ScanProjectionPolicy};
 
 use super::parameterized::ParameterizedCandidates;

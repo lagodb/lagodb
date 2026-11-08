@@ -15,7 +15,7 @@ use super::error::ForeignScanError;
 use super::pathkeys::ForeignPathKeys;
 use super::pending_paths::PendingForeignPaths;
 use super::pg;
-use super::private::encode_path_private;
+use super::plan_private::encode_path_private;
 
 /// Path alternatives submitted by one provider path callback.
 ///

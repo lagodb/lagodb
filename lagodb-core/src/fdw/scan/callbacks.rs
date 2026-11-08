@@ -12,7 +12,7 @@ use super::contract::FdwScan;
 use super::error::{ForeignScanError, ForeignScanPhase};
 use super::executor::{compile_executor_layout, list_len};
 use super::filter::{ForeignFilterExprs, ForeignScanFilters};
-use super::private::decode_scan_private;
+use super::plan_private::decode_scan_private;
 use super::pushdown::ReScanForeignScanContext;
 use super::state::ForeignScanStateWrapper;
 
