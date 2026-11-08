@@ -250,6 +250,16 @@ ANALYZE iceberg_fdw_schema.decimals;
 SELECT reltuples = 3 AS analyzed
 FROM pg_class WHERE oid = 'iceberg_fdw_schema.decimals'::regclass;
 
+-- ANALYZE copies each sample with heap_form_tuple, which also reads dropped
+-- attributes. A dropped text column must read as NULL.
+CREATE FOREIGN TABLE iceberg_fdw_schema.dropped_text (id integer, body text)
+SERVER iceberg_schema_rest OPTIONS (table 'fdw_schema.evolving');
+ALTER FOREIGN TABLE iceberg_fdw_schema.dropped_text DROP COLUMN body;
+ANALYZE iceberg_fdw_schema.dropped_text;
+SELECT reltuples = 2 AS analyzed
+FROM pg_class WHERE oid = 'iceberg_fdw_schema.dropped_text'::regclass;
+DROP FOREIGN TABLE iceberg_fdw_schema.dropped_text;
+
 -- The removed mode option rejects the whole ALTER, including the ADD COLUMN.
 ALTER FOREIGN TABLE iceberg_fdw_schema.renamed
     ADD COLUMN extra integer,

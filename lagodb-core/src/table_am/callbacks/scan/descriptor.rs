@@ -3,7 +3,7 @@
 use pgrx::pg_sys;
 
 use crate::diag::PgReportError;
-use crate::handles::OwnedScanKeys;
+use crate::handles::{OwnedScanKeys, RelationHandle};
 use crate::table_am::AmScanSession;
 use crate::table_am::callbacks::common::FfiContainer;
 use crate::tuple::{Row, RowDatumCodec, SlotDatumWriter};
@@ -16,6 +16,14 @@ pub(crate) struct TableScanState<T> {
     /// Bound only if this scan uses one of the Row-returning callbacks. The
     /// normal `scan_getnextslot` path may be slot-first and provider-physical.
     row_codec: Option<RowDatumCodec>,
+    /// Zero-based positions of the relation's dropped attributes.
+    ///
+    /// Slot-first providers write only live columns, but PostgreSQL reads every
+    /// attribute when it forms a whole-row datum or copies a slot into a
+    /// HeapTuple, and expects dropped attributes to be NULL. The caller
+    /// supplies the slot to every fetch, so these NULLs are written per fetch
+    /// rather than once per scan.
+    dropped_attributes: Box<[usize]>,
 }
 
 pub(crate) type TableAmScanDesc<T> =
@@ -26,18 +34,49 @@ impl<T> TableScanState<T> {
         am_instance: T,
         scan_keys: OwnedScanKeys,
         tmp_ctx: pg_sys::MemoryContext,
+        relation: &RelationHandle<'_>,
     ) -> Self {
+        let dropped_attributes = relation
+            .tuple_desc_handle()
+            .attributes()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, attribute)| attribute.attisdropped.then_some(index))
+            .collect();
         Self {
             am_instance,
             scan_keys,
             row: Row::new(),
             tmp_ctx,
             row_codec: None,
+            dropped_attributes,
         }
     }
 
     pub(super) unsafe fn reset_tmp_context(&mut self) {
         unsafe { pg_sys::MemoryContextReset(self.tmp_ctx) };
+    }
+
+    /// Open a slot-first output writer whose dropped attributes read as NULL.
+    ///
+    /// The returned writer does not borrow `self`, so the caller can drive the
+    /// provider session while it is alive.
+    ///
+    /// # Safety
+    /// `slot` is the slot PostgreSQL passed to the current fetch callback; its
+    /// descriptor is the scanned relation's, as `table_slot_create` makes it.
+    /// The safety contract of [`SlotDatumWriter::new`] applies for `'s`.
+    pub(super) unsafe fn slot_writer<'s>(
+        &self,
+        slot: *mut pg_sys::TupleTableSlot,
+    ) -> SlotDatumWriter<'s> {
+        let mut columns = unsafe { SlotDatumWriter::new(slot, self.tmp_ctx) };
+        for &index in &self.dropped_attributes {
+            // SAFETY: the index comes from the relation descriptor this slot
+            // was created with, so it is below the slot width.
+            unsafe { columns.set_datum_unchecked(index, None) };
+        }
+        columns
     }
 
     pub(super) unsafe fn write_row_to_slot(
@@ -87,7 +126,8 @@ impl<T: AmScanSession> TableAmScanDesc<T> {
         unsafe {
             let desc = Self::alloc(parent, c"lagodb TableScan lifecycle");
             let tmp = (*desc).create_child_context(c"lagodb TableScan tmp");
-            (*desc).init_session(TableScanState::new(instance, keys, tmp));
+            let relation = RelationHandle::from_raw(rel);
+            (*desc).init_session(TableScanState::new(instance, keys, tmp, &relation));
             let keys = &mut (*desc).session_mut().scan_keys;
             let nkeys = keys.len() as i32;
             let key = keys.rs_key_ptr();

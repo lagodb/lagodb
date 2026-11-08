@@ -33,7 +33,8 @@ pub(crate) struct ReadColumnBinding {
 }
 
 /// Read rules and destinations in requested storage-column order.
-/// Unselected destinations are untouched; callers must not read those positions.
+/// Unselected destinations are untouched; the adapter that owns the slot must
+/// make them read as NULL.
 pub(crate) struct ReadColumnPlan {
     pub(crate) columns: Box<[ReadColumnBinding]>,
 }

@@ -90,10 +90,11 @@ impl<'a> SlotDatumWriter<'a> {
     /// Positions this method never touches are **not** guaranteed SQL NULL by
     /// the slot itself: `ExecClearTuple` does not reset `tts_isnull`, and the
     /// slot's `tts_values`/`tts_isnull` arrays are `palloc0`'d (so they start
-    /// non-NULL; only `ExecStoreAllNullTuple` sets them all NULL). Callers must
-    /// therefore write every column the consumer can read — the data path
-    /// relies on "every readable column is mapped" (whole-row refs fall back to
-    /// all columns), not on untouched positions reading back as NULL.
+    /// non-NULL; only `ExecStoreAllNullTuple` sets them all NULL). PostgreSQL
+    /// reads every attribute, dropped ones included, when it forms a whole-row
+    /// datum or copies the slot into a HeapTuple. The adapter that owns the
+    /// slot must therefore make every position its layout never writes read
+    /// as NULL before rows are produced.
     ///
     /// `index` must be `< natts`. This is an always-on assertion rather than a
     /// `debug_assert!`: as a shared data-path substrate the bound is a domain

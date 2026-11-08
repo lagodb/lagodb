@@ -18,7 +18,6 @@ use crate::handles::{
     SampleScanStateHandle, ScanDirection, SnapshotHandle,
 };
 use crate::table_am::{AmResult, AmScanSession, ScanFlags, TableAccessMethod};
-use crate::tuple::SlotDatumWriter;
 pub(crate) use descriptor::TableAmScanDesc;
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::prelude::*;
@@ -215,8 +214,6 @@ where
 
         let direction = ScanDirection::try_from_raw(direction).report_unwrap();
 
-        // Copied out before borrowing `am_instance`: the slot-fill path needs
-        // both the session's context/width and a `&mut` driver at once.
         let tmp_ctx = state.tmp_ctx;
 
         // One uniform slot-filling path: ask the session's driver for the next
@@ -225,7 +222,7 @@ where
         // lands there and is freed on the next fetch's reset.
         let found = PgMemoryContexts::For(tmp_ctx)
             .switch_to(|_| {
-                let mut cols = SlotDatumWriter::new(slot, tmp_ctx);
+                let mut cols = state.slot_writer(slot);
                 state
                     .am_instance
                     .scan_driver()
@@ -600,7 +597,7 @@ where
 
         let state = (*custom_scan).session_mut();
         state.reset_tmp_context();
-        let mut columns = SlotDatumWriter::new(slot, state.tmp_ctx);
+        let mut columns = state.slot_writer(slot);
 
         let outcome = state
             .am_instance

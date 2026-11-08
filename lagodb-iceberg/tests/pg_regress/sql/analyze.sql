@@ -130,6 +130,17 @@ SELECT reltuples::bigint = 100 AS vacuum_analyze_updates_rows
 FROM pg_class
 WHERE oid = 'transaction_t'::regclass;
 
+-- ANALYZE copies each sample with heap_form_tuple, which also reads dropped
+-- attributes. A dropped text column must read as NULL.
+CREATE TABLE dropped_text_t (id integer, note text, label text) USING iceberg;
+INSERT INTO dropped_text_t
+SELECT value, 'dropped', 'kept' FROM generate_series(1, 100) AS value;
+ALTER TABLE dropped_text_t DROP COLUMN note;
+ANALYZE dropped_text_t;
+SELECT reltuples::bigint = 100 AS dropped_text_rows_estimated
+FROM pg_class
+WHERE oid = 'dropped_text_t'::regclass;
+
 -- A managed partitioned table is one logical Iceberg table, and PostgreSQL
 -- sees an ordinary relation with no pg_inherits leaves.
 CREATE TABLE partitioned_table_t (

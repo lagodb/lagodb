@@ -84,10 +84,6 @@ impl ScanTupleLayout {
         }
     }
 
-    pub(crate) fn is_row_only(&self) -> bool {
-        matches!(&self.kind, ScanTupleLayoutKind::RowOnly)
-    }
-
     /// Columns the provider must read, without rebuilding expression usage at
     /// executor start.
     pub fn required_columns(&self) -> NeededColumns<'_> {
@@ -307,21 +303,6 @@ impl ScanTupleLayout {
             }
         }
         Ok(())
-    }
-
-    /// Initialize the synthetic row-only cell once. `ExecClearTuple` preserves
-    /// the slot arrays, so providers can publish each row without a per-row
-    /// branch or write while still exposing a valid SQL NULL cell.
-    pub(crate) unsafe fn initialize_executor_slot(
-        &self,
-        slot: *mut pg_sys::TupleTableSlot,
-    ) {
-        if self.is_row_only() {
-            unsafe {
-                *(*slot).tts_values = pg_sys::Datum::from(0);
-                *(*slot).tts_isnull = true;
-            }
-        }
     }
 }
 

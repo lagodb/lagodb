@@ -148,10 +148,18 @@ impl AnalyzeSource {
 struct AnalyzeSlot(*mut pg_sys::TupleTableSlot);
 
 impl AnalyzeSlot {
+    /// The decoder writes only live columns, while `heap_form_tuple` reads
+    /// every attribute when a sample is copied, so dropped attributes must
+    /// read as NULL. `ExecClearTuple` preserves the slot arrays, so one
+    /// all-NULL baseline covers every sampled row.
     fn new(tuple_desc: pg_sys::TupleDesc) -> Self {
         let slot = unsafe {
             pg_sys::MakeSingleTupleTableSlot(tuple_desc, &pg_sys::TTSOpsVirtual)
         };
+        unsafe {
+            pg_sys::ExecStoreAllNullTuple(slot);
+            pg_sys::ExecClearTuple(slot);
+        }
         Self(slot)
     }
 

@@ -119,15 +119,13 @@ impl DecodedColumn {
 /// Pass-by-reference Datums still allocate in the destination row context.
 /// Unmapped slot positions are left untouched.
 ///
-/// Leaving a position untouched is safe only because every column the executor
-/// can read is mapped: a whole-row reference falls back to `NeededColumns::All`
-/// (so the plan covers every live column), and a projected scan maps exactly
-/// the referenced columns — unmapped positions are therefore dropped or
-/// otherwise never-read columns. This does **not** rely on `ExecClearTuple`
-/// resetting `tts_isnull`: it does not (the slot's `tts_values`/`tts_isnull`
-/// arrays are `palloc0`'d, i.e. start non-NULL, and only `ExecStoreAllNullTuple`
-/// marks them all NULL). Correctness comes from the "unmapped == unreferenced"
-/// invariant, not from the cleared slot.
+/// The decoder writes only its mapped columns. Unmapped positions, such as
+/// dropped attributes, can still be read: PostgreSQL reads every attribute
+/// when it forms a whole-row datum or copies the slot into a HeapTuple. The
+/// adapter that owns the slot must make every position its layout never
+/// writes read as NULL before using a decoder on that slot. `ExecClearTuple`
+/// does not do this: the slot's `tts_values`/`tts_isnull` arrays are
+/// `palloc0`'d, so they start non-NULL, and clearing leaves them unchanged.
 ///
 /// The immutable column plan is reference-counted with [`Rc`]: PostgreSQL scan
 /// state is backend-local, while rescans need cheap decoder handles without

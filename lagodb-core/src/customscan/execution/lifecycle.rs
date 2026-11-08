@@ -98,10 +98,15 @@ unsafe fn begin_custom_scan<P: LagodbCustomScanProvider>(
             .tuple_layout
             .validate_executor(cscan, scan_slot)
     }?;
+    // Providers write only the positions their layout maps: the synthetic
+    // row-only cell, dropped relation attributes and unrequested storage
+    // columns are never written. PostgreSQL reads every attribute when it
+    // forms a whole-row datum, so those positions must read as NULL. The
+    // framework owns this slot for the whole scan and ExecClearTuple preserves
+    // its arrays, so one all-NULL baseline covers every later row.
     unsafe {
-        priv_payload
-            .tuple_layout
-            .initialize_executor_slot(scan_slot);
+        pg_sys::ExecStoreAllNullTuple(scan_slot);
+        pg_sys::ExecClearTuple(scan_slot);
     }
     let scan_tuple_desc = unsafe { (*scan_slot).tts_tupleDescriptor };
 
