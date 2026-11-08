@@ -28,7 +28,7 @@ impl FilterPlanner {
             context,
             view.schema(),
             view.metadata(),
-            Some(view.pruning_units()),
+            Some(view.pruning_units()?),
         )?))
     }
 

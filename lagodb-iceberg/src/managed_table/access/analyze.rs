@@ -53,6 +53,8 @@ impl AnalyzePreparation {
         } = input;
         let population = AnalyzePopulation::try_new(tasks)?;
         let virtual_blocks = AnalyzeBlockDomain::blocks(storage_bytes);
+        // With zero blocks PostgreSQL samples nothing and records the
+        // relation as empty, so a non-empty population must not proceed.
         if population.physical_rows != 0 && virtual_blocks == 0 {
             return Err(IcebergError::InvariantViolated(
                 "non-empty Iceberg population has zero virtual ANALYZE blocks",
@@ -66,20 +68,20 @@ impl AnalyzePreparation {
         })
     }
 
-    /// Select up to `desired_candidates` rows and open a reader that splits
+    /// Select up to `requested_candidates` rows and open a reader that splits
     /// them across `tickets` callbacks. `live_weight` receives the number of
     /// candidates actually selected and returns each visible row's weight.
     fn open_cursor(
         self,
-        desired_candidates: u64,
+        requested_candidates: u64,
         tickets: u64,
         seed: u64,
-        live_weight: impl FnOnce(u64) -> f64,
+        live_weight: impl FnOnce(u32) -> f64,
     ) -> AmResult<AnalyzeBatchCursor> {
         let mut rng = StdRng::seed_from_u64(seed);
         let max_data_files = analyze_max_data_files();
         let sample = self.population.locality_plan(
-            desired_candidates,
+            requested_candidates,
             max_data_files,
             &mut rng,
         )?;

@@ -6,7 +6,6 @@ use crate::managed_table::{
     IcebergTableAm, IcebergTableProvider, ManagedTableReadView,
 };
 use lagodb_core::diag::PgReportError;
-use lagodb_core::diag::report_warning;
 use lagodb_core::prelude::*;
 use lagodb_core::table_maintenance::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
@@ -26,7 +25,7 @@ impl AmRelation for IcebergTableAm {
         rel: &RelationHandle,
         _attr_widths: Option<&mut AttrWidthsHandle>,
     ) -> AmResult<(pg_sys::BlockNumber, f64, f64)> {
-        let stats = RelationStats::load_or_default(rel);
+        let stats = RelationStats::load(rel)?;
 
         Ok((stats.pages(), stats.estimated_live_rows(rel), 0.0))
     }
@@ -70,7 +69,6 @@ impl AmRelation for IcebergTableAm {
     }
 }
 
-#[derive(Default)]
 struct RelationStats {
     rows: u64,
     bytes: u64,
@@ -80,29 +78,15 @@ struct RelationStats {
 impl RelationStats {
     /// Load Iceberg snapshot statistics for the planner.
     ///
-    /// The planner calls this on the read path and must never fail because
-    /// statistics are unavailable: missing or unreadable metadata should
-    /// degrade gracefully into "no information" rather than abort the query.
-    /// Failures are surfaced as a warning so operators can still notice them.
-    fn load_or_default(rel: &RelationHandle) -> Self {
-        match Self::try_load(rel) {
-            Ok(stats) => stats,
-            Err(err) => {
-                report_warning(format_args!(
-                    "lagodb_iceberg: failed to load Iceberg statistics for relation {}: {err}; planner will use default estimates",
-                    rel.oid(),
-                ));
-                Self::default()
-            }
-        }
-    }
-
-    fn try_load(rel: &RelationHandle) -> IcebergResult<Self> {
+    /// Like heap's `table_block_relation_estimate_size()`, whose
+    /// `RelationGetNumberOfBlocks()` raises storage errors, size estimation
+    /// reports metadata failures instead of planning with defaults.
+    fn load(rel: &RelationHandle) -> IcebergResult<Self> {
         let ctx = StorageContext::for_read(rel)?;
         let loaded =
             TxMetadata::current().current_table_metadata(rel.oid(), ctx.file_io())?;
         let (rows, bytes) = loaded.relation_stats(ctx.file_io())?;
-        let may_have_row_deletes = loaded.may_have_row_deletes();
+        let may_have_row_deletes = loaded.may_have_row_deletes()?;
 
         Ok(Self {
             rows,

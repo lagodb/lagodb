@@ -116,7 +116,7 @@ impl ManagedTableReadView {
         self.read.storage_bytes(self.context.file_io())
     }
 
-    pub(crate) fn pruning_units(&self) -> f64 {
+    pub(crate) fn pruning_units(&self) -> IcebergResult<f64> {
         self.read.pruning_units()
     }
 

@@ -58,11 +58,6 @@ pub enum IcebergError {
     RowIdentityLimitExceeded,
 
     #[error(
-        "Iceberg ANALYZE physical population exceeds PostgreSQL synthetic TID capacity"
-    )]
-    AnalyzeTidCapacityExceeded,
-
-    #[error(
         "failed to commit metadata for relid {relid} after {max_retries} retries due to concurrent updates"
     )]
     MetadataCommitConflict {
@@ -237,8 +232,7 @@ impl SqlStateError for IcebergError {
             }
 
             IcebergError::FileIdLimitExceeded { .. }
-            | IcebergError::RowIdentityLimitExceeded
-            | IcebergError::AnalyzeTidCapacityExceeded => {
+            | IcebergError::RowIdentityLimitExceeded => {
                 PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED
             }
 

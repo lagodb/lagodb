@@ -1,10 +1,9 @@
 //! Pure sampling algorithms for PostgreSQL ANALYZE over Iceberg rows.
 
 use std::collections::HashSet;
+use std::iter;
 
 use rand::Rng;
-
-use crate::error::{IcebergError, IcebergResult};
 
 pub(super) struct AnalyzePopulationSample {
     pub(super) files: Vec<AnalyzeFileSample>,
@@ -31,19 +30,16 @@ impl AnalyzeSampler {
         population: u64,
         sample_size: u64,
         rng: &mut R,
-    ) -> IcebergResult<Vec<u64>> {
-        if sample_size > population {
-            return Err(IcebergError::InvariantViolated(
-                "ANALYZE sample size exceeds physical row population",
-            ));
-        }
-        let capacity = usize::try_from(sample_size).map_err(|_| {
-            IcebergError::InvariantViolated(
-                "ANALYZE sample size exceeds platform collection capacity",
-            )
-        })?;
+    ) -> Vec<u64> {
+        assert!(
+            sample_size <= population,
+            "ANALYZE sample size exceeds its population"
+        );
+        let capacity = usize::try_from(sample_size).expect(
+            "ANALYZE samples are bounded by a u32 candidate or usize file count",
+        );
         let mut selected = HashSet::with_capacity(capacity);
-        for upper in population.saturating_sub(sample_size)..population {
+        for upper in population - sample_size..population {
             let candidate = rng.random_range(0..=upper);
             if !selected.insert(candidate) {
                 selected.insert(upper);
@@ -51,87 +47,54 @@ impl AnalyzeSampler {
         }
         let mut ordinals = selected.into_iter().collect::<Vec<_>>();
         ordinals.sort_unstable();
-        Ok(ordinals)
+        ordinals
     }
 
     /// Select a locality-bounded file set whose probability is proportional to
-    /// its manifest row count, then draw a fixed number of observations from
-    /// that set. Every physical row has the same expected observation count.
+    /// its manifest row count, then draw `min(requested, physical rows)`
+    /// observations from that set. Every physical row has the same expected
+    /// observation count.
+    ///
+    /// [`super::AnalyzePopulation`] already proved that `record_counts` sums
+    /// without overflow.
     pub(super) fn sample_population<R: Rng + ?Sized>(
         record_counts: &[u64],
-        physical_rows: u64,
-        desired_candidates: u64,
+        requested_candidates: u64,
         max_data_files: usize,
         rng: &mut R,
-    ) -> IcebergResult<AnalyzePopulationSample> {
-        if desired_candidates > physical_rows {
-            return Err(IcebergError::InvariantViolated(
-                "ANALYZE desired sample exceeds physical row population",
-            ));
-        }
-        if max_data_files == 0 {
-            return Err(IcebergError::InvariantViolated(
-                "ANALYZE data-file limit must be positive",
-            ));
-        }
-        let verified_rows = record_counts.iter().try_fold(0_u64, |sum, count| {
-            sum.checked_add(*count)
-                .ok_or(IcebergError::InvariantViolated(
-                    "ANALYZE physical row population overflowed",
-                ))
-        })?;
-        if verified_rows != physical_rows {
-            return Err(IcebergError::InvariantViolated(
-                "ANALYZE file record counts do not match physical population",
-            ));
-        }
-        if record_counts.is_empty() || physical_rows == 0 || desired_candidates == 0 {
-            return Ok(AnalyzePopulationSample {
+    ) -> AnalyzePopulationSample {
+        let physical_rows = record_counts.iter().sum::<u64>();
+        let observation_count = requested_candidates.min(physical_rows);
+        if observation_count == 0 {
+            return AnalyzePopulationSample {
                 files: Vec::new(),
-                observation_count: 0,
-            });
+                observation_count,
+            };
         }
 
         let sampled_file_count = record_counts.len().min(max_data_files);
-        let total_file_count = u64::try_from(record_counts.len()).map_err(|_| {
-            IcebergError::InvariantViolated(
-                "ANALYZE file population exceeds unsigned long range",
-            )
-        })?;
         let anchor_ticket = rng.random_range(0..physical_rows);
         let mut cumulative_rows = 0_u64;
         let anchor_index = record_counts
             .iter()
             .position(|record_count| {
-                cumulative_rows = cumulative_rows.saturating_add(*record_count);
+                cumulative_rows += *record_count;
                 anchor_ticket < cumulative_rows
             })
-            .ok_or(IcebergError::InvariantViolated(
-                "ANALYZE weighted file sample did not select an anchor",
-            ))?;
+            .expect("the anchor ticket lies below the physical row total");
 
         let mut file_indices = Vec::with_capacity(sampled_file_count);
         file_indices.push(anchor_index);
         if sampled_file_count > 1 {
-            let remaining_population = total_file_count.checked_sub(1).ok_or(
-                IcebergError::InvariantViolated(
-                    "ANALYZE file population underflowed",
-                ),
-            )?;
-            let remaining_sample =
-                u64::try_from(sampled_file_count - 1).map_err(|_| {
-                    IcebergError::InvariantViolated(
-                        "ANALYZE sampled file count exceeds unsigned long range",
-                    )
-                })?;
+            let remaining_population = u64::try_from(record_counts.len() - 1)
+                .expect("a usize file count fits u64");
+            let remaining_sample = u64::try_from(sampled_file_count - 1)
+                .expect("a usize file count fits u64");
             for logical_index in
-                Self::sample_ordinals(remaining_population, remaining_sample, rng)?
+                Self::sample_ordinals(remaining_population, remaining_sample, rng)
             {
-                let logical_index = usize::try_from(logical_index).map_err(|_| {
-                    IcebergError::InvariantViolated(
-                        "ANALYZE sampled file index exceeds platform capacity",
-                    )
-                })?;
+                let logical_index = usize::try_from(logical_index)
+                    .expect("sampled ordinals index the file population");
                 file_indices.push(if logical_index < anchor_index {
                     logical_index
                 } else {
@@ -141,82 +104,64 @@ impl AnalyzeSampler {
         }
         file_indices.sort_unstable();
 
-        let selected_rows = file_indices.iter().try_fold(0_u64, |sum, index| {
-            sum.checked_add(record_counts[*index]).ok_or(
-                IcebergError::InvariantViolated(
-                    "ANALYZE selected row population overflowed",
-                ),
-            )
-        })?;
-        let observations =
-            Self::sample_observations(selected_rows, desired_candidates, rng)?;
-        let mut observations = observations.into_iter().peekable();
-        let mut selected_offset = 0_u64;
+        let selected_rows = file_indices
+            .iter()
+            .map(|index| record_counts[*index])
+            .sum::<u64>();
+        let mut observations =
+            Self::sample_observations(selected_rows, observation_count, rng)
+                .into_iter()
+                .peekable();
+        let mut file_start = 0_u64;
         let mut files = Vec::with_capacity(file_indices.len());
         for file_index in file_indices {
-            let file_end = selected_offset
-                .checked_add(record_counts[file_index])
-                .ok_or(IcebergError::InvariantViolated(
-                    "ANALYZE selected file boundary overflowed",
-                ))?;
-            let mut positions = Vec::new();
-            while let Some(observation) = observations.peek() {
-                if observation.position >= file_end {
-                    break;
-                }
-                let observation =
-                    observations.next().ok_or(IcebergError::InvariantViolated(
-                        "ANALYZE sampled observation disappeared",
-                    ))?;
-                positions.push(SampledPosition {
-                    position: observation.position - selected_offset,
-                    multiplicity: observation.multiplicity,
-                });
-            }
+            let file_end = file_start + record_counts[file_index];
+            let positions = iter::from_fn(|| {
+                observations.next_if(|observation| observation.position < file_end)
+            })
+            .map(|observation| SampledPosition {
+                position: observation.position - file_start,
+                multiplicity: observation.multiplicity,
+            })
+            .collect::<Vec<_>>();
             if !positions.is_empty() {
                 files.push(AnalyzeFileSample {
                     file_index,
                     positions,
                 });
             }
-            selected_offset = file_end;
+            file_start = file_end;
         }
-        if observations.next().is_some() {
-            return Err(IcebergError::InvariantViolated(
-                "ANALYZE sampled observation lies outside selected files",
-            ));
-        }
+        assert!(
+            observations.next().is_none(),
+            "ANALYZE observations lie inside the selected files"
+        );
 
-        Ok(AnalyzePopulationSample {
+        AnalyzePopulationSample {
             files,
-            observation_count: desired_candidates,
-        })
+            observation_count,
+        }
     }
 
+    /// Draw `observation_count` positions below `population`, without
+    /// replacement when the population is large enough. `population` is
+    /// non-zero: it includes the anchor file, which has rows.
     fn sample_observations<R: Rng + ?Sized>(
         population: u64,
         observation_count: u64,
         rng: &mut R,
-    ) -> IcebergResult<Vec<SampledPosition>> {
+    ) -> Vec<SampledPosition> {
         if observation_count <= population {
-            return Ok(Self::sample_ordinals(population, observation_count, rng)?
+            return Self::sample_ordinals(population, observation_count, rng)
                 .into_iter()
                 .map(|position| SampledPosition {
                     position,
                     multiplicity: 1,
                 })
-                .collect());
+                .collect();
         }
-        if population == 0 {
-            return Err(IcebergError::InvariantViolated(
-                "ANALYZE cannot sample observations from an empty file set",
-            ));
-        }
-        let capacity = usize::try_from(observation_count).map_err(|_| {
-            IcebergError::InvariantViolated(
-                "ANALYZE observation count exceeds platform collection capacity",
-            )
-        })?;
+        let capacity = usize::try_from(observation_count)
+            .expect("ANALYZE observations are bounded by a u32 candidate count");
         let mut observations = Vec::with_capacity(capacity);
         for _ in 0..observation_count {
             observations.push(rng.random_range(0..population));
@@ -232,11 +177,7 @@ impl AnalyzeSampler {
             if let Some(last) = sampled.last_mut()
                 && last.position == position
             {
-                last.multiplicity = last.multiplicity.checked_add(1).ok_or(
-                    IcebergError::InvariantViolated(
-                        "ANALYZE observation multiplicity overflowed",
-                    ),
-                )?;
+                last.multiplicity += 1;
             } else {
                 sampled.push(SampledPosition {
                     position,
@@ -244,35 +185,7 @@ impl AnalyzeSampler {
                 });
             }
         }
-        Ok(sampled)
-    }
-
-    #[cfg(any(feature = "pg17", feature = "pg18"))]
-    pub(super) fn desired_candidate_count(
-        physical_rows: u64,
-        virtual_blocks: u64,
-        tickets: u64,
-        target_rows: u64,
-    ) -> IcebergResult<u64> {
-        if tickets > virtual_blocks {
-            return Err(IcebergError::InvariantViolated(
-                "PostgreSQL ANALYZE selected more tickets than virtual blocks",
-            ));
-        }
-        if tickets == 0 || physical_rows == 0 {
-            return Ok(0);
-        }
-        if virtual_blocks == 0 {
-            return Err(IcebergError::InvariantViolated(
-                "non-empty ANALYZE sample has zero virtual blocks",
-            ));
-        }
-        let requested_rows = if tickets < virtual_blocks {
-            tickets
-        } else {
-            tickets.max(target_rows)
-        };
-        Ok(physical_rows.min(requested_rows))
+        sampled
     }
 }
 #[cfg(test)]
@@ -284,8 +197,7 @@ mod tests {
     #[test]
     fn floyd_sampler_is_sorted_unique_and_bounded() {
         let mut rng = StdRng::seed_from_u64(42);
-        let sample =
-            AnalyzeSampler::sample_ordinals(10_000, 1_000, &mut rng).unwrap();
+        let sample = AnalyzeSampler::sample_ordinals(10_000, 1_000, &mut rng);
 
         assert_eq!(sample.len(), 1_000);
         assert!(sample.windows(2).all(|pair| pair[0] < pair[1]));
@@ -295,20 +207,15 @@ mod tests {
     #[test]
     fn floyd_sampler_handles_empty_full_and_u64_populations() {
         let mut rng = StdRng::seed_from_u64(7);
-        assert!(
-            AnalyzeSampler::sample_ordinals(0, 0, &mut rng)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(AnalyzeSampler::sample_ordinals(0, 0, &mut rng).is_empty());
         assert_eq!(
-            AnalyzeSampler::sample_ordinals(5, 5, &mut rng).unwrap(),
+            AnalyzeSampler::sample_ordinals(5, 5, &mut rng),
             vec![0, 1, 2, 3, 4]
         );
 
-        let sample = AnalyzeSampler::sample_ordinals(u64::MAX, 4, &mut rng).unwrap();
+        let sample = AnalyzeSampler::sample_ordinals(u64::MAX, 4, &mut rng);
         assert_eq!(sample.len(), 4);
         assert!(sample.windows(2).all(|pair| pair[0] < pair[1]));
-        assert!(AnalyzeSampler::sample_ordinals(3, 4, &mut rng).is_err());
     }
 
     #[test]
@@ -326,9 +233,7 @@ mod tests {
                 POPULATION as u64,
                 SAMPLE_SIZE,
                 &mut rng,
-            )
-            .unwrap()
-            {
+            ) {
                 counts[ordinal as usize] += 1;
             }
         }
@@ -344,16 +249,9 @@ mod tests {
     fn locality_sample_has_fixed_observation_and_file_bounds() {
         let mut record_counts = vec![1; 99];
         record_counts.push(10_000_000);
-        let physical_rows = record_counts.iter().sum();
         let mut rng = StdRng::seed_from_u64(9);
-        let sample = AnalyzeSampler::sample_population(
-            &record_counts,
-            physical_rows,
-            30_000,
-            8,
-            &mut rng,
-        )
-        .unwrap();
+        let sample =
+            AnalyzeSampler::sample_population(&record_counts, 30_000, 8, &mut rng);
 
         assert_eq!(sample.observation_count, 30_000);
         assert!(sample.files.len() <= 8);
@@ -384,19 +282,13 @@ mod tests {
     fn uneven_files_produce_unbiased_fixed_size_observations() {
         const RUNS: u64 = 20_000;
         let record_counts = [10_u64, 100, 1_000];
-        let physical_rows = record_counts.into_iter().sum();
+        let physical_rows = record_counts.into_iter().sum::<u64>();
         let mut observations = [0_u64; 3];
 
         for seed in 0..RUNS {
             let mut rng = StdRng::seed_from_u64(seed);
-            let sample = AnalyzeSampler::sample_population(
-                &record_counts,
-                physical_rows,
-                60,
-                2,
-                &mut rng,
-            )
-            .unwrap();
+            let sample =
+                AnalyzeSampler::sample_population(&record_counts, 60, 2, &mut rng);
             assert_eq!(sample.observation_count, 60);
             for file in sample.files {
                 observations[file.file_index] += file
@@ -422,12 +314,10 @@ mod tests {
                 let mut rng = StdRng::seed_from_u64(seed);
                 let sample = AnalyzeSampler::sample_population(
                     &[1, 1, 1, 100],
-                    103,
                     20,
                     1,
                     &mut rng,
-                )
-                .unwrap();
+                );
                 (sample.files[0].positions[0].multiplicity > 1).then_some(sample)
             })
             .expect(
@@ -440,51 +330,14 @@ mod tests {
         assert_eq!(sample.files[0].positions[0].multiplicity, 20);
     }
 
-    #[cfg(any(feature = "pg17", feature = "pg18"))]
     #[test]
-    fn desired_candidates_are_bounded_by_postgresql_sample_target() {
-        assert_eq!(
-            AnalyzeSampler::desired_candidate_count(10_000, 1_000, 100, 30_000)
-                .unwrap(),
-            100
-        );
-        assert_eq!(
-            AnalyzeSampler::desired_candidate_count(10_000_000, 1_000, 100, 30_000)
-                .unwrap(),
-            100
-        );
-        assert_eq!(
-            AnalyzeSampler::desired_candidate_count(
-                10_000_000,
-                1_000,
-                1_000,
-                30_000,
-            )
-            .unwrap(),
-            30_000
-        );
-        assert_eq!(
-            AnalyzeSampler::desired_candidate_count(
-                10_000_000, 1_000_000, 300_000, 30_000,
-            )
-            .unwrap(),
-            300_000
-        );
-        assert!(
-            AnalyzeSampler::desired_candidate_count(10, 100, 101, 30_000).is_err()
-        );
-    }
-
-    #[test]
-    fn locality_sampler_handles_empty_full_and_invalid_boundaries() {
+    fn locality_sampler_handles_empty_and_full_populations() {
         let mut rng = StdRng::seed_from_u64(23);
-        let empty =
-            AnalyzeSampler::sample_population(&[], 0, 0, 32, &mut rng).unwrap();
+        let empty = AnalyzeSampler::sample_population(&[], 0, 32, &mut rng);
         assert!(empty.files.is_empty());
         assert_eq!(empty.observation_count, 0);
 
-        let full =
-            AnalyzeSampler::sample_population(&[5, 5], 10, 10, 32, &mut rng).unwrap();
+        let full = AnalyzeSampler::sample_population(&[5, 5], 10, 32, &mut rng);
         assert_eq!(full.observation_count, 10);
         assert_eq!(full.files.len(), 2);
         assert!(full.files.iter().all(|file| {
@@ -494,14 +347,6 @@ mod tests {
                     .iter()
                     .all(|position| position.multiplicity == 1)
         }));
-
-        assert!(
-            AnalyzeSampler::sample_population(&[10], 10, 1, 0, &mut rng).is_err()
-        );
-        assert!(AnalyzeSampler::sample_population(&[9], 10, 1, 1, &mut rng).is_err());
-        assert!(
-            AnalyzeSampler::sample_population(&[10], 10, 11, 1, &mut rng).is_err()
-        );
     }
 
     #[test]

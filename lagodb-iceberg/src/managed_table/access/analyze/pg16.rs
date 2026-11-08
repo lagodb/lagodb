@@ -24,13 +24,11 @@ use rand::Rng;
 
 use super::AnalyzePreparation;
 use super::cursor::AnalyzeBatchCursor;
-use crate::error::IcebergError;
 
 impl AnalyzePreparation {
     fn emit_all_candidates(self, sample_budget: u64) -> AmResult<AnalyzeBatchCursor> {
-        let desired_candidates = self.population.physical_rows.min(sample_budget);
         let seed = rand::rng().random::<u64>();
-        self.open_cursor(desired_candidates, 1, seed, |_| 0.0)
+        self.open_cursor(sample_budget, 1, seed, |_| 0.0)
     }
 }
 
@@ -72,16 +70,12 @@ impl AnalyzeScanState {
         }
     }
 
+    /// The block number is opaque: PostgreSQL's `BlockSampler` draws it below
+    /// the relation size this AM reported, and each block is one ticket.
     pub(crate) fn next_block(
         &mut self,
-        block: pg_sys::BlockNumber,
+        _block: pg_sys::BlockNumber,
     ) -> AmResult<bool> {
-        if u64::from(block) >= self.virtual_blocks {
-            return Err(IcebergError::InvariantViolated(
-                "PostgreSQL ANALYZE sampled a block outside the virtual relation",
-            )
-            .into());
-        }
         match mem::replace(&mut self.phase, AnalyzeScanPhase::Transitioning) {
             AnalyzeScanPhase::Pending {
                 preparation,
@@ -89,7 +83,7 @@ impl AnalyzeScanState {
             } => {
                 let physical_rows = preparation.population.physical_rows;
                 let mut cursor = preparation.emit_all_candidates(sample_budget)?;
-                cursor.next_ticket()?;
+                cursor.next_ticket();
                 self.phase = AnalyzeScanPhase::Emitting {
                     cursor,
                     physical_rows,
@@ -102,10 +96,9 @@ impl AnalyzeScanState {
                 Ok(true)
             }
             AnalyzeScanPhase::Emitting { .. } | AnalyzeScanPhase::Transitioning => {
-                Err(IcebergError::InvariantViolated(
-                    "ANALYZE requested a block before draining the previous one",
+                unreachable!(
+                    "PostgreSQL drains a block's tuples before requesting the next block"
                 )
-                .into())
             }
         }
     }
@@ -140,10 +133,9 @@ impl AnalyzeScanState {
                 AnalyzeTupleOutcome::end_of_block_with_live_delta(*live_delta),
             ),
             AnalyzeScanPhase::Pending { .. } | AnalyzeScanPhase::Transitioning => {
-                Err(IcebergError::InvariantViolated(
-                    "ANALYZE tuple callback ran before block initialization",
+                unreachable!(
+                    "PostgreSQL requests ANALYZE tuples only after an accepted block"
                 )
-                .into())
             }
         }
     }
@@ -153,12 +145,12 @@ impl AnalyzeScanState {
         physical_rows: u64,
         virtual_blocks: u64,
         visible_rows: u64,
-        candidate_count: u64,
+        candidate_count: u32,
     ) -> f64 {
         if candidate_count == 0 {
             return 0.0;
         }
         (physical_rows as f64 / virtual_blocks as f64)
-            * (visible_rows as f64 / candidate_count as f64)
+            * (visible_rows as f64 / f64::from(candidate_count))
     }
 }

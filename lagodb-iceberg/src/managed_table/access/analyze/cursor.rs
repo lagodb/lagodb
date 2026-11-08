@@ -15,7 +15,10 @@ use super::sampling::SampledPosition;
 use crate::error::{IcebergError, IcebergResult};
 use crate::scan::batch::InterruptibleArrowBatches;
 
-const TUPLES_PER_SYNTHETIC_BLOCK: u64 = 2048;
+const TUPLES_PER_SYNTHETIC_BLOCK: u32 = 2048;
+
+// Every u32 sample ordinal maps below the trigger-row TID block range.
+const _: () = assert!(u32::MAX / TUPLES_PER_SYNTHETIC_BLOCK < TRIGGER_ROW_BLOCK_BASE);
 
 pub(super) enum AnalyzeReadPlan {
     Selected {
@@ -62,8 +65,8 @@ pub(super) struct AnalyzeBatchCursor {
     expected: ExpectedCursor,
     tickets: u64,
     next_ticket: u64,
-    ticket_end: u64,
-    candidate_count: u64,
+    ticket_end: u32,
+    candidate_count: u32,
     live_weight: f64,
 }
 
@@ -72,7 +75,7 @@ impl AnalyzeBatchCursor {
         returned: ReturnedRows,
         expected: ExpectedCursor,
         tickets: u64,
-        candidate_count: u64,
+        candidate_count: u32,
         live_weight: f64,
     ) -> Self {
         Self {
@@ -87,25 +90,21 @@ impl AnalyzeBatchCursor {
     }
 
     #[cfg(feature = "pg16")]
-    pub(super) const fn candidate_count(&self) -> u64 {
+    pub(super) const fn candidate_count(&self) -> u32 {
         self.candidate_count
     }
 
-    pub(super) fn next_ticket(&mut self) -> AmResult<bool> {
+    pub(super) fn next_ticket(&mut self) -> bool {
         if self.next_ticket == self.tickets {
-            return Ok(false);
+            return false;
         }
         self.next_ticket += 1;
-        self.ticket_end = u64::try_from(
+        self.ticket_end = u32::try_from(
             (u128::from(self.next_ticket) * u128::from(self.candidate_count))
                 / u128::from(self.tickets),
         )
-        .map_err(|_| {
-            IcebergError::InvariantViolated(
-                "ANALYZE ticket boundary exceeds unsigned long range",
-            )
-        })?;
-        Ok(true)
+        .expect("a ticket boundary never exceeds the candidate count");
+        true
     }
 
     pub(super) fn next_tuple(
@@ -124,7 +123,7 @@ impl AnalyzeBatchCursor {
                     Ordering::Equal => {
                         let ordinal = self.expected.ordinal();
                         returned.write(out)?;
-                        out.set_tid(&Self::synthetic_tid(ordinal)?);
+                        out.set_tid(&Self::synthetic_tid(ordinal));
                         if self.expected.advance() {
                             self.returned.consume();
                         }
@@ -148,25 +147,12 @@ impl AnalyzeBatchCursor {
         Ok(AnalyzeTupleOutcome::end_of_block())
     }
 
-    fn synthetic_tid(sample_ordinal: u64) -> IcebergResult<ItemPointer> {
-        let block = sample_ordinal / TUPLES_PER_SYNTHETIC_BLOCK;
-        if block >= u64::from(TRIGGER_ROW_BLOCK_BASE) {
-            return Err(IcebergError::AnalyzeTidCapacityExceeded);
+    fn synthetic_tid(sample_ordinal: u32) -> ItemPointer {
+        ItemPointer {
+            block_number: sample_ordinal / TUPLES_PER_SYNTHETIC_BLOCK,
+            offset: u16::try_from(sample_ordinal % TUPLES_PER_SYNTHETIC_BLOCK + 1)
+                .expect("a synthetic offset is at most TUPLES_PER_SYNTHETIC_BLOCK"),
         }
-        let offset = u16::try_from(sample_ordinal % TUPLES_PER_SYNTHETIC_BLOCK + 1)
-            .map_err(|_| {
-            IcebergError::InvariantViolated(
-                "ANALYZE synthetic tuple offset exceeds PostgreSQL range",
-            )
-        })?;
-        Ok(ItemPointer {
-            block_number: u32::try_from(block).map_err(|_| {
-                IcebergError::InvariantViolated(
-                    "ANALYZE synthetic tuple block exceeds PostgreSQL range",
-                )
-            })?,
-            offset,
-        })
     }
 }
 
@@ -215,7 +201,7 @@ pub(super) struct ExpectedCursor {
     head: Option<RowIdentity>,
     /// Observations of `head` not yet consumed.
     remaining: u64,
-    ordinal: u64,
+    ordinal: u32,
 }
 
 impl ExpectedCursor {
@@ -233,7 +219,7 @@ impl ExpectedCursor {
     }
 
     /// The next observation, unless the ticket ending at `ticket_end` is full.
-    fn peek_before(&self, ticket_end: u64) -> Option<RowIdentity> {
+    fn peek_before(&self, ticket_end: u32) -> Option<RowIdentity> {
         if self.ordinal < ticket_end {
             self.head
         } else {
@@ -241,7 +227,7 @@ impl ExpectedCursor {
         }
     }
 
-    const fn ordinal(&self) -> u64 {
+    const fn ordinal(&self) -> u32 {
         self.ordinal
     }
 
@@ -296,28 +282,28 @@ mod tests {
             .into_iter(),
         )]);
 
-        assert_eq!(cursor.peek_before(u64::MAX).unwrap().position, 3);
+        assert_eq!(cursor.peek_before(u32::MAX).unwrap().position, 3);
         assert!(!cursor.advance());
-        assert_eq!(cursor.peek_before(u64::MAX).unwrap().position, 3);
+        assert_eq!(cursor.peek_before(u32::MAX).unwrap().position, 3);
         assert!(cursor.peek_before(cursor.ordinal()).is_none());
         assert!(cursor.advance());
-        assert_eq!(cursor.peek_before(u64::MAX).unwrap().position, 8);
+        assert_eq!(cursor.peek_before(u32::MAX).unwrap().position, 8);
         assert!(cursor.advance());
-        assert!(cursor.peek_before(u64::MAX).is_none());
+        assert!(cursor.peek_before(u32::MAX).is_none());
         assert_eq!(cursor.ordinal(), 3);
     }
 
     #[test]
     fn synthetic_tids_are_monotonic_across_block_boundaries() {
         assert_eq!(
-            AnalyzeBatchCursor::synthetic_tid(2047).unwrap(),
+            AnalyzeBatchCursor::synthetic_tid(2047),
             ItemPointer {
                 block_number: 0,
                 offset: 2048,
             }
         );
         assert_eq!(
-            AnalyzeBatchCursor::synthetic_tid(2048).unwrap(),
+            AnalyzeBatchCursor::synthetic_tid(2048),
             ItemPointer {
                 block_number: 1,
                 offset: 1,

@@ -8,6 +8,7 @@ use iceberg_lite::overlay::SnapshotDelta;
 use iceberg_lite::spec::{
     DataContentType, ManifestContentType, SchemaRef, TableMetadata,
 };
+use iceberg_lite::{Error, ErrorKind};
 use pgrx::pg_sys;
 
 use crate::error::IcebergResult;
@@ -55,19 +56,21 @@ impl LoadedTableRead {
     /// Storage bytes this read observes. Without a committed baseline, the
     /// snapshot summary in `loaded` describes rows outside this read.
     pub(crate) fn storage_bytes(&self, file_io: &FileIO) -> IcebergResult<u64> {
-        let committed = self
-            .snapshot_id
-            .map_or((0, 0), |_| self.loaded.committed_stats());
+        let committed = match self.snapshot_id {
+            Some(_) => self.loaded.committed_stats()?,
+            None => (0, 0),
+        };
         Ok(self.loaded.stats_with_delta(committed, file_io)?.1)
     }
 
     /// Estimated units that file and row-group statistics keep or skip
     /// whole: every data file holds at least one row group of at most
     /// [`MANAGED_ROW_GROUP_MAX_ROWS`] rows.
-    pub(crate) fn pruning_units(&self) -> f64 {
-        let (mut rows, mut files) = self
-            .snapshot_id
-            .map_or((0, 0), |_| self.loaded.committed_layout());
+    pub(crate) fn pruning_units(&self) -> IcebergResult<f64> {
+        let (mut rows, mut files) = match self.snapshot_id {
+            Some(_) => self.loaded.committed_layout()?,
+            None => (0, 0),
+        };
         if let Some(delta) = self.loaded.delta.as_ref() {
             let stats = delta.stats();
             if stats.truncates_base {
@@ -77,13 +80,13 @@ impl LoadedTableRead {
                 // The committed rows still count the removed files, which only
                 // their manifests tell apart. One unit prices statistics
                 // pruning as skipping nothing.
-                return 1.0;
+                return Ok(1.0);
             }
             // Added files are counted through their rows.
             rows = rows.saturating_add(stats.added_data_records);
         }
         let row_groups = rows.div_ceil(MANAGED_ROW_GROUP_MAX_ROWS as u64);
-        files.max(row_groups).max(1) as f64
+        Ok(files.max(row_groups).max(1) as f64)
     }
 }
 
@@ -99,22 +102,22 @@ impl LoadedTableMetadata {
         &self,
         file_io: &FileIO,
     ) -> IcebergResult<(u64, u64)> {
-        self.stats_with_delta(self.committed_stats(), file_io)
+        self.stats_with_delta(self.committed_stats()?, file_io)
     }
 
     /// Committed rows and data files.
-    fn committed_layout(&self) -> (u64, u64) {
-        (
-            Self::summary_u64(&self.metadata, TOTAL_RECORDS).unwrap_or(0),
-            Self::summary_u64(&self.metadata, TOTAL_DATA_FILES).unwrap_or(0),
-        )
+    fn committed_layout(&self) -> IcebergResult<(u64, u64)> {
+        Ok((
+            self.summary_total(TOTAL_RECORDS)?,
+            self.summary_total(TOTAL_DATA_FILES)?,
+        ))
     }
 
-    fn committed_stats(&self) -> (u64, u64) {
-        (
-            Self::summary_u64(&self.metadata, TOTAL_RECORDS).unwrap_or(0),
-            Self::summary_u64(&self.metadata, TOTAL_FILES_SIZE).unwrap_or(0),
-        )
+    fn committed_stats(&self) -> IcebergResult<(u64, u64)> {
+        Ok((
+            self.summary_total(TOTAL_RECORDS)?,
+            self.summary_total(TOTAL_FILES_SIZE)?,
+        ))
     }
 
     fn stats_with_delta(
@@ -158,31 +161,41 @@ impl LoadedTableMetadata {
     /// serve as the live-row estimate. A true result is deliberately
     /// conservative when transaction-local removal of the last committed
     /// delete file cannot be proven from summary counters alone.
-    pub(crate) fn may_have_row_deletes(&self) -> bool {
+    pub(crate) fn may_have_row_deletes(&self) -> IcebergResult<bool> {
         let delta_stats = self.delta.as_ref().map(|delta| delta.stats());
         let base_was_replaced = delta_stats
             .as_ref()
             .is_some_and(|stats| stats.truncates_base);
         let base_may_have_deletes =
-            if base_was_replaced || self.metadata.current_snapshot().is_none() {
-                false
-            } else {
-                // Snapshot summary properties are extensible metadata. Treat a
-                // missing or malformed delete count conservatively: returning
-                // false here authorizes the planner to treat physical records as
-                // an exact live-row count.
-                Self::summary_u64(&self.metadata, TOTAL_DELETE_FILES)
-                    .is_none_or(|count| count != 0)
-            };
-        base_may_have_deletes
-            || delta_stats.is_some_and(|stats| stats.added_delete_file_bytes != 0)
+            !base_was_replaced && self.summary_total(TOTAL_DELETE_FILES)? != 0;
+        Ok(base_may_have_deletes
+            || delta_stats.is_some_and(|stats| stats.added_delete_file_bytes != 0))
     }
 
-    fn summary_u64(metadata: &TableMetadata, key: &str) -> Option<u64> {
-        metadata
-            .current_snapshot()
-            .and_then(|snapshot| snapshot.summary().additional_properties.get(key))
+    /// A total from the current snapshot's summary, or 0 without a snapshot.
+    ///
+    /// LagoDB is the only writer of managed metadata: tables are created in an
+    /// empty location and every snapshot goes through iceberg-lite, which
+    /// records the totals from the first snapshot on. iceberg-lite skips a
+    /// total only when the previous snapshot lacks it or its arithmetic
+    /// underflows, so a missing or malformed total means the metadata is
+    /// inconsistent or was changed outside LagoDB.
+    fn summary_total(&self, key: &str) -> IcebergResult<u64> {
+        let Some(snapshot) = self.metadata.current_snapshot() else {
+            return Ok(0);
+        };
+        snapshot
+            .summary()
+            .additional_properties
+            .get(key)
             .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("Iceberg snapshot summary has no valid \"{key}\" total"),
+                )
+                .into()
+            })
     }
 
     fn subtract_removed_data_file_stats(

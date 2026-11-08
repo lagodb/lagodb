@@ -10,32 +10,33 @@ use rand::Rng;
 
 use super::AnalyzePreparation;
 use super::cursor::AnalyzeBatchCursor;
-use super::sampling::AnalyzeSampler;
 use crate::error::IcebergError;
 
 impl AnalyzePreparation {
+    /// PostgreSQL selects `min(virtual_blocks, target_rows)` tickets, which
+    /// either covers every virtual block or is `target_rows` itself. Both
+    /// cases request `target_rows` candidates, the size PostgreSQL samples.
     fn start(
         self,
-        tickets: u64,
-        target_rows: u64,
+        tickets: AnalyzeTickets,
         seed: u64,
     ) -> AmResult<AnalyzeBatchCursor> {
         let physical_rows = self.population.physical_rows;
         let virtual_blocks = self.virtual_blocks;
-        let desired_candidates = AnalyzeSampler::desired_candidate_count(
-            physical_rows,
-            virtual_blocks,
-            tickets,
-            target_rows,
-        )?;
-        self.open_cursor(desired_candidates, tickets, seed, |candidate_count| {
-            if candidate_count == 0 {
-                0.0
-            } else {
-                (tickets as f64 / virtual_blocks as f64)
-                    * (physical_rows as f64 / candidate_count as f64)
-            }
-        })
+        let ticket_count = tickets.tickets();
+        self.open_cursor(
+            tickets.target_rows(),
+            ticket_count,
+            seed,
+            |candidate_count| {
+                if candidate_count == 0 {
+                    0.0
+                } else {
+                    (ticket_count as f64 / virtual_blocks as f64)
+                        * (physical_rows as f64 / f64::from(candidate_count))
+                }
+            },
+        )
     }
 }
 
@@ -62,81 +63,42 @@ impl AnalyzeScanState {
         &mut self,
         stream: &AnalyzeReadStreamHandle,
     ) -> AmResult<bool> {
-        if matches!(&self.phase, AnalyzeScanPhase::Pending(_)) {
-            let phase =
-                mem::replace(&mut self.phase, AnalyzeScanPhase::Transitioning);
-            let AnalyzeScanPhase::Pending(preparation) = phase else {
-                return Err(IcebergError::InvariantViolated(
-                    "ANALYZE entered an invalid lifecycle transition",
-                )
-                .into());
-            };
-            let initial_sampler = stream.analyze_sampler_state().ok_or(
-                IcebergError::InvariantViolated(
-                    "ANALYZE ReadStream is missing valid PostgreSQL BlockSampler state",
-                ),
-            )?;
-            if initial_sampler.visited_blocks() != 0
-                || initial_sampler.selected_blocks() != 0
-            {
-                return Err(IcebergError::InvariantViolated(
-                    "ANALYZE ReadStream was consumed before provider initialization",
-                )
-                .into());
-            }
-            let mut tickets = 0_u64;
-            while stream.next_block().is_some() {
-                tickets =
-                    tickets
-                        .checked_add(1)
-                        .ok_or(IcebergError::InvariantViolated(
-                            "PostgreSQL ANALYZE ticket count overflowed",
-                        ))?;
-            }
-            let completed_sampler = stream.analyze_sampler_state().ok_or(
-                IcebergError::InvariantViolated(
-                    "ANALYZE ReadStream lost its PostgreSQL BlockSampler state",
-                ),
-            )?;
-            {
-                let population_blocks = initial_sampler.population_blocks();
-                let target_rows = initial_sampler.target_rows();
-                let expected_tickets = population_blocks.min(target_rows);
-                if completed_sampler.population_blocks() != population_blocks
-                    || completed_sampler.target_rows() != target_rows
-                    || preparation.virtual_blocks != population_blocks
-                    || tickets != expected_tickets
-                    || completed_sampler.selected_blocks() != tickets
-                {
-                    return Err(IcebergError::InvariantViolated(
-                        "ANALYZE BlockSampler state is inconsistent with consumed tickets",
-                    )
-                    .into());
-                }
-            }
-            if tickets == 0 {
-                self.phase = AnalyzeScanPhase::Finished;
-                return Ok(false);
-            }
-            let seed = rand::rng().random::<u64>();
-            let target_rows = initial_sampler.target_rows();
-            self.phase = AnalyzeScanPhase::Ready(preparation.start(
-                tickets,
-                target_rows,
-                seed,
-            )?);
-        }
-
         match &mut self.phase {
-            AnalyzeScanPhase::Ready(cursor) => cursor.next_ticket(),
+            AnalyzeScanPhase::Ready(cursor) => Ok(cursor.next_ticket()),
             AnalyzeScanPhase::Finished => Ok(false),
-            AnalyzeScanPhase::Pending(_) | AnalyzeScanPhase::Transitioning => {
-                Err(IcebergError::InvariantViolated(
-                    "ANALYZE state remained incomplete after initialization",
-                )
-                .into())
-            }
+            AnalyzeScanPhase::Pending(_) => self.begin_sampling(stream),
+            AnalyzeScanPhase::Transitioning => unreachable!(
+                "a failed ANALYZE transition raises ERROR before PostgreSQL requests another block"
+            ),
         }
+    }
+
+    /// Drain PostgreSQL's tickets on the first block callback and open the
+    /// sample they select.
+    fn begin_sampling(&mut self, stream: &AnalyzeReadStreamHandle) -> AmResult<bool> {
+        let AnalyzeScanPhase::Pending(preparation) =
+            mem::replace(&mut self.phase, AnalyzeScanPhase::Transitioning)
+        else {
+            unreachable!("only the Pending phase begins ANALYZE sampling");
+        };
+        let tickets = stream.drain_tickets()?;
+        // Live-row weights scale by `virtual_blocks` while PostgreSQL scales
+        // by its block count; relation_size reported both from one snapshot.
+        if tickets.population_blocks() != preparation.virtual_blocks {
+            return Err(IcebergError::InvariantViolated(
+                "ANALYZE virtual blocks differ from the relation size PostgreSQL sampled",
+            )
+            .into());
+        }
+        if tickets.tickets() == 0 {
+            self.phase = AnalyzeScanPhase::Finished;
+            return Ok(false);
+        }
+        let seed = rand::rng().random::<u64>();
+        let mut cursor = preparation.start(tickets, seed)?;
+        let accepted = cursor.next_ticket();
+        self.phase = AnalyzeScanPhase::Ready(cursor);
+        Ok(accepted)
     }
 
     pub(crate) fn next_tuple(
@@ -147,10 +109,9 @@ impl AnalyzeScanState {
             AnalyzeScanPhase::Ready(cursor) => cursor.next_tuple(out),
             AnalyzeScanPhase::Finished => Ok(AnalyzeTupleOutcome::end_of_block()),
             AnalyzeScanPhase::Pending(_) | AnalyzeScanPhase::Transitioning => {
-                Err(IcebergError::InvariantViolated(
-                    "ANALYZE tuple callback ran before block initialization",
+                unreachable!(
+                    "PostgreSQL requests ANALYZE tuples only after an accepted block"
                 )
-                .into())
             }
         }
     }

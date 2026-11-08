@@ -25,6 +25,8 @@
 //! - Owning guards manage resources this crate must close or free, such as
 //!   `RelationGuard` and `HeapTupleGuard`.
 
+#[cfg(any(feature = "pg17", feature = "pg18"))]
+mod analyze_stream;
 #[cfg(feature = "pg18")]
 mod bitmap;
 mod borrowed;
@@ -45,6 +47,8 @@ mod syscache;
 mod tuple;
 mod tuple_desc;
 
+#[cfg(any(feature = "pg17", feature = "pg18"))]
+pub use analyze_stream::{AnalyzeReadStreamHandle, AnalyzeTickets};
 #[cfg(feature = "pg18")]
 pub use bitmap::{
     BitmapPage, BitmapPageOffsets, BitmapScanOutputHandle, TBMIteratorHandle,
@@ -65,8 +69,6 @@ pub use relation_column::RelationColumn;
 pub use relation_guard::RelationGuard;
 pub use relation_name::RelationName;
 pub use relation_tablespace::RelationTablespace;
-#[cfg(any(feature = "pg17", feature = "pg18"))]
-pub use scan::{AnalyzeReadStreamHandle, AnalyzeSamplerState};
 pub use scan::{
     OwnedScanKeys, ParallelTableScanDescHandle, SampleScanStateHandle, ScanDirection,
     ScanKeyEntry, ScanKeyIter, TBMIterateResultHandle, TableScanDescHandle,

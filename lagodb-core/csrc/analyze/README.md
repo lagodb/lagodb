@@ -56,13 +56,15 @@ adding another major:
 5. Run the ANALYZE regression matrix, including ordinary, column-list,
    inherited, repeated-relation, empty, and high-target cases.
 
-Rust validates both snapshots of the sampler against the tickets consumed
-from that same stream. Those checks protect sampler semantics. The recorded
+Core's `AnalyzeReadStreamHandle::drain_tickets()` validates both snapshots of
+the sampler against the tickets consumed from that same stream, so providers
+receive validated ticket counts. Those checks protect sampler field values,
+not the private layout the bridge dereferences. The recorded
 source hashes document the audited baseline; the private layout must be
 reviewed explicitly whenever the supported PostgreSQL version changes.
 
-PG18 creates the ANALYZE stream with `READ_STREAM_USE_BATCHING`, but a
-provider consumes sampling tickets through the exported
+PG18 creates the ANALYZE stream with `READ_STREAM_USE_BATCHING`, but core
+drains a provider's sampling tickets through the exported
 `read_stream_next_block()` function. That function calls the stream callback
 directly; it does not enter `read_stream_look_ahead()` or submit relation I/O.
 The batching flag therefore does not change provider ticket order, count, or

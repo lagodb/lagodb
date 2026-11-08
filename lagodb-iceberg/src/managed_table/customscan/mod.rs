@@ -63,7 +63,7 @@ impl FilterPushdown for IcebergCustomScanProvider {
             context,
             view.schema(),
             view.metadata(),
-            Some(view.pruning_units()),
+            Some(view.pruning_units()?),
         )
     }
 

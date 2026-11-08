@@ -228,10 +228,9 @@ impl AmScanSession for IcebergScan {
                 state.rescan(None)?;
                 Ok(())
             }
-            IcebergScanState::Analyze(_) => Err(IcebergError::InvariantViolated(
-                "PostgreSQL attempted to rescan an ANALYZE session",
-            )
-            .into()),
+            IcebergScanState::Analyze(_) => {
+                unreachable!("PostgreSQL never rescans an ANALYZE scan")
+            }
         }
     }
 
@@ -249,10 +248,9 @@ impl AmScanSession for IcebergScan {
     ) -> AmResult<bool> {
         match &mut self.state {
             IcebergScanState::Analyze(state) => state.next_block(block),
-            _ => Err(IcebergError::InvariantViolated(
-                "ANALYZE block callback used a non-ANALYZE scan",
-            )
-            .into()),
+            IcebergScanState::Regular(_) | IcebergScanState::Mutation(_) => {
+                unreachable!("PostgreSQL samples blocks only from an ANALYZE scan")
+            }
         }
     }
 
@@ -263,10 +261,9 @@ impl AmScanSession for IcebergScan {
     ) -> AmResult<bool> {
         match &mut self.state {
             IcebergScanState::Analyze(state) => state.next_block(stream),
-            _ => Err(IcebergError::InvariantViolated(
-                "ANALYZE block callback used a non-ANALYZE scan",
-            )
-            .into()),
+            IcebergScanState::Regular(_) | IcebergScanState::Mutation(_) => {
+                unreachable!("PostgreSQL samples blocks only from an ANALYZE scan")
+            }
         }
     }
 
@@ -277,10 +274,9 @@ impl AmScanSession for IcebergScan {
     ) -> AmResult<AnalyzeTupleOutcome> {
         match &mut self.state {
             IcebergScanState::Analyze(state) => state.next_tuple(out),
-            _ => Err(IcebergError::InvariantViolated(
-                "ANALYZE tuple callback used a non-ANALYZE scan",
-            )
-            .into()),
+            IcebergScanState::Regular(_) | IcebergScanState::Mutation(_) => {
+                unreachable!("PostgreSQL samples tuples only from an ANALYZE scan")
+            }
         }
     }
 }
