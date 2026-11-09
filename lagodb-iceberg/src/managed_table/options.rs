@@ -13,7 +13,7 @@
 use iceberg_lite::spec::{FormatVersion, IsolationLevel, TableProperties};
 use lagodb_core::handles::RelationHandle;
 use lagodb_core::options::table::{
-    AmCache, AmCacheRef, AmCacheValue, AmCacheable, TableOptionError, TableOptions,
+    AmCache, AmCacheValue, AmCacheable, TableOptionError, TableOptions,
 };
 use lagodb_core::options::{OptionAccess, OptionDef, OptionKind};
 use parquet::basic::{Compression as ParquetCompression, ZstdLevel};
@@ -680,26 +680,27 @@ unsafe impl AmCacheable for IcebergTableOptionCache {
 pub(crate) const MANAGED_ROW_GROUP_MAX_ROWS: usize = DEFAULT_MAX_ROW_GROUP_ROW_COUNT;
 
 /// Iceberg-specific safe access to this AM's single `rd_amcache` type.
-#[derive(Clone, Copy)]
-pub(crate) struct IcebergTableOptions<'a>(AmCacheRef<'a, IcebergTableOptionCache>);
+///
+/// Values are copied out of the cache before returning: `AmCache::get`
+/// requires that no relcache invalidation is processed while its borrow is
+/// alive, which a borrow escaping to the caller could not guarantee.
+pub(crate) struct IcebergTableOptions;
 
-impl<'a> IcebergTableOptions<'a> {
-    pub(crate) fn for_relation(
-        rel: &RelationHandle<'a>,
-    ) -> Result<Self, TableOptionError> {
-        // SAFETY: `IcebergTableOptionCache` is private to this module and this is
-        // the only production accessor for an Iceberg relation's `rd_amcache`.
-        // Every access therefore uses the same concrete cache type.
+impl IcebergTableOptions {
+    /// Parquet writer settings for `rel`'s data files.
+    pub(crate) fn writer_properties(
+        rel: &RelationHandle<'_>,
+    ) -> Result<WriterProperties, TableOptionError> {
+        // SAFETY: `IcebergTableOptionCache` is private to this module and this
+        // is the only production accessor for an Iceberg relation's
+        // `rd_amcache`, so every access uses the same concrete cache type.
+        // The borrow ends before this function returns, and building the
+        // properties processes no invalidation.
         let cached = unsafe { AmCache::get::<IcebergTableOptionCache>(rel)? };
-        Ok(Self(cached))
-    }
-
-    /// Parquet writer settings for this relation's data files.
-    pub(crate) fn writer_properties(self) -> WriterProperties {
-        WriterProperties::builder()
-            .set_compression(self.0.header().compression.parquet())
+        Ok(WriterProperties::builder()
+            .set_compression(cached.header().compression.parquet())
             .set_max_row_group_row_count(Some(MANAGED_ROW_GROUP_MAX_ROWS))
-            .build()
+            .build())
     }
 }
 

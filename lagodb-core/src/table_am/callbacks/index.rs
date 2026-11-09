@@ -4,6 +4,8 @@
 //! All unsafe operations are handled here, keeping trait implementations safe.
 
 use super::common::FfiContainer;
+use crate::am_lifecycle::SessionContext;
+use crate::backend::MemoryContextHandle;
 use crate::diag::PgReportError;
 use crate::diag::ReportableError;
 use crate::handles::{
@@ -20,7 +22,7 @@ use std::ptr::NonNull;
 struct IndexFetchState<T> {
     am_instance: T,
     row: Row,
-    tmp_ctx: pg_sys::MemoryContext,
+    tmp_ctx: MemoryContextHandle,
     /// Bound only when the index callback returns an owned Row. Keeping this
     /// lazy avoids imposing semantic UTF-8 requirements on unrelated paths.
     row_codec: Option<RowDatumCodec>,
@@ -30,7 +32,7 @@ type CustomIndexFetchData<T> =
     FfiContainer<pg_sys::IndexFetchTableData, IndexFetchState<T>>;
 
 impl<T> IndexFetchState<T> {
-    fn new(am_instance: T, tmp_ctx: pg_sys::MemoryContext, natts: usize) -> Self {
+    fn new(am_instance: T, tmp_ctx: MemoryContextHandle, natts: usize) -> Self {
         Self {
             am_instance,
             row: Row::with_width(natts),
@@ -39,8 +41,17 @@ impl<T> IndexFetchState<T> {
         }
     }
 
+    /// Free the previous fetch's datums.
+    ///
+    /// # Safety
+    ///
+    /// Call at callback entry, before anything switches into `tmp_ctx`, and
+    /// only once the previous fetch's slot contents are no longer used.
     unsafe fn reset_tmp_context(&mut self) {
-        unsafe { pg_sys::MemoryContextReset(self.tmp_ctx) };
+        // SAFETY: the lifecycle context is live while PostgreSQL holds the
+        // fetch. PostgreSQL calls in with its own context current, and this
+        // framework enters `tmp_ctx` only through scoped switches.
+        unsafe { self.tmp_ctx.reset() };
     }
 
     unsafe fn write_row_to_slot(
@@ -54,11 +65,11 @@ impl<T> IndexFetchState<T> {
                 // SAFETY: the executor passes an initialized slot whose tuple
                 // descriptor remains valid for this fetch callback.
                 unsafe { RowDatumCodec::from_slot(slot) }
-                    .map_err(PgReportError::from_domain_error)
-                    .report_unwrap(),
+                    .map_err(PgReportError::from_domain_error)?,
             );
         }
-        let mut columns = unsafe { SlotDatumWriter::new(slot, self.tmp_ctx) };
+        let mut columns =
+            unsafe { SlotDatumWriter::new(slot, self.tmp_ctx.as_ptr()) };
         unsafe {
             columns.fill_from_row(
                 &mut self.row,
@@ -77,26 +88,26 @@ pub extern "C-unwind" fn index_fetch_begin<A>(
 where
     A: TableAccessMethod,
 {
+    // SAFETY: PG passes the open table relation; the session is installed
+    // before the container is allocated and published.
     unsafe {
-        const LIFECYCLE_CTX_NAME: &core::ffi::CStr = c"lagodb IndexFetch lifecycle";
-        let fetch_data = CustomIndexFetchData::<A::IndexFetchSession>::alloc(
-            pg_sys::CurrentMemoryContext,
-            LIFECYCLE_CTX_NAME,
-        );
-        (*fetch_data).base_mut().rel = rel;
-
         let rel_handle = RelationHandle::from_raw(rel);
         let mut instance =
             <A::IndexFetchSession as AmIndexFetchSession>::new(&rel_handle)
                 .report_unwrap();
         instance.index_fetch_begin().report_unwrap();
 
-        let tup_desc = (*rel).rd_att;
-        let natts = (*tup_desc).natts as usize;
-
-        const TMP_CTX_NAME: &core::ffi::CStr = c"lagodb IndexFetch tmp";
-        let tmp_ctx = (*fetch_data).create_child_context(TMP_CTX_NAME);
-        (*fetch_data).init_session(IndexFetchState::new(instance, tmp_ctx, natts));
+        let natts = (*(*rel).rd_att).natts as usize;
+        let context = MemoryContextHandle::create(
+            pg_sys::CurrentMemoryContext,
+            c"lagodb IndexFetch lifecycle",
+        );
+        let tmp_ctx = context.create_child(c"lagodb IndexFetch tmp");
+        let state = IndexFetchState::new(instance, tmp_ctx, natts);
+        let fetch_data = CustomIndexFetchData::<A::IndexFetchSession>::alloc(
+            SessionContext::install(context, state),
+        );
+        (*fetch_data).base_mut().rel = rel;
 
         fetch_data as *mut pg_sys::IndexFetchTableData
     }
@@ -110,9 +121,11 @@ where
     unsafe {
         let custom_data =
             CustomIndexFetchData::<A::IndexFetchSession>::from_base_ptr(data);
-        if let Some(state) = (*custom_data).session_mut_if_initialized() {
-            state.am_instance.index_fetch_reset().report_unwrap();
-        }
+        (*custom_data)
+            .session_mut()
+            .am_instance
+            .index_fetch_reset()
+            .report_unwrap();
     }
 }
 
@@ -124,14 +137,11 @@ where
     unsafe {
         let custom_data =
             CustomIndexFetchData::<A::IndexFetchSession>::from_base_ptr(data);
-        if let Some(end_res) =
-            CustomIndexFetchData::<A::IndexFetchSession>::finish_with(
-                custom_data,
-                |state| state.am_instance.index_fetch_end(),
-            )
-        {
-            end_res.report_unwrap();
-        }
+        CustomIndexFetchData::<A::IndexFetchSession>::finish_with(
+            custom_data,
+            |state| state.am_instance.index_fetch_end(),
+        )
+        .report_unwrap();
     }
 }
 

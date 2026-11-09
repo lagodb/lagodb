@@ -4,15 +4,15 @@
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys;
 
+use crate::backend::MemoryContextHandle;
 use crate::handles::RelationHandle;
-use crate::table_am::callbacks::lifecycle;
 use crate::table_am::{AmResult, TableAccessMethod};
 use crate::tuple::{TupleSlotBatch, TupleSlotRow};
 
 use crate::table_am::modify::trigger_rows::TriggerRelationRows;
 
 pub(super) struct CopyTriggerRows {
-    context: pg_sys::MemoryContext,
+    context: MemoryContextHandle,
     rows: TriggerRelationRows,
 }
 
@@ -24,13 +24,13 @@ impl CopyTriggerRows {
         // lifetimes. On abort PG owns this child's reclamation, including
         // during savepoint rollback.
         let context = unsafe {
-            lifecycle::create_child_context(
+            MemoryContextHandle::create(
                 pg_sys::CurTransactionContext,
                 c"LagoDB COPY trigger rows",
             )
         };
         let rows = unsafe {
-            PgMemoryContexts::For(context).switch_to(|_| {
+            PgMemoryContexts::For(context.as_ptr()).switch_to(|_| {
                 let tuple_desc =
                     pg_sys::CreateTupleDescCopy((*relation.as_raw()).rd_att);
                 TriggerRelationRows::new::<A>(relation.oid(), tuple_desc)
@@ -44,7 +44,7 @@ impl CopyTriggerRows {
         // SAFETY: the input slot is callback-scoped; all retained tuples and
         // the store's read slots are allocated in the COPY-owned context.
         unsafe {
-            PgMemoryContexts::For(self.context).switch_to(|_| {
+            PgMemoryContexts::For(self.context.as_ptr()).switch_to(|_| {
                 let slot = row.as_raw();
                 (*slot).tts_tid = rows.preserve(slot)?.to_pg_sys();
                 Ok(())
@@ -66,7 +66,7 @@ impl CopyTriggerRows {
         // SAFETY: the caller guarantees populated, live input slots; retained
         // tuples are allocated in the COPY-owned context.
         unsafe {
-            PgMemoryContexts::For(self.context).switch_to(|_| {
+            PgMemoryContexts::For(self.context.as_ptr()).switch_to(|_| {
                 for &slot in batch.raw_slots() {
                     (*slot).tts_tid = rows.preserve(slot)?.to_pg_sys();
                 }
@@ -80,7 +80,9 @@ impl CopyTriggerRows {
         // Normal shutdown closes tuplestore spill files before deleting the
         // allocations. Closing clears the PG pointers before our Drop runs.
         self.rows.finish();
-        unsafe { pg_sys::MemoryContextDelete(self.context) };
+        // SAFETY: the context is live, and every switch into it was scoped by
+        // `switch_to`, so neither it nor a descendant is current.
+        unsafe { self.context.delete() };
     }
 }
 

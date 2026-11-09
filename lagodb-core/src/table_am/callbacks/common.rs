@@ -2,33 +2,34 @@
 //!
 //! `FfiContainer` models the common PostgreSQL-owned wrapper used by scan and
 //! index-fetch callbacks: a C base struct must be the first field, followed by
-//! the lifecycle context and Rust session pointer.  The Rust session is still
-//! dropped by the lifecycle memory-context callback, so normal end callbacks
-//! and PostgreSQL ERROR unwinds share the same ownership boundary.
+//! the [`SessionContext`] that owns the lifecycle context and Rust session.
+//! The container itself lives in that lifecycle context, so normal end
+//! callbacks and PostgreSQL ERROR unwinds share the same ownership boundary.
+//! It is allocated only after the session is installed, so every published
+//! container has one.
 
-use std::ffi::CStr;
+use std::ptr::addr_of_mut;
 
-use pgrx::pg_sys;
-
-use super::lifecycle;
+use crate::am_lifecycle::SessionContext;
 
 #[repr(C)]
-pub(crate) struct FfiContainer<B, T> {
+pub(crate) struct FfiContainer<B, T: 'static> {
     base: B,
-    lifecycle_ctx: pg_sys::MemoryContext,
-    session: *mut T,
+    session: SessionContext<T>,
 }
 
-impl<B, T> FfiContainer<B, T> {
-    pub(crate) unsafe fn alloc(
-        parent: pg_sys::MemoryContext,
-        lifecycle_ctx_name: &'static CStr,
-    ) -> *mut Self {
+impl<B, T: 'static> FfiContainer<B, T> {
+    /// Allocate a container with a zeroed base inside `session`'s lifecycle
+    /// context. The caller fills the base before publishing it.
+    ///
+    /// # Safety
+    ///
+    /// The lifecycle context must not have been deleted, and all-zero bytes
+    /// must be a valid `B`.
+    pub(crate) unsafe fn alloc(session: SessionContext<T>) -> *mut Self {
         unsafe {
-            let lifecycle_ctx =
-                lifecycle::create_child_context(parent, lifecycle_ctx_name);
-            let container = lifecycle::palloc0_in_context::<Self>(lifecycle_ctx);
-            (*container).lifecycle_ctx = lifecycle_ctx;
+            let container = session.context().alloc_zeroed::<Self>();
+            addr_of_mut!((*container).session).write(session);
             container
         }
     }
@@ -45,58 +46,24 @@ impl<B, T> FfiContainer<B, T> {
         &mut self.base
     }
 
-    pub(crate) unsafe fn create_child_context(
-        &self,
-        name: &'static CStr,
-    ) -> pg_sys::MemoryContext {
-        unsafe { lifecycle::create_child_context(self.lifecycle_ctx, name) }
-    }
-
-    pub(crate) unsafe fn init_session(&mut self, session: T) {
-        self.session =
-            unsafe { lifecycle::leak_state_in_context(self.lifecycle_ctx, session) };
-    }
-
+    #[inline]
     pub(crate) unsafe fn session_mut(&mut self) -> &mut T {
-        debug_assert!(!self.session.is_null());
-        unsafe { &mut *self.session }
+        unsafe { self.session.session_mut() }
     }
 
-    pub(crate) unsafe fn session_mut_if_initialized(&mut self) -> Option<&mut T> {
-        if self.session.is_null() {
-            None
-        } else {
-            Some(unsafe { &mut *self.session })
-        }
-    }
-
+    /// Run `finish` on the session and delete the container's lifecycle
+    /// context, which also frees the container.
+    ///
+    /// # Safety
+    ///
+    /// Call only from the end callback, with the container that PostgreSQL
+    /// passed in, as [`SessionContext::finish_with`] requires.
     pub(crate) unsafe fn finish_with<R>(
         container: *mut Self,
         finish: impl FnOnce(&mut T) -> R,
-    ) -> Option<R> {
+    ) -> R {
         unsafe {
-            if (*container).session.is_null() {
-                Self::delete_lifecycle_context(container);
-                return None;
-            }
-
-            let result = {
-                let session = &mut *(*container).session;
-                finish(session)
-            };
-
-            (*container).session = std::ptr::null_mut();
-            Self::delete_lifecycle_context(container);
-            Some(result)
-        }
-    }
-
-    unsafe fn delete_lifecycle_context(container: *mut Self) {
-        unsafe {
-            let lifecycle_ctx = (*container).lifecycle_ctx;
-            if !lifecycle_ctx.is_null() {
-                pg_sys::MemoryContextDelete(lifecycle_ctx);
-            }
+            SessionContext::finish_with(addr_of_mut!((*container).session), finish)
         }
     }
 }

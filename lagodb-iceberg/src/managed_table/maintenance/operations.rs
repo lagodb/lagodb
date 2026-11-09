@@ -105,7 +105,7 @@ impl IcebergTableMaintenance {
         let materialized_delete_identities = plan.materialized_delete_identities;
         let planning_metrics = plan.metrics;
         let writer_properties =
-            IcebergTableOptions::for_relation(request.relation)?.writer_properties();
+            IcebergTableOptions::writer_properties(request.relation)?;
         let mut report = TableMaintenanceReport::default();
         for (name, value) in [
             (c"scanned_manifests", planning_metrics.scanned_manifests),

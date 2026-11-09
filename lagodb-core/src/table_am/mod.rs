@@ -89,6 +89,7 @@ use std::fmt::{Display, Formatter};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
+use pgrx::{AllocatedByPostgres, PgBox};
 
 pub use callbacks::virtual_slot_callbacks_with_tid;
 pub(crate) use callbacks::{
@@ -107,8 +108,10 @@ pub use relation::AmRelation;
 pub use scan::{AmScan, AmScanSession, AnalyzeTupleOutcome, ScanFlags};
 pub use scan_ops::{BitmapScanOps, TidRangeOps};
 
-use crate::TableAmRoutine;
 use crate::diag::{PgReportError, SqlStateError};
+
+/// PgBox'ed `TableAmRoutine`, returned by [`TableAccessMethod::am_routine`].
+pub type TableAmRoutine<A = AllocatedByPostgres> = PgBox<pg_sys::TableAmRoutine, A>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AmFrameworkError {
@@ -176,8 +179,8 @@ pub fn unsupported_callback<T>(method: &'static str) -> AmResult<T> {
 pub trait TableAccessMethod:
     AmScan + AmRelation + AmIndexCallbacks + AmDdl + 'static
 {
-    type ScanSession: AmScanSession;
-    type IndexFetchSession: AmIndexFetchSession;
+    type ScanSession: AmScanSession + 'static;
+    type IndexFetchSession: AmIndexFetchSession + 'static;
     type ModifyQueryState: AmModifyQueryState;
     type ModifyState: AmModifyState<QueryState = Self::ModifyQueryState> + 'static;
     type CopySession: AmCopySession + 'static;

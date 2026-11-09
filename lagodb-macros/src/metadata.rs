@@ -1,12 +1,13 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{
-    Lit, LitStr, Meta, Token,
+    Ident, Lit, LitStr, Meta, Token,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
 };
 
-/// Parsed metadata shared by the FDW and table-access-method macros.
+/// Parsed metadata shared by the FDW, table-access-method and
+/// index-access-method macros.
 pub(crate) struct ProviderMetadata {
     version: Option<LitStr>,
     author: Option<LitStr>,
@@ -14,13 +15,28 @@ pub(crate) struct ProviderMetadata {
 }
 
 impl ProviderMetadata {
-    /// Converts the parsed values into generated `Option<String>` expressions.
-    pub(crate) fn into_tokens(self) -> (TokenStream, TokenStream, TokenStream) {
-        (
-            Self::value_tokens(self.version),
-            Self::value_tokens(self.author),
-            Self::value_tokens(self.website),
-        )
+    /// Generate the SQL function `fn_ident` that returns the provider's
+    /// metadata row. `name` is an `Option<String>` expression; the caller's
+    /// module must import `pgrx::prelude::*`.
+    pub(crate) fn meta_function(
+        self,
+        fn_ident: &Ident,
+        name: TokenStream,
+    ) -> TokenStream {
+        let version = Self::value_tokens(self.version);
+        let author = Self::value_tokens(self.author);
+        let website = Self::value_tokens(self.website);
+        quote! {
+            #[pg_extern(create_or_replace)]
+            fn #fn_ident() -> TableIterator<'static, (
+                name!(name, Option<String>),
+                name!(version, Option<String>),
+                name!(author, Option<String>),
+                name!(website, Option<String>)
+            )> {
+                TableIterator::once((#name, #version, #author, #website))
+            }
+        }
     }
 
     fn value_tokens(value: Option<LitStr>) -> TokenStream {

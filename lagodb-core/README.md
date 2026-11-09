@@ -16,10 +16,10 @@ retains global hook ownership, admission, provider registration and policy.
 
 ## Core Architecture and Seams
 
-`lagodb-core` connects PostgreSQL's database engine with pluggable lakehouse storage providers across four distinct seams:
+`lagodb-core` connects PostgreSQL's database engine with pluggable lakehouse storage providers across five distinct seams:
 
 ```text
-               PostgreSQL Planner / Executor / TableAM / FDW
+               PostgreSQL Planner / Executor / TableAM / IndexAM / FDW
                                      │
                                      ▼
 +─────────────────────────────────────────────────────────────────────────────+
@@ -34,6 +34,11 @@ retains global hook ownership, admission, provider registration and policy.
 │  - Scan, modify, schema import  - ResourceOwner cleanup on ERROR / abort    │
 │  - Foreign option parsing       - Transaction commit & rollback callbacks   │
 │  - Server / mapping routing     - Custom WAL resource-manager integration   │
+│                                                                             │
+│  [ IndexAM Seam ]                                                           │
+│  - Build, insert, vacuum, scan                                              │
+│  - Typed reloptions & capability registration                               │
+│  - Index-only output & parallel scan regions                                │
 +────────────────────────────────────┬────────────────────────────────────────+
                                      │ (Safe Rust Traits)
                                      ▼
@@ -45,7 +50,7 @@ retains global hook ownership, admission, provider registration and policy.
 +─────────────────────────────────────────────────────────────────────────────+
 ```
 
-### The Four Integration Seams
+### The Five Integration Seams
 
 1. **TableAM Seam**:
    - Bridges PostgreSQL `TableAmRoutine` callbacks to Rust.
@@ -58,7 +63,11 @@ retains global hook ownership, admission, provider registration and policy.
 3. **FDW Seam**:
    - Encapsulates PostgreSQL Foreign Data Wrapper callbacks for external table scans, DML mutations, and schema import (`IMPORT FOREIGN SCHEMA`).
    - Normalizes storage provider options, region endpoints, and credential resolution.
-4. **Lifecycle & Durability Seam**:
+4. **IndexAM Seam**:
+   - Bridges every PostgreSQL `IndexAmRoutine` callback to Rust; optional callbacks are registered per capability.
+   - Owns insert and scan sessions through memory-context lifecycles, so ERROR cleanup drops them like a normal end.
+   - Declares reloptions once and reads them through typed keys.
+5. **Lifecycle & Durability Seam**:
    - **MemoryContext Integration**: Releases Rust heap allocations tied to PostgreSQL-owned execution contexts even when normal end callbacks are omitted.
    - **`ResourceOwner` Integration**: Performs bounded, idempotent logical abort for owner-scoped handles and sessions after PostgreSQL error cleanup takes over; it does not own physical memory release.
    - **Transaction Callbacks**: Connects post-commit publication and abort rollbacks to PostgreSQL transaction boundaries.

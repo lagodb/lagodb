@@ -4,9 +4,9 @@ use std::{cell::RefCell, str};
 
 use pgrx::pg_sys;
 
-use super::codec_context::CodecContext;
 use super::output_cstring::PgOutputCString;
 use super::pg_type::PgType;
+use crate::backend::OwnedBackendContext;
 
 /// Backend-local I/O state. Function caches live in this codec's context,
 /// while returned datums belong to the caller's current row context.
@@ -16,14 +16,14 @@ pub struct PgTextIo {
     buffer: RefCell<Vec<u8>>,
     parameter: pg_sys::Oid,
     typmod: i32,
-    _context: CodecContext,
+    _context: OwnedBackendContext,
 }
 
 impl PgTextIo {
     /// Cache I/O functions for a provider-approved text representation.
     /// Storage admission and DDL restrictions belong to the provider.
     pub fn bind(pg_type: PgType) -> Self {
-        let context = CodecContext::new(c"lagodb storage type I/O");
+        let context = OwnedBackendContext::new(c"lagodb storage type I/O");
         let (mut input_oid, mut output_oid, mut parameter) =
             (pg_sys::InvalidOid, pg_sys::InvalidOid, pg_sys::InvalidOid);
         let mut varlena = false;

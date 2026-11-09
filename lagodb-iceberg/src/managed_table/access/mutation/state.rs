@@ -235,8 +235,7 @@ impl IcebergModifyState {
             transaction_isolation,
             scan_context.as_ref(),
         )?;
-        let writer_properties =
-            IcebergTableOptions::for_relation(rel)?.writer_properties();
+        let writer_properties = IcebergTableOptions::writer_properties(rel)?;
 
         let data_sink = if actions.writes_rows() {
             // The shared relation layout drives the read and write column

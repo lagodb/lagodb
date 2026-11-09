@@ -12,7 +12,6 @@
 mod common;
 mod ddl;
 mod index;
-mod lifecycle;
 mod mutation;
 mod relation;
 mod scan;
@@ -23,8 +22,7 @@ pub(crate) use mutation::{RelationTriggerPolicy, acquire_modify_query_state};
 pub(crate) use scan::TableAmScanDesc;
 pub use scan::virtual_slot_callbacks_with_tid;
 
-use super::TableAccessMethod;
-use crate::TableAmRoutine;
+use super::{TableAccessMethod, TableAmRoutine};
 
 /// Allocate `A`'s routine in `TopMemoryContext` with every callback installed.
 pub(super) fn build_routine<A>() -> TableAmRoutine

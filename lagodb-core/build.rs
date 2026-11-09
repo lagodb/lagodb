@@ -72,6 +72,8 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/copy/lagodb_copy_write.h");
     println!("cargo:rerun-if-changed=csrc/tuple/lagodb_array.c");
     println!("cargo:rerun-if-changed=csrc/tuple/lagodb_array.h");
+    println!("cargo:rerun-if-changed=csrc/index/lagodb_index_am.c");
+    println!("cargo:rerun-if-changed=csrc/index/lagodb_index_am.h");
 
     let Some(pg_feature) = active_pg_config() else {
         return;
@@ -146,11 +148,13 @@ fn main() {
         .file("csrc/vacuum/lagodb_vacuum.c")
         .file("csrc/vacuum/lagodb_vacuum_probe.c")
         .file("csrc/tuple/lagodb_array.c")
+        .file("csrc/index/lagodb_index_am.c")
         .include(PathBuf::from("csrc/modify"))
         .include(PathBuf::from("csrc/analyze"))
         .include(PathBuf::from("csrc/vacuum"))
         .include(PathBuf::from("csrc/copy"))
         .include(PathBuf::from("csrc/compat"))
+        .include(PathBuf::from("csrc/index"))
         .flag_if_supported("-Wno-unused-function")
         .flag_if_supported("-Wno-unused-parameter");
     if pg_feature.read_stream {

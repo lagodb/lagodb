@@ -3,7 +3,7 @@ name = "lagodb-core"
 version = { workspace = true }
 authors = ["Robert Mu. https://github.com/robertmu"]
 license = { workspace = true }
-description = "Postgres Table Access Method framework in Rust."
+description = "Postgres table access method, index access method and FDW framework in Rust."
 homepage = { workspace = true }
 repository = { workspace = true }
 categories = ["database"]

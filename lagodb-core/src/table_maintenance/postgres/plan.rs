@@ -12,6 +12,7 @@ use pgrx::pg_sys;
 
 use super::MaintenanceCommand;
 use super::bridge::MaintenanceBridge;
+use crate::backend::MemoryContextHandle;
 
 /// Relations split by executor, in PostgreSQL's expansion order.
 pub struct MaintenancePlan {
@@ -19,7 +20,7 @@ pub struct MaintenancePlan {
     pub(super) stmt: *mut pg_sys::VacuumStmt,
     pub(super) native: Box<[*mut pg_sys::VacuumRelation]>,
     pub(super) provider: Box<[*mut pg_sys::VacuumRelation]>,
-    context: pg_sys::MemoryContext,
+    context: MemoryContextHandle,
 }
 
 impl MaintenancePlan {
@@ -40,12 +41,9 @@ impl MaintenancePlan {
         // SAFETY: the live Portal survives this command's transaction changes;
         // the static name also avoids allocating a context name in the Portal.
         let context = unsafe {
-            pg_sys::AllocSetContextCreateExtended(
+            MemoryContextHandle::create(
                 pg_sys::PortalContext,
-                c"lagodb maintenance command".as_ptr(),
-                pg_sys::ALLOCSET_DEFAULT_MINSIZE as usize,
-                pg_sys::ALLOCSET_DEFAULT_INITSIZE as usize,
-                pg_sys::ALLOCSET_DEFAULT_MAXSIZE as usize,
+                c"lagodb maintenance command",
             )
         };
         // Establish ownership before expansion so guarded ERROR also drops it.
@@ -62,7 +60,7 @@ impl MaintenancePlan {
             let expanded = MaintenanceBridge::expand_relations(
                 stmt,
                 &mut plan.command.params,
-                context,
+                context.as_ptr(),
             );
             let count = pg_sys::list_length(expanded);
             let mut native = Vec::with_capacity(count as usize);
@@ -93,7 +91,11 @@ impl MaintenancePlan {
         // SAFETY: the list and the statement are owned by this plan's context.
         unsafe {
             let relations = self.relation_list(&self.native);
-            MaintenanceBridge::vacuum_stmt(self.stmt, relations, self.context)
+            MaintenanceBridge::vacuum_stmt(
+                self.stmt,
+                relations,
+                self.context.as_ptr(),
+            )
         }
     }
 
@@ -108,7 +110,11 @@ impl MaintenancePlan {
         // SAFETY: the list and the statement are owned by this plan's context.
         unsafe {
             let relations = self.relation_list(relations);
-            MaintenanceBridge::analyze_stmt(self.stmt, relations, self.context)
+            MaintenanceBridge::analyze_stmt(
+                self.stmt,
+                relations,
+                self.context.as_ptr(),
+            )
         }
     }
 
@@ -122,7 +128,7 @@ impl MaintenancePlan {
         // SAFETY: this plan's context is live; Drop handles an allocation
         // ERROR raised while it is current.
         unsafe {
-            let previous = pg_sys::MemoryContextSwitchTo(self.context);
+            let previous = pg_sys::MemoryContextSwitchTo(self.context.as_ptr());
             let mut list = ptr::null_mut();
             for relation in relations {
                 list = pg_sys::lappend(list, relation.cast());
@@ -140,10 +146,10 @@ impl Drop for MaintenancePlan {
         // If allocation failed while its context was current, switch to the
         // Portal rather than an entry transaction context that may be gone.
         unsafe {
-            if pg_sys::CurrentMemoryContext == self.context {
+            if pg_sys::CurrentMemoryContext == self.context.as_ptr() {
                 pg_sys::MemoryContextSwitchTo(pg_sys::PortalContext);
             }
-            pg_sys::MemoryContextDelete(self.context);
+            self.context.delete();
         }
     }
 }

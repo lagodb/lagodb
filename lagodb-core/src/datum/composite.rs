@@ -2,9 +2,9 @@
 
 use pgrx::{PgTupleDesc, pg_sys};
 
-use super::codec_context::CodecContext;
 use super::pg_type::PgType;
 use super::varlena::DetoastedVarlena;
+use crate::backend::OwnedBackendContext;
 
 /// Backend-local descriptor and reusable attribute buffers. Dropped attributes
 /// remain NULL; consumers bind live attributes by their physical index.
@@ -12,19 +12,25 @@ pub struct CompositeDatumCodec {
     desc: PgTupleDesc<'static>,
     values: Vec<pg_sys::Datum>,
     nulls: Vec<bool>,
-    _context: CodecContext,
+    /// Holds `desc`. Declared after it, so it is deleted after `desc` drops.
+    _context: OwnedBackendContext,
 }
 
 impl CompositeDatumCodec {
     pub fn bind(pg_type: PgType) -> Self {
         let base = pg_type.base();
-        let context = CodecContext::new(c"lagodb composite codec");
-        let desc = context.with(|| unsafe {
-            PgTupleDesc::from_pg_is_copy(pg_sys::lookup_rowtype_tupdesc_copy(
-                base.oid,
-                base.typmod,
-            ))
-        });
+        let context = OwnedBackendContext::new(c"lagodb composite codec");
+        // SAFETY: the descriptor copy lives in `context`, and both end up in
+        // `Self`: `desc` is declared before `_context`, so it is dropped (and
+        // freed) before the context is deleted, and is never used after.
+        let desc = unsafe {
+            context.with(|| {
+                PgTupleDesc::from_pg_is_copy(pg_sys::lookup_rowtype_tupdesc_copy(
+                    base.oid,
+                    base.typmod,
+                ))
+            })
+        };
         let width = desc.len();
         Self {
             desc,

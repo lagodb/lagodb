@@ -6,6 +6,7 @@
 //! coverage. It must not be treated as a Delta storage implementation.
 
 use lagodb_core::handles::RelationHandle;
+use lagodb_core::table_am::TableAmRoutine;
 use lagodb_core::table_maintenance::{
     TableMaintenanceError, TableMaintenanceReport, TableMaintenanceRequest,
     TableMaintenanceStats,
@@ -55,7 +56,7 @@ impl LagodbTableProvider for DeltaTableProvider {
            RETURNS table_am_handler
            LANGUAGE c STRICT
            AS 'MODULE_PATHNAME', 'delta_table_am_handler_wrapper';")]
-fn delta_table_am_handler() -> lagodb_core::TableAmRoutine {
+fn delta_table_am_handler() -> TableAmRoutine {
     let heap_handler_oid =
         unsafe { pg_sys::fmgr_internal_function(c"heap_tableam_handler".as_ptr()) };
     assert_ne!(
@@ -68,7 +69,7 @@ fn delta_table_am_handler() -> lagodb_core::TableAmRoutine {
         !routine.is_null(),
         "PostgreSQL returned a null heap table-AM routine"
     );
-    unsafe { lagodb_core::TableAmRoutine::from_pg(routine.cast_mut()) }
+    unsafe { TableAmRoutine::from_pg(routine.cast_mut()) }
 }
 
 pgrx::extension_sql!(

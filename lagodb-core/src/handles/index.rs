@@ -47,6 +47,22 @@ impl<'a> IndexInfoHandle<'a> {
     pub fn num_index_key_attributes(&self) -> usize {
         unsafe { self.inner.as_ref().ii_NumIndexKeyAttrs as usize }
     }
+
+    /// Number of parallel workers PostgreSQL planned for this index build.
+    ///
+    /// PostgreSQL 16 plans workers only for btree, and PostgreSQL 17+ only
+    /// for access methods declaring `amcanbuildparallel`; otherwise this is
+    /// zero. The access method owns the parallel build itself.
+    #[inline]
+    pub fn parallel_workers(&self) -> usize {
+        unsafe { self.inner.as_ref().ii_ParallelWorkers as usize }
+    }
+
+    /// Whether the index enforces uniqueness.
+    #[inline]
+    pub fn is_unique(&self) -> bool {
+        unsafe { self.inner.as_ref().ii_Unique }
+    }
 }
 
 /// Callback-scoped borrowed handle for PostgreSQL `ValidateIndexState`.

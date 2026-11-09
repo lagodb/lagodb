@@ -134,13 +134,10 @@ where
 {
     unsafe {
         let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
-        if let Some(end_res) =
-            TableAmScanDesc::<A::ScanSession>::finish_with(custom_scan, |state| {
-                state.am_instance.scan_end()
-            })
-        {
-            end_res.report_unwrap();
-        }
+        TableAmScanDesc::<A::ScanSession>::finish_with(custom_scan, |state| {
+            state.am_instance.scan_end()
+        })
+        .report_unwrap();
     }
 }
 
@@ -158,40 +155,39 @@ pub extern "C-unwind" fn scan_rescan<A>(
     unsafe {
         let custom_scan = TableAmScanDesc::<A::ScanSession>::from_base_ptr(scan);
         let nkeys = (*custom_scan).base().rs_nkeys;
-        if let Some(state) = (*custom_scan).session_mut_if_initialized() {
-            // PostgreSQL heap-AM rescan semantics: a non-null `key` argument
-            // *replaces* the previously stored keys (memcpy in
-            // `initscan`); a null `key` keeps the prior keys. We apply the
-            // same rule on the dispatcher-owned buffer before handing it to
-            // the AM, so AM implementations only ever see the *effective*
-            // key set for the upcoming scan.
-            if !key.is_null() {
-                state.scan_keys.replace_with(key, nkeys);
-            }
-
-            state
-                .am_instance
-                .scan_rescan(
-                    &state.scan_keys,
-                    set_params,
-                    allow_strat,
-                    allow_sync,
-                    allow_pagemode,
-                )
-                .report_unwrap();
-
-            // Re-publish the AM-owned buffer to the descriptor. The heap-AM
-            // contract fixes `rs_nkeys` at `scan_begin` time and never
-            // changes it, so the length here is unchanged; we only need to
-            // refresh `rs_key` because `Vec` may reallocate inside
-            // `replace_with`. `rs_key_ptr` returns `NULL` when the buffer
-            // is empty, matching PG heap AM convention.
-            let new_nkeys = state.scan_keys.len() as core::ffi::c_int;
-            let new_ptr = state.scan_keys.rs_key_ptr();
-            let base = (*custom_scan).base_mut();
-            base.rs_nkeys = new_nkeys;
-            base.rs_key = new_ptr;
+        let state = (*custom_scan).session_mut();
+        // PostgreSQL heap-AM rescan semantics: a non-null `key` argument
+        // *replaces* the previously stored keys (memcpy in
+        // `initscan`); a null `key` keeps the prior keys. We apply the
+        // same rule on the dispatcher-owned buffer before handing it to
+        // the AM, so AM implementations only ever see the *effective*
+        // key set for the upcoming scan.
+        if !key.is_null() {
+            state.scan_keys.replace_with(key, nkeys);
         }
+
+        state
+            .am_instance
+            .scan_rescan(
+                &state.scan_keys,
+                set_params,
+                allow_strat,
+                allow_sync,
+                allow_pagemode,
+            )
+            .report_unwrap();
+
+        // Re-publish the AM-owned buffer to the descriptor. The heap-AM
+        // contract fixes `rs_nkeys` at `scan_begin` time and never
+        // changes it, so the length here is unchanged; we only need to
+        // refresh `rs_key` because `Vec` may reallocate inside
+        // `replace_with`. `rs_key_ptr` returns `NULL` when the buffer
+        // is empty, matching PG heap AM convention.
+        let new_nkeys = state.scan_keys.len() as core::ffi::c_int;
+        let new_ptr = state.scan_keys.rs_key_ptr();
+        let base = (*custom_scan).base_mut();
+        base.rs_nkeys = new_nkeys;
+        base.rs_key = new_ptr;
     }
 }
 
@@ -216,7 +212,7 @@ where
 
         // Switch to the just-reset `tmp_ctx` so the session's varlena palloc
         // lands there and is freed on the next fetch's reset.
-        let found = PgMemoryContexts::For(tmp_ctx)
+        let found = PgMemoryContexts::For(tmp_ctx.as_ptr())
             .switch_to(|_| {
                 let mut cols = state.slot_writer(slot);
                 state.am_instance.scan_getnextslot(direction, &mut cols)

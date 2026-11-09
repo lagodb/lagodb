@@ -152,9 +152,7 @@ impl OwnedScanKeys {
     /// Iterate over the keys as safe `ScanKeyEntry` views.
     #[inline]
     pub fn iter(&self) -> ScanKeyIter<'_> {
-        ScanKeyIter {
-            inner: self.keys.iter(),
-        }
+        ScanKeyIter::new(&self.keys)
     }
 }
 
@@ -167,9 +165,17 @@ impl<'a> IntoIterator for &'a OwnedScanKeys {
     }
 }
 
-/// Iterator over [`OwnedScanKeys`].
+/// Iterator over a set of scan keys, such as [`OwnedScanKeys`].
 pub struct ScanKeyIter<'a> {
     inner: std::slice::Iter<'a, pg_sys::ScanKeyData>,
+}
+
+impl<'a> ScanKeyIter<'a> {
+    /// Iterate over keys borrowed from a PostgreSQL-owned key array.
+    #[inline]
+    pub(crate) fn new(keys: &'a [pg_sys::ScanKeyData]) -> Self {
+        Self { inner: keys.iter() }
+    }
 }
 
 impl<'a> Iterator for ScanKeyIter<'a> {

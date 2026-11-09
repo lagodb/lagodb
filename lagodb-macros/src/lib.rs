@@ -66,7 +66,6 @@ use metadata::ProviderMetadata;
 #[proc_macro_attribute]
 pub fn pg_fdw(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metadata = parse_macro_input!(attr as ProviderMetadata);
-    let (version, author, website) = metadata.into_tokens();
 
     let item: ItemStruct = parse_macro_input!(item as ItemStruct);
     let item_tokens = item.to_token_stream();
@@ -77,6 +76,17 @@ pub fn pg_fdw(attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_ident = format_ident!("{}_fdw_handler", ident_snake);
     let fn_validator_ident = format_ident!("{}_fdw_validator", ident_snake);
     let fn_meta_ident = format_ident!("{}_fdw_meta", ident_snake);
+    let meta_function = metadata.meta_function(
+        &fn_meta_ident,
+        quote! {
+            Some(
+                <#ident as ForeignDataWrapper>::NAME
+                    .to_str()
+                    .unwrap_or_report()
+                    .to_owned(),
+            )
+        },
+    );
 
     let sql = format!(
         "CREATE OR REPLACE FUNCTION {0}() RETURNS fdw_handler LANGUAGE c STRICT AS 'MODULE_PATHNAME', '{0}_wrapper';",
@@ -118,25 +128,7 @@ pub fn pg_fdw(attr: TokenStream, item: TokenStream) -> TokenStream {
                 .report_unwrap();
             }
 
-            #[pg_extern(create_or_replace)]
-            fn #fn_meta_ident() -> TableIterator<'static, (
-                name!(name, Option<String>),
-                name!(version, Option<String>),
-                name!(author, Option<String>),
-                name!(website, Option<String>)
-            )> {
-                TableIterator::once((
-                    Some(
-                        <#ident as ForeignDataWrapper>::NAME
-                            .to_str()
-                            .unwrap_or_report()
-                            .to_owned(),
-                    ),
-                    #version,
-                    #author,
-                    #website,
-                ))
-            }
+            #meta_function
         }
     }
     .into()
@@ -203,7 +195,6 @@ pub fn pg_fdw(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn pg_table_am(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metadata = parse_macro_input!(attr as ProviderMetadata);
-    let (version, author, website) = metadata.into_tokens();
 
     let item: ItemStruct = parse_macro_input!(item as ItemStruct);
     let item_tokens = item.to_token_stream();
@@ -221,11 +212,15 @@ pub fn pg_table_am(attr: TokenStream, item: TokenStream) -> TokenStream {
     let sql_def_lit = LitStr::new(&sql_def, Span::call_site());
 
     let fn_meta_ident = format_ident!("{}_am_meta", ident_snake);
+    let meta_function = metadata.meta_function(
+        &fn_meta_ident,
+        quote! { ::core::option::Option::Some(::std::string::String::from(#ident_str)) },
+    );
     let quoted = quote! {
         #item_tokens
 
         impl #ident {
-            pub fn cached_am_routine() -> ::lagodb_core::TableAmRoutine {
+            pub fn cached_am_routine() -> ::lagodb_core::table_am::TableAmRoutine {
                 #module_ident::cached_am_routine()
             }
         }
@@ -242,7 +237,7 @@ pub fn pg_table_am(attr: TokenStream, item: TokenStream) -> TokenStream {
 
             static AM_ROUTINE: OnceLock<AmRoutinePtr> = OnceLock::new();
 
-            pub(super) fn cached_am_routine() -> ::lagodb_core::TableAmRoutine {
+            pub(super) fn cached_am_routine() -> ::lagodb_core::table_am::TableAmRoutine {
                 let ptr = AM_ROUTINE
                     .get_or_init(|| {
                         let routine = #ident::am_routine();
@@ -250,33 +245,103 @@ pub fn pg_table_am(attr: TokenStream, item: TokenStream) -> TokenStream {
                     })
                     .0;
 
-                unsafe { ::lagodb_core::TableAmRoutine::from_pg(ptr) }
+                unsafe { ::lagodb_core::table_am::TableAmRoutine::from_pg(ptr) }
             }
 
             #[pg_extern(create_or_replace, sql = #sql_def_lit)]
-            fn #fn_ident() -> ::lagodb_core::TableAmRoutine {
+            fn #fn_ident() -> ::lagodb_core::table_am::TableAmRoutine {
                 #ident::cached_am_routine()
             }
 
-            #[pg_extern(create_or_replace)]
-            fn #fn_meta_ident() -> TableIterator<'static, (
-                name!(name, Option<String>),
-                name!(version, Option<String>),
-                name!(author, Option<String>),
-                name!(website, Option<String>)
-            )> {
-                TableIterator::once((
-                    ::core::option::Option::Some(::std::string::String::from(#ident_str)),
-                    #version,
-                    #author,
-                    #website,
-                ))
-            }
+            #meta_function
         }
 
     };
 
     quoted.into()
+}
+
+/// Create the handler and metadata functions for a PostgreSQL index access
+/// method.
+///
+/// 1. `<snake_case_am_name>_handler(internal)` returns a freshly built
+///    `IndexAmRoutine` on every call, as PostgreSQL requires.
+/// 2. `<snake_case_am_name>_index_am_meta()` returns the metadata row.
+///
+/// The extension must also call
+/// [`register_index_am`](lagodb_core::index_am::register_index_am) from its
+/// `_PG_init`.
+///
+/// ```rust,ignore
+/// use lagodb_core::index_am::*;
+/// use lagodb_core::pg_index_am;
+///
+/// #[pg_index_am(version = "0.1.0")]
+/// pub struct MyIndexAm;
+///
+/// impl IndexAccessMethod for MyIndexAm {
+///     const PROPERTIES: IndexAmProperties = IndexAmProperties {
+///         strategies: 1,
+///         support: 1,
+///         ..IndexAmProperties::DEFAULT
+///     };
+///     type InsertSession = MyInsert;
+///     type ScanSession = MyScan;
+///
+///     fn register(routine: &mut IndexAmRoutineBuilder<Self>) {
+///         routine.bitmap_scan();
+///     }
+/// }
+///
+/// #[pg_guard]
+/// pub extern "C-unwind" fn _PG_init() {
+///     register_index_am::<MyIndexAm>();
+/// }
+/// ```
+///
+/// ```sql
+/// CREATE ACCESS METHOD my_index_am TYPE INDEX HANDLER my_index_am_handler;
+/// ```
+#[proc_macro_attribute]
+pub fn pg_index_am(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let metadata = parse_macro_input!(attr as ProviderMetadata);
+
+    let item: ItemStruct = parse_macro_input!(item as ItemStruct);
+    let item_tokens = item.to_token_stream();
+    let ident = item.ident;
+    let ident_str = ident.to_string();
+    let ident_snake = to_snake_case(ident_str.as_str());
+
+    let module_ident = format_ident!("__{}_index_am", ident_snake);
+    let fn_ident = format_ident!("{}_handler", ident_snake);
+    let fn_meta_ident = format_ident!("{}_index_am_meta", ident_snake);
+    let meta_function = metadata.meta_function(
+        &fn_meta_ident,
+        quote! { ::core::option::Option::Some(::std::string::String::from(#ident_str)) },
+    );
+
+    let sql = format!(
+        "CREATE OR REPLACE FUNCTION {0}(internal) RETURNS index_am_handler LANGUAGE c STRICT AS 'MODULE_PATHNAME', '{0}_wrapper';",
+        fn_ident
+    );
+    let sql_lit = LitStr::new(&sql, Span::call_site());
+
+    quote! {
+        #item_tokens
+
+        mod #module_ident {
+            use super::#ident;
+            use ::pgrx::prelude::*;
+
+            #[pg_extern(create_or_replace, sql = #sql_lit)]
+            fn #fn_ident() -> ::lagodb_core::index_am::IndexAmRoutine {
+                ::lagodb_core::index_am::index_am_routine::<#ident>()
+            }
+
+            #meta_function
+        }
+    }
+    .into()
 }
 
 fn to_snake_case(s: &str) -> String {

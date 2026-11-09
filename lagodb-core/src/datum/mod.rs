@@ -7,7 +7,6 @@
 mod array;
 mod cell;
 mod codec;
-mod codec_context;
 mod composite;
 mod decimal128;
 mod encoding;

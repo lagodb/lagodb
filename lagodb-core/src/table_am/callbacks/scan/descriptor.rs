@@ -2,6 +2,8 @@
 
 use pgrx::pg_sys;
 
+use crate::am_lifecycle::SessionContext;
+use crate::backend::MemoryContextHandle;
 use crate::diag::PgReportError;
 use crate::handles::{OwnedScanKeys, RelationHandle};
 use crate::table_am::AmScanSession;
@@ -12,7 +14,7 @@ pub(crate) struct TableScanState<T> {
     pub(super) am_instance: T,
     pub(super) scan_keys: OwnedScanKeys,
     pub(super) row: Row,
-    pub(super) tmp_ctx: pg_sys::MemoryContext,
+    pub(super) tmp_ctx: MemoryContextHandle,
     /// Bound only if this scan uses one of the Row-returning callbacks. The
     /// normal `scan_getnextslot` path may be slot-first and provider-physical.
     row_codec: Option<RowDatumCodec>,
@@ -33,7 +35,7 @@ impl<T> TableScanState<T> {
     fn new(
         am_instance: T,
         scan_keys: OwnedScanKeys,
-        tmp_ctx: pg_sys::MemoryContext,
+        tmp_ctx: MemoryContextHandle,
         relation: &RelationHandle<'_>,
     ) -> Self {
         let dropped_attributes = relation
@@ -53,8 +55,17 @@ impl<T> TableScanState<T> {
         }
     }
 
+    /// Free the previous fetch's datums.
+    ///
+    /// # Safety
+    ///
+    /// Call at callback entry, before anything switches into `tmp_ctx`, and
+    /// only once the previous fetch's slot contents are no longer used.
     pub(super) unsafe fn reset_tmp_context(&mut self) {
-        unsafe { pg_sys::MemoryContextReset(self.tmp_ctx) };
+        // SAFETY: the lifecycle context is live while PostgreSQL holds the
+        // scan. PostgreSQL calls in with its own context current, and this
+        // framework enters `tmp_ctx` only through scoped switches.
+        unsafe { self.tmp_ctx.reset() };
     }
 
     /// Open a slot-first output writer whose dropped attributes read as NULL.
@@ -70,7 +81,8 @@ impl<T> TableScanState<T> {
         &self,
         slot: *mut pg_sys::TupleTableSlot,
     ) -> SlotDatumWriter<'s> {
-        let mut columns = unsafe { SlotDatumWriter::new(slot, self.tmp_ctx) };
+        let mut columns =
+            unsafe { SlotDatumWriter::new(slot, self.tmp_ctx.as_ptr()) };
         for &index in &self.dropped_attributes {
             // SAFETY: the index comes from the relation descriptor this slot
             // was created with, so it is below the slot width.
@@ -94,7 +106,8 @@ impl<T> TableScanState<T> {
                     .map_err(PgReportError::from_domain_error)?,
             );
         }
-        let mut columns = unsafe { SlotDatumWriter::new(slot, self.tmp_ctx) };
+        let mut columns =
+            unsafe { SlotDatumWriter::new(slot, self.tmp_ctx.as_ptr()) };
         unsafe {
             columns.fill_from_row(
                 &mut self.row,
@@ -106,7 +119,7 @@ impl<T> TableScanState<T> {
     }
 }
 
-impl<T: AmScanSession> TableAmScanDesc<T> {
+impl<T: AmScanSession + 'static> TableAmScanDesc<T> {
     /// Install a complete session under the descriptor's PG owner.
     ///
     /// # Safety
@@ -122,12 +135,15 @@ impl<T: AmScanSession> TableAmScanDesc<T> {
         instance: T,
     ) -> *mut Self {
         // SAFETY: the caller supplies the PG owner; the registered session
-        // destructor also runs when ERROR skips table_endscan.
+        // destructor also runs when ERROR skips table_endscan. The session
+        // is installed before the descriptor exists.
         unsafe {
-            let desc = Self::alloc(parent, c"lagodb TableScan lifecycle");
-            let tmp = (*desc).create_child_context(c"lagodb TableScan tmp");
+            let context =
+                MemoryContextHandle::create(parent, c"lagodb TableScan lifecycle");
+            let tmp = context.create_child(c"lagodb TableScan tmp");
             let relation = RelationHandle::from_raw(rel);
-            (*desc).init_session(TableScanState::new(instance, keys, tmp, &relation));
+            let state = TableScanState::new(instance, keys, tmp, &relation);
+            let desc = Self::alloc(SessionContext::install(context, state));
             let keys = &mut (*desc).session_mut().scan_keys;
             let nkeys = keys.len() as i32;
             let key = keys.rs_key_ptr();

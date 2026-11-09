@@ -3,7 +3,7 @@ name = "lagodb-macros"
 version = { workspace = true }
 authors = ["Robert Mu. https://github.com/robertmu"]
 license = { workspace = true }
-description = "Postgres Table Access Method framework macros for LagoDB core"
+description = "Table access method, index access method and FDW handler macros for LagoDB core"
 homepage = { workspace = true }
 repository = { workspace = true }
 categories = ["database"]

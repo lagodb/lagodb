@@ -1,7 +1,9 @@
-//! lagodb-core: Rust framework for PostgreSQL table access methods and FDWs
+//! lagodb-core: Rust framework for PostgreSQL table access methods, index
+//! access methods and FDWs
 //!
 //! This library provides safe lifecycle adapters for implementing custom table
-//! access methods and foreign data wrappers for PostgreSQL using pgrx.
+//! access methods, index access methods and foreign data wrappers for
+//! PostgreSQL using pgrx.
 //!
 //! # Quick Start
 //!
@@ -56,11 +58,14 @@ pub mod runtime_api;
 pub mod transaction;
 pub mod wal;
 
-// Provider seams: table AM, FDW, CustomScan, COPY, and provider registration.
+// Provider seams: table AM, index AM, FDW, CustomScan, COPY, and provider
+// registration.
+mod am_lifecycle;
 pub mod batch;
 pub mod copy;
 pub mod customscan;
 pub mod fdw;
+pub mod index_am;
 pub mod parallel_scan;
 pub mod query_contract;
 mod scan_explain;
@@ -90,15 +95,9 @@ pub mod prelude {
         PgDatumRef, Row, RowDatumCodec, RowSlotWriter, SlotDatumIndex, SlotDatumView,
         SlotDatumWriter, TupleSlotBatch, TupleSlotRow,
     };
-    pub use crate::{pg_fdw, pg_table_am};
+    pub use crate::{pg_fdw, pg_index_am, pg_table_am};
 }
 
-use pgrx::AllocatedByPostgres;
-use pgrx::prelude::*;
-
-/// PgBox'ed `TableAmRoutine`, returned by
-/// [`am_routine`](table_am::TableAccessMethod::am_routine).
-pub type TableAmRoutine<A = AllocatedByPostgres> = PgBox<pg_sys::TableAmRoutine, A>;
-
-/// Procedural macro for generating table access method boilerplate
-pub use lagodb_macros::{pg_fdw, pg_table_am};
+/// Procedural macros generating the SQL-callable handler and metadata
+/// functions of a provider.
+pub use lagodb_macros::{pg_fdw, pg_index_am, pg_table_am};
