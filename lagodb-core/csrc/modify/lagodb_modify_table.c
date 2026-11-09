@@ -139,6 +139,7 @@ typedef struct ModifyTableContext
 	TM_FailureData tmfd;
 
 #if LAGODB_PG18_GE
+
 	/*
 	 * The tuple deleted when doing a cross-partition UPDATE with a RETURNING
 	 * clause that refers to OLD columns (converted to the root's tuple
@@ -559,9 +560,9 @@ ExecInitStoredGenerated(ResultRelInfo *resultRelInfo,
 	/* Nothing to do if no generated columns */
 	if (!(tupdesc->constr && (tupdesc->constr->has_generated_stored
 #if LAGODB_PG18_GE
-								 || tupdesc->constr->has_generated_virtual
+							  || tupdesc->constr->has_generated_virtual
 #endif
-								 )))
+							  )))
 		return;
 
 	/*
@@ -1460,6 +1461,7 @@ ExecInsert(ModifyTableContext *context,
 		TupleTableSlot *oldSlot = NULL;
 
 #if LAGODB_PG18_GE
+
 		/*
 		 * If this is part of a cross-partition UPDATE, and the RETURNING list
 		 * refers to any OLD columns, ExecDelete() will have saved the tuple
@@ -1476,13 +1478,13 @@ ExecInsert(ModifyTableContext *context,
 			if (tupconv_map != NULL)
 			{
 				/*
-				 * Convert the OLD tuple to the new partition's format/slot, if
-				 * needed.  Note that ExecDelete() already converted it to the
-				 * root's partition's format/slot.
+				 * Convert the OLD tuple to the new partition's format/slot,
+				 * if needed.  Note that ExecDelete() already converted it to
+				 * the root's partition's format/slot.
 				 */
 				oldSlot = execute_attr_map_slot(tupconv_map->attrMap, oldSlot,
-											ExecGetReturningSlot(estate,
-															 resultRelInfo));
+												ExecGetReturningSlot(estate,
+																	 resultRelInfo));
 				oldSlot->tts_tableOid = context->cpDeletedSlot->tts_tableOid;
 				ItemPointerCopy(&context->cpDeletedSlot->tts_tid,
 								&oldSlot->tts_tid);
@@ -1494,6 +1496,7 @@ ExecInsert(ModifyTableContext *context,
 									  oldSlot, slot, planSlot);
 
 #if LAGODB_PG18_GE
+
 		/*
 		 * For a cross-partition UPDATE, release the old tuple, first making
 		 * sure that the result slot has a local copy of any pass-by-reference
@@ -2047,6 +2050,7 @@ ldelete:
 	ExecDeleteEpilogue(context, resultRelInfo, tupleid, oldtuple, changingPart);
 
 #if LAGODB_PG18_GE
+
 	/*
 	 * Process RETURNING if present and if requested.
 	 *
@@ -2079,7 +2083,11 @@ ldelete:
 			if (oldtuple != NULL)
 			{
 				ExecForceStoreHeapTuple(oldtuple, slot, false);
-				/* LAGODB BEGIN: virtual slots do not inherit HeapTuple table OID. */
+
+				/*
+				 * LAGODB BEGIN: virtual slots do not inherit HeapTuple table
+				 * OID.
+				 */
 				slot->tts_tableOid = RelationGetRelid(resultRelationDesc);
 				/* LAGODB END */
 			}
@@ -2088,6 +2096,7 @@ ldelete:
 		}
 
 #if LAGODB_PG18_GE
+
 		/*
 		 * If required, save the old tuple for later processing of the
 		 * RETURNING list by ExecInsert().
@@ -2108,7 +2117,7 @@ ldelete:
 				TupleTableSlot *oldSlot = slot;
 
 				slot = execute_attr_map_slot(tupconv_map->attrMap, slot,
-										 ExecGetReturningSlot(estate, rootRelInfo));
+											 ExecGetReturningSlot(estate, rootRelInfo));
 				slot->tts_tableOid = oldSlot->tts_tableOid;
 				ItemPointerCopy(&oldSlot->tts_tid, &slot->tts_tid);
 			}
@@ -2416,9 +2425,11 @@ ExecUpdateAct(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	Relation	resultRelationDesc = resultRelInfo->ri_RelationDesc;
 	bool		partition_constraint_failed;
 	TM_Result	result;
+
 	/* LAGODB BEGIN: slot-first mutation bridge. */
 	LagodbModifyBridge *bridge = context->lagodb_bridge;
 	LagodbMutationResult mutation;
+
 	/* LAGODB END */
 
 	updateCxt->crossPartUpdate = false;
@@ -3842,7 +3853,11 @@ lmerge_matched:
 										InstrUpdateTupleCount(outerPlanState(mtstate)->instrument, 1.0);
 								}
 #else
-								/* PostgreSQL 16 has no NOT MATCHED BY SOURCE list */
+
+								/*
+								 * PostgreSQL 16 has no NOT MATCHED BY SOURCE
+								 * list
+								 */
 								if (!*matched)
 									goto out;
 #endif
@@ -4638,6 +4653,7 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 			ResetExprContext(pstate->ps_ExprContext);
 
 #if LAGODB_PG17_GE
+
 		/*
 		 * If there is a pending MERGE ... WHEN NOT MATCHED [BY TARGET] action
 		 * to execute, do so now --- see the comments in ExecMerge().
@@ -5030,6 +5046,7 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
 
 #if LAGODB_PG18_GE
+
 	/*
 	 * Only consider unpruned relations for initializing their ResultRelInfo
 	 * struct and other fields such as withCheckOptions, etc.
@@ -5069,16 +5086,16 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 			if (node->withCheckOptionLists)
 			{
 				List	   *withCheckOptions = list_nth_node(List,
-													 node->withCheckOptionLists,
-													 i);
+															 node->withCheckOptionLists,
+															 i);
 
 				withCheckOptionLists = lappend(withCheckOptionLists, withCheckOptions);
 			}
 			if (node->returningLists)
 			{
 				List	   *returningList = list_nth_node(List,
-												  node->returningLists,
-												  i);
+														  node->returningLists,
+														  i);
 
 				returningLists = lappend(returningLists, returningList);
 			}
@@ -5400,12 +5417,14 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 		ExprContext *econtext;
 
 #if LAGODB_PG18_LT
+
 		/*
 		 * Initialize result tuple slot and assign its rowtype using the first
 		 * RETURNING list.  We assume the rest will look the same.
 		 */
 		mtstate->ps.plan->targetlist = (List *) linitial(returningLists);
 #else
+
 		/*
 		 * Initialize result tuple slot and assign its rowtype using the plan
 		 * node's declared targetlist, which the planner set up to be the same

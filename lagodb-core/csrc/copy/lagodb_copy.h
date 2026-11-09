@@ -107,7 +107,7 @@ uint64		lagodb_execute_routed_copy_from(
 											CopyFromState state,
 											lagodb_typed_copy_source_cb typed_source,
 											void *typed_source_context,
-                                            const LagodbCopyWriteBridge *write_bridge);
+											const LagodbCopyWriteBridge *write_bridge);
 void		lagodb_end_routed_copy_from(CopyFromState state);
 TupleDesc	lagodb_routed_copy_from_tuple_desc(CopyFromState state);
 List	   *lagodb_routed_copy_from_attnums(CopyFromState state);
@@ -122,6 +122,7 @@ void		lagodb_encode_copy_header(
 									  LagodbCopyRowEncoder *state,
 									  const char **data,
 									  int *len);
+
 /* The caller supplies a slot with all attributes already materialized. */
 void		lagodb_encode_copy_row(
 								   LagodbCopyRowEncoder *state,

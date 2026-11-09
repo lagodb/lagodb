@@ -12,6 +12,7 @@ typedef void (*LagodbVacuumProviderCallback) (Relation relation,
 
 /* Report the FULL option without validating the rest of the statement. */
 extern bool lagodb_vacuum_requests_full(VacuumStmt *stmt);
+
 /* Parse and validate every PostgreSQL VACUUM option into params. */
 extern void lagodb_parse_vacuum_options(VacuumStmt *stmt,
 										const char *query_string,

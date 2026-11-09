@@ -20,7 +20,7 @@ lagodb_array_cursor_setup(ArrayType *array, LagodbArrayCursor *cursor)
 
 Datum
 lagodb_array_cursor_next(LagodbArrayCursor *cursor, int len,
-						bool by_value, char align, bool *is_null)
+						 bool by_value, char align, bool *is_null)
 {
 	array_iter	iter;
 	Datum		value;

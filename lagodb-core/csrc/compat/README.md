@@ -25,6 +25,28 @@ Use the matching PostgreSQL release source for comparisons. Shared version
 predicates belong in `lagodb_pg_compat.h`; compatibility branches stay next to
 the affected implementation.
 
+C sources under `csrc` follow PostgreSQL 18 pgindent layout, so fork audits
+compare against upstream without whitespace noise. PostgreSQL 16, 17 and 18
+use the same `pg_bsd_indent` options; only their typedef lists differ.
+`csrc/typedefs.list` holds LagoDB's own typedef names, one per line without
+comments, and must be extended whenever a new typedef is added. Build
+`src/tools/pg_bsd_indent` in a configured PostgreSQL 18 source tree, then run
+from a scratch directory, because pgindent writes temporary files to its
+working directory:
+
+```sh
+PG18_SRC=~/.pgrx/18.6
+CSRC=/path/to/lagodb/lagodb-core/csrc
+perl "$PG18_SRC/src/tools/pgindent/pgindent" \
+  --indent="$PG18_SRC/src/tools/pg_bsd_indent/pg_bsd_indent" \
+  --typedefs="$PG18_SRC/src/tools/pgindent/typedefs.list" \
+  --list-of-typedefs="$(cat "$CSRC/typedefs.list")" \
+  $(find "$CSRC" -name '*.[ch]')
+```
+
+Add `--diff` to preview changes, or `--check` to only report whether any
+file needs formatting.
+
 `lagodb_injection_point.h` is a capability adapter rather than a source
 fork. It records the known API difference between PostgreSQL 17's
 `INJECTION_POINT(name)` and PostgreSQL 18's `INJECTION_POINT(name, arg)`, and

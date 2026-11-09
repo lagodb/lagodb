@@ -19,7 +19,7 @@ typedef struct LagodbArrayCursor
 } LagodbArrayCursor;
 
 /* Initialize the cursor and return the number of elements, including NULLs. */
-extern int lagodb_array_cursor_setup(ArrayType *array, LagodbArrayCursor *cursor);
+extern int	lagodb_array_cursor_setup(ArrayType *array, LagodbArrayCursor *cursor);
 
 /*
  * The caller has established that another element exists and supplies its
@@ -28,6 +28,6 @@ extern int lagodb_array_cursor_setup(ArrayType *array, LagodbArrayCursor *cursor
  * it without an FFI error guard; preserve this contract when changing the bridge.
  */
 extern Datum lagodb_array_cursor_next(LagodbArrayCursor *cursor, int len,
-									 bool by_value, char align, bool *is_null);
+									  bool by_value, char align, bool *is_null);
 
 #endif

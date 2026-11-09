@@ -104,7 +104,7 @@ typedef struct CopyMultiInsertBuffer
 	TupleTableSlot *slots[MAX_BUFFERED_TUPLES]; /* Array to store tuples */
 	ResultRelInfo *resultRelInfo;	/* ResultRelInfo for 'relid' */
 	/* LAGODB BEGIN: borrowed binding survives buffer eviction. */
-	void       *write_binding;
+	void	   *write_binding;
 	/* LAGODB END */
 	BulkInsertState bistate;	/* BulkInsertState for this rel if plain
 								 * table; NULL if foreign table */
@@ -140,7 +140,7 @@ static void ClosePipeFromProgram(CopyFromState cstate);
 #if LAGODB_PG18_GE
 static void
 LagodbCopyFromTextLikeInFunc(CopyFromState cstate, Oid atttypid,
-							FmgrInfo *finfo, Oid *typioparam)
+							 FmgrInfo *finfo, Oid *typioparam)
 {
 	Oid			func_oid;
 
@@ -151,7 +151,7 @@ LagodbCopyFromTextLikeInFunc(CopyFromState cstate, Oid atttypid,
 static void
 LagodbCopyFromTextLikeStart(CopyFromState cstate, TupleDesc tupdesc)
 {
-	AttrNumber attr_count;
+	AttrNumber	attr_count;
 
 	if (cstate->need_transcoding)
 	{
@@ -175,7 +175,7 @@ LagodbCopyFromTextLikeEnd(CopyFromState cstate)
 
 static void
 LagodbCopyFromBinaryInFunc(CopyFromState cstate, Oid atttypid,
-						  FmgrInfo *finfo, Oid *typioparam)
+						   FmgrInfo *finfo, Oid *typioparam)
 {
 	Oid			func_oid;
 
@@ -404,7 +404,7 @@ CopyMultiInsertInfoSetupBuffer(CopyMultiInsertInfo *miinfo,
 	/* LAGODB BEGIN: resolve once when a buffer is bound to its relation. */
 	buffer->write_binding = rri->ri_FdwRoutine == NULL
 		? miinfo->write_bridge->bind(miinfo->write_bridge->context,
-									   rri->ri_RelationDesc, miinfo->mycid)
+									 rri->ri_RelationDesc, miinfo->mycid)
 		: NULL;
 	/* LAGODB END */
 
@@ -424,7 +424,7 @@ static void
 CopyMultiInsertInfoInit(CopyMultiInsertInfo *miinfo, ResultRelInfo *rri,
 						CopyFromState cstate, EState *estate, CommandId mycid,
 						int ti_options,
-                        const LagodbCopyWriteBridge *write_bridge)
+						const LagodbCopyWriteBridge *write_bridge)
 {
 	miinfo->multiInsertBuffers = NIL;
 	miinfo->bufferedTuples = 0;
@@ -798,12 +798,12 @@ static uint64
 LagodbCopyFromExecutor(CopyFromState cstate,
 					   lagodb_typed_copy_source_cb typed_source,
 					   void *typed_source_context,
-                       const LagodbCopyWriteBridge *write_bridge)
+					   const LagodbCopyWriteBridge *write_bridge)
 {
 	ResultRelInfo *resultRelInfo;
 	ResultRelInfo *target_resultRelInfo;
 	ResultRelInfo *prevResultRelInfo = NULL;
-	void       *write_binding = NULL;
+	void	   *write_binding = NULL;
 	EState	   *estate = CreateExecutorState(); /* for ExecConstraints() */
 	ModifyTableState *mtstate;
 	ExprContext *econtext;
@@ -1661,7 +1661,10 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 
 	MemoryContextSwitchTo(oldcontext);
 
-	/* LAGODB BEGIN: publish all AM writes; retain rows through input shutdown. */
+	/*
+	 * LAGODB BEGIN: publish all AM writes; retain rows through input
+	 * shutdown.
+	 */
 	write_bridge->publish(write_bridge->context);
 	/* LAGODB END */
 
@@ -1981,8 +1984,8 @@ LagodbBeginCopyFrom(ParseState *pstate,
 		/* Fetch the input function and typioparam info */
 #if LAGODB_PG18_GE
 		cstate->routine->CopyFromInFunc(cstate, att->atttypid,
-										 &in_functions[attnum - 1],
-										 &typioparams[attnum - 1]);
+										&in_functions[attnum - 1],
+										&typioparams[attnum - 1]);
 #else
 		if (cstate->opts.binary)
 			getTypeBinaryInputInfo(att->atttypid,
@@ -2206,12 +2209,12 @@ uint64
 lagodb_execute_routed_copy_from(CopyFromState state,
 								lagodb_typed_copy_source_cb typed_source,
 								void *typed_source_context,
-                       const LagodbCopyWriteBridge *write_bridge)
+								const LagodbCopyWriteBridge *write_bridge)
 {
 	/*
-	 * Provider byte input is now open and its callback is active. Preserve PG's
-	 * binary-header validation before starting the executor, using the COPY
-	 * context as BeginCopyFrom does for file/program/frontend input.
+	 * Provider byte input is now open and its callback is active. Preserve
+	 * PG's binary-header validation before starting the executor, using the
+	 * COPY context as BeginCopyFrom does for file/program/frontend input.
 	 */
 	if (typed_source == NULL && state->data_source_cb && state->opts.binary)
 	{

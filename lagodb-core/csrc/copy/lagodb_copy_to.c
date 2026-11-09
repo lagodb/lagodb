@@ -268,8 +268,12 @@ CopySendEndOfRow(CopyToState cstate)
 			break;
 		case COPY_CALLBACK:
 			cstate->data_dest_cb(fe_msgbuf->data, fe_msgbuf->len);
-			/* Provider progress counts encoded files, including their framing.
-			 * Publishing logical row bytes here would overwrite that count. */
+
+			/*
+			 * Provider progress counts encoded files, including their
+			 * framing. Publishing logical row bytes here would overwrite that
+			 * count.
+			 */
 			resetStringInfo(fe_msgbuf);
 			return;
 	}
@@ -593,8 +597,11 @@ LagodbBeginCopyTo(ParseState *pstate,
 		UpdateActiveSnapshotCommandId();
 
 		/* Create dest receiver for COPY OUT */
-		/* The backend dispatcher constructs the native COPY receiver, whose
-		 * private CopyToState layout differs from this executor's layout. */
+
+		/*
+		 * The backend dispatcher constructs the native COPY receiver, whose
+		 * private CopyToState layout differs from this executor's layout.
+		 */
 		dest = CreateCopyDestReceiver();
 		((DR_copy *) dest)->cstate = cstate;
 
