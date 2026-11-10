@@ -101,7 +101,6 @@ pub(crate) enum ScalarRead {
     List(ListRead),
     PrevalidatedJsonText,
     PostgresNumericVarlena,
-    NumericFromInt64,
     NumericFromFloat64,
 }
 
@@ -127,12 +126,6 @@ impl ScalarRead {
                 return Self::physical(
                     matches!(rule, CellRule::Binary),
                     Self::PostgresNumericVarlena,
-                );
-            }
-            DatumCodecKind::NumericFromInt64 => {
-                return Self::physical(
-                    matches!(rule, CellRule::I64),
-                    Self::NumericFromInt64,
                 );
             }
             DatumCodecKind::NumericFromFloat64 => {
@@ -284,9 +277,6 @@ impl ScalarRead {
                 }
                 _ => R::PostgresLargeNumericVarlena(array.as_binary::<i64>().clone()),
             },
-            Self::NumericFromInt64 => {
-                R::NumericFromInt64(array.as_primitive::<Int64Type>().clone())
-            }
             Self::NumericFromFloat64 => {
                 R::NumericFromFloat64(array.as_primitive::<Float64Type>().clone())
             }
@@ -334,7 +324,6 @@ pub(crate) enum BoundDatumReader {
     PrevalidatedLargeJsonText(LargeStringArray),
     PostgresNumericVarlena(BinaryArray),
     PostgresLargeNumericVarlena(LargeBinaryArray),
-    NumericFromInt64(Int64Array),
     NumericFromFloat64(Float64Array),
 }
 
@@ -456,9 +445,6 @@ impl BoundDatumReader {
                 present!(array, |value| unsafe {
                     DatumCodec::copy_postgres_numeric_varlena(value)
                 })
-            }
-            Self::NumericFromInt64(array) => {
-                present!(array, |value| DatumCodec::numeric_datum_from_int64(value)?)
             }
             Self::NumericFromFloat64(array) => {
                 present!(array, |value| DatumCodec::numeric_datum_from_float64(

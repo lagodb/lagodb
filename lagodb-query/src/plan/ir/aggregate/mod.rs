@@ -11,7 +11,9 @@ mod semantics;
 
 use super::ordering::{OrderingSemantics, SortDirection};
 use super::semantics::ScalarSemantics;
-use super::{ExecutionExpr, QueryNode, QueryPlanError, RowEstimate};
+use super::{
+    Decimal128Semantics, ExecutionExpr, QueryNode, QueryPlanError, RowEstimate,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AggregateKind {
@@ -240,9 +242,13 @@ impl AggCall {
     }
 
     /// Physical type emitted by DataFusion before the PostgreSQL output codec.
-    /// Decimal MIN/MAX preserve their input Decimal128 metadata even though
-    /// PostgreSQL's Aggref result typmod is -1.
+    /// Decimal MIN/MAX preserve their input Decimal128 metadata, and SUM(int8)
+    /// emits its accumulation decimal, even though PostgreSQL's Aggref result
+    /// typmod is -1.
     pub fn execution_result_type(&self) -> ExprType {
+        if let Some(decimal) = self.int8_sum_decimal() {
+            return decimal.value_type();
+        }
         if matches!(self.kind, AggregateKind::Min | AggregateKind::Max)
             && self.result_type.type_oid == pg_sys::NUMERICOID
         {
@@ -252,6 +258,18 @@ impl AggCall {
                 .unwrap_or(self.result_type);
         }
         self.result_type
+    }
+
+    /// Exact accumulation decimal for SUM(int8), whose PostgreSQL result is
+    /// NUMERIC. DataFusion's native Int64 SUM wraps on overflow, so the input
+    /// is widened to NUMERIC(38,0) and summed by the native Decimal128 SUM. Its
+    /// magnitude stays below 2^63 per input row and therefore below 10^38 for
+    /// fewer than 10^19 rows.
+    pub fn int8_sum_decimal(&self) -> Option<Decimal128Semantics> {
+        (u32::from(self.function_oid) == pg_sys::F_SUM_INT8).then(|| {
+            Decimal128Semantics::new(38, 0)
+                .expect("NUMERIC(38,0) is a valid Decimal128 shape")
+        })
     }
 
     #[inline]
@@ -266,14 +284,12 @@ impl AggCall {
 
     /// Whether the aggregate's physical result can participate in HAVING.
     ///
-    /// Integer-input SUM/AVG deliberately use DataFusion's native aggregate
-    /// representation, including for PostgreSQL aggregates whose declared
-    /// result is NUMERIC. SUM(int8) is evaluated as Int64 and integer AVG as
-    /// Float64, inheriting DataFusion's wrapping/rounding behavior instead of
-    /// PostgreSQL's arbitrary-precision transition semantics. NUMERIC-input
-    /// SUM/AVG keep LagoDB's exact Binary result and remain unavailable to
-    /// HAVING; Decimal MIN/MAX retain their input Decimal128 metadata and use
-    /// the native exact comparison path.
+    /// Integer AVG deliberately uses DataFusion's native Float64 result even
+    /// though PostgreSQL declares NUMERIC, inheriting Float64 rounding instead
+    /// of PostgreSQL's arbitrary-precision transition semantics. SUM(int8) and
+    /// Decimal MIN/MAX emit bounded Decimal128 results and use the native exact
+    /// comparison path. NUMERIC-input SUM/AVG keep LagoDB's exact Binary result
+    /// and remain unavailable to HAVING.
     #[inline]
     pub const fn supports_having_result(&self) -> bool {
         !matches!(

@@ -123,6 +123,10 @@ impl PgPredicatePushdownPolicy {
             PlannedValueType::String => PredicateValueKind::String,
             PlannedValueType::Decimal128(_) => PredicateValueKind::Decimal,
             PlannedValueType::Int8ToInt => PredicateValueKind::Integer,
+            PlannedValueType::Float
+            | PlannedValueType::Double
+            | PlannedValueType::FloatToDouble
+            | PlannedValueType::DoubleToFloat => PredicateValueKind::Float,
         }
     }
 
@@ -206,6 +210,29 @@ impl PgPredicatePushdownPolicy {
                 PgOid::BuiltIn(PgBuiltInOids::INT8OID),
                 PgOid::BuiltIn(PgBuiltInOids::INT8OID),
             ) => Some(PlannedValueType::Int8),
+            (
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT4OID),
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT4OID),
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT4OID),
+            ) => Some(PlannedValueType::Float),
+            (
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT8OID),
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT8OID),
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT8OID),
+            ) => Some(PlannedValueType::Double),
+            // float84 operators widen the real value exactly; float48
+            // operators widen the real column, so binding rounds the double
+            // value to the column's precision.
+            (
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT8OID),
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT8OID),
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT4OID),
+            ) => Some(PlannedValueType::FloatToDouble),
+            (
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT4OID),
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT4OID),
+                PgOid::BuiltIn(PgBuiltInOids::FLOAT8OID),
+            ) => Some(PlannedValueType::DoubleToFloat),
             (
                 PgOid::BuiltIn(PgBuiltInOids::DATEOID),
                 PgOid::BuiltIn(PgBuiltInOids::DATEOID),

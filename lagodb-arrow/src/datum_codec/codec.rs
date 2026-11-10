@@ -24,7 +24,6 @@ pub(super) enum DatumCodecKind {
     Standard(BoundColumnDatumCodec),
     PrevalidatedJsonText,
     PostgresNumericVarlena,
-    NumericFromInt64,
     NumericFromFloat64,
 }
 
@@ -66,13 +65,6 @@ impl DatumCodec {
         }
     }
 
-    /// Bind a native Int64 aggregate result to PostgreSQL NUMERIC.
-    pub const fn numeric_from_int64() -> Self {
-        Self {
-            kind: DatumCodecKind::NumericFromInt64,
-        }
-    }
-
     /// Bind a native Float64 aggregate result to PostgreSQL NUMERIC.
     pub const fn numeric_from_float64() -> Self {
         Self {
@@ -88,7 +80,6 @@ impl DatumCodec {
             DatumCodecKind::Standard(target) => target.oid() == target_oid,
             DatumCodecKind::PrevalidatedJsonText => target_oid == pg_sys::JSONOID,
             DatumCodecKind::PostgresNumericVarlena
-            | DatumCodecKind::NumericFromInt64
             | DatumCodecKind::NumericFromFloat64 => target_oid == pg_sys::NUMERICOID,
         };
         if valid {
@@ -141,16 +132,6 @@ impl DatumCodec {
             ptr::copy_nonoverlapping(bytes.as_ptr(), new_ptr.cast(), len);
             pg_sys::Datum::from(new_ptr)
         }
-    }
-
-    pub(super) fn numeric_datum_from_int64(
-        value: i64,
-    ) -> ArrowConversionResult<pg_sys::Datum> {
-        AnyNumeric::from(value).into_datum().ok_or(
-            ArrowConversionError::InvariantViolated(
-                "integer to NUMERIC conversion returned SQL NULL",
-            ),
-        )
     }
 
     pub(super) fn numeric_datum_from_float64(

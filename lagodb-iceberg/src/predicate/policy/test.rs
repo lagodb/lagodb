@@ -372,7 +372,7 @@ fn supported_predicate_numeric_temporal_float_matrix() {
         for opno in opnos {
             assert_eq!(
                 capability(type_oid, triple(opno), CollationSemantics::None),
-                None,
+                Some(SupportedPredicateCapability::Exact),
             );
         }
     }

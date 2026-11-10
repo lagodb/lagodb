@@ -25,6 +25,10 @@ const VALUE_BINARY: i32 = 13;
 const VALUE_FIXED_BINARY: i32 = 14;
 const VALUE_INT2_TO_LONG: i32 = 15;
 const VALUE_INT4_TO_LONG: i32 = 16;
+const VALUE_FLOAT: i32 = 17;
+const VALUE_DOUBLE: i32 = 18;
+const VALUE_FLOAT_TO_DOUBLE: i32 = 19;
+const VALUE_DOUBLE_TO_FLOAT: i32 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlannedValueType {
@@ -43,6 +47,10 @@ pub(crate) enum PlannedValueType {
     String,
     Decimal128(Decimal128Semantics),
     Int8ToInt,
+    Float,
+    Double,
+    FloatToDouble,
+    DoubleToFloat,
 }
 
 impl PlannedValueType {
@@ -68,6 +76,21 @@ impl PlannedValueType {
                 Some(Self::Timestamptz(TimestampPrecision::Nanoseconds))
             }
             (Self::Timestamp(_) | Self::Timestamptz(_), _) => None,
+            (
+                Self::Float | Self::DoubleToFloat,
+                Type::Primitive(PrimitiveType::Float),
+            )
+            | (
+                Self::Double | Self::FloatToDouble,
+                Type::Primitive(PrimitiveType::Double),
+            ) => Some(self),
+            (
+                Self::Float
+                | Self::Double
+                | Self::FloatToDouble
+                | Self::DoubleToFloat,
+                _,
+            ) => None,
             _ => Some(self),
         }
     }
@@ -104,6 +127,10 @@ impl PlannedValueType {
                 .append_i32(i32::from(semantics.precision()))
                 .append_i32(i32::from(semantics.scale())),
             Self::Int8ToInt => writer.append_i32(VALUE_INT8_TO_INT),
+            Self::Float => writer.append_i32(VALUE_FLOAT),
+            Self::Double => writer.append_i32(VALUE_DOUBLE),
+            Self::FloatToDouble => writer.append_i32(VALUE_FLOAT_TO_DOUBLE),
+            Self::DoubleToFloat => writer.append_i32(VALUE_DOUBLE_TO_FLOAT),
         };
     }
 
@@ -145,6 +172,10 @@ impl PlannedValueType {
                 Ok(Self::Decimal128(semantics))
             }
             VALUE_INT8_TO_INT => Ok(Self::Int8ToInt),
+            VALUE_FLOAT => Ok(Self::Float),
+            VALUE_DOUBLE => Ok(Self::Double),
+            VALUE_FLOAT_TO_DOUBLE => Ok(Self::FloatToDouble),
+            VALUE_DOUBLE_TO_FLOAT => Ok(Self::DoubleToFloat),
             tag => Err(IcebergFilterError::UnknownValueTypeTag(tag)),
         }
     }

@@ -50,8 +50,9 @@ INSERT INTO query_offload_distinct_basic VALUES
 
 -- ============================================================================
 -- Aggregate DISTINCT across the current primitive/output families.
--- The values avoid the documented NaN, signed-zero, collation, and large-int
--- semantic differences so this block is an exact native/offload comparison.
+-- The values avoid the NaN, signed-zero, collation, and large-int semantic
+-- differences in docs/query-offload-semantics.md, so this block is an exact
+-- native/offload comparison.
 -- ============================================================================
 
 -- Query offload plan and result.

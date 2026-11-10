@@ -21,6 +21,7 @@ use crate::error::IcebergError;
 use crate::schema::relation::RelationLayout;
 
 use super::error::IcebergFilterError;
+use super::float::FloatComparison;
 use super::plan::{
     PlannedComparisonOperator, PlannedIcebergColumn, PlannedIcebergNode,
     PlannedIcebergPredicate, PlannedValueType,
@@ -257,12 +258,29 @@ impl IcebergFilterPlanner {
         if mirrored {
             planned_operator = planned_operator.mirrored();
         }
-        let costing = self.comparison_costing(
+        let mut costing = self.comparison_costing(
             supported,
             value_slot.source_kind,
             value_type,
             &planned_column,
         );
+        // A float `>` / `>=` binds as `x > c OR isnan(x)`. Row-group metrics
+        // never exclude `isnan`, and file metrics do only where the NaN count
+        // is recorded as zero, so the bound shape is costed as that OR. A
+        // runtime value bound as NaN takes another shape, which this covers
+        // conservatively.
+        if matches!(
+            value_type,
+            PlannedValueType::Float
+                | PlannedValueType::Double
+                | PlannedValueType::FloatToDouble
+                | PlannedValueType::DoubleToFloat
+        ) && FloatComparison::may_add_nan_disjunction(planned_operator)
+        {
+            costing = costing.disjunction(
+                self.pruning_costing(&planned_column, PartitionMatch::Value),
+            );
+        }
         let planned = PlannedNode {
             node: PlannedIcebergNode::Comparison {
                 operator: planned_operator,

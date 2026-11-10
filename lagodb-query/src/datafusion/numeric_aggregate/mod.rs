@@ -1,9 +1,10 @@
 //! Exact bounded-NUMERIC aggregates owned by LagoDB.
 //!
-//! Integer-input SUM/AVG deliberately use DataFusion's native aggregates.
-//! These UDAFs cover only PostgreSQL NUMERIC values represented by the source
-//! ABI as Decimal128, retaining a fixed i256 coefficient through aggregation
-//! and materializing PostgreSQL NUMERIC once per output group.
+//! Integer-input SUM/AVG deliberately use DataFusion's native aggregates;
+//! SUM(int8) widens to the native Decimal128 SUM. These UDAFs cover only
+//! PostgreSQL NUMERIC values represented by the source ABI as Decimal128,
+//! retaining a fixed i256 coefficient through aggregation and materializing
+//! PostgreSQL NUMERIC once per output group.
 
 mod accumulator;
 mod output;

@@ -4,7 +4,7 @@ use iceberg_lite::expr::{
     BinaryExpression, Predicate, PredicateOperator, Reference, UnaryExpression,
 };
 use iceberg_lite::spec::Datum;
-use lagodb_core::expr::BooleanTestKind;
+use lagodb_core::expr::{BooleanTestKind, PgNanComparison};
 
 #[derive(Clone)]
 pub(crate) struct IcebergPredicateBuilder {
@@ -75,6 +75,17 @@ impl IcebergPredicateBuilder {
             }
             BooleanTestKind::IsUnknown => self.null_test(false),
             BooleanTestKind::IsNotUnknown => self.null_test(true),
+        }
+    }
+
+    /// PostgreSQL's comparison with a NaN value, which it orders above every
+    /// number.
+    pub(crate) fn nan_comparison(self, comparison: PgNanComparison) -> Predicate {
+        match comparison {
+            PgNanComparison::IsNan => self.nan_test(false),
+            PgNanComparison::IsNotNan => self.nan_test(true),
+            PgNanComparison::StrictTrue => self.null_test(true),
+            PgNanComparison::StrictFalse => Predicate::AlwaysFalse,
         }
     }
 

@@ -25,8 +25,8 @@ struct OutputFact {
 
 impl OutputFact {
     /// HAVING normally follows PostgreSQL's declared aggregate type. Decimal
-    /// MIN/MAX are the one current exception: PostgreSQL erases their typmod,
-    /// while DataFusion retains the bounded Decimal128 input representation.
+    /// MIN/MAX and SUM(int8) are the exceptions: PostgreSQL erases their
+    /// typmod, while DataFusion emits a bounded Decimal128 representation.
     fn predicate_type(self) -> ExprType {
         if Decimal128Semantics::for_type(self.execution_type).is_some() {
             self.execution_type

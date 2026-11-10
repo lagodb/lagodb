@@ -148,7 +148,23 @@ impl JoinKey {
             | pg_sys::INT4OID
             | pg_sys::INT8OID
             | pg_sys::DATEOID
-            | pg_sys::UUIDOID => {
+            | pg_sys::UUIDOID
+            // For floats, DataFusion 55's hash and key comparator fold -0 into
+            // +0 and keep NaN payloads apart, an accepted engine difference
+            // from PostgreSQL's float4eq/float8eq. Two upstream-owned
+            // DataFusion 55 defects are recorded in
+            // docs/query-offload-semantics.md and are not worked around here:
+            // - A small build side is pushed to the probe scan as an
+            //   IN-list dynamic filter, which compares float bits and drops
+            //   probe rows whose key is the other-signed zero. Fixed by
+            //   https://github.com/apache/datafusion/pull/25186.
+            // - The sort-merge semi/anti/mark fallback compares keys at
+            //   batch boundaries with `partial_cmp().unwrap()` and panics on
+            //   NaN. Fixed by https://github.com/apache/datafusion/pull/25134
+            //   (https://github.com/apache/datafusion/issues/25133).
+            // Both fixes were merged after DataFusion 55.
+            | pg_sys::FLOAT4OID
+            | pg_sys::FLOAT8OID => {
                 value_type.typmod == -1 && value_type.collation == pg_sys::InvalidOid
             }
             pg_sys::TEXTOID => {
@@ -174,17 +190,6 @@ impl JoinKey {
                 // domain requires a separate provider representation change,
                 // not join-local coercion or a weakened equality rule.
                 Decimal128Semantics::for_type(value_type).is_some()
-            }
-            pg_sys::FLOAT4OID | pg_sys::FLOAT8OID => {
-                // Keep the known correctness difference at the single join-key
-                // gate. DataFusion 55 normalizes signed zero, but its hash keeps
-                // NaN payload bits and its comparator uses IEEE totalOrder.
-                // PostgreSQL's float4eq/float8eq considers every NaN equal, so
-                // distinct NaN encodings can miss a match. The source contract
-                // must establish a NaN-domain invariant or provide a vectorized
-                // PostgreSQL-semantic key representation; do not add per-row
-                // PostgreSQL callbacks.
-                false
             }
             _ => false,
         }

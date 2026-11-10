@@ -1120,11 +1120,44 @@ SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
 SET lagodb.customscan_mode = 'off';
 SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
 
+-- Float comparisons are exact: both zeros compare equal, and every NaN, a
+-- negative-sign NaN included, sorts above every number.
+-- The NaN rows get a data file of their own, which file statistics show to
+-- hold only NaN, so `f8 > 0.1` must not prune it.
+CREATE TABLE rq_float (
+    id integer,
+    f4 real,
+    f8 double precision
+) USING iceberg;
+
+INSERT INTO rq_float VALUES
+    (1, 1, 1), (3, '-0', '-0'), (4, 0, 0), (6, 0.1, 0.1), (7, NULL, NULL);
+
+INSERT INTO rq_float VALUES
+    (2, -'NaN'::real, -'NaN'::float8), (5, 'NaN', 'NaN');
+
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id FROM rq_float WHERE f8 <= 0 ORDER BY id;
+
+SELECT id FROM rq_float WHERE f8 <= 0 ORDER BY id;
+
+SELECT id FROM rq_float WHERE f8 > 0.1 ORDER BY id;
+
+SELECT id FROM rq_float WHERE f8 <> 0 ORDER BY id;
+
+-- A real column compared with a double constant compares in double precision.
+EXPLAIN (COSTS OFF)
+SELECT id FROM rq_float WHERE f4 <= 0.1::float8 ORDER BY id;
+
+SELECT id FROM rq_float WHERE f4 <= 0.1::float8 ORDER BY id;
+
 RESET lagodb.customscan_mode;
 RESET timezone;
 DROP TABLE rq_numeric;
 DROP TABLE rq_temporal;
 DROP TABLE rq_text;
+DROP TABLE rq_float;
 -- Exact text inequality under the default deterministic collation.
 
 

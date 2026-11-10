@@ -348,8 +348,8 @@ FROM query_offload_aggregate_basic;
 -- ============================================================================
 -- Float, temporal, boolean, ARRAY_AGG, and STRING_AGG families.
 -- Only finite exactly representable float inputs are used by this basic
--- parity test; NaN and signed-zero behavior belongs to the documented
--- capability-boundary suite.
+-- parity test; NaN and signed-zero differences are documented in
+-- docs/query-offload-semantics.md.
 -- ============================================================================
 
 -- Query offload plan and result.
@@ -662,6 +662,52 @@ INSERT INTO query_offload_real_sum VALUES (1, 3e38::real), (1, 3e38::real);
 SELECT sum(value) FROM query_offload_real_sum;
 \set VERBOSITY default
 DROP TABLE query_offload_real_sum;
+
+-- Float GROUP BY and HAVING comparison run in the engine; ORDER BY on a float
+-- stays in PostgreSQL. The data holds a single NaN bit pattern, so the NaN
+-- payload difference documented in docs/query-offload-semantics.md cannot
+-- appear. It holds both 0 and -0, which form one group whose displayed sign
+-- may differ from PostgreSQL; HAVING max(f8) > 0 filters that group out.
+CREATE TABLE query_offload_float_keys (id integer, f4 real, f8 double precision)
+USING iceberg;
+INSERT INTO query_offload_float_keys VALUES
+    (1, 0, 0), (2, '-0', '-0'), (3, 'NaN', 'NaN'), (4, 1.5, 1.5),
+    (5, 1.5, 1.5), (6, -1.5, -1.5), (7, 'Infinity', 'Infinity'), (8, NULL, NULL);
+EXPLAIN (COSTS OFF)
+SELECT f4, count(*) AS rows
+FROM query_offload_float_keys
+GROUP BY f4
+HAVING max(f8) > 0
+ORDER BY f4 DESC;
+
+SELECT f4, count(*) AS rows
+FROM query_offload_float_keys
+GROUP BY f4
+HAVING max(f8) > 0
+ORDER BY f4 DESC;
+
+DROP TABLE query_offload_float_keys;
+
+-- SUM(int8) accumulates as NUMERIC(38,0): two int8 maxima exceed int8, and
+-- HAVING compares the exact sum with an integral constant.
+CREATE TABLE query_offload_int8_sum (group_id integer, value bigint) USING iceberg;
+INSERT INTO query_offload_int8_sum VALUES
+    (1, 9223372036854775807), (1, 9223372036854775807),
+    (2, -9223372036854775808), (2, -1), (3, NULL);
+EXPLAIN (COSTS OFF)
+SELECT group_id, sum(value) AS total
+FROM query_offload_int8_sum
+GROUP BY group_id
+HAVING sum(value) > 9223372036854775807
+ORDER BY group_id;
+
+SELECT group_id, sum(value) AS total
+FROM query_offload_int8_sum
+GROUP BY group_id
+HAVING sum(value) > 9223372036854775807
+ORDER BY group_id;
+
+DROP TABLE query_offload_int8_sum;
 
 -- ============================================================================
 -- PARAM_EXTERN is bound when each query-offload execution begins.

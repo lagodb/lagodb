@@ -69,9 +69,12 @@ impl PredicatePushdownPolicy {
     // The branch is type-independent: affected ordered kinds admitted here are
     // Integer/Long (int2/int4/int8), Decimal (numeric), String (text/varchar),
     // Binary (bytea, including fixed binary, and uuid), and Date/Timestamp/
-    // Timestamptz. PostgreSQL temporal and fixed-binary comparisons already keep
-    // Conservative residuals; those residuals remove these false positives.
-    // Boolean admits only equality/inequality; Float/Time comparisons are off.
+    // Timestamptz. PostgreSQL temporal and fixed-binary comparisons already
+    // keep Conservative residuals; those residuals remove these false
+    // positives. Float `<` / `<=` are Exact but unaffected: their not-NaN test
+    // carries a NotNull guard, which the reader evaluates to false for a
+    // missing column. Boolean admits only equality/inequality; Time
+    // comparisons are off.
     // This defect therefore predates the addition of binary ordered pushdown.
     //
     // Any capability correction must account for operand mirroring and native
@@ -92,7 +95,12 @@ impl PredicatePushdownPolicy {
                 }
                 _ => None,
             },
-            PredicateValueKind::Float | PredicateValueKind::Time => None,
+            // Iceberg and Arrow order floats by IEEE totalOrder, while
+            // PostgreSQL treats -0 and 0 as equal and every NaN as the
+            // greatest value. `predicate::float` rewrites each comparison so
+            // that it accepts exactly PostgreSQL's rows.
+            PredicateValueKind::Float => Some(SupportedPredicateCapability::Exact),
+            PredicateValueKind::Time => None,
             PredicateValueKind::Integer
             | PredicateValueKind::Long
             | PredicateValueKind::Date
@@ -140,6 +148,10 @@ impl PredicatePushdownPolicy {
             (
                 pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID,
                 pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID,
+            )
+            | (
+                pg_sys::FLOAT4OID | pg_sys::FLOAT8OID,
+                pg_sys::FLOAT4OID | pg_sys::FLOAT8OID,
             )
             | (pg_sys::BOOLOID, pg_sys::BOOLOID)
             | (pg_sys::UUIDOID, pg_sys::UUIDOID)
@@ -216,6 +228,14 @@ impl PredicatePushdownPolicy {
                 }
             }
 
+            PgOid::BuiltIn(PgBuiltInOids::FLOAT4OID | PgBuiltInOids::FLOAT8OID) => {
+                if Self::is_collation_free(op_key) {
+                    Self::comparison_capability(PredicateValueKind::Float, class)
+                } else {
+                    None
+                }
+            }
+
             PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID) => {
                 text_semantics?;
                 Self::comparison_capability(PredicateValueKind::String, class)
@@ -231,7 +251,7 @@ impl PredicatePushdownPolicy {
             // provider has is a byte-wise Iceberg/Arrow string comparison, so a
             // stored `'ab   '` would not match a planned `col = 'ab'` even though
             // PostgreSQL treats them as equal — a silent false negative (wrong
-            // results), the same failure class as float comparisons.
+            // results).
             // This hazard is orthogonal to collation: it persists even under
             // `C` / `POSIX`. `IS NULL` / `IS NOT NULL` on `bpchar` is unaffected
             // (see `supports_null_test`): a null test inspects only the null
@@ -261,16 +281,15 @@ impl PredicatePushdownPolicy {
     /// `NullTest`, so residual is not needed.
     ///
     /// Null tests only inspect the null bitmap — no value comparison is
-    /// involved — so the NaN ordering divergence that disables float
-    /// *comparison* pushdown does not apply here. Float IS NULL / IS NOT NULL
-    /// remains safe even though float comparisons are unsupported.
+    /// involved — so the NaN and signed-zero divergence that float
+    /// *comparisons* must rewrite does not apply here. Float IS NULL /
+    /// IS NOT NULL is an exact row filter.
     ///
     /// Scalar validity support is independent of comparison support. Nested
     /// types remain excluded because their Parquet validity belongs to groups.
     fn null_test_value_kind(type_oid: pg_sys::Oid) -> Option<PredicateValueKind> {
         // IS NULL / IS NOT NULL only inspects the null bitmap — there is no
         // value comparison, so NaN ordering/equality divergence does not apply.
-        // Float null-tests are safe even though float comparisons are unsupported.
         match PgOid::from(type_oid) {
             PgOid::BuiltIn(PgBuiltInOids::BOOLOID) => {
                 Some(PredicateValueKind::Boolean)

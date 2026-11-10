@@ -46,9 +46,6 @@ impl QueryOutputDecoder {
                         DatumCodec::postgres_numeric_varlena()
                     }))
                 }
-                (pg_sys::NUMERICOID, DataType::Int64) => {
-                    Some((CellRule::I64, DatumCodec::numeric_from_int64()))
-                }
                 (pg_sys::NUMERICOID, DataType::Float64) => {
                     Some((CellRule::F64, DatumCodec::numeric_from_float64()))
                 }

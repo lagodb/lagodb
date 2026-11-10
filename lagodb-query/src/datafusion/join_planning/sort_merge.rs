@@ -28,6 +28,15 @@ fn sorted<'a>(
 /// The join `hash_join` describes, over single-partition `left` and `right`
 /// with the same schemas as its own inputs. The hash join's embedded projection
 /// becomes a `ProjectionExec`, so the output schema is the same.
+///
+/// DataFusion 55 runs semi/anti/mark joins through its bitwise stream. That
+/// stream checks whether a key group continues into the next batch with
+/// `compare_join_arrays`, which compares Float32/Float64 keys with
+/// `partial_cmp().unwrap()` and panics when a NaN key sits on a batch boundary.
+/// This is an upstream-owned defect, not worked around here. It is fixed by
+/// <https://github.com/apache/datafusion/pull/25134>
+/// (<https://github.com/apache/datafusion/issues/25133>), merged after
+/// DataFusion 55.
 pub(super) fn sort_merge_join(
     hash_join: &HashJoinExec,
     left: Arc<dyn ExecutionPlan>,

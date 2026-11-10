@@ -288,16 +288,20 @@ impl PreparedIcebergRead {
             // remain active, so this is conservative but can scan extra files.
             // PR #2845 introduced the fallback; PR #2869 moved it into the
             // per-spec cache and made the whole-spec behavior persistent.
-            // Related issue #3122 and PR #3123 cover Arrow reader/page-index
-            // promotion, not this manifest partition/metrics pruning boundary.
-            // Those reader changes do not fix manifest partition pruning.
+            // Related issue #3122 covers Arrow reader/page-index promotion, not
+            // this manifest partition/metrics pruning boundary: PR #3540 fixes
+            // the row filter and PRs #3507/#3521 the page index (all open;
+            // PR #3123 was closed unmerged). Those reader changes do not fix
+            // manifest partition pruning.
             // Do not add a LagoDB-only coercion here. Wait for iceberg-rust to
             // make these evaluators promotion-aware, then merge that upstream
             // change into iceberg-lite and remove this limitation.
             // https://github.com/apache/iceberg-rust/pull/2845
             // https://github.com/apache/iceberg-rust/pull/2869
             // https://github.com/apache/iceberg-rust/issues/3122
-            // https://github.com/apache/iceberg-rust/pull/3123
+            // https://github.com/apache/iceberg-rust/pull/3540
+            // https://github.com/apache/iceberg-rust/pull/3507
+            // https://github.com/apache/iceberg-rust/pull/3521
             builder = builder.with_filter(predicate.clone());
         }
         if let Some(delta) = self.delta.as_ref() {

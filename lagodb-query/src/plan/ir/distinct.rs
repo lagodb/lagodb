@@ -39,8 +39,10 @@ impl DistinctExpr {
 
     fn supports_type(value_type: ExprType) -> bool {
         // Query DISTINCT deliberately inherits DataFusion's native grouping
-        // keys. Float keys use bit equality, so -0/+0 and distinct NaN payloads
-        // do not follow PostgreSQL equality. Text-family keys use Arrow byte
+        // keys. DataFusion 55 folds -0 into one +0 group, but float keys
+        // otherwise use bit equality, so distinct NaN payloads stay separate
+        // where PostgreSQL treats every NaN as equal; see
+        // docs/query-offload-semantics.md. Text-family keys use Arrow byte
         // equality; nondeterministic collations are rejected below, but this
         // gate does not provide locale-aware equality normalization.
         //

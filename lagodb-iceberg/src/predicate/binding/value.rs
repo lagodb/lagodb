@@ -8,6 +8,7 @@ use pgrx::{FromDatum, datum::Uuid as PgUuid};
 use uuid::Uuid;
 
 use super::super::error::IcebergFilterError;
+use super::super::float::{FloatComparison, FloatValue};
 use super::super::plan::PlannedValueType;
 use super::super::policy::Int32OutOfRange;
 use super::super::temporal::TimestampComparison;
@@ -85,6 +86,30 @@ impl IcebergFilterBinder<'_> {
                     Ok(value) => BoundComparisonValue::Datum(Datum::int(value)),
                     Err(boundary) => BoundComparisonValue::OutsideInteger(boundary),
                 })
+            }
+            PlannedValueType::Float => Some(BoundComparisonValue::Float(
+                FloatComparison::Native(FloatValue::Float(
+                    unsafe { f32::from_datum(datum, false) }
+                        .ok_or(IcebergFilterError::DatumDecode { type_oid })?,
+                )),
+            )),
+            PlannedValueType::Double => Some(BoundComparisonValue::Float(
+                FloatComparison::Native(FloatValue::Double(
+                    unsafe { f64::from_datum(datum, false) }
+                        .ok_or(IcebergFilterError::DatumDecode { type_oid })?,
+                )),
+            )),
+            PlannedValueType::FloatToDouble => Some(BoundComparisonValue::Float(
+                FloatComparison::Native(FloatValue::Double(f64::from(
+                    unsafe { f32::from_datum(datum, false) }
+                        .ok_or(IcebergFilterError::DatumDecode { type_oid })?,
+                ))),
+            )),
+            PlannedValueType::DoubleToFloat => {
+                Some(BoundComparisonValue::Float(FloatComparison::DoubleOnFloat(
+                    unsafe { f64::from_datum(datum, false) }
+                        .ok_or(IcebergFilterError::DatumDecode { type_oid })?,
+                )))
             }
             PlannedValueType::Date => {
                 let days = unsafe { i32::from_datum(datum, false) }

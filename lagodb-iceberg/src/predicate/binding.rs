@@ -11,6 +11,7 @@ use lagodb_core::expr::{RuntimeValue, RuntimeValueBindings};
 
 use super::IcebergPredicateBuilder;
 use super::error::IcebergFilterError;
+use super::float::FloatComparison;
 use super::plan::{
     PlannedComparisonOperator, PlannedIcebergColumn, PlannedIcebergNode,
     PlannedIcebergPredicate, PlannedValueType,
@@ -58,6 +59,19 @@ impl BoundIcebergPredicate {
 
     /// Conjoin the predicates the Arrow reader evaluates. A set stays with file
     /// pruning; `PredicatePushdownPolicy` records why.
+    ///
+    /// iceberg-lite, like iceberg-rust, evaluates this filter on each file's
+    /// own column types, before type promotion, and casts the literal down to
+    /// the file's type (`try_cast_literal`). On a file written before an
+    /// `int` -> `long`, `float` -> `double`, decimal precision or `date` ->
+    /// `timestamp` promotion, an out-of-range literal becomes NULL and a double
+    /// literal is rounded to real, so the filter can drop rows PostgreSQL
+    /// keeps. Only foreign tables are exposed: managed tables reject
+    /// `ALTER COLUMN TYPE`. The defect is upstream's; merge the fix into
+    /// iceberg-lite once it lands rather than gating promoted columns here.
+    ///
+    /// https://github.com/apache/iceberg-rust/issues/3122
+    /// https://github.com/apache/iceberg-rust/pull/3540
     pub(crate) fn conjoin_row_filter<'a>(
         predicates: impl IntoIterator<Item = &'a Self>,
     ) -> Option<Predicate> {
@@ -231,6 +245,9 @@ impl IcebergFilterBinder<'_> {
             BoundComparisonValue::Timestamp(value) => {
                 return Ok(value.bind(Self::builder(column), operator));
             }
+            BoundComparisonValue::Float(value) => {
+                value.bind(Self::builder(column), operator)
+            }
             BoundComparisonValue::Datum(datum) => {
                 Self::builder(column).comparison(operator.into(), datum)
             }
@@ -290,6 +307,7 @@ impl IcebergFilterBinder<'_> {
 
 enum BoundComparisonValue {
     Timestamp(TimestampComparison),
+    Float(FloatComparison),
     Datum(Datum),
     OutsideFinite(Decimal128ComparisonValue),
     OutsideInteger(Int32OutOfRange),

@@ -474,17 +474,17 @@ CROSS JOIN query_offload_explain_json(
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT count(*) FILTER (WHERE random() >= 0)
 FROM query_offload_explain_left;
-                                    QUERY PLAN                                    
-----------------------------------------------------------------------------------
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Output: (count(*) FILTER (WHERE (random() >= '0'::double precision)))
    Engine: DataFusion
    Maximum Batch Rows: 2
    PostgreSQL Expression Fallbacks: 1
    ->  Projection
-         Output: COUNT(*) FILTER (WHERE PostgreSQL volatile expression)
+         Output: COUNT(*) FILTER (WHERE (PostgreSQL volatile expression >= Runtime Binding 1))
          ->  Aggregate
-               Aggregates: COUNT(*) FILTER (WHERE PostgreSQL volatile expression)
+               Aggregates: COUNT(*) FILTER (WHERE (PostgreSQL volatile expression >= Runtime Binding 1))
                ->  Table Scan on public.query_offload_explain_left
                      Access Method: iceberg
                      Scan ID: 0

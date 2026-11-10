@@ -195,9 +195,9 @@ JOIN query_offload_join_right AS r
   ON l.key_numeric = r.key_numeric
  AND l.key_text = r.key_text;
 
--- PostgreSQL makes every NaN equal for float join operators, while the
--- DataFusion hash-key implementation does not provide that contract. Force
--- mode must therefore retain the PostgreSQL plan for both float widths.
+-- Float join keys run in the engine: DataFusion folds -0 into +0 and keeps
+-- NaN payloads apart. Both inputs store PostgreSQL's canonical NaN, so the
+-- offload result matches PostgreSQL; see docs/query-offload-semantics.md.
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT count(*) AS matches

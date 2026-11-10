@@ -2,12 +2,14 @@
 
 use std::sync::Arc;
 
+use arrow_schema::DataType;
 use datafusion::common::DataFusionError;
 use datafusion::functions_aggregate::expr_fn::{
     array_agg, avg, bool_and, bool_or, count, max, min, stddev, stddev_pop, sum,
     var_pop, var_sample,
 };
 use datafusion::logical_expr::expr::{AggregateFunction, Sort};
+use datafusion::logical_expr::expr_fn::cast;
 use datafusion::logical_expr::{Expr, ScalarUDF, lit};
 use pgrx::pg_sys;
 
@@ -41,17 +43,27 @@ impl DataFusionLogicalPlanCompiler<'_> {
         let expression = match (aggregate.kind(), argument) {
             (AggregateKind::Count, None) => count(lit(1_i64)),
             (AggregateKind::Count, Some(argument)) => count(argument),
-            // Float MIN/MAX delegates to DataFusion. Its native partial ordering
-            // does not implement PostgreSQL's rule that NaN is greater than every
-            // non-NaN value, so a NaN result can depend on input order. This
-            // execution-semantic difference is explicitly admitted by the
-            // current aggregate capability.
+            // Float MIN/MAX delegates to DataFusion. Its grouped accumulator
+            // replaces the state whenever `partial_cmp` is None (min_max.rs),
+            // so any comparison involving NaN keeps the later value; PostgreSQL
+            // treats NaN as greater than every non-NaN value. The result depends
+            // on input order, an accepted engine difference recorded in
+            // docs/query-offload-semantics.md.
             (AggregateKind::Min, Some(argument)) => min(argument),
             (AggregateKind::Max, Some(argument)) => max(argument),
             // Keep integer-input SUM/AVG on DataFusion's optimized native
-            // AggregateExec path. See AggregateKind's semantic gate for the
-            // intentional PostgreSQL precision differences this inherits.
-            (AggregateKind::Sum, Some(argument)) => sum(argument),
+            // AggregateExec path. SUM(int8) is widened to its exact decimal
+            // first because native Int64 SUM wraps; integer AVG inherits the
+            // Float64 precision documented by AggCall::supports_having_result.
+            (AggregateKind::Sum, Some(argument)) => {
+                match aggregate.int8_sum_decimal() {
+                    Some(decimal) => sum(cast(
+                        argument,
+                        DataType::Decimal128(decimal.precision(), decimal.scale()),
+                    )),
+                    None => sum(argument),
+                }
+            }
             (AggregateKind::Average, Some(argument)) => avg(argument),
             (AggregateKind::NumericSum, Some(argument)) => {
                 numeric_aggregate::sum().call(vec![argument])
@@ -109,8 +121,14 @@ impl DataFusionLogicalPlanCompiler<'_> {
         // The first aggregate-DISTINCT capability intentionally uses
         // DataFusion's native state semantics. In DataFusion 55, floating-point
         // DISTINCT keys use their bit representation: -0/+0 and distinct NaN
-        // payloads can remain separate even though PostgreSQL considers each
-        // pair equal. AVG/variance coerce integer inputs to Float64 before
+        // payloads remain separate even though PostgreSQL considers each pair
+        // equal. DataFusion's own `=`, join keys and GROUP BY fold -0 into +0,
+        // so this is an upstream-owned defect, not engine-wide behavior, and
+        // is not worked around here. Upstream tracks `count(DISTINCT)` as an
+        // open step of https://github.com/apache/datafusion/issues/26138 (no
+        // fix yet); NaN payload equality is
+        // https://github.com/apache/datafusion/issues/26091.
+        // AVG/variance coerce integer inputs to Float64 before
         // DISTINCT evaluation, so distinct int8 values outside Float64's exact
         // integer domain (above 2^53 in magnitude) can collapse to one key.
         // Collated text uses Arrow byte equality, and growing distinct state is

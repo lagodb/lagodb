@@ -3,6 +3,7 @@
 mod binding;
 mod builder;
 mod error;
+mod float;
 mod plan;
 mod planner;
 pub(crate) mod policy;

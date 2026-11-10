@@ -15,8 +15,9 @@ pub use lagodb_core::expr::PgComparisonKind as ComparisonKind;
 /// Provider pruning keeps its separate, smaller IR. Exact query execution may
 /// additionally use PostgreSQL boolean operators, deterministic byte equality,
 /// and PostgreSQL-recognized C-equivalent text comparisons; HAVING also admits
-/// unbounded-typmod NUMERIC values
-/// produced by integer SUM/AVG aggregates.
+/// the unbounded-typmod NUMERIC values produced by integer AVG aggregates.
+/// Float comparisons and grouping inherit DataFusion's NaN semantics, an
+/// accepted engine difference listed in docs/query-offload-semantics.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarSemantics {
     Integer,
@@ -56,9 +57,23 @@ impl ScalarSemantics {
                 matches!(self, Self::Exact)
                     && value_type.collation == pg_sys::InvalidOid
             }
-            pg_sys::BOOLOID => {
+            pg_sys::BOOLOID
+            // For floats, DataFusion 55 normalizes -0 to +0 before every
+            // comparison kernel (datafusion-physical-expr-common `apply_cmp`),
+            // so only NaN differs from PostgreSQL: Arrow's IEEE totalOrder
+            // places a negative-sign NaN below every number and keeps NaN
+            // payloads distinct, where PostgreSQL treats every NaN as one
+            // value above +Infinity. Comparisons with a NaN constant are
+            // lowered to exact NaN tests before reaching this domain.
+            // DataFusion 55's IN-list skips that normalization and compares
+            // float bits, so `f IN (0.0)` misses -0 rows. This is an
+            // upstream-owned defect, not worked around here; it is fixed by
+            // https://github.com/apache/datafusion/pull/25186 (merged after
+            // DataFusion 55) and recorded in docs/query-offload-semantics.md.
+            | pg_sys::FLOAT4OID
+            | pg_sys::FLOAT8OID => {
                 !matches!(self, Self::Integer)
-                    && value_type.collation.to_u32() == pg_sys::InvalidOid.to_u32()
+                    && value_type.collation == pg_sys::InvalidOid
             }
             pg_sys::TEXTOID => {
                 matches!(self, Self::Exact)
@@ -143,20 +158,25 @@ impl ScalarSemantics {
         }
     }
 
-    /// Whether DataFusion's native hash grouping exactly implements this
-    /// PostgreSQL scalar domain.
+    /// Whether DataFusion's native hash grouping implements this PostgreSQL
+    /// scalar domain.
     ///
     /// Deterministic PostgreSQL TEXT/VARCHAR equality uses the same UTF-8 bytes
     /// stored in Arrow, independently of the collation's ordering. BPCHAR and
     /// NAME retain PostgreSQL-specific value semantics that the provider-neutral
     /// query contract does not prove. String ordering remains a separate,
-    /// stricter capability owned by Sort.
+    /// stricter capability owned by Sort. Float group values fold -0 into +0
+    /// but keep NaN payloads apart, the accepted engine difference shared with
+    /// query DISTINCT.
     pub fn supports_hash_group_key(self, value_type: ExprType) -> bool {
         if self != Self::Exact {
             return false;
         }
         match value_type.type_oid {
-            pg_sys::INT4OID | pg_sys::INT8OID => self.supports_type(value_type),
+            pg_sys::INT4OID
+            | pg_sys::INT8OID
+            | pg_sys::FLOAT4OID
+            | pg_sys::FLOAT8OID => self.supports_type(value_type),
             pg_sys::TEXTOID | pg_sys::VARCHAROID => {
                 let typmod_is_normalized = value_type.typmod == -1
                     || (value_type.type_oid == pg_sys::VARCHAROID
