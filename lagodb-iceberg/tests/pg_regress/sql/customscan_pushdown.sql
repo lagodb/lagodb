@@ -1,4 +1,6 @@
 -- Predicate pushdown, residual filtering, pruning, and path costing.
+-- PostgreSQL 15 has no presorted aggregates, so its plans have no Sort below
+-- an ordered or DISTINCT aggregate; _1.out is the PostgreSQL 15 output.
 
 -- Exact equality: plans and results.
 

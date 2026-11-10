@@ -33,8 +33,28 @@ pub struct MaintenanceCommand {
 }
 
 impl MaintenanceCommand {
-    /// PostgreSQL VACOPT flags produced by command preparation.
-    pub const fn options(&self) -> pg_sys::bits32 {
-        self.params.options
+    /// Whether VACUUM processes the main relation. PostgreSQL 16 added
+    /// `PROCESS_MAIN`; before that VACUUM always does.
+    pub const fn processes_main(&self) -> bool {
+        #[cfg(feature = "pg15")]
+        let processes = true;
+        #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+        let processes = self.params.options & pg_sys::VACOPT_PROCESS_MAIN != 0;
+        processes
+    }
+
+    /// Whether VACUUM finishes by updating `datfrozenxid`. PostgreSQL 16 added
+    /// `SKIP_DATABASE_STATS`; before that a user VACUUM always does.
+    pub(super) const fn updates_database_stats(&self) -> bool {
+        #[cfg(feature = "pg15")]
+        let updates = true;
+        #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+        let updates = self.params.options & pg_sys::VACOPT_SKIP_DATABASE_STATS == 0;
+        updates
+    }
+
+    /// Whether the command also runs ANALYZE (`VACUUM ANALYZE`).
+    pub(super) const fn analyzes(&self) -> bool {
+        self.params.options & pg_sys::VACOPT_ANALYZE != 0
     }
 }

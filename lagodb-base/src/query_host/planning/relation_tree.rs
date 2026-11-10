@@ -14,6 +14,7 @@ use pgrx::pg_sys;
 
 use super::candidate::{ScannableRelation, SingleRelationCandidate};
 use super::expression::{ExpressionSourceCatalog, QueryExpressionPlanner};
+use super::planner_info::PlannerInfoExt;
 pub(super) use node::PlannedRelationInput;
 use node::RelationNode;
 
@@ -83,7 +84,9 @@ impl RelationTreePlanner {
         let planner = unsafe { &*root };
         let input = unsafe { &*input_rel };
         if !input.lateral_relids.is_null()
-            || unsafe { !pg_sys::bms_equal(input.relids, planner.all_query_rels) }
+            || unsafe {
+                !pg_sys::bms_equal(input.relids, planner.final_join_relids())
+            }
         {
             return None;
         }

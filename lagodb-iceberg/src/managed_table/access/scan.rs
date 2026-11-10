@@ -129,14 +129,14 @@ impl IcebergScanState {
         ))))
     }
 
-    /// PostgreSQL 16 never passes the invocation's selected columns, `targrows`,
+    /// PostgreSQL 15 and 16 never pass the invocation's selected columns, `targrows`,
     /// or inherited `childtargrows` to the callbacks, so this captures the
     /// relation-local approximation while the relation is still borrowed. It
     /// covers built-in non-inherited scans, but can overproduce for a column
     /// list or underfill a child allocation made from its parent's targets.
     /// Every admitted column type uses a built-in analyzer unless a superuser
     /// replaces it with `ALTER TYPE ... SET (ANALYZE = ...)`.
-    #[cfg(feature = "pg16")]
+    #[cfg(any(feature = "pg15", feature = "pg16"))]
     fn analyze(rel: &RelationHandle, relation: &ScanRelation) -> AmResult<Self> {
         let sample_budget = rel.analyze_sample_budget()?;
         Ok(Self::Analyze(Box::new(AnalyzeScanState::pending(
@@ -241,7 +241,7 @@ impl AmScanSession for IcebergScan {
         Ok(())
     }
 
-    #[cfg(feature = "pg16")]
+    #[cfg(any(feature = "pg15", feature = "pg16"))]
     fn scan_analyze_next_block(
         &mut self,
         block: pg_sys::BlockNumber,

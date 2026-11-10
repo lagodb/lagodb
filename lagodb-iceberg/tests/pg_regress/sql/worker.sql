@@ -529,7 +529,8 @@ WHERE item_id IN (
     '00000000-0000-0000-0000-000000000003'
 );
 
--- PostgreSQL 17 introduced injection points; _1.out is the PostgreSQL 16 output.
+-- PostgreSQL 17 introduced injection points; _1.out is the PostgreSQL 15 and
+-- 16 output.
 \if :has_injection_points
 \connect :regress_database
 SELECT injection_points_attach(
@@ -749,10 +750,8 @@ SELECT pg_backend_pid()::text AS lagodb_regress_backend_pid,
 \setenv LAGODB_REGRESS_STORAGE_PID :lagodb_regress_storage_pid
 \setenv LAGODB_REGRESS_BACKEND_PID :lagodb_regress_backend_pid
 \setenv LAGODB_REGRESS_SLOT :lagodb_regress_slot
-\! bin/storage_worker_pause_guard start
-\if :SHELL_ERROR
-    \quit 1
-\endif
+\set fixture_command 'bin/storage_worker_pause_guard start'
+\i ../../../scripts/pg_regress/fixture_command.sql
 
 SELECT lagodb.request_worker_wakeup('lagodb_base', 'maintenance');
 DO $$
@@ -835,10 +834,8 @@ END
 $$;
 
 -- 6. Restore process state and remove every worker-owned fixture.
-\! bin/storage_worker_pause_guard release
-\if :SHELL_ERROR
-    \quit 1
-\endif
+\set fixture_command 'bin/storage_worker_pause_guard release'
+\i ../../../scripts/pg_regress/fixture_command.sql
 DO $$
 DECLARE
     recovered boolean := false;

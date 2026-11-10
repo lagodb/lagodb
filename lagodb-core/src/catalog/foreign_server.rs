@@ -2,6 +2,7 @@ use std::ffi::CStr;
 
 use pgrx::{PgTryBuilder, pg_sys};
 
+use super::CatalogObject;
 use crate::diag::{PgError, PgReportError};
 
 /// Existing foreign-server target admitted for provider ALTER policy checks.
@@ -23,11 +24,9 @@ impl ForeignServerDdlTarget {
                 if server_oid == pg_sys::InvalidOid {
                     return Ok(None);
                 }
-                if !pg_sys::object_ownercheck(
-                    pg_sys::ForeignServerRelationId,
-                    server_oid,
-                    pg_sys::GetUserId(),
-                ) {
+                if !CatalogObject::ForeignServer(server_oid)
+                    .is_owned_by(pg_sys::GetUserId())
+                {
                     pg_sys::aclcheck_error(
                         pg_sys::AclResult::ACLCHECK_NOT_OWNER,
                         pg_sys::ObjectType::OBJECT_FOREIGN_SERVER,

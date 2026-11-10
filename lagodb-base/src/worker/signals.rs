@@ -52,7 +52,7 @@ impl BackgroundWorkerSignals {
     }
 
     unsafe fn install_handler(signal: i32, handler: pg_sys::pqsigfunc) {
-        #[cfg(any(feature = "pg16", feature = "pg17"))]
+        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
         unsafe {
             pg_sys::pqsignal(signal, handler);
         }

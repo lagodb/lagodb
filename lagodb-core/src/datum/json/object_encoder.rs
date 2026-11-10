@@ -296,7 +296,8 @@ impl JsonEncodeBuffer {
     unsafe fn append_datum(&mut self, encoder: JsonObjectDatumEncoder, datum: Datum) {
         match encoder {
             JsonObjectDatumEncoder::Boolean => {
-                self.append_bytes(if unsafe { pg_sys::DatumGetBool(datum) } {
+                // `DatumGetBool`: any nonzero Datum is true.
+                self.append_bytes(if datum.value() != 0 {
                     b"true"
                 } else {
                     b"false"

@@ -32,7 +32,10 @@ lagodb_index_unique_violation(Relation index, Relation heap,
 {
 	char	   *key_desc;
 
-	/* PostgreSQL 16 declares the arrays without const; it only reads them. */
+	/*
+	 * PostgreSQL 15 and 16 declare the arrays without const; they only read
+	 * them.
+	 */
 	key_desc = BuildIndexValueDescription(index, (Datum *) values,
 										  (bool *) isnull);
 

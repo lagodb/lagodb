@@ -60,7 +60,7 @@ impl<'a> TupleDescHandle<'a> {
         // array immediately after `natts` compact attributes; this is the
         // inlined `TupleDescAttrAddress` calculation used by PostgreSQL and
         // pgrx's `PgTupleDesc`, and avoids its out-of-line C shim here.
-        #[cfg(any(feature = "pg16", feature = "pg17"))]
+        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
         let attributes = unsafe { self.inner.as_ref().attrs.as_ptr() };
         #[cfg(feature = "pg18")]
         let attributes =

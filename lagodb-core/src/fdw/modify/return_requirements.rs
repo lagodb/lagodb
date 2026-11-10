@@ -92,10 +92,10 @@ impl ForeignModifyReturnRequirements {
         rtindex: pg_sys::Index,
         operation: ForeignModifyOperation,
     ) -> Result<Vec<pg_sys::AttrNumber>, ForeignModifyError> {
-        #[cfg(any(feature = "pg16", feature = "pg17"))]
+        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
         let _ = operation;
 
-        #[cfg(any(feature = "pg16", feature = "pg17"))]
+        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
         let raw_attributes = {
             // pull_varattnos also descends into the planned SubPlan test and
             // argument expressions used by RETURNING.

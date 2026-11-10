@@ -35,6 +35,10 @@ pub(crate) type TypedCopySourceCallback =
     ) -> LagodbTypedCopyRowResult;
 pub(crate) type TypedCopyDestinationCallback =
     unsafe extern "C-unwind" fn(*mut c_void, *mut pg_sys::TupleTableSlot, *mut u64);
+/// `copy_data_dest_cb`, which `lagodb_copy.h` also declares before
+/// PostgreSQL 16 added it to commands/copy.h.
+pub(crate) type CopyDataDestCallback =
+    Option<unsafe extern "C-unwind" fn(*mut c_void, std::ffi::c_int)>;
 
 #[repr(C)]
 pub(crate) struct LagodbCopyPreparation {
@@ -143,7 +147,7 @@ unsafe extern "C-unwind" {
         query_rel_id: pg_sys::Oid,
         filename: *const std::ffi::c_char,
         is_program: bool,
-        data_dest_cb: pg_sys::copy_data_dest_cb,
+        data_dest_cb: CopyDataDestCallback,
         attnamelist: *mut pg_sys::List,
         options: *mut pg_sys::List,
         typed_output: bool,
@@ -341,7 +345,7 @@ impl CopyBridge {
         query_relation: pg_sys::Oid,
         filename: *const std::ffi::c_char,
         is_program: bool,
-        data_dest_cb: pg_sys::copy_data_dest_cb,
+        data_dest_cb: CopyDataDestCallback,
         attnamelist: *mut pg_sys::List,
         options: *mut pg_sys::List,
         typed_output: bool,

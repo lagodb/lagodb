@@ -2,6 +2,8 @@
 -- Foreign scan binding, transaction visibility, worker reconstruction and
 -- nested output contracts. Operator matrices live in the focused managed-table
 -- suites; this file keeps representative foreign-provider integration cases.
+-- PostgreSQL 15 has no presorted aggregates, so its plans have no Sort below
+-- an ordered or DISTINCT aggregate; _1.out is the PostgreSQL 15 output.
 
 \setenv PGDATABASE :DBNAME
 \set iceberg_fixture query-offload-writes

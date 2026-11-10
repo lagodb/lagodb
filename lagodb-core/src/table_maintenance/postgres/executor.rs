@@ -116,13 +116,11 @@ impl MaintenanceExecutor {
                 }
             }
             pg_sys::StartTransactionCommand();
-            if plan.command.params.options & pg_sys::VACOPT_SKIP_DATABASE_STATS == 0 {
+            if plan.command.updates_database_stats() {
                 pg_sys::vac_update_datfrozenxid();
             }
 
-            if plan.command.params.options & pg_sys::VACOPT_ANALYZE != 0
-                && !rewritten.is_empty()
-            {
+            if plan.command.analyzes() && !rewritten.is_empty() {
                 // vacuum() runs a single-relation ANALYZE in this transaction
                 // under the caller's snapshot, and pops it for several. The
                 // Portal expects the stack it left: empty after VACUUM.

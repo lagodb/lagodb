@@ -2,8 +2,8 @@
 
 ## PostgreSQL source provenance
 
-- Baseline releases: PostgreSQL 16.15, 17.11 and 18.6
-- Upstream tags: `REL_16_15`, `REL_17_11` and `REL_18_6`
+- Baseline releases: PostgreSQL 15.19, 16.15, 17.11 and 18.6
+- Upstream tags: `REL_15_19`, `REL_16_15`, `REL_17_11` and `REL_18_6`
 - Private layout source (PostgreSQL 17 and 18): `src/backend/storage/aio/read_stream.c`
 - Private layout SHA-256 epochs:
   - PG17.0-17.4:
@@ -14,6 +14,8 @@
     `14d2016e5c51e8705b357450b3d561edf1af6c44907e77edb7a902e1ef91693f`
 - ANALYZE owner: `src/backend/commands/analyze.c`
 - ANALYZE SHA-256:
+  - PG15.19:
+    `97a46447c66004b218b821a6959e0c878cd0cabdb4c6f800f431d44adb689b9b`
   - PG16.15:
     `41ff28e75d8bc04a678349f9905ba56c4175e166eadff536fdf0d6f5ef745698`
   - PG17.11:
@@ -71,18 +73,24 @@ The batching flag therefore does not change provider ticket order, count, or
 lifetime. Native TableAM implementations continue to use PostgreSQL's normal
 buffer-reading path, where the flag controls batched asynchronous I/O.
 
-## PostgreSQL 16
+## PostgreSQL 15 and 16
 
-PostgreSQL 16 has no `ReadStream`, so `build.rs` omits this adapter and the
-sampler has no private layout to read. `acquire_sample_rows()` drives
+PostgreSQL 15 drives the same TableAM sampling contract as PostgreSQL 16:
+`acquire_sample_rows()`, `acquire_inherited_sample_rows()`, the `targrows`
+derivation and `std_typanalyze()`'s `minrows` are unchanged from PG15.0 through
+PG15.19 and PG16.15, as is `statext_compute_stattarget()`. PG16 narrowed
+`pg_attribute.attstattarget` from int4 to int2, which the sample budget reads.
+
+PostgreSQL 15 and 16 have no `ReadStream`, so `build.rs` omits this adapter and
+the sampler has no private layout to read. `acquire_sample_rows()` drives
 `scan_analyze_next_block(scan, blockno, bstrategy)` and scales
 `liverows / bs.m` by `RelationGetNumberOfBlocks()`. Core exposes that callback
-through a PG16-only `TableAccessMethod` signature; it does not emulate the
+through a PG15/PG16-only `TableAccessMethod` signature; it does not emulate the
 ticket protocol. A provider without PostgreSQL blocks reports its row-weight
 correction through `AnalyzeTupleOutcome::end_of_block_with_live_delta`.
 
-On `USE_PREFETCH` builds, such as PG16 on Linux, `PrefetchBuffer()` reaches
-`mdprefetch()`, which requires the block's segment file to exist. The first
+On `USE_PREFETCH` builds, such as PG15 and PG16 on Linux, `PrefetchBuffer()`
+reaches `mdprefetch()`, which requires the block's segment file to exist. The first
 main-fork segment that holds a provider's synthetic blocks must therefore exist,
 although it can be empty, and `relation_size` must stay within `RELSEG_SIZE`.
 `RelFileLocator::create_storage` WAL-logs that fork for permanent and UNLOGGED
@@ -94,18 +102,18 @@ ANALYZE blocks, that value is about 1/1024 of its `BLCKSZ` page count, short of
 rounding and the `RELSEG_SIZE` cap. The planner does not read it, because
 `relation_estimate_size` reports `BLCKSZ` pages from storage bytes.
 
-PostgreSQL 16 keeps `targrows` private, so `RelationHandle::analyze_sample_budget`
-offers `max(100, 300 * largest resolved statistics target)` rows. That covers
+PostgreSQL 15 and 16 keep `targrows` private, so
+`RelationHandle::analyze_sample_budget` offers `max(100, 300 * largest resolved statistics target)` rows. That covers
 PostgreSQL's built-in analyzers. A custom `typanalyze` that sets a larger
 `minrows` silently gets a smaller sample, as `VacAttrStats` permits; LagoDB
 neither rejects it nor logs per-ANALYZE warnings. Managed Iceberg reaches this
 only after a superuser replaces an analyzer with
 `ALTER TYPE ... SET (ANALYZE = ...)`, because its type admission is a closed set.
 
-### Why PG16 has no LagoDB ANALYZE executor/fork
+### Why PG15 and PG16 have no LagoDB ANALYZE executor/fork
 
-LagoDB deliberately leaves PG16 ANALYZE under PostgreSQL's native
-`analyze_rel()` and `do_analyze_rel()` control flow. The PG16 TableAM boundary
+LagoDB deliberately leaves PG15/PG16 ANALYZE under PostgreSQL's native
+`analyze_rel()` and `do_analyze_rel()` control flow. The PG15/PG16 TableAM boundary
 does not expose enough invocation context to reproduce that control flow in a
 provider callback:
 
@@ -118,7 +126,7 @@ provider callback:
 - `acquire_inherited_sample_rows()` computes each proportional
   `childtargrows`, then passes it to `acquire_sample_rows()` without exposing it
   through TableAM.
-- PG16 calls `PrefetchBuffer()` directly from `acquire_sample_rows()`, outside
+- PG15/PG16 calls `PrefetchBuffer()` directly from `acquire_sample_rows()`, outside
   a TableAM callback that a non-heap provider could intercept or veto.
 
 Consequently, neither a Rust TableAM adapter nor a provider-local state object
@@ -128,7 +136,7 @@ approximation; it cannot reconstruct the current invocation because a
 column-list ANALYZE and an inherited parent use context that is absent at the
 TableAM boundary.
 
-Removing these limitations would require core to own a PG16-specific copy of
+Removing these limitations would require core to own a PG15/PG16-specific copy of
 the ANALYZE executor around `do_analyze_rel()`, `acquire_sample_rows()`, and
 `acquire_inherited_sample_rows()`, or require a PostgreSQL kernel change. That
 fork would have to track PostgreSQL's type and index analyzers, memory contexts,
@@ -141,11 +149,11 @@ ANALYZE and autovacuum. This preserves PostgreSQL's scheduling, lifecycle, and
 statistics-publication semantics and avoids a large version-specific source
 fork. The tradeoff is intentional: built-in non-inherited ANALYZE remains
 statistically valid, while the inherited sample-composition limitations below
-are documented PG16 capability restrictions.
+are documented PG15/PG16 capability restrictions.
 
-### Consequences of not owning the PG16 ANALYZE executor
+### Consequences of not owning the PG15/PG16 ANALYZE executor
 
-The PG16 TableAM callbacks expose neither the invocation's selected columns nor
+The PG15/PG16 TableAM callbacks expose neither the invocation's selected columns nor
 its actual `targrows`. For inherited ANALYZE they also hide the `childtargrows`
 that PostgreSQL computed from the parent's statistics requirements and child
 sizes. The relation-local budget is therefore exact enough for built-in,
@@ -158,7 +166,7 @@ non-inherited ANALYZE, but has two known consequences:
   `childtargrows` contributes too few rows to the parent's combined sample.
   That changes the parent's MCV, histogram, and selectivity statistics.
 
-PG16 also uses the same `relation_size` both as the block-sampling population
+PG15/PG16 also uses the same `relation_size` both as the block-sampling population
 and as the inherited child-size weight, while prefetching those block numbers
 through heap storage before the TableAM callback. Iceberg maps 8 MiB to one
 synthetic block and caps the result at `RELSEG_SIZE` to keep prefetch inside the
@@ -169,7 +177,7 @@ row-count estimates but cannot reweight the rows already combined for parent
 column statistics.
 
 These limitations do not bias a non-inherited built-in ANALYZE. Removing them
-requires core to own the PG16 `acquire_sample_rows()` and inherited allocation
+requires core to own the PG15/PG16 `acquire_sample_rows()` and inherited allocation
 control flow so it can pass the exact target and separate logical child weight
 from physical prefetch. Adjusting the relation-local budget or synthetic block
 constant alone cannot recover that hidden invocation context.

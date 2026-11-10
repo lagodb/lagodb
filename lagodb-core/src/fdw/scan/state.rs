@@ -19,6 +19,8 @@ use super::pushdown::{
     StartForeignScanContext,
 };
 use super::slot::{ScanOutputLayout, ScanSlotWriter, SlotWriteLayout};
+#[cfg(feature = "pg15")]
+use crate::handles::ExecutorHandle;
 use crate::handles::{RelationHandle, SnapshotHandle};
 
 /// Rust-owned payload kept behind `ForeignScanState.fdw_state`.
@@ -105,6 +107,14 @@ impl<P: FdwScan> ForeignScanStateWrapper<P> {
         let econtext = unsafe { (*node).ss.ps.ps_ExprContext };
         let snapshot = unsafe { (*estate).es_snapshot };
         let query_context = unsafe { (*estate).es_query_cxt };
+        // The framework plans only base-relation scans, so `scanrelid` names
+        // the scanned table. PostgreSQL 16 copies its `checkAsUser` into the
+        // plan.
+        #[cfg(feature = "pg15")]
+        let effective_user_id = unsafe {
+            ExecutorHandle::from_raw(estate).range_table_user((*plan).scan.scanrelid)
+        };
+        #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
         let effective_user_id = unsafe {
             if (*plan).checkAsUser != pg_sys::InvalidOid {
                 (*plan).checkAsUser

@@ -222,8 +222,9 @@ pub trait AmScanSession {
         unsupported_callback("scan_sample_next_tuple")
     }
 
-    /// PostgreSQL 16 chooses each block itself and keeps its sampler private.
-    #[cfg(feature = "pg16")]
+    /// PostgreSQL 15 and 16 choose each block themselves and keep the sampler
+    /// private.
+    #[cfg(any(feature = "pg15", feature = "pg16"))]
     fn scan_analyze_next_block(
         &mut self,
         block: pg_sys::BlockNumber,

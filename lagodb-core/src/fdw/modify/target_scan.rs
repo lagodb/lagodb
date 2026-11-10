@@ -61,7 +61,7 @@ impl<P: FdwModify> ForeignModifyTargetScan<P> {
             }
         }
         unsafe {
-            pg_sys::planstate_tree_walker_impl(
+            pg_sys::planstate_tree_walker(
                 plan_state,
                 Some(Self::walker),
                 core::ptr::from_mut(self).cast(),

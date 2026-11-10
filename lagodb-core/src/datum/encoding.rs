@@ -14,7 +14,7 @@ impl PgEncodingNames {
     /// Whether PostgreSQL resolves `name`, as COPY's `ENCODING` option does.
     pub fn contains(name: &CStr) -> bool {
         // SAFETY: `name` is NUL-terminated and outlives this table lookup.
-        #[cfg(feature = "pg16")]
+        #[cfg(any(feature = "pg15", feature = "pg16"))]
         let encoding = unsafe { pg_sys::pg_char_to_encoding(name.as_ptr()) };
         // SAFETY: as above.
         #[cfg(any(feature = "pg17", feature = "pg18"))]

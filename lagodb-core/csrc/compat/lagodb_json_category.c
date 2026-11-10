@@ -50,9 +50,9 @@ lagodb_json_categorize_type(Oid typoid, Oid *outfuncoid)
 
 /*
  * Source-derived from json_categorize_type() in PostgreSQL 17.11
- * src/backend/utils/adt/jsonfuncs.c with is_jsonb = false. PostgreSQL 16
- * keeps its variant static in json.c and leaves outfuncoid unset for the
- * categories that do not call an output function.
+ * src/backend/utils/adt/jsonfuncs.c with is_jsonb = false. PostgreSQL 15
+ * and 16 keep an identical variant static in json.c, which leaves outfuncoid
+ * unset for the categories that do not call an output function.
  */
 uint32
 lagodb_json_categorize_type(Oid typoid, Oid *outfuncoid)

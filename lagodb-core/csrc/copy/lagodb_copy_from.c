@@ -59,7 +59,9 @@
 #include "foreign/fdwapi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#if LAGODB_PG16_GE
 #include "nodes/miscnodes.h"
+#endif
 #include "optimizer/optimizer.h"
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
@@ -273,12 +275,14 @@ CopyFromErrorCallback(void *arg)
 {
 	CopyFromState cstate = (CopyFromState) arg;
 
+#if LAGODB_PG16_GE
 	if (cstate->relname_only)
 	{
 		errcontext("COPY %s",
 				   cstate->cur_relname);
 		return;
 	}
+#endif
 	if (cstate->opts.binary)
 	{
 		/* can't usefully display the data */
@@ -480,6 +484,7 @@ CopyMultiInsertBufferFlush(CopyMultiInsertInfo *miinfo,
 	TupleTableSlot **slots = buffer->slots;
 	int			i;
 
+#if LAGODB_PG16_GE
 	if (resultRelInfo->ri_FdwRoutine)
 	{
 		int			batch_size = resultRelInfo->ri_BatchSize;
@@ -557,6 +562,10 @@ CopyMultiInsertBufferFlush(CopyMultiInsertInfo *miinfo,
 		cstate->relname_only = false;
 	}
 	else
+#else
+	/* PostgreSQL 15 COPY never buffers rows for a foreign table. */
+	Assert(resultRelInfo->ri_FdwRoutine == NULL);
+#endif
 	{
 		CommandId	mycid = miinfo->mycid;
 		int			ti_options = miinfo->ti_options;
@@ -597,10 +606,17 @@ CopyMultiInsertBufferFlush(CopyMultiInsertInfo *miinfo,
 				List	   *recheckIndexes;
 
 				cstate->cur_lineno = buffer->linenos[i];
+#if LAGODB_PG16_GE
 				recheckIndexes =
 					ExecInsertIndexTuples(resultRelInfo,
 										  buffer->slots[i], estate, false,
 										  false, NULL, NIL, false);
+#else
+				recheckIndexes =
+					ExecInsertIndexTuples(resultRelInfo,
+										  buffer->slots[i], estate, false,
+										  false, NULL, NIL);
+#endif
 				ExecARInsertTriggers(estate, resultRelInfo,
 									 slots[i], recheckIndexes,
 									 cstate->transition_capture);
@@ -876,10 +892,17 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 	 * for free space is a waste of time.  This could possibly be wrong, but
 	 * it's unlikely.
 	 */
+#if LAGODB_PG16_GE
 	if (RELKIND_HAS_STORAGE(cstate->rel->rd_rel->relkind) &&
 		(cstate->rel->rd_createSubid != InvalidSubTransactionId ||
 		 cstate->rel->rd_firstRelfilelocatorSubid != InvalidSubTransactionId))
 		ti_options |= TABLE_INSERT_SKIP_FSM;
+#else
+	if (RELKIND_HAS_STORAGE(cstate->rel->rd_rel->relkind) &&
+		(cstate->rel->rd_createSubid != InvalidSubTransactionId ||
+		 cstate->rel->rd_firstRelfilenodeSubid != InvalidSubTransactionId))
+		ti_options |= TABLE_INSERT_SKIP_FSM;
+#endif
 
 	/*
 	 * Optimize if new relation storage was created in this subxact or one of
@@ -931,8 +954,13 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 					(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
 					 errmsg("cannot perform COPY FREEZE because of prior transaction activity")));
 
+#if LAGODB_PG16_GE
 		if (cstate->rel->rd_createSubid != GetCurrentSubTransactionId() &&
 			cstate->rel->rd_newRelfilelocatorSubid != GetCurrentSubTransactionId())
+#else
+		if (cstate->rel->rd_createSubid != GetCurrentSubTransactionId() &&
+			cstate->rel->rd_newRelfilenodeSubid != GetCurrentSubTransactionId())
+#endif
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					 errmsg("cannot perform COPY FREEZE because the table was not created or truncated in the current subtransaction")));
@@ -948,8 +976,10 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 #if LAGODB_PG18_GE
 	ExecInitRangeTable(estate, cstate->range_table, cstate->rteperminfos,
 					   bms_make_singleton(1));
-#else
+#elif LAGODB_PG16_GE
 	ExecInitRangeTable(estate, cstate->range_table, cstate->rteperminfos);
+#else
+	ExecInitRangeTable(estate, cstate->range_table);
 #endif
 	resultRelInfo = target_resultRelInfo = makeNode(ResultRelInfo);
 	ExecInitResultRelation(estate, resultRelInfo, 1);
@@ -982,6 +1012,8 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 		resultRelInfo->ri_FdwRoutine->BeginForeignInsert(mtstate,
 														 resultRelInfo);
 
+#if LAGODB_PG16_GE
+
 	/*
 	 * Also, if the named relation is a foreign table, determine if the FDW
 	 * supports batch insert and determine the batch size (a FDW may support
@@ -998,6 +1030,7 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 		resultRelInfo->ri_BatchSize = 1;
 
 	Assert(resultRelInfo->ri_BatchSize >= 1);
+#endif
 
 	/* Prepare to catch AFTER triggers. */
 	AfterTriggerBeginQuery();
@@ -1046,6 +1079,7 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 		 */
 		insertMethod = CIM_SINGLE;
 	}
+#if LAGODB_PG16_GE
 	else if (resultRelInfo->ri_FdwRoutine != NULL &&
 			 resultRelInfo->ri_BatchSize == 1)
 	{
@@ -1055,6 +1089,13 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 		 */
 		insertMethod = CIM_SINGLE;
 	}
+#else
+	else if (resultRelInfo->ri_FdwRoutine != NULL)
+	{
+		/* PostgreSQL 15 COPY has no batch insert into foreign tables. */
+		insertMethod = CIM_SINGLE;
+	}
+#endif
 	else if (proute != NULL && resultRelInfo->ri_TrigDesc != NULL &&
 			 resultRelInfo->ri_TrigDesc->trig_insert_new_table)
 	{
@@ -1292,10 +1333,21 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 
 				Assert(CurrentMemoryContext ==
 					   econtext->ecxt_per_tuple_memory);
+				/*
+				 * PostgreSQL 16 indexes defexprs by attribute; before that
+				 * it is parallel to defmap.
+				 */
+#if LAGODB_PG16_GE
 				myslot->tts_values[attribute_index] =
 					ExecEvalExpr(cstate->defexprs[attribute_index],
 								 econtext,
 								 &myslot->tts_isnull[attribute_index]);
+#else
+				myslot->tts_values[attribute_index] =
+					ExecEvalExpr(cstate->defexprs[i],
+								 econtext,
+								 &myslot->tts_isnull[attribute_index]);
+#endif
 			}
 		}
 		else
@@ -1395,11 +1447,19 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 				 * OF triggers, or if the partition is a foreign table that
 				 * can't use batching.
 				 */
+#if LAGODB_PG16_GE
 				leafpart_use_multi_insert = insertMethod == CIM_MULTI_CONDITIONAL &&
 					!has_before_insert_row_trig &&
 					!has_instead_insert_row_trig &&
 					(resultRelInfo->ri_FdwRoutine == NULL ||
 					 resultRelInfo->ri_BatchSize > 1);
+#else
+				/* PostgreSQL 15 never batches into a foreign partition. */
+				leafpart_use_multi_insert = insertMethod == CIM_MULTI_CONDITIONAL &&
+					!has_before_insert_row_trig &&
+					!has_instead_insert_row_trig &&
+					resultRelInfo->ri_FdwRoutine == NULL;
+#endif
 
 				/* Set the multi-insert buffer to use for this partition. */
 				if (leafpart_use_multi_insert)
@@ -1448,7 +1508,11 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 			 * We might need to convert from the root rowtype to the partition
 			 * rowtype.
 			 */
+#if LAGODB_PG16_GE
 			map = ExecGetRootToChildMap(resultRelInfo, estate);
+#else
+			map = resultRelInfo->ri_RootToPartitionMap;
+#endif
 			if (insertMethod == CIM_SINGLE || !leafpart_use_multi_insert)
 			{
 				/* non batch insert */
@@ -1603,6 +1667,7 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 											   myslot, mycid, ti_options, bistate);
 
 						if (resultRelInfo->ri_NumIndices > 0)
+#if LAGODB_PG16_GE
 							recheckIndexes = ExecInsertIndexTuples(resultRelInfo,
 																   myslot,
 																   estate,
@@ -1611,6 +1676,15 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 																   NULL,
 																   NIL,
 																   false);
+#else
+							recheckIndexes = ExecInsertIndexTuples(resultRelInfo,
+																   myslot,
+																   estate,
+																   false,
+																   false,
+																   NULL,
+																   NIL);
+#endif
 					}
 
 					/* AFTER ROW INSERT Triggers */
@@ -1917,7 +1991,9 @@ LagodbBeginCopyFrom(ParseState *pstate,
 	cstate->cur_lineno = 0;
 	cstate->cur_attname = NULL;
 	cstate->cur_attval = NULL;
+#if LAGODB_PG16_GE
 	cstate->relname_only = false;
+#endif
 
 	/*
 	 * Allocate buffers for the input pipeline.
@@ -1956,7 +2032,9 @@ LagodbBeginCopyFrom(ParseState *pstate,
 	if (pstate)
 	{
 		cstate->range_table = pstate->p_rtable;
+#if LAGODB_PG16_GE
 		cstate->rteperminfos = pstate->p_rteperminfos;
+#endif
 	}
 
 	num_defaults = 0;
@@ -1996,6 +2074,7 @@ LagodbBeginCopyFrom(ParseState *pstate,
 		fmgr_info(in_func_oid, &in_functions[attnum - 1]);
 #endif
 
+#if LAGODB_PG16_GE
 		/* Get default info if available */
 		defexprs[attnum - 1] = NULL;
 
@@ -2007,6 +2086,14 @@ LagodbBeginCopyFrom(ParseState *pstate,
 		if ((cstate->opts.default_print != NULL ||
 			 !list_member_int(cstate->attnumlist, attnum)) &&
 			!att->attgenerated)
+#else
+
+		/*
+		 * PostgreSQL 15 has no DEFAULT option, so only columns missing from
+		 * the column list need a default.
+		 */
+		if (!list_member_int(cstate->attnumlist, attnum) && !att->attgenerated)
+#endif
 		{
 			Expr	   *defexpr = (Expr *) build_column_default(cstate->rel,
 																attnum);
@@ -2016,6 +2103,7 @@ LagodbBeginCopyFrom(ParseState *pstate,
 				/* Run the expression through planner */
 				defexpr = expression_planner(defexpr);
 
+#if LAGODB_PG16_GE
 				/* Initialize executable expression in copycontext */
 				defexprs[attnum - 1] = ExecInitExpr(defexpr, NULL);
 
@@ -2026,6 +2114,16 @@ LagodbBeginCopyFrom(ParseState *pstate,
 					defmap[num_defaults] = attnum - 1;
 					num_defaults++;
 				}
+#else
+
+				/*
+				 * PostgreSQL 15's NextCopyFrom() reads defexprs in parallel
+				 * with defmap, not by attribute.
+				 */
+				defexprs[num_defaults] = ExecInitExpr(defexpr, NULL);
+				defmap[num_defaults] = attnum - 1;
+				num_defaults++;
+#endif
 
 				/*
 				 * If a default expression looks at the table being loaded,
@@ -2047,7 +2145,9 @@ LagodbBeginCopyFrom(ParseState *pstate,
 		}
 	}
 
+#if LAGODB_PG16_GE
 	cstate->defaults = (bool *) palloc0(tupDesc->natts * sizeof(bool));
+#endif
 
 	/* initialize progress */
 	pgstat_progress_start_command(PROGRESS_COMMAND_COPY,

@@ -16,6 +16,7 @@ use super::expression::{
     ResolvedOutput,
 };
 use super::planned_query::PlannedQuery;
+use super::planner_info::PlannerInfoExt;
 use super::relation_tree::{PlannedRelationInput, PlannedRelationTree};
 
 pub(super) struct AggregatePlanBuilder {
@@ -52,7 +53,7 @@ impl AggregatePlanBuilder {
     pub(super) unsafe fn build(&mut self) -> Option<PlannedQuery> {
         let parse = unsafe { &*(*self.root).parse };
         let mut groups = Vec::new();
-        let processed_groups = unsafe { (*self.root).processed_groupClause };
+        let processed_groups = unsafe { (*self.root).processed_group_clause() };
         let group_count = unsafe { pg_sys::list_length(processed_groups) };
         for index in 0..group_count {
             let clause = unsafe { pg_sys::list_nth(processed_groups, index) }

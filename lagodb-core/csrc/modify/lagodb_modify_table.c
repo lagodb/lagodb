@@ -52,7 +52,8 @@
 
 /*
  * nodeModifyTable.c fork derived primarily from PostgreSQL 17.11/18.6, then
- * audited and ported for PG16.15 control flow and API compatibility.
+ * audited and ported for PG16.15 and PG15.19 control flow and API
+ * compatibility.
  *
  * Keep upstream control flow intact. Extension differences are delimited by
  * LAGODB BEGIN/END markers; version compatibility stays at the owning method.
@@ -167,7 +168,11 @@ typedef struct ModifyTableContext
 typedef struct UpdateContext
 {
 	bool		crossPartUpdate;	/* was it a cross-partition update? */
+#if LAGODB_PG16_GE
 	TU_UpdateIndexes updateIndexes; /* Which index updates are required? */
+#else
+	bool		updateIndexes;	/* index update required? */
+#endif
 
 	/*
 	 * Lock mode to acquire on the latest tuple version before performing
@@ -184,7 +189,9 @@ static void ExecBatchInsert(ModifyTableState *mtstate,
 							int numSlots,
 							EState *estate,
 							bool canSetTag);
+#if LAGODB_HAS_INSERT_PENDING_LISTS
 static void ExecPendingInserts(EState *estate);
+#endif
 static void ExecCrossPartitionUpdateForeignKey(ModifyTableContext *context,
 											   ResultRelInfo *sourcePartInfo,
 											   ResultRelInfo *destPartInfo,
@@ -543,6 +550,12 @@ ExecCheckTIDVisible(EState *estate,
  * ri_GeneratedExprsU per result rel; but MERGE can need both, and so can
  * cross-partition UPDATEs, since a partition might be the target of both
  * UPDATE and INSERT actions.
+ *
+ * PG15 keeps a single ri_GeneratedExprs/ri_NumGeneratedNeeded pair, which
+ * ExecInitModifyTable fills for every generated column of a MERGE.  From
+ * PG15.2, the columns are also recorded in a ResultRelInfoExtra that
+ * PostgreSQL's ExecGetExtraUpdatedCols looks up; earlier PG15 releases read
+ * the planner's extraUpdatedCols instead.
  */
 void
 ExecInitStoredGenerated(ResultRelInfo *resultRelInfo,
@@ -555,7 +568,15 @@ ExecInitStoredGenerated(ResultRelInfo *resultRelInfo,
 	ExprState **ri_GeneratedExprs;
 	int			ri_NumGeneratedNeeded;
 	Bitmapset  *updatedCols;
+#if LAGODB_HAS_RESULT_REL_INFO_EXTRA
+	ResultRelInfoExtra *rextra;
+#endif
 	MemoryContext oldContext;
+
+#if LAGODB_PG16_LT
+	/* Don't call twice */
+	Assert(resultRelInfo->ri_GeneratedExprs == NULL);
+#endif
 
 	/* Nothing to do if no generated columns */
 	if (!(tupdesc->constr && (tupdesc->constr->has_generated_stored
@@ -585,6 +606,14 @@ ExecInitStoredGenerated(ResultRelInfo *resultRelInfo,
 
 	ri_GeneratedExprs = (ExprState **) palloc0(natts * sizeof(ExprState *));
 	ri_NumGeneratedNeeded = 0;
+
+#if LAGODB_HAS_RESULT_REL_INFO_EXTRA
+	rextra = palloc_object(ResultRelInfoExtra);
+	rextra->rinfo = resultRelInfo;
+	rextra->ri_extraUpdatedCols = NULL;
+	estate->es_resultrelinfo_extra = lappend(estate->es_resultrelinfo_extra,
+											 rextra);
+#endif
 
 	for (int i = 0; i < natts; i++)
 	{
@@ -621,11 +650,18 @@ ExecInitStoredGenerated(ResultRelInfo *resultRelInfo,
 				ri_NumGeneratedNeeded++;
 			}
 
+#if LAGODB_HAS_RESULT_REL_INFO_EXTRA
+			/* And mark this column in rextra->ri_extraUpdatedCols */
+			rextra->ri_extraUpdatedCols =
+				bms_add_member(rextra->ri_extraUpdatedCols,
+							   i + 1 - FirstLowInvalidHeapAttributeNumber);
+#elif LAGODB_PG16_GE
 			/* If UPDATE, mark column in resultRelInfo->ri_extraUpdatedCols */
 			if (cmdtype == CMD_UPDATE)
 				resultRelInfo->ri_extraUpdatedCols =
 					bms_add_member(resultRelInfo->ri_extraUpdatedCols,
 								   i + 1 - FirstLowInvalidHeapAttributeNumber);
+#endif
 		}
 	}
 
@@ -638,6 +674,10 @@ ExecInitStoredGenerated(ResultRelInfo *resultRelInfo,
 	}
 #endif
 
+#if LAGODB_PG16_LT
+	resultRelInfo->ri_GeneratedExprs = ri_GeneratedExprs;
+	resultRelInfo->ri_NumGeneratedNeeded = ri_NumGeneratedNeeded;
+#else
 	/* Save in appropriate set of fields */
 	if (cmdtype == CMD_UPDATE)
 	{
@@ -658,6 +698,7 @@ ExecInitStoredGenerated(ResultRelInfo *resultRelInfo,
 		resultRelInfo->ri_GeneratedExprsI = ri_GeneratedExprs;
 		resultRelInfo->ri_NumGeneratedNeededI = ri_NumGeneratedNeeded;
 	}
+#endif
 
 	MemoryContextSwitchTo(oldContext);
 }
@@ -686,6 +727,13 @@ ExecComputeStoredGenerated(ResultRelInfo *resultRelInfo,
 	 * Initialize the expressions if we didn't already, and check whether we
 	 * can exit early because nothing needs to be computed.
 	 */
+#if LAGODB_PG16_LT
+	if (resultRelInfo->ri_GeneratedExprs == NULL)
+		ExecInitStoredGenerated(resultRelInfo, estate, cmdtype);
+	if (resultRelInfo->ri_NumGeneratedNeeded == 0)
+		return;
+	ri_GeneratedExprs = resultRelInfo->ri_GeneratedExprs;
+#else
 	if (cmdtype == CMD_UPDATE)
 	{
 		if (resultRelInfo->ri_GeneratedExprsU == NULL)
@@ -702,6 +750,7 @@ ExecComputeStoredGenerated(ResultRelInfo *resultRelInfo,
 		Assert(resultRelInfo->ri_NumGeneratedNeededI > 0);
 		ri_GeneratedExprs = resultRelInfo->ri_GeneratedExprsI;
 	}
+#endif
 
 	oldContext = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
 
@@ -1038,9 +1087,11 @@ ExecInsert(ModifyTableContext *context,
 	if (resultRelInfo->ri_TrigDesc &&
 		resultRelInfo->ri_TrigDesc->trig_insert_before_row)
 	{
+#if LAGODB_HAS_INSERT_PENDING_LISTS
 		/* Flush any pending inserts, so rows are visible to the triggers */
 		if (estate->es_insert_pending_result_relations != NIL)
 			ExecPendingInserts(estate);
+#endif
 
 		if (!ExecBRInsertTriggers(estate, resultRelInfo, slot))
 			return NULL;		/* "do nothing" */
@@ -1075,7 +1126,9 @@ ExecInsert(ModifyTableContext *context,
 		 */
 		if (resultRelInfo->ri_BatchSize > 1)
 		{
+#if LAGODB_HAS_INSERT_PENDING_LISTS
 			bool		flushed = false;
+#endif
 
 			/*
 			 * When we've reached the desired batch size, perform the
@@ -1088,7 +1141,9 @@ ExecInsert(ModifyTableContext *context,
 								resultRelInfo->ri_PlanSlots,
 								resultRelInfo->ri_NumSlots,
 								estate, canSetTag);
+#if LAGODB_HAS_INSERT_PENDING_LISTS
 				flushed = true;
+#endif
 			}
 
 			oldContext = MemoryContextSwitchTo(estate->es_query_cxt);
@@ -1131,6 +1186,8 @@ ExecInsert(ModifyTableContext *context,
 			ExecCopySlot(resultRelInfo->ri_PlanSlots[resultRelInfo->ri_NumSlots],
 						 planSlot);
 
+#if LAGODB_HAS_INSERT_PENDING_LISTS
+
 			/*
 			 * If these are the first tuples stored in the buffers, add the
 			 * target rel and the mtstate to the
@@ -1152,6 +1209,7 @@ ExecInsert(ModifyTableContext *context,
 			}
 			Assert(list_member_ptr(estate->es_insert_pending_result_relations,
 								   resultRelInfo));
+#endif
 
 			resultRelInfo->ri_NumSlots++;
 
@@ -1337,11 +1395,18 @@ ExecInsert(ModifyTableContext *context,
 										   specToken);
 
 			/* insert index entries for tuple */
+#if LAGODB_PG16_GE
 			recheckIndexes = ExecInsertIndexTuples(resultRelInfo,
 												   slot, estate, false, true,
 												   &specConflict,
 												   arbiterIndexes,
 												   false);
+#else
+			recheckIndexes = ExecInsertIndexTuples(resultRelInfo,
+												   slot, estate, false, true,
+												   &specConflict,
+												   arbiterIndexes);
+#endif
 
 			/* adjust the tuple's state accordingly */
 			table_tuple_complete_speculative(resultRelationDesc, slot,
@@ -1384,10 +1449,16 @@ ExecInsert(ModifyTableContext *context,
 
 			/* insert index entries for tuple */
 			if (resultRelInfo->ri_NumIndices > 0)
+#if LAGODB_PG16_GE
 				recheckIndexes = ExecInsertIndexTuples(resultRelInfo,
 													   slot, estate, false,
 													   false, NULL, NIL,
 													   false);
+#else
+				recheckIndexes = ExecInsertIndexTuples(resultRelInfo,
+													   slot, estate, false,
+													   false, NULL, NIL);
+#endif
 		}
 	}
 
@@ -1586,6 +1657,7 @@ ExecBatchInsert(ModifyTableState *mtstate,
 	resultRelInfo->ri_NumSlots = 0;
 }
 
+#if LAGODB_HAS_INSERT_PENDING_LISTS
 /*
  * ExecPendingInserts -- flushes all pending inserts to the foreign tables
  */
@@ -1614,6 +1686,7 @@ ExecPendingInserts(EState *estate)
 	estate->es_insert_pending_result_relations = NIL;
 	estate->es_insert_pending_modifytables = NIL;
 }
+#endif
 
 /*
  * ExecDeletePrologue -- subroutine for ExecDelete
@@ -1637,9 +1710,11 @@ ExecDeletePrologue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 		if (oldtuple == NULL)
 			elog(ERROR, "LagoDB DELETE trigger input has no wholerow");
 
+#if LAGODB_HAS_INSERT_PENDING_LISTS
 		/* Flush any pending inserts, so rows are visible to the triggers */
 		if (context->estate->es_insert_pending_result_relations != NIL)
 			ExecPendingInserts(context->estate);
+#endif
 
 #if LAGODB_PG18_GE
 		return ExecBRDeleteTriggers(context->estate, context->epqstate,
@@ -1651,10 +1726,21 @@ ExecDeletePrologue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 									   resultRelInfo, NULL, oldtuple,
 									   epqreturnslot, result, &context->tmfd,
 									   context->mtstate->operation == CMD_MERGE);
-#else
+#elif LAGODB_PG16_GE
 		return ExecBRDeleteTriggers(context->estate, context->epqstate,
 									resultRelInfo, NULL, oldtuple,
 									epqreturnslot, result, &context->tmfd);
+#else
+
+		/*
+		 * PG15 adds the result outputs only to ExecBRDeleteTriggersNew()
+		 * from 15.3.  They are written only when locking a tuple by TID, and
+		 * the fork always passes the carried wholerow, so the entry point
+		 * present in every PG15 release is equivalent.
+		 */
+		return ExecBRDeleteTriggers(context->estate, context->epqstate,
+									resultRelInfo, NULL, oldtuple,
+									epqreturnslot);
 #endif
 	}
 
@@ -2351,9 +2437,11 @@ ExecUpdatePrologue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	if (resultRelInfo->ri_TrigDesc &&
 		resultRelInfo->ri_TrigDesc->trig_update_before_row)
 	{
+#if LAGODB_HAS_INSERT_PENDING_LISTS
 		/* Flush any pending inserts, so rows are visible to the triggers */
 		if (context->estate->es_insert_pending_result_relations != NIL)
 			ExecPendingInserts(context->estate);
+#endif
 
 #if LAGODB_PG18_GE
 		return ExecBRUpdateTriggers(context->estate, context->epqstate,
@@ -2365,10 +2453,15 @@ ExecUpdatePrologue(ModifyTableContext *context, ResultRelInfo *resultRelInfo,
 									   resultRelInfo, NULL, oldtuple, slot,
 									   result, &context->tmfd,
 									   context->mtstate->operation == CMD_MERGE);
-#else
+#elif LAGODB_PG16_GE
 		return ExecBRUpdateTriggers(context->estate, context->epqstate,
 									resultRelInfo, NULL, oldtuple, slot,
 									result, &context->tmfd);
+#else
+		/* As in ExecDeletePrologue, the PG15.0 entry point is equivalent. */
+		return ExecBRUpdateTriggers(context->estate, context->epqstate,
+									resultRelInfo, NULL, oldtuple, slot,
+									&context->tmfd);
 #endif
 	}
 
@@ -2567,7 +2660,11 @@ lreplace:
 							  estate->es_crosscheck_snapshot,
 							  true);
 	updateCxt->lockmode = LockTupleExclusive;
+#if LAGODB_PG16_GE
 	updateCxt->updateIndexes = TU_None;
+#else
+	updateCxt->updateIndexes = false;
+#endif
 	switch (mutation.outcome)
 	{
 		case LAGODB_MUTATION_APPLIED:
@@ -2576,10 +2673,18 @@ lreplace:
 			 * The bridge replaces table_tuple_update(), including its
 			 * statistics lifecycle.
 			 */
+#if LAGODB_PG16_GE
 			pgstat_count_heap_update(resultRelationDesc, false, false);
+#else
+			pgstat_count_heap_update(resultRelationDesc, false);
+#endif
 			result = TM_Ok;
 			if (bridge->postgres_indexes)
+#if LAGODB_PG16_GE
 				updateCxt->updateIndexes = TU_All;
+#else
+				updateCxt->updateIndexes = true;
+#endif
 			break;
 		case LAGODB_MUTATION_SELF_MODIFIED:
 			LagodbSetSelfModifiedFailureData(context, mutation.modifying_cid);
@@ -2611,12 +2716,20 @@ ExecUpdateEpilogue(ModifyTableContext *context, UpdateContext *updateCxt,
 	List	   *recheckIndexes = NIL;
 
 	/* insert index entries for tuple if necessary */
+#if LAGODB_PG16_GE
 	if (resultRelInfo->ri_NumIndices > 0 && (updateCxt->updateIndexes != TU_None))
 		recheckIndexes = ExecInsertIndexTuples(resultRelInfo,
 											   slot, context->estate,
 											   true, false,
 											   NULL, NIL,
 											   (updateCxt->updateIndexes == TU_Summarizing));
+#else
+	if (resultRelInfo->ri_NumIndices > 0 && updateCxt->updateIndexes)
+		recheckIndexes = ExecInsertIndexTuples(resultRelInfo,
+											   slot, context->estate,
+											   true, false,
+											   NULL, NIL);
+#endif
 
 	/* AFTER ROW UPDATE Triggers */
 	if (resultRelInfo->ri_TrigDesc &&
@@ -3855,8 +3968,8 @@ lmerge_matched:
 #else
 
 								/*
-								 * PostgreSQL 16 has no NOT MATCHED BY SOURCE
-								 * list
+								 * PostgreSQL 15 and 16 have no NOT MATCHED BY
+								 * SOURCE list
 								 */
 								if (!*matched)
 									goto out;
@@ -4293,10 +4406,16 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 			if (rootRelation != firstResultRel)
 			{
 				/* Convert any Vars in it to contain the root's attno's */
+#if LAGODB_PG16_GE
 				part_attmap =
 					build_attrmap_by_name(RelationGetDescr(rootRelation),
 										  RelationGetDescr(firstResultRel),
 										  false);
+#else
+				part_attmap =
+					build_attrmap_by_name(RelationGetDescr(rootRelation),
+										  RelationGetDescr(firstResultRel));
+#endif
 
 				wcoList = (List *)
 					map_variable_attnos((Node *) wcoList,
@@ -4337,10 +4456,16 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 			{
 				/* Convert any Vars in it to contain the root's attno's */
 				if (part_attmap == NULL)
+#if LAGODB_PG16_GE
 					part_attmap =
 						build_attrmap_by_name(RelationGetDescr(rootRelation),
 											  RelationGetDescr(firstResultRel),
 											  false);
+#else
+					part_attmap =
+						build_attrmap_by_name(RelationGetDescr(rootRelation),
+											  RelationGetDescr(firstResultRel));
+#endif
 
 				returningList = (List *)
 					map_variable_attnos((Node *) returningList,
@@ -4542,7 +4667,11 @@ ExecPrepareTupleRouting(ModifyTableState *mtstate,
 	/*
 	 * Convert the tuple, if necessary.
 	 */
+#if LAGODB_PG16_GE
 	map = ExecGetRootToChildMap(partrel, estate);
+#else
+	map = partrel->ri_RootToPartitionMap;
+#endif
 	if (map != NULL)
 	{
 		TupleTableSlot *new_slot = partrel->ri_PartitionTupleSlot;
@@ -4814,7 +4943,7 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 				elog(ERROR, "LagoDB matched mutation row has NULL ctid");
 			}
 
-			tupleid = DatumGetItemPointer(datum);
+			tupleid = (ItemPointer) DatumGetPointer(datum);
 			tuple_ctid = *tupleid;
 			tupleid = &tuple_ctid;
 			if (AttributeNumberIsValid(wholerow_attno))
@@ -4930,8 +5059,31 @@ ExecModifyTableWithBridge(PlanState *pstate, LagodbModifyBridge *bridge)
 	/*
 	 * Insert remaining tuples for batch insert.
 	 */
+#if LAGODB_HAS_INSERT_PENDING_LISTS
 	if (estate->es_insert_pending_result_relations != NIL)
 		ExecPendingInserts(estate);
+#else
+	{
+		List	   *relinfos;
+		ListCell   *lc;
+
+		if (node->mt_partition_tuple_routing)
+			relinfos = estate->es_tuple_routing_result_relations;
+		else
+			relinfos = estate->es_opened_result_relations;
+
+		foreach(lc, relinfos)
+		{
+			resultRelInfo = lfirst(lc);
+			if (resultRelInfo->ri_NumSlots > 0)
+				ExecBatchInsert(node, resultRelInfo,
+								resultRelInfo->ri_Slots,
+								resultRelInfo->ri_PlanSlots,
+								resultRelInfo->ri_NumSlots,
+								estate, node->canSetTag);
+		}
+	}
+#endif
 
 	/*
 	 * We're done, but fire AFTER STATEMENT triggers before exiting.
@@ -5206,8 +5358,16 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 	}
 
 	/* set up epqstate with dummy subplan data for the moment */
+#if LAGODB_PG16_GE
 	EvalPlanQualInit(&mtstate->mt_epqstate, estate, NULL, NIL,
 					 node->epqParam, resultRelations);
+#elif LAGODB_HAS_EPQ_RESULT_RELATIONS
+	EvalPlanQualInitExt(&mtstate->mt_epqstate, estate, NULL, NIL,
+						node->epqParam, resultRelations);
+#else
+	EvalPlanQualInit(&mtstate->mt_epqstate, estate, NULL, NIL,
+					 node->epqParam);
+#endif
 	mtstate->fireBSTriggers = true;
 
 	/*
@@ -5356,6 +5516,21 @@ lagodb_init_modify_table_state(ModifyTableState *mtstate, ModifyTable *node,
 					elog(ERROR, "could not find junk wholerow column");
 			}
 		}
+
+#if LAGODB_PG16_LT
+
+		/*
+		 * For INSERT/UPDATE/MERGE, prepare to evaluate any generated columns.
+		 * We must do this now, even if we never insert or update any rows, to
+		 * cover the case where a MERGE does some UPDATE operations and later
+		 * some INSERTs.  We'll need ri_GeneratedExprs to cover all generated
+		 * columns, so we force it now.  (It might be sufficient to do this
+		 * only for operation == CMD_MERGE, but we'll avoid changing the data
+		 * structure definition in back branches.)
+		 */
+		if (operation == CMD_INSERT || operation == CMD_UPDATE || operation == CMD_MERGE)
+			ExecInitStoredGenerated(resultRelInfo, estate, operation);
+#endif
 	}
 
 	/*

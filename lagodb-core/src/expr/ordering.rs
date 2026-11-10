@@ -13,7 +13,7 @@ impl PgOrderingDirection {
     /// Decode the direction carried by a live PostgreSQL planner pathkey.
     #[inline]
     pub fn from_path_key(pathkey: &pg_sys::PathKey) -> Option<Self> {
-        #[cfg(any(feature = "pg16", feature = "pg17"))]
+        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
         let direction = pathkey.pk_strategy;
         #[cfg(feature = "pg18")]
         let direction = pathkey.pk_cmptype;
@@ -29,7 +29,7 @@ impl PgOrderingDirection {
 
         let mut opfamily = pg_sys::InvalidOid;
         let mut input_type = pg_sys::InvalidOid;
-        #[cfg(any(feature = "pg16", feature = "pg17"))]
+        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
         let mut direction = 0_i16;
         #[cfg(feature = "pg18")]
         let mut direction = pg_sys::CompareType::COMPARE_INVALID;
@@ -42,12 +42,12 @@ impl PgOrderingDirection {
                 &mut direction,
             )
         };
-        #[cfg(any(feature = "pg16", feature = "pg17"))]
+        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
         let direction = i32::from(direction);
         found.then(|| Self::from_pg_direction(direction)).flatten()
     }
 
-    #[cfg(any(feature = "pg16", feature = "pg17"))]
+    #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
     #[inline]
     fn from_pg_direction(direction: i32) -> Option<Self> {
         match u32::try_from(direction).ok()? {

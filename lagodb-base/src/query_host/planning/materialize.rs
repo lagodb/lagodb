@@ -31,7 +31,7 @@ impl PathRankingCost {
         }
     }
 
-    #[cfg(any(feature = "pg16", feature = "pg17"))]
+    #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
     fn replacing(plan: PlanCost, _old_path: &pg_sys::Path) -> Self {
         Self { plan }
     }

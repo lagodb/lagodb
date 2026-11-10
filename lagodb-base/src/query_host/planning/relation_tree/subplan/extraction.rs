@@ -4,6 +4,7 @@ use pgrx::pg_sys;
 
 use super::LiftedMarkSubPlan;
 use crate::query_host::planning::expression::QueryExpressionPlanner;
+use crate::query_host::planning::planner_info::PlannerInfoExt;
 use crate::query_host::planning::query_shape::QueryShape;
 use crate::query_host::planning::relation_tree::RelationTreePlanner;
 
@@ -199,14 +200,14 @@ impl RelationTreePlanner {
             };
             if !relation.is_null()
                 && unsafe {
-                    pg_sys::bms_equal((*relation).relids, (*root).all_query_rels)
+                    pg_sys::bms_equal((*relation).relids, (*root).final_join_relids())
                 }
             {
                 return Some(relation);
             }
         }
         let rtis =
-            unsafe { Self::collect_base_relids(root, (*root).all_query_rels) }?;
+            unsafe { Self::collect_base_relids(root, (*root).final_join_relids()) }?;
         let [rti] = rtis.as_slice() else {
             return None;
         };

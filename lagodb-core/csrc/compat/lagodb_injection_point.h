@@ -5,8 +5,8 @@
 
 /*
  * PostgreSQL 17 introduced injection points and PostgreSQL 18 added a
- * runtime-data argument to INJECTION_POINT(). PostgreSQL 16 has no such
- * facility, so its builds keep this adapter as a no-op.
+ * runtime-data argument to INJECTION_POINT(). PostgreSQL 15 and 16 have no
+ * such facility, so their builds keep this adapter as a no-op.
  */
 #if LAGODB_PG18_GE
 #include "utils/injection_point.h"

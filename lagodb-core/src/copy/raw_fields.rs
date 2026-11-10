@@ -192,6 +192,10 @@ impl CopyTextInputValidator {
         })
     }
 
+    /// Whether `value` is valid text input for the type. PostgreSQL 16+
+    /// reports rejection through soft input errors. PostgreSQL 15 has none, so
+    /// an input-function ERROR in the data-exception class counts as rejection
+    /// and any other ERROR is returned as `Err`.
     pub fn accepts(&mut self, value: &CStr) -> Result<bool, CopyError> {
         let state = self.state.ok_or(CopyError::TextInputValidatorFinished)?;
         unsafe {

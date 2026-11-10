@@ -1,5 +1,7 @@
 -- query_offload_aggregates.sql
 -- Basic single-relation grouping, aggregate, FILTER, and HAVING coverage.
+-- PostgreSQL 15 has no presorted aggregates, so its plans have no Sort below
+-- an ordered or DISTINCT aggregate; _1.out is the PostgreSQL 15 output.
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 -- A small batch limit exercises multiple Arrow batches.

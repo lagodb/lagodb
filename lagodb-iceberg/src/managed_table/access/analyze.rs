@@ -7,19 +7,19 @@
 //! delete-aware pipeline. The block protocol differs by PostgreSQL major, so
 //! each one owns its callback state machine.
 
+#[cfg(any(feature = "pg15", feature = "pg16"))]
+mod block_callback;
 mod block_domain;
 mod cursor;
-#[cfg(feature = "pg16")]
-mod pg16;
 mod population;
 #[cfg(any(feature = "pg17", feature = "pg18"))]
 mod read_stream;
 mod returned;
 mod sampling;
 
+#[cfg(any(feature = "pg15", feature = "pg16"))]
+pub(crate) use block_callback::AnalyzeScanState;
 pub(crate) use block_domain::AnalyzeBlockDomain;
-#[cfg(feature = "pg16")]
-pub(crate) use pg16::AnalyzeScanState;
 pub(crate) use population::AnalyzePopulation;
 #[cfg(any(feature = "pg17", feature = "pg18"))]
 pub(crate) use read_stream::AnalyzeScanState;

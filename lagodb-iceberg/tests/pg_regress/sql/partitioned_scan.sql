@@ -1,6 +1,8 @@
 -- Managed partition reads, typed pruning/pushdown, rescans, and native planning.
 -- Managed file counts include both partition and column-metrics pruning.
 -- The external FDW fixture separately disables column metrics.
+-- PostgreSQL 15 has no presorted aggregates, so its plans have no Sort below
+-- an ordered or DISTINCT aggregate; _1.out is the PostgreSQL 15 output.
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION lagodb_iceberg;
 SET lagodb.query_offload_mode = 'off';

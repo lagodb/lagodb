@@ -36,6 +36,52 @@ pub fn get_namespace_name_bytes(nspid: pg_sys::Oid) -> Option<Vec<u8>> {
     }
 }
 
+/// The schema extension `extension` is installed in, or `InvalidOid` if it
+/// does not exist.
+pub fn get_extension_schema(extension: pg_sys::Oid) -> pg_sys::Oid {
+    // SAFETY: the catalog functions accept any OID and report failures through
+    // PostgreSQL ERROR, which pgrx's guarded bindings propagate.
+    #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+    unsafe {
+        pg_sys::get_extension_schema(extension)
+    }
+    // PostgreSQL 15 keeps `get_extension_schema()` private to extension.c;
+    // this is its body.
+    // SAFETY: the scan reads one pg_extension tuple while the relation is
+    // open, and the guarded bindings propagate PostgreSQL ERROR.
+    #[cfg(feature = "pg15")]
+    unsafe {
+        let lock = pg_sys::AccessShareLock as pg_sys::LOCKMODE;
+        let relation = pg_sys::table_open(pg_sys::ExtensionRelationId, lock);
+        let mut key = pg_sys::ScanKeyData::default();
+        pg_sys::ScanKeyInit(
+            &mut key,
+            pg_sys::Anum_pg_extension_oid as pg_sys::AttrNumber,
+            pg_sys::BTEqualStrategyNumber as pg_sys::StrategyNumber,
+            pg_sys::Oid::from(pg_sys::F_OIDEQ),
+            pg_sys::Datum::from(extension),
+        );
+        let scan = pg_sys::systable_beginscan(
+            relation,
+            pg_sys::Oid::from(pg_sys::ExtensionOidIndexId),
+            true,
+            ptr::null_mut(),
+            1,
+            &mut key,
+        );
+        let tuple = pg_sys::systable_getnext(scan);
+        let schema = if tuple.is_null() {
+            pg_sys::InvalidOid
+        } else {
+            (*pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_extension>())
+                .extnamespace
+        };
+        pg_sys::systable_endscan(scan);
+        pg_sys::table_close(relation, lock);
+        schema
+    }
+}
+
 pub fn get_relation_oid(relname: &CStr, relnamespace: pg_sys::Oid) -> pg_sys::Oid {
     unsafe { pg_sys::get_relname_relid(relname.as_ptr(), relnamespace) }
 }

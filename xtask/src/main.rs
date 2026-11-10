@@ -83,7 +83,7 @@ fn usage_error(message: &str) -> String {
            cargo xtask regress [pg-version] [all]\n  \
            cargo xtask regress [pg-version] <iceberg|connectors> [test]\n  \
            cargo xtask isolation [pg-version] [spec ...]\n\n\
-         pg-version: pg16, pg17 or pg18 (default)\n\n\
+         pg-version: pg15, pg16, pg17 or pg18 (default)\n\n\
          examples:\n  \
            cargo xtask test-all\n  \
            cargo xtask test-all pg16\n  \

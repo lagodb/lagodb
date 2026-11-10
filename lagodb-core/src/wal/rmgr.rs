@@ -533,10 +533,12 @@ pub fn register_wal_rmgr<const RMGR_ID: u8>(manager: Box<dyn WalResourceManager>
         return;
     };
 
+    // PostgreSQL 15 declares the argument non-const; every supported version
+    // only copies the struct into its resource-manager table.
     unsafe {
         pg_sys::RegisterCustomRmgr(
             rmgr_id as pg_sys::RmgrId,
-            registered.rmgr_data.as_ptr(),
+            registered.rmgr_data.as_ptr().cast_mut(),
         );
     }
 

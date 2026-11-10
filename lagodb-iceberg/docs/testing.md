@@ -75,7 +75,7 @@ PostgreSQL transactional semantics (ACID, MVCC, read-your-own-writes, conflict d
 
 To verify resilience against crashes, aborts, and network interruptions, tests
 leverage native **Injection Points** in PostgreSQL 17 and 18
-(`--enable-injection-points`). PostgreSQL 16 has none, so
+(`--enable-injection-points`). PostgreSQL 15 and 16 have none, so
 `fault_injection.sql` skips itself there and `worker.sql` omits its crash-backoff
 block:
 - Injecting errors at transactional boundaries to verify that uncommitted data/delete files are discarded without metadata corruption.
@@ -97,14 +97,14 @@ Runs Tier 1 pure unit tests instantly without starting PostgreSQL:
 - **Run all workspace pure unit tests** for each target PostgreSQL major
   (matches `xtask` Phase 1):
   ```bash
-  for pg_feature in pg16 pg17 pg18; do
+  for pg_feature in pg15 pg16 pg17 pg18; do
     cargo test --workspace --exclude lagodb-base --exclude lagodb-iceberg --exclude lagodb-delta --exclude lagodb-connectors --no-default-features --features "${pg_feature}"
   done
   ```
 
   Ordinary package-level Cargo commands use the default `pg18` feature. To
-  target PG16 or PG17 with ordinary Cargo, always use
-  `--no-default-features --features pg16` or `pg17`; do not use `--all-features`, because
+  target PG15, PG16 or PG17 with ordinary Cargo, always use
+  `--no-default-features --features pg15`, `pg16` or `pg17`; do not use `--all-features`, because
   the PostgreSQL major features are mutually exclusive.
 
 
@@ -112,7 +112,7 @@ Runs Tier 1 pure unit tests instantly without starting PostgreSQL:
 Runs Tier 2 `#[pg_test]` tests inside an ephemeral PostgreSQL test cluster:
 ```bash
 # cargo-pgrx selects the matching feature from the explicit target major.
-for pg in pg16 pg17 pg18; do
+for pg in pg15 pg16 pg17 pg18; do
   cargo pgrx install --package lagodb-base \
     --pg-config "$(cargo pgrx info pg-config "${pg}")"
   cargo pgrx test "${pg}" --package lagodb-iceberg
@@ -122,9 +122,9 @@ done
 ### Run SQL Regression Tests
 Runs the complete SQL regression suite:
 ```bash
-cargo xtask regress pg16
-cargo xtask regress pg17
-cargo xtask regress pg18
+for pg in pg15 pg16 pg17 pg18; do
+  cargo xtask regress "${pg}"
+done
 ```
 
 Credential coverage uses the existing MinIO and REST fixtures without changing
@@ -138,9 +138,9 @@ are not covered by these fixtures.
 ### Run Full Test Suite (Unit, Backend, Isolation, E2E)
 Runs the complete end-to-end verification suite:
 ```bash
-cargo xtask test-all pg16
-cargo xtask test-all pg17
-cargo xtask test-all pg18
+for pg in pg15 pg16 pg17 pg18; do
+  cargo xtask test-all "${pg}"
+done
 ```
 
 ## Summary of Best Practices

@@ -1,0 +1,2073 @@
+-- Predicate pushdown, residual filtering, pruning, and path costing.
+-- PostgreSQL 15 has no presorted aggregates, so its plans have no Sort below
+-- an ordered or DISTINCT aggregate; _1.out is the PostgreSQL 15 output.
+-- Exact equality: plans and results.
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
+-- Disable upper query offload to isolate relation-level CustomScan behavior.
+SET lagodb.query_offload_mode = 'off';
+CREATE TABLE customscan_where_eq_t (
+    a integer,
+    b text
+) USING iceberg;
+INSERT INTO customscan_where_eq_t VALUES (1, 'one');
+INSERT INTO customscan_where_eq_t VALUES (2, 'two');
+INSERT INTO customscan_where_eq_t VALUES (3, 'three');
+SELECT COUNT(*) AS total_rows FROM customscan_where_eq_t;
+ total_rows 
+------------
+          3
+(1 row)
+
+-- An exact equality is pushed without a local residual.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT a, b FROM customscan_where_eq_t WHERE a = 1;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Custom Scan (lagodb-iceberg) on customscan_where_eq_t
+   Pushed Filter: (a = 1)
+(2 rows)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT a, b FROM customscan_where_eq_t WHERE a = 1;
+            QUERY PLAN             
+-----------------------------------
+ Seq Scan on customscan_where_eq_t
+   Filter: (a = 1)
+(2 rows)
+
+SET lagodb.customscan_mode = 'force';
+SELECT a, b FROM customscan_where_eq_t WHERE a = 1 ORDER BY a, b;
+ a |  b  
+---+-----
+ 1 | one
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+SELECT a, b FROM customscan_where_eq_t WHERE a = 1 ORDER BY a, b;
+ a |  b  
+---+-----
+ 1 | one
+(1 row)
+
+-- VERBOSE exposes the provider, exact filter, and recheck expression.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT a, b FROM customscan_where_eq_t WHERE a = 1;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Custom Scan (lagodb-iceberg) on public.customscan_where_eq_t
+   Output: a, b
+   Scan Purpose: Read
+   Provider: lagodb-iceberg
+   Pushed Filter Exact: (a = 1)
+   Recheck: (a = 1)
+(6 rows)
+
+RESET lagodb.customscan_mode;
+DROP TABLE customscan_where_eq_t;
+-- Exact integer predicates.
+-- Use three files with disjoint integer ranges. The second includes NULL ids to check
+-- strict comparison semantics.
+CREATE TABLE customscan_exact_pushdown_int4 (
+    id integer,
+    payload text
+) USING iceberg;
+-- File 1: id in [1, 50]
+INSERT INTO customscan_exact_pushdown_int4
+SELECT g, 'i4_a_' || g
+FROM generate_series(1, 50) AS g;
+-- File 2: id in [100, 150] with three NULLs interleaved
+INSERT INTO customscan_exact_pushdown_int4
+SELECT
+    CASE WHEN g % 17 = 0 THEN NULL ELSE g END,
+    'i4_b_' || g
+FROM generate_series(100, 150) AS g;
+-- File 3: id in [1000, 1050]
+INSERT INTO customscan_exact_pushdown_int4
+SELECT g, 'i4_c_' || g
+FROM generate_series(1000, 1050) AS g;
+SELECT COUNT(*) AS int4_total_rows FROM customscan_exact_pushdown_int4;
+ int4_total_rows 
+-----------------
+             152
+(1 row)
+
+SELECT COUNT(*) AS int4_null_rows
+FROM customscan_exact_pushdown_int4 WHERE id IS NULL;
+ int4_null_rows 
+----------------
+              3
+(1 row)
+
+CREATE TABLE customscan_exact_pushdown_int8 (
+    id bigint,
+    payload text
+) USING iceberg;
+-- File 1: id in [1, 50]
+INSERT INTO customscan_exact_pushdown_int8
+SELECT g::bigint, 'i8_a_' || g
+FROM generate_series(1, 50) AS g;
+-- File 2: id in [100, 150] with three NULLs interleaved
+INSERT INTO customscan_exact_pushdown_int8
+SELECT
+    CASE WHEN g % 17 = 0 THEN NULL ELSE g::bigint END,
+    'i8_b_' || g
+FROM generate_series(100, 150) AS g;
+-- File 3: id in [10_000_000_000, 10_000_000_050]
+INSERT INTO customscan_exact_pushdown_int8
+SELECT (10000000000 + g)::bigint, 'i8_c_' || g
+FROM generate_series(0, 50) AS g;
+SELECT COUNT(*) AS int8_total_rows FROM customscan_exact_pushdown_int8;
+ int8_total_rows 
+-----------------
+             152
+(1 row)
+
+SELECT COUNT(*) AS int8_null_rows
+FROM customscan_exact_pushdown_int8 WHERE id IS NULL;
+ int8_null_rows 
+----------------
+              3
+(1 row)
+
+-- Exact int4 comparisons.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 25;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int4
+         Pushed Filter: (id = 25)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 25;
+ row_count |            row_digest            
+-----------+----------------------------------
+         1 | 644df98e00e6db45b70c5aaa8305151b
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 25;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int4
+         Filter: (id = 25)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 25;
+ row_count |            row_digest            
+-----------+----------------------------------
+         1 | 644df98e00e6db45b70c5aaa8305151b
+(1 row)
+
+-- NULL ids must not satisfy the inequality.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 25;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int4
+         Pushed Filter: (id <> 25)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 25;
+ row_count |            row_digest            
+-----------+----------------------------------
+       148 | 754a0304f7a990119dbab3e539caa98d
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 25;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int4
+         Filter: (id <> 25)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 25;
+ row_count |            row_digest            
+-----------+----------------------------------
+       148 | 754a0304f7a990119dbab3e539caa98d
+(1 row)
+
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id < 120;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int4
+         Pushed Filter: (id < 120)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id < 120;
+ row_count |            row_digest            
+-----------+----------------------------------
+        68 | 69dd890fd7444bc7da4c4cff95705916
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id < 120;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int4
+         Filter: (id < 120)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id < 120;
+ row_count |            row_digest            
+-----------+----------------------------------
+        68 | 69dd890fd7444bc7da4c4cff95705916
+(1 row)
+
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <= 120;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int4
+         Pushed Filter: (id <= 120)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <= 120;
+ row_count |            row_digest            
+-----------+----------------------------------
+        69 | dd74f76a5799366d736d6963729e90a4
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <= 120;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int4
+         Filter: (id <= 120)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <= 120;
+ row_count |            row_digest            
+-----------+----------------------------------
+        69 | dd74f76a5799366d736d6963729e90a4
+(1 row)
+
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id > 120;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int4
+         Pushed Filter: (id > 120)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id > 120;
+ row_count |            row_digest            
+-----------+----------------------------------
+        80 | 8728a40dc9a00c026f55cb7f14bc133a
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id > 120;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int4
+         Filter: (id > 120)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id > 120;
+ row_count |            row_digest            
+-----------+----------------------------------
+        80 | 8728a40dc9a00c026f55cb7f14bc133a
+(1 row)
+
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 120;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int4
+         Pushed Filter: (id >= 120)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 120;
+ row_count |            row_digest            
+-----------+----------------------------------
+        81 | 5a710ca9f1038fe7a00959793276ff37
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 120;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int4
+         Filter: (id >= 120)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 120;
+ row_count |            row_digest            
+-----------+----------------------------------
+        81 | 5a710ca9f1038fe7a00959793276ff37
+(1 row)
+
+-- Exact int8 comparisons.
+-- Use a literal above 2^32 to exercise the 64-bit comparison path.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 10000000025;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int8
+         Pushed Filter: (id = '10000000025'::bigint)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 10000000025;
+ row_count |            row_digest            
+-----------+----------------------------------
+         1 | e7315745ba115f4fa14dd8258369ac38
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 10000000025;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int8
+         Filter: (id = '10000000025'::bigint)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 10000000025;
+ row_count |            row_digest            
+-----------+----------------------------------
+         1 | e7315745ba115f4fa14dd8258369ac38
+(1 row)
+
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <> 25::bigint;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int8
+         Pushed Filter: (id <> '25'::bigint)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <> 25::bigint;
+ row_count |            row_digest            
+-----------+----------------------------------
+       148 | 0a1a298e30d7891482531a7002118911
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <> 25::bigint;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int8
+         Filter: (id <> '25'::bigint)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <> 25::bigint;
+ row_count |            row_digest            
+-----------+----------------------------------
+       148 | 0a1a298e30d7891482531a7002118911
+(1 row)
+
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id < 120::bigint;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int8
+         Pushed Filter: (id < '120'::bigint)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id < 120::bigint;
+ row_count |            row_digest            
+-----------+----------------------------------
+        68 | 8f31112c32983a83ad8d9962bbcccb22
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id < 120::bigint;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int8
+         Filter: (id < '120'::bigint)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id < 120::bigint;
+ row_count |            row_digest            
+-----------+----------------------------------
+        68 | 8f31112c32983a83ad8d9962bbcccb22
+(1 row)
+
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <= 120::bigint;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int8
+         Pushed Filter: (id <= '120'::bigint)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <= 120::bigint;
+ row_count |            row_digest            
+-----------+----------------------------------
+        69 | 58f9ceb2269879e71196da9de551d588
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <= 120::bigint;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int8
+         Filter: (id <= '120'::bigint)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id <= 120::bigint;
+ row_count |            row_digest            
+-----------+----------------------------------
+        69 | 58f9ceb2269879e71196da9de551d588
+(1 row)
+
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id > 9999999999::bigint;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int8
+         Pushed Filter: (id > '9999999999'::bigint)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id > 9999999999::bigint;
+ row_count |            row_digest            
+-----------+----------------------------------
+        51 | f28e8b2c4a36577707064a8f2603c3c1
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id > 9999999999::bigint;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int8
+         Filter: (id > '9999999999'::bigint)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id > 9999999999::bigint;
+ row_count |            row_digest            
+-----------+----------------------------------
+        51 | f28e8b2c4a36577707064a8f2603c3c1
+(1 row)
+
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id >= 10000000000::bigint;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int8
+         Pushed Filter: (id >= '10000000000'::bigint)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id >= 10000000000::bigint;
+ row_count |            row_digest            
+-----------+----------------------------------
+        51 | f28e8b2c4a36577707064a8f2603c3c1
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id >= 10000000000::bigint;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int8
+         Filter: (id >= '10000000000'::bigint)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id >= 10000000000::bigint;
+ row_count |            row_digest            
+-----------+----------------------------------
+        51 | f28e8b2c4a36577707064a8f2603c3c1
+(1 row)
+
+-- NULL semantics and AND composition
+-- Equality on the NULL-bearing int4 file.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 119;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int4
+         Pushed Filter: (id = 119)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 119;
+ row_count |            row_digest            
+-----------+----------------------------------
+         0 | d41d8cd98f00b204e9800998ecf8427e
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 119;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int4
+         Filter: (id = 119)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id = 119;
+ row_count |            row_digest            
+-----------+----------------------------------
+         0 | d41d8cd98f00b204e9800998ecf8427e
+(1 row)
+
+-- NULL ids must not satisfy the inequality.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 119;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int4
+         Pushed Filter: (id <> 119)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 119;
+ row_count |            row_digest            
+-----------+----------------------------------
+       149 | 6b5b6c35304543ef08429d609c2e7204
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 119;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int4
+         Filter: (id <> 119)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id <> 119;
+ row_count |            row_digest            
+-----------+----------------------------------
+       149 | 6b5b6c35304543ef08429d609c2e7204
+(1 row)
+
+-- Both exact range clauses are pushed without a residual.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 100 AND id <= 150;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int4
+         Pushed Filter: (id >= 100) AND (id <= 150)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 100 AND id <= 150;
+ row_count |            row_digest            
+-----------+----------------------------------
+        48 | f8fa892ebc6bfbf7d5157419e6cc3d78
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 100 AND id <= 150;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int4
+         Filter: ((id >= 100) AND (id <= 150))
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int4
+WHERE id >= 100 AND id <= 150;
+ row_count |            row_digest            
+-----------+----------------------------------
+        48 | f8fa892ebc6bfbf7d5157419e6cc3d78
+(1 row)
+
+-- Type resolution through PG's resolved operator identity
+-- An explicitly typed int8 literal resolves to the same pushdown operator.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 25::bigint;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_int8
+         Pushed Filter: (id = '25'::bigint)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 25::bigint;
+ row_count |            row_digest            
+-----------+----------------------------------
+         1 | 3c7181b40d8b2b0e3013311bc0e719b8
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 25::bigint;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_int8
+         Filter: (id = '25'::bigint)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || payload, E'\n' ORDER BY id, payload), '')) AS row_digest
+FROM customscan_exact_pushdown_int8
+WHERE id = 25::bigint;
+ row_count |            row_digest            
+-----------+----------------------------------
+         1 | 3c7181b40d8b2b0e3013311bc0e719b8
+(1 row)
+
+-- Text equality is exact under deterministic collations. Keep the column on the
+-- database default collation.
+CREATE TABLE customscan_exact_pushdown_text (
+    id integer,
+    label text
+) USING iceberg;
+INSERT INTO customscan_exact_pushdown_text VALUES
+    (1, 'apple'),
+    (2, 'Banana'),
+    (3, 'banana'),
+    (4, 'Cherry'),
+    (5, 'cherry');
+-- Equality under the column default collation.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label = 'banana';
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_text
+         Pushed Filter: (label = 'banana'::text)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label = 'banana';
+ row_count |            row_digest            
+-----------+----------------------------------
+         1 | 4c8c54e18c0164b5efe5b345e46754c9
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label = 'banana';
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_text
+         Filter: (label = 'banana'::text)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label = 'banana';
+ row_count |            row_digest            
+-----------+----------------------------------
+         1 | 4c8c54e18c0164b5efe5b345e46754c9
+(1 row)
+
+-- An explicit deterministic predicate collation uses the same equality policy.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label COLLATE "POSIX" = 'banana';
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_exact_pushdown_text
+         Pushed Filter: ((label)::text = 'banana'::text)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label COLLATE "POSIX" = 'banana';
+ row_count |            row_digest            
+-----------+----------------------------------
+         1 | 4c8c54e18c0164b5efe5b345e46754c9
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label COLLATE "POSIX" = 'banana';
+                    QUERY PLAN                    
+--------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_exact_pushdown_text
+         Filter: ((label)::text = 'banana'::text)
+(3 rows)
+
+SELECT COUNT(*) AS row_count,
+       md5(COALESCE(string_agg(id::text || '|' || label, E'\n' ORDER BY id, label), '')) AS row_digest
+FROM customscan_exact_pushdown_text
+WHERE label COLLATE "POSIX" = 'banana';
+ row_count |            row_digest            
+-----------+----------------------------------
+         1 | 4c8c54e18c0164b5efe5b345e46754c9
+(1 row)
+
+RESET lagodb.customscan_mode;
+DROP TABLE customscan_exact_pushdown_int4;
+DROP TABLE customscan_exact_pushdown_int8;
+DROP TABLE customscan_exact_pushdown_text;
+-- Partial pushdown and residual composition.
+CREATE TABLE customscan_partial_pushdown_t (
+    a integer,
+    b text
+) USING iceberg;
+INSERT INTO customscan_partial_pushdown_t VALUES (1, 'one');
+INSERT INTO customscan_partial_pushdown_t VALUES (2, 'two');
+INSERT INTO customscan_partial_pushdown_t VALUES (3, '');
+SELECT COUNT(*) AS total_rows FROM customscan_partial_pushdown_t;
+ total_rows 
+------------
+          3
+(1 row)
+
+-- Push a = 1 while PostgreSQL evaluates length(b) > 0 as a residual.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 AND length(b) > 0;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Custom Scan (lagodb-iceberg) on customscan_partial_pushdown_t
+   Filter: (length(b) > 0)
+   Pushed Filter: (a = 1)
+(3 rows)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 AND length(b) > 0;
+                QUERY PLAN                 
+-------------------------------------------
+ Seq Scan on customscan_partial_pushdown_t
+   Filter: ((a = 1) AND (length(b) > 0))
+(2 rows)
+
+SET lagodb.customscan_mode = 'force';
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 AND length(b) > 0
+ORDER BY a, b;
+ a |  b  
+---+-----
+ 1 | one
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 AND length(b) > 0
+ORDER BY a, b;
+ a |  b  
+---+-----
+ 1 | one
+(1 row)
+
+-- VERBOSE separates the exact filter and recheck from the local residual.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 AND length(b) > 0;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Custom Scan (lagodb-iceberg) on public.customscan_partial_pushdown_t
+   Output: a, b
+   Filter: (length(customscan_partial_pushdown_t.b) > 0)
+   Scan Purpose: Read
+   Provider: lagodb-iceberg
+   Pushed Filter Exact: (a = 1)
+   Recheck: (a = 1)
+(7 rows)
+
+-- An OR with an unsupported child remains entirely residual.
+EXPLAIN (COSTS OFF)
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 OR length(b) > 0;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Custom Scan (lagodb-iceberg) on customscan_partial_pushdown_t
+   Filter: ((a = 1) OR (length(b) > 0))
+(2 rows)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 OR length(b) > 0;
+                QUERY PLAN                 
+-------------------------------------------
+ Seq Scan on customscan_partial_pushdown_t
+   Filter: ((a = 1) OR (length(b) > 0))
+(2 rows)
+
+SET lagodb.customscan_mode = 'force';
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 OR length(b) > 0
+ORDER BY a, b;
+ a |  b  
+---+-----
+ 1 | one
+ 2 | two
+(2 rows)
+
+SET lagodb.customscan_mode = 'off';
+SELECT a, b FROM customscan_partial_pushdown_t
+WHERE a = 1 OR length(b) > 0
+ORDER BY a, b;
+ a |  b  
+---+-----
+ 1 | one
+ 2 | two
+(2 rows)
+
+-- Row-valued IS NULL and IS NOT NULL are not complements. Keep NOT (t IS NULL) as the
+-- original residual when widening the OR; row (1, NULL) distinguishes the results.
+INSERT INTO customscan_partial_pushdown_t VALUES (1, NULL);
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT a, b
+FROM customscan_partial_pushdown_t AS t
+WHERE (a = 1 AND NOT (t IS NULL)) OR a = 2;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Custom Scan (lagodb-iceberg) on customscan_partial_pushdown_t t
+   Filter: (((a = 1) AND (NOT (t.* IS NULL))) OR (a = 2))
+   Pushed Filter: ((a = 1) OR (a = 2))
+(3 rows)
+
+SELECT count(*) AS matched_rows
+FROM customscan_partial_pushdown_t AS t
+WHERE (a = 1 AND NOT (t IS NULL)) OR a = 2;
+ matched_rows 
+--------------
+            3
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+SELECT count(*) AS matched_rows
+FROM customscan_partial_pushdown_t AS t
+WHERE (a = 1 AND NOT (t IS NULL)) OR a = 2;
+ matched_rows 
+--------------
+            3
+(1 row)
+
+-- Volatile functions and SubPlans block OR widening; the clause stays residual.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT a FROM customscan_partial_pushdown_t
+WHERE (a = 1 AND random() < 2.0) OR a = 2;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Custom Scan (lagodb-iceberg) on customscan_partial_pushdown_t
+   Filter: (((a = 1) AND (random() < '2'::double precision)) OR (a = 2))
+(2 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT a FROM customscan_partial_pushdown_t AS t
+WHERE (a = 1 AND (SELECT v.x FROM (VALUES (1)) AS v(x) WHERE v.x = t.a) = 1)
+   OR a = 2;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Custom Scan (lagodb-iceberg) on customscan_partial_pushdown_t t
+   Filter: (((a = 1) AND ((SubPlan 1) = 1)) OR (a = 2))
+   SubPlan 1
+     ->  Result
+           One-Time Filter: (1 = t.a)
+(5 rows)
+
+RESET lagodb.customscan_mode;
+DROP TABLE customscan_partial_pushdown_t;
+-- Auto mode on a read: the provider replaces the table AM SeqScan, so the
+-- Plain CustomScan is the only path, and filters are still pushed down.
+CREATE TABLE customscan_auto_read_t (
+    id integer,
+    payload text
+) USING iceberg;
+INSERT INTO customscan_auto_read_t
+SELECT g, 'auto_' || g
+FROM generate_series(1, 2000) AS g;
+SET lagodb.customscan_mode = 'auto';
+EXPLAIN (COSTS OFF)
+SELECT id, payload FROM customscan_auto_read_t;
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Custom Scan (lagodb-iceberg) on customscan_auto_read_t
+(1 row)
+
+EXPLAIN (COSTS OFF)
+SELECT id, payload FROM customscan_auto_read_t WHERE id = 1500;
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Custom Scan (lagodb-iceberg) on customscan_auto_read_t
+   Pushed Filter: (id = 1500)
+(2 rows)
+
+SELECT id, payload FROM customscan_auto_read_t WHERE id = 1500 ORDER BY id, payload;
+  id  |  payload  
+------+-----------
+ 1500 | auto_1500
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+SELECT id, payload FROM customscan_auto_read_t WHERE id = 1500 ORDER BY id, payload;
+  id  |  payload  
+------+-----------
+ 1500 | auto_1500
+(1 row)
+
+RESET lagodb.customscan_mode;
+DROP TABLE customscan_auto_read_t;
+-- Pruning estimates. With PostgreSQL's CPU costs at zero, the CustomScan costs
+-- only seq_page_cost times the pages it is expected to read, so the cost of a
+-- filtered read over the unfiltered one is the estimated scanned fraction, free
+-- of file sizes. Every data file holds 1000 rows and is one pruning unit, and
+-- ANALYZE samples these small tables whole and in insertion order.
+CREATE FUNCTION pg_temp.scan_cost(query text) RETURNS float8
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan json;
+BEGIN
+    EXECUTE 'EXPLAIN (FORMAT JSON) ' || query INTO plan;
+    RETURN (plan -> 0 -> 'Plan' ->> 'Total Cost')::float8;
+END;
+$$;
+SET cpu_tuple_cost = 0;
+SET cpu_operator_cost = 0;
+-- Files hold ids 1-1000, 1001-2000, ... in that order.
+CREATE TABLE customscan_pruning_cost_t (id integer) USING iceberg;
+INSERT INTO customscan_pruning_cost_t SELECT generate_series(1, 1000);
+INSERT INTO customscan_pruning_cost_t SELECT generate_series(1001, 2000);
+INSERT INTO customscan_pruning_cost_t SELECT generate_series(2001, 3000);
+INSERT INTO customscan_pruning_cost_t SELECT generate_series(3001, 4000);
+ANALYZE customscan_pruning_cost_t;
+-- Correlation 1: the qualifying rows fill one unit of four, as in
+-- brincostestimate.
+SELECT round((pg_temp.scan_cost('SELECT id FROM customscan_pruning_cost_t WHERE id = 1500')
+              / pg_temp.scan_cost('SELECT id FROM customscan_pruning_cost_t'))::numeric, 4)
+       AS scanned_fraction;
+ scanned_fraction 
+------------------
+           0.2500
+(1 row)
+
+-- lagodb_iceberg.scan_min_fraction floors the estimate.
+SET lagodb_iceberg.scan_min_fraction = 0.5;
+SELECT round((pg_temp.scan_cost('SELECT id FROM customscan_pruning_cost_t WHERE id = 1500')
+              / pg_temp.scan_cost('SELECT id FROM customscan_pruning_cost_t'))::numeric, 4)
+       AS scanned_fraction;
+ scanned_fraction 
+------------------
+           0.5000
+(1 row)
+
+RESET lagodb_iceberg.scan_min_fraction;
+-- Files hold parts 2, 4, 1, 3 in that order, ids following the part, so both
+-- columns correlate with physical order by only 1/16.
+CREATE TABLE customscan_layout_cost_t (id integer, part integer)
+PARTITION BY LIST (part) USING iceberg;
+INSERT INTO customscan_layout_cost_t SELECT g, 2 FROM generate_series(1001, 2000) AS g;
+INSERT INTO customscan_layout_cost_t SELECT g, 4 FROM generate_series(3001, 4000) AS g;
+INSERT INTO customscan_layout_cost_t SELECT g, 1 FROM generate_series(1, 1000) AS g;
+INSERT INTO customscan_layout_cost_t SELECT g, 3 FROM generate_series(2001, 3000) AS g;
+ANALYZE customscan_layout_cost_t;
+-- The identity partition prunes by layout: its selectivity is the fraction,
+-- whatever the correlation.
+SELECT round((pg_temp.scan_cost('SELECT id FROM customscan_layout_cost_t WHERE part = 2')
+              / pg_temp.scan_cost('SELECT id FROM customscan_layout_cost_t'))::numeric, 4)
+       AS scanned_fraction;
+ scanned_fraction 
+------------------
+           0.2500
+(1 row)
+
+-- The same rows reached through min/max statistics: at correlation 1/16 one
+-- qualifying unit spreads over all four.
+SELECT round((pg_temp.scan_cost('SELECT id FROM customscan_layout_cost_t WHERE id = 1500')
+              / pg_temp.scan_cost('SELECT id FROM customscan_layout_cost_t'))::numeric, 4)
+       AS scanned_fraction;
+ scanned_fraction 
+------------------
+           1.0000
+(1 row)
+
+-- Eight files: part 1 holds ids 1-4000 in four files, part 2 ids 4001-8000 in
+-- four more, ids in insertion order (correlation 1).
+CREATE TABLE customscan_combined_cost_t (id integer, part integer)
+PARTITION BY LIST (part) USING iceberg;
+INSERT INTO customscan_combined_cost_t SELECT g, 1 FROM generate_series(1, 1000) AS g;
+INSERT INTO customscan_combined_cost_t SELECT g, 1 FROM generate_series(1001, 2000) AS g;
+INSERT INTO customscan_combined_cost_t SELECT g, 1 FROM generate_series(2001, 3000) AS g;
+INSERT INTO customscan_combined_cost_t SELECT g, 1 FROM generate_series(3001, 4000) AS g;
+INSERT INTO customscan_combined_cost_t SELECT g, 2 FROM generate_series(4001, 5000) AS g;
+INSERT INTO customscan_combined_cost_t SELECT g, 2 FROM generate_series(5001, 6000) AS g;
+INSERT INTO customscan_combined_cost_t SELECT g, 2 FROM generate_series(6001, 7000) AS g;
+INSERT INTO customscan_combined_cost_t SELECT g, 2 FROM generate_series(7001, 8000) AS g;
+ANALYZE customscan_combined_cost_t;
+-- Statistics prune only the units the layout keeps: part = 1 keeps half of the
+-- eight units, and id <= 2400 (selectivity 0.3) fills ceil(4 * 0.3) = 2 of
+-- those four, so 0.5 * 2 / 4. Pricing the statistics over all eight units
+-- would give 0.5 * 3 / 8, statistics alone 3 / 8, and layout alone 0.5.
+SELECT round((pg_temp.scan_cost('SELECT id FROM customscan_combined_cost_t
+                                 WHERE part = 1 AND id <= 2400')
+              / pg_temp.scan_cost('SELECT id FROM customscan_combined_cost_t'))::numeric, 4)
+       AS scanned_fraction;
+ scanned_fraction 
+------------------
+           0.2500
+(1 row)
+
+RESET cpu_tuple_cost;
+RESET cpu_operator_cost;
+DROP TABLE customscan_combined_cost_t;
+DROP TABLE customscan_layout_cost_t;
+DROP TABLE customscan_pruning_cost_t;
+DROP FUNCTION pg_temp.scan_cost(text);
+-- Conservative pruning retains the PostgreSQL residual.
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
+-- Use four files with disjoint date ranges. Conservative filters prune files while
+-- PostgreSQL rechecks returned rows.
+CREATE TABLE customscan_conservative_pruning_t (
+    val date,
+    payload text
+) USING iceberg;
+-- File 1: val ∈ [2001-01-01 + 1, 2001-01-01 + 100]
+INSERT INTO customscan_conservative_pruning_t
+SELECT DATE '2001-01-01' + g, 'file1_' || g
+FROM generate_series(1, 100) AS g;
+-- File 2: val ∈ [2001-01-01 + 200, 2001-01-01 + 300]
+INSERT INTO customscan_conservative_pruning_t
+SELECT DATE '2001-01-01' + g, 'file2_' || g
+FROM generate_series(200, 300) AS g;
+-- File 3: val ∈ [2001-01-01 + 500, 2001-01-01 + 600]
+INSERT INTO customscan_conservative_pruning_t
+SELECT DATE '2001-01-01' + g, 'file3_' || g
+FROM generate_series(500, 600) AS g;
+-- File 4: val ∈ [2001-01-01 + 800, 2001-01-01 + 900]
+INSERT INTO customscan_conservative_pruning_t
+SELECT DATE '2001-01-01' + g, 'file4_' || g
+FROM generate_series(800, 900) AS g;
+SELECT COUNT(*) AS total_rows FROM customscan_conservative_pruning_t;
+ total_rows 
+------------
+        403
+(1 row)
+
+-- Equality selects a value in the second file.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 250
+ORDER BY val, payload;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Sort
+   Sort Key: payload
+   ->  Custom Scan (lagodb-iceberg) on customscan_conservative_pruning_t
+         Filter: (val = '09-08-2001'::date)
+         Pushed Filter: (val = '09-08-2001'::date)
+(5 rows)
+
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 250
+ORDER BY val, payload;
+    val     |  payload  
+------------+-----------
+ 09-08-2001 | file2_250
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 250
+ORDER BY val, payload;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Sort
+   Sort Key: payload
+   ->  Seq Scan on customscan_conservative_pruning_t
+         Filter: (val = '09-08-2001'::date)
+(4 rows)
+
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 250
+ORDER BY val, payload;
+    val     |  payload  
+------------+-----------
+ 09-08-2001 | file2_250
+(1 row)
+
+-- Equality in a gap between files returns no rows.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 150
+ORDER BY val, payload;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Sort
+   Sort Key: payload
+   ->  Custom Scan (lagodb-iceberg) on customscan_conservative_pruning_t
+         Filter: (val = '05-31-2001'::date)
+         Pushed Filter: (val = '05-31-2001'::date)
+(5 rows)
+
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 150
+ORDER BY val, payload;
+ val | payload 
+-----+---------
+(0 rows)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 150
+ORDER BY val, payload;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Sort
+   Sort Key: payload
+   ->  Seq Scan on customscan_conservative_pruning_t
+         Filter: (val = '05-31-2001'::date)
+(4 rows)
+
+SELECT val, payload
+FROM customscan_conservative_pruning_t
+WHERE val = DATE '2001-01-01' + 150
+ORDER BY val, payload;
+ val | payload 
+-----+---------
+(0 rows)
+
+-- The range covers file 1 and part of file 2: 150 rows.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS pushdown_count
+FROM customscan_conservative_pruning_t
+WHERE val < DATE '2001-01-01' + 250;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_conservative_pruning_t
+         Filter: (val < '09-08-2001'::date)
+         Pushed Filter: (val < '09-08-2001'::date)
+(4 rows)
+
+SELECT COUNT(*) AS pushdown_count
+FROM customscan_conservative_pruning_t
+WHERE val < DATE '2001-01-01' + 250;
+ pushdown_count 
+----------------
+            150
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS baseline_count
+FROM customscan_conservative_pruning_t
+WHERE val < DATE '2001-01-01' + 250;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_conservative_pruning_t
+         Filter: (val < '09-08-2001'::date)
+(3 rows)
+
+SELECT COUNT(*) AS baseline_count
+FROM customscan_conservative_pruning_t
+WHERE val < DATE '2001-01-01' + 250;
+ baseline_count 
+----------------
+            150
+(1 row)
+
+-- The range crosses three files: 51 + 101 + 51 = 203 rows.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS pushdown_count
+FROM customscan_conservative_pruning_t
+WHERE val >= DATE '2001-01-01' + 50 AND val <= DATE '2001-01-01' + 550;
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on customscan_conservative_pruning_t
+         Filter: ((val >= '02-20-2001'::date) AND (val <= '07-05-2002'::date))
+         Pushed Filter: (val >= '02-20-2001'::date) AND (val <= '07-05-2002'::date)
+(4 rows)
+
+SELECT COUNT(*) AS pushdown_count
+FROM customscan_conservative_pruning_t
+WHERE val >= DATE '2001-01-01' + 50 AND val <= DATE '2001-01-01' + 550;
+ pushdown_count 
+----------------
+            203
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT COUNT(*) AS baseline_count
+FROM customscan_conservative_pruning_t
+WHERE val >= DATE '2001-01-01' + 50 AND val <= DATE '2001-01-01' + 550;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Aggregate
+   ->  Seq Scan on customscan_conservative_pruning_t
+         Filter: ((val >= '02-20-2001'::date) AND (val <= '07-05-2002'::date))
+(3 rows)
+
+SELECT COUNT(*) AS baseline_count
+FROM customscan_conservative_pruning_t
+WHERE val >= DATE '2001-01-01' + 50 AND val <= DATE '2001-01-01' + 550;
+ baseline_count 
+----------------
+            203
+(1 row)
+
+RESET lagodb.customscan_mode;
+DROP TABLE customscan_conservative_pruning_t;
+-- EXPLAIN separates exact filters from conservative pruning.
+-- Integer comparisons and C-collation text comparisons are exact; date
+-- comparisons remain conservative.
+CREATE TABLE customscan_explain_split_t (
+    id integer,
+    d date,
+    descr text COLLATE "C"
+) USING iceberg;
+-- File 1: id in [1, 3], d in 2023 (before the 2024-01-01 boundary)
+INSERT INTO customscan_explain_split_t VALUES
+    (1, DATE '2023-01-15', 'apple'),
+    (2, DATE '2023-06-20', 'mango'),
+    (3, DATE '2023-12-31', 'cherry');
+-- File 2: id in [4, 6], d in 2024+ (on/after the boundary)
+INSERT INTO customscan_explain_split_t VALUES
+    (4, DATE '2024-01-10', 'date'),
+    (5, DATE '2024-06-15', 'fig'),
+    (6, DATE '2024-12-31', 'grape');
+SELECT COUNT(*) AS total_rows FROM customscan_explain_split_t;
+ total_rows 
+------------
+          6
+(1 row)
+
+-- Only the date clause remains in the residual; both date and integer clauses appear in
+-- the pushed filter.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, d FROM customscan_explain_split_t
+WHERE id = 2 AND d < DATE '2024-01-01';
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Custom Scan (lagodb-iceberg) on customscan_explain_split_t
+   Filter: (d < '01-01-2024'::date)
+   Pushed Filter: (d < '01-01-2024'::date) AND (id = 2)
+(3 rows)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT id, d FROM customscan_explain_split_t
+WHERE id = 2 AND d < DATE '2024-01-01';
+                    QUERY PLAN                     
+---------------------------------------------------
+ Seq Scan on customscan_explain_split_t
+   Filter: ((d < '01-01-2024'::date) AND (id = 2))
+(2 rows)
+
+SET lagodb.customscan_mode = 'force';
+SELECT id, d FROM customscan_explain_split_t
+WHERE id = 2 AND d < DATE '2024-01-01'
+ORDER BY id;
+ id |     d      
+----+------------
+  2 | 06-20-2023
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+SELECT id, d FROM customscan_explain_split_t
+WHERE id = 2 AND d < DATE '2024-01-01'
+ORDER BY id;
+ id |     d      
+----+------------
+  2 | 06-20-2023
+(1 row)
+
+-- Ordered text comparison under an explicit C collation is pushed exactly.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, descr FROM customscan_explain_split_t
+WHERE descr < 'mango';
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Custom Scan (lagodb-iceberg) on customscan_explain_split_t
+   Pushed Filter: (descr < 'mango'::text)
+(2 rows)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT id, descr FROM customscan_explain_split_t
+WHERE descr < 'mango';
+               QUERY PLAN               
+----------------------------------------
+ Seq Scan on customscan_explain_split_t
+   Filter: (descr < 'mango'::text)
+(2 rows)
+
+SET lagodb.customscan_mode = 'force';
+SELECT id, descr FROM customscan_explain_split_t
+WHERE descr < 'mango'
+ORDER BY id;
+ id | descr  
+----+--------
+  1 | apple
+  3 | cherry
+  4 | date
+  5 | fig
+  6 | grape
+(5 rows)
+
+SET lagodb.customscan_mode = 'off';
+SELECT id, descr FROM customscan_explain_split_t
+WHERE descr < 'mango'
+ORDER BY id;
+ id | descr  
+----+--------
+  1 | apple
+  3 | cherry
+  4 | date
+  5 | fig
+  6 | grape
+(5 rows)
+
+RESET lagodb.customscan_mode;
+DROP TABLE customscan_explain_split_t;
+-- Result parity across operand types.
+-- Fix the timezone for timestamptz comparisons.
+SET timezone = 'UTC';
+-- Numeric comparisons stay residual, including NaN and out-of-range literals.
+CREATE TABLE rq_numeric (
+    id integer,
+    val numeric(10, 2)
+) USING iceberg;
+-- File 1: val in [10.50, 99.99]
+INSERT INTO rq_numeric VALUES (1, 10.50), (2, 50.00), (3, 99.99);
+-- File 2: val in [100.50, 999.99]
+INSERT INTO rq_numeric VALUES (4, 100.50), (5, 200.00), (6, 999.99);
+SELECT COUNT(*) AS rq_numeric_rows FROM rq_numeric;
+ rq_numeric_rows 
+-----------------
+               6
+(1 row)
+
+-- Numeric ordered comparison remains residual.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, val FROM rq_numeric WHERE val < 100.5 ORDER BY id;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on rq_numeric
+         Pushed Filter: (val < 100.5)
+(4 rows)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT id, val FROM rq_numeric WHERE val < 100.5 ORDER BY id;
+          QUERY PLAN           
+-------------------------------
+ Sort
+   Sort Key: id
+   ->  Seq Scan on rq_numeric
+         Filter: (val < 100.5)
+(4 rows)
+
+SET lagodb.customscan_mode = 'force';
+SELECT id, val FROM rq_numeric WHERE val < 100.5 ORDER BY id;
+ id |  val  
+----+-------
+  1 | 10.50
+  2 | 50.00
+  3 | 99.99
+(3 rows)
+
+SET lagodb.customscan_mode = 'off';
+SELECT id, val FROM rq_numeric WHERE val < 100.5 ORDER BY id;
+ id |  val  
+----+-------
+  1 | 10.50
+  2 | 50.00
+  3 | 99.99
+(3 rows)
+
+-- NaN sorts above finite numeric values, so every stored value matches without error.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, val FROM rq_numeric WHERE val < 'NaN'::numeric ORDER BY id;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on rq_numeric
+         Pushed Filter: (val < 'NaN'::numeric)
+(4 rows)
+
+SELECT id, val FROM rq_numeric WHERE val < 'NaN'::numeric ORDER BY id;
+ id |  val   
+----+--------
+  1 |  10.50
+  2 |  50.00
+  3 |  99.99
+  4 | 100.50
+  5 | 200.00
+  6 | 999.99
+(6 rows)
+
+SET lagodb.customscan_mode = 'off';
+SELECT id, val FROM rq_numeric WHERE val < 'NaN'::numeric ORDER BY id;
+ id |  val   
+----+--------
+  1 |  10.50
+  2 |  50.00
+  3 |  99.99
+  4 | 100.50
+  5 | 200.00
+  6 | 999.99
+(6 rows)
+
+-- An out-of-range numeric literal must be evaluated by PostgreSQL without a storage
+-- conversion error.
+SET lagodb.customscan_mode = 'force';
+SELECT id, val FROM rq_numeric WHERE val < 1e40::numeric ORDER BY id;
+ id |  val   
+----+--------
+  1 |  10.50
+  2 |  50.00
+  3 |  99.99
+  4 | 100.50
+  5 | 200.00
+  6 | 999.99
+(6 rows)
+
+SET lagodb.customscan_mode = 'off';
+SELECT id, val FROM rq_numeric WHERE val < 1e40::numeric ORDER BY id;
+ id |  val   
+----+--------
+  1 |  10.50
+  2 |  50.00
+  3 |  99.99
+  4 | 100.50
+  5 | 200.00
+  6 | 999.99
+(6 rows)
+
+-- Temporal pruning must agree with PostgreSQL epoch conversion across the 2024
+-- boundary.
+CREATE TABLE rq_temporal (
+    id integer,
+    d date,
+    ts timestamp,
+    tstz timestamptz
+) USING iceberg;
+-- File 1: pre-2024
+INSERT INTO rq_temporal VALUES
+    (1, DATE '2020-03-15', TIMESTAMP '2020-03-15 08:00:00', TIMESTAMPTZ '2020-03-15 08:00:00+00'),
+    (2, DATE '2021-07-20', TIMESTAMP '2021-07-20 16:30:00', TIMESTAMPTZ '2021-07-20 16:30:00+00');
+-- File 2: 2024 and later
+INSERT INTO rq_temporal VALUES
+    (3, DATE '2024-06-15', TIMESTAMP '2024-06-15 12:34:56', TIMESTAMPTZ '2024-06-15 12:34:56+00'),
+    (4, DATE '2025-01-10', TIMESTAMP '2025-01-10 23:59:59', TIMESTAMPTZ '2025-01-10 23:59:59+00');
+SELECT COUNT(*) AS rq_temporal_rows FROM rq_temporal;
+ rq_temporal_rows 
+------------------
+                4
+(1 row)
+
+-- Date comparison.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, d FROM rq_temporal WHERE d >= DATE '2024-01-01' ORDER BY id;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on rq_temporal
+         Filter: (d >= '01-01-2024'::date)
+         Pushed Filter: (d >= '01-01-2024'::date)
+(5 rows)
+
+SELECT id, d FROM rq_temporal WHERE d >= DATE '2024-01-01' ORDER BY id;
+ id |     d      
+----+------------
+  3 | 06-15-2024
+  4 | 01-10-2025
+(2 rows)
+
+SET lagodb.customscan_mode = 'off';
+SELECT id, d FROM rq_temporal WHERE d >= DATE '2024-01-01' ORDER BY id;
+ id |     d      
+----+------------
+  3 | 06-15-2024
+  4 | 01-10-2025
+(2 rows)
+
+-- Timestamp comparison.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, ts FROM rq_temporal WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' ORDER BY id;
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on rq_temporal
+         Filter: (ts >= 'Mon Jan 01 00:00:00 2024'::timestamp without time zone)
+         Pushed Filter: (ts >= 'Mon Jan 01 00:00:00 2024'::timestamp without time zone)
+(5 rows)
+
+SELECT id, ts FROM rq_temporal WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' ORDER BY id;
+ id |            ts            
+----+--------------------------
+  3 | Sat Jun 15 12:34:56 2024
+  4 | Fri Jan 10 23:59:59 2025
+(2 rows)
+
+SET lagodb.customscan_mode = 'off';
+SELECT id, ts FROM rq_temporal WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' ORDER BY id;
+ id |            ts            
+----+--------------------------
+  3 | Sat Jun 15 12:34:56 2024
+  4 | Fri Jan 10 23:59:59 2025
+(2 rows)
+
+-- Timestamptz comparison.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on rq_temporal
+         Filter: (tstz >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone)
+         Pushed Filter: (tstz >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone)
+(5 rows)
+
+SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
+ id |             tstz             
+----+------------------------------
+  3 | Sat Jun 15 12:34:56 2024 UTC
+  4 | Fri Jan 10 23:59:59 2025 UTC
+(2 rows)
+
+SET lagodb.customscan_mode = 'off';
+SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
+ id |             tstz             
+----+------------------------------
+  3 | Sat Jun 15 12:34:56 2024 UTC
+  4 | Fri Jan 10 23:59:59 2025 UTC
+(2 rows)
+
+-- Default deterministic-collation text equality and inequality.
+CREATE TABLE rq_text (
+    id integer,
+    label text
+) USING iceberg;
+-- File 1
+INSERT INTO rq_text VALUES (1, 'alpha'), (2, 'bravo'), (3, 'charlie');
+-- File 2
+INSERT INTO rq_text VALUES (4, 'delta'), (5, 'echo'), (6, 'foxtrot');
+SELECT COUNT(*) AS rq_text_rows FROM rq_text;
+ rq_text_rows 
+--------------
+            6
+(1 row)
+
+-- Text equality under the database default collation.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
+                   QUERY PLAN                   
+------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on rq_text
+         Pushed Filter: (label = 'bravo'::text)
+(4 rows)
+
+SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
+ id | label 
+----+-------
+  2 | bravo
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+SELECT id, label FROM rq_text WHERE label = 'bravo' ORDER BY id;
+ id | label 
+----+-------
+  2 | bravo
+(1 row)
+
+-- Text inequality is exact under a deterministic default collation.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on rq_text
+         Pushed Filter: (label <> 'bravo'::text)
+(4 rows)
+
+SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
+ id |  label  
+----+---------
+  1 | alpha
+  3 | charlie
+  4 | delta
+  5 | echo
+  6 | foxtrot
+(5 rows)
+
+SET lagodb.customscan_mode = 'off';
+SELECT id, label FROM rq_text WHERE label <> 'bravo' ORDER BY id;
+ id |  label  
+----+---------
+  1 | alpha
+  3 | charlie
+  4 | delta
+  5 | echo
+  6 | foxtrot
+(5 rows)
+
+-- Float comparisons are exact: both zeros compare equal, and every NaN, a
+-- negative-sign NaN included, sorts above every number.
+-- The NaN rows get a data file of their own, which file statistics show to
+-- hold only NaN, so `f8 > 0.1` must not prune it.
+CREATE TABLE rq_float (
+    id integer,
+    f4 real,
+    f8 double precision
+) USING iceberg;
+INSERT INTO rq_float VALUES
+    (1, 1, 1), (3, '-0', '-0'), (4, 0, 0), (6, 0.1, 0.1), (7, NULL, NULL);
+INSERT INTO rq_float VALUES
+    (2, -'NaN'::real, -'NaN'::float8), (5, 'NaN', 'NaN');
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id FROM rq_float WHERE f8 <= 0 ORDER BY id;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on rq_float
+         Pushed Filter: (f8 <= '0'::double precision)
+(4 rows)
+
+SELECT id FROM rq_float WHERE f8 <= 0 ORDER BY id;
+ id 
+----
+  3
+  4
+(2 rows)
+
+SELECT id FROM rq_float WHERE f8 > 0.1 ORDER BY id;
+ id 
+----
+  1
+  2
+  5
+(3 rows)
+
+SELECT id FROM rq_float WHERE f8 <> 0 ORDER BY id;
+ id 
+----
+  1
+  2
+  5
+  6
+(4 rows)
+
+-- A real column compared with a double constant compares in double precision.
+EXPLAIN (COSTS OFF)
+SELECT id FROM rq_float WHERE f4 <= 0.1::float8 ORDER BY id;
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on rq_float
+         Pushed Filter: (f4 <= '0.1'::double precision)
+(4 rows)
+
+SELECT id FROM rq_float WHERE f4 <= 0.1::float8 ORDER BY id;
+ id 
+----
+  3
+  4
+(2 rows)
+
+RESET lagodb.customscan_mode;
+RESET timezone;
+DROP TABLE rq_numeric;
+DROP TABLE rq_temporal;
+DROP TABLE rq_text;
+DROP TABLE rq_float;
+-- Exact text inequality under the default deterministic collation.
+CREATE TABLE customscan_unsupported_only_t (
+    id integer,
+    label text
+) USING iceberg;
+INSERT INTO customscan_unsupported_only_t VALUES (1, 'alpha');
+INSERT INTO customscan_unsupported_only_t VALUES (2, 'bravo');
+INSERT INTO customscan_unsupported_only_t VALUES (3, 'charlie');
+SELECT COUNT(*) AS total_rows FROM customscan_unsupported_only_t;
+ total_rows 
+------------
+          3
+(1 row)
+
+-- Text inequality is pushed without a local residual.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE label <> 'bravo'
+ORDER BY id, label;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Sort
+   Sort Key: id, label
+   ->  Custom Scan (lagodb-iceberg) on customscan_unsupported_only_t
+         Pushed Filter: (label <> 'bravo'::text)
+(4 rows)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE label <> 'bravo'
+ORDER BY id, label;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Sort
+   Sort Key: id, label
+   ->  Seq Scan on customscan_unsupported_only_t
+         Filter: (label <> 'bravo'::text)
+(4 rows)
+
+SET lagodb.customscan_mode = 'force';
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE label <> 'bravo'
+ORDER BY id, label;
+ id |  label  
+----+---------
+  1 | alpha
+  3 | charlie
+(2 rows)
+
+SET lagodb.customscan_mode = 'off';
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE label <> 'bravo'
+ORDER BY id, label;
+ id |  label  
+----+---------
+  1 | alpha
+  3 | charlie
+(2 rows)
+
+-- Use integer equality as the exact-pushdown control on the same table.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE id = 2
+ORDER BY id, label;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Sort
+   Sort Key: label
+   ->  Custom Scan (lagodb-iceberg) on customscan_unsupported_only_t
+         Pushed Filter: (id = 2)
+(4 rows)
+
+SET lagodb.customscan_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE id = 2
+ORDER BY id, label;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Sort
+   Sort Key: label
+   ->  Seq Scan on customscan_unsupported_only_t
+         Filter: (id = 2)
+(4 rows)
+
+SET lagodb.customscan_mode = 'force';
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE id = 2
+ORDER BY id, label;
+ id | label 
+----+-------
+  2 | bravo
+(1 row)
+
+SET lagodb.customscan_mode = 'off';
+SELECT id, label FROM customscan_unsupported_only_t
+WHERE id = 2
+ORDER BY id, label;
+ id | label 
+----+-------
+  2 | bravo
+(1 row)
+
+RESET lagodb.customscan_mode;
+RESET lagodb.query_offload_mode;
+DROP TABLE customscan_unsupported_only_t;

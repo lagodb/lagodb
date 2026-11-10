@@ -3,6 +3,7 @@ use super::record::{
     MAX_DELETE_FILES_PER_RECORD, SIZE_OF_DELETE_FILES, SIZE_OF_DIRECTORY,
     SIZE_OF_WRITE_FILE, WriteFileHeader,
 };
+use lagodb_core::backend::VfdHandle;
 use lagodb_core::wal::{RmgrId, WalRecord, WalResourceManager, WalRmgrError};
 use lagodb_core::{diag, wal};
 
@@ -390,18 +391,12 @@ impl IcebergRmgr {
         let _guard = FileGuard(file);
 
         if !file_data.is_empty() {
-            // SAFETY: `file` is a valid open VFD held by `_guard`; the slice
-            // supplies a readable pointer for exactly `file_data.len()` bytes;
-            // and the wait-event value is the PostgreSQL event for file writes.
-            let bytes_written = unsafe {
-                pg_sys::FileWrite(
-                    file,
-                    file_data.as_ptr() as *const std::ffi::c_void,
-                    file_data.len(),
-                    offset as pg_sys::off_t,
-                    pg_sys::WaitEventIO::WAIT_EVENT_COPY_FILE_WRITE,
-                )
-            };
+            // SAFETY: `file` is a valid open VFD held by `_guard`.
+            let bytes_written = unsafe { VfdHandle::from_raw(file) }.write_at(
+                file_data,
+                offset as pg_sys::off_t,
+                pg_sys::WaitEventIO::WAIT_EVENT_COPY_FILE_WRITE,
+            );
 
             // Check if all bytes were written correctly
             if bytes_written < 0 || bytes_written as usize != file_data.len() {

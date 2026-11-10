@@ -18,7 +18,6 @@
 #include "miscadmin.h"
 #include "nodes/bitmapset.h"
 #include "nodes/makefuncs.h"
-#include "nodes/miscnodes.h"
 #include "optimizer/optimizer.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_collate.h"
@@ -57,8 +56,9 @@ lagodb_prepare_copy_command(const CopyStmt *stmt, LagodbCopyEndpoint endpoint)
 	 * the URI as a server filename. PROGRAM classification takes precedence
 	 * over URI recognition, so a URI in a shell command cannot bypass this
 	 * check. Role checks and diagnostics below follow PostgreSQL 17.11
-	 * copy.c, audited for PG16.15.
+	 * copy.c, audited for PG16.15; PG15.19 words the errors differently.
 	 */
+#if LAGODB_PG16_GE
 	if (endpoint == LAGODB_COPY_SERVER_PROGRAM)
 	{
 		if (!has_privs_of_role(GetUserId(), ROLE_PG_EXECUTE_SERVER_PROGRAM))
@@ -90,6 +90,33 @@ lagodb_prepare_copy_command(const CopyStmt *stmt, LagodbCopyEndpoint endpoint)
 					 errhint("Anyone can COPY to stdout or from stdin. "
 							 "psql's \\copy command also works for anyone.")));
 	}
+#else
+	if (endpoint == LAGODB_COPY_SERVER_PROGRAM)
+	{
+		if (!has_privs_of_role(GetUserId(), ROLE_PG_EXECUTE_SERVER_PROGRAM))
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("must be superuser or have privileges of the pg_execute_server_program role to COPY to or from an external program"),
+					 errhint("Anyone can COPY to stdout or from stdin. "
+							 "psql's \\copy command also works for anyone.")));
+	}
+	else if (endpoint == LAGODB_COPY_SERVER_FILE)
+	{
+		if (stmt->is_from && !has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("must be superuser or have privileges of the pg_read_server_files role to COPY from a file"),
+					 errhint("Anyone can COPY to stdout or from stdin. "
+							 "psql's \\copy command also works for anyone.")));
+
+		if (!stmt->is_from && !has_privs_of_role(GetUserId(), ROLE_PG_WRITE_SERVER_FILES))
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("must be superuser or have privileges of the pg_write_server_files role to COPY to a file"),
+					 errhint("Anyone can COPY to stdout or from stdin. "
+							 "psql's \\copy command also works for anyone.")));
+	}
+#endif
 }
 
 static Node *
@@ -113,7 +140,7 @@ lagodb_prepare_where_clause(ParseState *pstate,
 	assign_expr_collations(pstate, where_clause);
 
 #if LAGODB_HAS_COPY_WHERE_GENERATED_CHECK
-	/* PG16.11 and PG17.7 added generated-column validation here. */
+	/* PG15.15, PG16.11 and PG17.7 added generated-column validation here. */
 	pull_varattnos(where_clause, 1, &expr_attrs);
 	if (bms_is_member(0 - FirstLowInvalidHeapAttributeNumber, expr_attrs))
 	{
@@ -131,7 +158,10 @@ lagodb_prepare_where_clause(ParseState *pstate,
 		AttrNumber	attno = i + FirstLowInvalidHeapAttributeNumber;
 
 		Assert(attno != 0);
-		/* The attno guard is also required on PG16.11-16.13 and PG17.7-17.9. */
+		/*
+		 * The attno guard is also required on PG15.15-15.17, PG16.11-16.13
+		 * and PG17.7-17.9.
+		 */
 		if (attno > 0 &&
 			TupleDescAttr(RelationGetDescr(rel), attno - 1)->attgenerated)
 			ereport(ERROR,
@@ -154,7 +184,12 @@ lagodb_prepare_relation(ParseState *pstate,
 						Node **where_clause)
 {
 	ParseNamespaceItem *nsitem;
+#if LAGODB_PG16_GE
 	RTEPermissionInfo *perminfo;
+#else
+	/* PostgreSQL 16 moved permission fields into RTEPermissionInfo. */
+	RangeTblEntry *perminfo;
+#endif
 	List	   *attnums;
 	ListCell   *cur;
 	Relation	rel;
@@ -162,7 +197,11 @@ lagodb_prepare_relation(ParseState *pstate,
 	rel = table_openrv(stmt->relation, lockmode);
 	nsitem = addRangeTableEntryForRelation(pstate, rel, lockmode,
 										   NULL, false, false);
+#if LAGODB_PG16_GE
 	perminfo = nsitem->p_perminfo;
+#else
+	perminfo = nsitem->p_rte;
+#endif
 	perminfo->requiredPerms = stmt->is_from ? ACL_INSERT : ACL_SELECT;
 
 	if (stmt->whereClause != NULL)
@@ -182,8 +221,12 @@ lagodb_prepare_relation(ParseState *pstate,
 		*columns = bms_add_member(*columns,
 								  attno - FirstLowInvalidHeapAttributeNumber);
 	}
+#if LAGODB_PG16_GE
 	ExecCheckPermissions(pstate->p_rtable,
 						 list_make1(perminfo), true);
+#else
+	ExecCheckRTPerms(pstate->p_rtable, true);
+#endif
 	return rel;
 }
 

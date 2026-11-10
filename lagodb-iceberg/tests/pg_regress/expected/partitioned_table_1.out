@@ -1,0 +1,612 @@
+-- Managed partitioned tables: definitions, PostgreSQL catalog policy, COPY, and DML.
+-- PostgreSQL 15 words the COPY file-permission error differently; _1.out is
+-- the PostgreSQL 15 output.
+-- Managed partition definitions and PostgreSQL catalog policy.
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+CREATE EXTENSION lagodb_iceberg;
+CREATE SCHEMA partitioned_ddl;
+-- Each key entry lowers to one Iceberg partition field. The strategy word only
+-- interprets a bare column.
+CREATE TABLE partitioned_ddl.date_t (event_date date)
+PARTITION BY RANGE (event_date) USING iceberg;
+CREATE TABLE partitioned_ddl.timestamp_t (event_time timestamp)
+PARTITION BY RANGE ((date_trunc('month', event_time))) USING iceberg;
+CREATE TABLE partitioned_ddl.timestamptz_t (event_time timestamptz)
+PARTITION BY RANGE ((date_trunc('day', event_time, 'UTC'))) USING iceberg;
+CREATE TABLE partitioned_ddl.hash_default_t (id integer)
+PARTITION BY HASH (id) USING iceberg;
+CREATE TABLE partitioned_ddl.hash_bucket_t (id bigint)
+PARTITION BY HASH (iceberg.bucket(16, id)) USING iceberg;
+-- A function entry keeps its own transform under every strategy.
+CREATE TABLE partitioned_ddl.hash_temporal_t (event_time timestamp)
+PARTITION BY HASH (date_trunc('day', event_time)) USING iceberg;
+-- A key with several entries is one composite spec in clause order, whatever
+-- the column order.
+CREATE TABLE partitioned_ddl.composite_range_t (id uuid, event_time timestamptz)
+PARTITION BY RANGE (date_trunc('day', event_time, 'UTC'), iceberg.bucket(32, id)) USING iceberg;
+CREATE TABLE partitioned_ddl.composite_list_t (event_time timestamp, region text, site integer)
+PARTITION BY LIST (region, site, date_trunc('hour', event_time)) USING iceberg;
+CREATE TABLE partitioned_ddl.same_source_t (id integer, payload text)
+PARTITION BY HASH (iceberg.bucket(4, id), iceberg.bucket(8, id)) USING iceberg;
+-- Check the lowered transform, field name, and source identity.
+SELECT definition.table_id::text AS relation,
+       field.ordinal,
+       field.spec->>'transform' AS transform,
+       field.spec->>'name' AS field_name,
+       field.spec->>'source-id' AS source_id
+FROM (VALUES ('partitioned_ddl.date_t'::regclass),
+             ('partitioned_ddl.timestamp_t'::regclass),
+             ('partitioned_ddl.timestamptz_t'::regclass),
+             ('partitioned_ddl.hash_default_t'::regclass),
+             ('partitioned_ddl.hash_bucket_t'::regclass),
+             ('partitioned_ddl.hash_temporal_t'::regclass),
+             ('partitioned_ddl.composite_range_t'::regclass),
+             ('partitioned_ddl.composite_list_t'::regclass),
+             ('partitioned_ddl.same_source_t'::regclass)) AS definition(table_id)
+JOIN iceberg.iceberg_metadata ON relid = definition.table_id
+CROSS JOIN LATERAL (SELECT pg_read_file(metadata_location)::jsonb AS metadata) AS file
+CROSS JOIN LATERAL jsonb_array_elements(metadata->'partition-specs'->0->'fields')
+    WITH ORDINALITY AS field(spec, ordinal)
+ORDER BY relation, field.ordinal;
+             relation              | ordinal | transform  |    field_name    | source_id 
+-----------------------------------+---------+------------+------------------+-----------
+ partitioned_ddl.composite_list_t  |       1 | identity   | region           | 2
+ partitioned_ddl.composite_list_t  |       2 | identity   | site             | 3
+ partitioned_ddl.composite_list_t  |       3 | hour       | event_time_hour  | 1
+ partitioned_ddl.composite_range_t |       1 | day        | event_time_day   | 2
+ partitioned_ddl.composite_range_t |       2 | bucket[32] | id_bucket_32     | 1
+ partitioned_ddl.date_t            |       1 | day        | event_date_day   | 1
+ partitioned_ddl.hash_bucket_t     |       1 | bucket[16] | id_bucket_16     | 1
+ partitioned_ddl.hash_default_t    |       1 | bucket[32] | id_bucket_32     | 1
+ partitioned_ddl.hash_temporal_t   |       1 | day        | event_time_day   | 1
+ partitioned_ddl.same_source_t     |       1 | bucket[4]  | id_bucket_4      | 1
+ partitioned_ddl.same_source_t     |       2 | bucket[8]  | id_bucket_8      | 1
+ partitioned_ddl.timestamp_t       |       1 | month      | event_time_month | 1
+ partitioned_ddl.timestamptz_t     |       1 | day        | event_time_day   | 1
+(13 rows)
+
+-- Each entry projects the shared source column for its own transform.
+INSERT INTO partitioned_ddl.same_source_t VALUES (1, 'one'), (3, 'three'), (NULL, 'none');
+SELECT id, payload FROM partitioned_ddl.same_source_t ORDER BY id;
+ id | payload 
+----+---------
+  1 | one
+  3 | three
+    | none
+(3 rows)
+
+-- Iceberg has no multi-column hash, so each column spells its own bucket.
+CREATE TABLE partitioned_ddl.hash_columns_t (a integer, b integer)
+PARTITION BY HASH (a, b) USING iceberg;
+ERROR:  unsupported managed Iceberg partition definition: PARTITION BY HASH accepts a bare column only as its sole key; write iceberg.bucket(N, column) for each column
+-- The bucket count is a divisor.
+CREATE TABLE partitioned_ddl.bucket_zero_t (id integer)
+PARTITION BY HASH (iceberg.bucket(0, id)) USING iceberg;
+ERROR:  invalid managed Iceberg partition definition: iceberg.bucket requires a positive integer constant bucket count
+CREATE TABLE partitioned_ddl.bucket_bool_t (flag boolean)
+PARTITION BY HASH (iceberg.bucket(8, flag)) USING iceberg;
+ERROR:  unsupported managed Iceberg partition definition: PostgreSQL type boolean is not supported for an Iceberg bucket partition
+CREATE TABLE partitioned_ddl.bucket_expression_t (id integer)
+PARTITION BY HASH (iceberg.bucket(8, (id + 1))) USING iceberg;
+ERROR:  unsupported managed Iceberg partition definition: a partition transform source must be a direct table column
+-- The marker never runs. A native key rejects it at CREATE as VOLATILE, and a
+-- direct call reaches its error even with a NULL argument.
+CREATE TABLE partitioned_ddl.native_bucket_t (id integer)
+PARTITION BY HASH (iceberg.bucket(8, id));
+ERROR:  functions in partition key expression must be marked IMMUTABLE
+SELECT iceberg.bucket(
+    num_buckets => 32,
+    value => NULL::integer
+);
+ERROR:  unsupported managed Iceberg partition definition: iceberg.bucket only names a transform in PARTITION BY of a USING iceberg table and cannot be executed
+\echo :LAST_ERROR_SQLSTATE
+0A000
+-- Only the marker's exact signature names a bucket transform. PL/pgSQL keeps
+-- this overload from being inlined before lowering sees the call.
+CREATE FUNCTION iceberg.bucket(integer, text) RETURNS integer
+LANGUAGE plpgsql IMMUTABLE AS $$ BEGIN RETURN 0; END $$;
+CREATE TABLE partitioned_ddl.bucket_overload_t (id integer, region text)
+PARTITION BY HASH (iceberg.bucket(8, region)) USING iceberg;
+ERROR:  unsupported managed Iceberg partition definition: a partition key expression must be an iceberg.bucket or built-in date_trunc call
+DROP FUNCTION iceberg.bucket(integer, text);
+-- UUID partition literals cannot currently round-trip through upstream Avro.
+CREATE TABLE partitioned_ddl.unsupported_uuid_t (id uuid)
+PARTITION BY LIST (id) USING iceberg;
+ERROR:  unsupported managed Iceberg partition definition: PostgreSQL type uuid is not supported for an Iceberg identity partition
+-- A missing partition column keeps the captured report's message and SQLSTATE.
+CREATE TABLE partitioned_ddl.missing_column_t (id integer)
+PARTITION BY RANGE (missing_column) USING iceberg;
+ERROR:  column "missing_column" named in partition key does not exist
+\echo :LAST_ERROR_SQLSTATE
+42703
+-- A table owner names the marker with the USAGE that PUBLIC holds on its schema.
+CREATE ROLE partitioned_ddl_user;
+GRANT USAGE, CREATE ON SCHEMA partitioned_ddl TO partitioned_ddl_user;
+SET ROLE partitioned_ddl_user;
+CREATE TABLE partitioned_ddl.role_bucket_t (id integer)
+PARTITION BY HASH (iceberg.bucket(8, id)) USING iceberg;
+RESET ROLE;
+DROP TABLE partitioned_ddl.role_bucket_t;
+REVOKE ALL ON SCHEMA partitioned_ddl FROM partitioned_ddl_user;
+DROP ROLE partitioned_ddl_user;
+DROP TABLE partitioned_ddl.date_t, partitioned_ddl.timestamp_t, partitioned_ddl.timestamptz_t,
+    partitioned_ddl.hash_default_t, partitioned_ddl.hash_bucket_t, partitioned_ddl.hash_temporal_t,
+    partitioned_ddl.composite_range_t, partitioned_ddl.composite_list_t,
+    partitioned_ddl.same_source_t;
+-- Partitioned tables must not advertise PostgreSQL uniqueness without enforcement.
+CREATE TABLE partitioned_ddl.root_index_t (
+    id integer,
+    region text
+) PARTITION BY LIST (region) USING iceberg;
+INSERT INTO partitioned_ddl.root_index_t VALUES (1, 'east'), (2, 'east');
+\set VERBOSITY sqlstate
+CREATE UNIQUE INDEX root_unique_idx
+ON partitioned_ddl.root_index_t (region);
+ERROR:  0A000
+\set VERBOSITY default
+-- Rejected indexes leave no metadata and do not poison the COPY lifecycle.
+COPY partitioned_ddl.root_index_t FROM stdin WITH (FORMAT csv);
+SELECT count(*) AS root_indexes
+FROM pg_index WHERE indrelid = 'partitioned_ddl.root_index_t'::regclass;
+ root_indexes 
+--------------
+            0
+(1 row)
+
+SELECT count(*) AS join_rows
+FROM partitioned_ddl.root_index_t a
+LEFT JOIN partitioned_ddl.root_index_t b ON a.region = b.region;
+ join_rows 
+-----------
+         5
+(1 row)
+
+-- Native partitioned tables retain PostgreSQL's metadata-only index behavior.
+CREATE TABLE partitioned_ddl.native_index_t (
+    region text
+) PARTITION BY LIST (region);
+CREATE UNIQUE INDEX native_root_unique_idx
+ON partitioned_ddl.native_index_t (region);
+SELECT indisunique, indisvalid
+FROM pg_index
+WHERE indexrelid = 'partitioned_ddl.native_root_unique_idx'::regclass;
+ indisunique | indisvalid 
+-------------+------------
+ t           | t
+(1 row)
+
+-- Native child partitions must still route INSERT and COPY after provider registration.
+CREATE TABLE partitioned_ddl.native_east
+PARTITION OF partitioned_ddl.native_index_t FOR VALUES IN ('east') USING heap;
+CREATE TABLE partitioned_ddl.native_west
+PARTITION OF partitioned_ddl.native_index_t FOR VALUES IN ('west') USING heap;
+INSERT INTO partitioned_ddl.native_index_t VALUES ('east');
+COPY partitioned_ddl.native_index_t FROM stdin WITH (FORMAT csv);
+SELECT region FROM partitioned_ddl.native_index_t ORDER BY region;
+ region 
+--------
+ east
+ west
+(2 rows)
+
+-- The default AM never applies to a partitioned root. pg_restore depends on
+-- this: it keeps the previous table's default while creating a native root.
+SET default_table_access_method = 'iceberg';
+CREATE TABLE partitioned_ddl.default_am_root (region text)
+PARTITION BY HASH (region);
+RESET default_table_access_method;
+SELECT relkind, relam = 0 AS native_root
+FROM pg_class
+WHERE oid = 'partitioned_ddl.default_am_root'::regclass;
+ relkind | native_root 
+---------+-------------
+ p       | t
+(1 row)
+
+-- PostgreSQL sees an ordinary table here: Iceberg partitions have no child tables.
+CREATE TABLE partitioned_ddl.root_index_t_child
+PARTITION OF partitioned_ddl.root_index_t
+FOR VALUES IN ('east') USING heap;
+ERROR:  "root_index_t" is not partitioned
+-- Ordinary Iceberg tables cannot be PostgreSQL declarative partition children.
+CREATE TABLE partitioned_ddl.native_topology_root (id integer)
+PARTITION BY RANGE (id);
+CREATE TABLE partitioned_ddl.iceberg_topology_t (id integer) USING iceberg;
+\set VERBOSITY terse
+ALTER TABLE partitioned_ddl.native_topology_root
+ATTACH PARTITION partitioned_ddl.iceberg_topology_t
+FOR VALUES FROM (0) TO (10);
+ERROR:  table provider relations cannot share an inheritance or partition hierarchy with another access method
+\set VERBOSITY default
+SELECT count(*) AS inherited_edges FROM pg_inherits
+WHERE inhrelid = 'partitioned_ddl.iceberg_topology_t'::regclass
+   OR inhparent = 'partitioned_ddl.iceberg_topology_t'::regclass;
+ inherited_edges 
+-----------------
+               0
+(1 row)
+
+-- A partitioned table is relkind 'r', but stays out of regular inheritance as
+-- in PostgreSQL. Object access hook errors name OIDs in their DETAIL.
+CREATE TABLE partitioned_ddl.inherit_part_t (id integer, region text)
+PARTITION BY LIST (region) USING iceberg;
+CREATE TABLE partitioned_ddl.inherit_plain_t (id integer, region text)
+USING iceberg;
+CREATE TABLE partitioned_ddl.inherit_other_t (id integer, region text)
+USING iceberg;
+\set VERBOSITY terse
+CREATE TABLE partitioned_ddl.inherit_part_child_t ()
+INHERITS (partitioned_ddl.inherit_plain_t)
+PARTITION BY LIST (region) USING iceberg;
+ERROR:  cannot create partitioned table as inheritance child
+ALTER TABLE partitioned_ddl.inherit_part_t
+INHERIT partitioned_ddl.inherit_plain_t;
+ERROR:  cannot change inheritance of partitioned table
+-- The parent's metadata is visible to its own transaction.
+BEGIN;
+CREATE TABLE partitioned_ddl.inherit_tx_t (id integer, region text)
+PARTITION BY LIST (region) USING iceberg;
+CREATE TABLE partitioned_ddl.inherit_tx_child_t ()
+INHERITS (partitioned_ddl.inherit_tx_t) USING iceberg;
+ERROR:  cannot inherit from partitioned table "inherit_tx_t"
+ROLLBACK;
+\set VERBOSITY default
+-- Unpartitioned relations keep regular inheritance at any isolation level.
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+ALTER TABLE partitioned_ddl.inherit_other_t
+INHERIT partitioned_ddl.inherit_plain_t;
+ALTER TABLE partitioned_ddl.inherit_other_t
+NO INHERIT partitioned_ddl.inherit_plain_t;
+COMMIT;
+SELECT count(*) AS inherited_edges FROM pg_inherits
+WHERE inhrelid = 'partitioned_ddl.inherit_other_t'::regclass;
+ inherited_edges 
+-----------------
+               0
+(1 row)
+
+-- ddl_command_end runs before the CREATE post-hook writes metadata, which then
+-- rejects an edge the partitioned table gained in between.
+CREATE FUNCTION partitioned_ddl.inherit_new_table() RETURNS event_trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    ALTER TABLE partitioned_ddl.inherit_other_t
+    INHERIT partitioned_ddl.inherit_trigger_t;
+END;
+$$;
+CREATE EVENT TRIGGER partitioned_ddl_inherit_new_table ON ddl_command_end
+WHEN TAG IN ('CREATE TABLE')
+EXECUTE FUNCTION partitioned_ddl.inherit_new_table();
+CREATE TABLE partitioned_ddl.inherit_trigger_t (id integer, region text)
+PARTITION BY LIST (region) USING iceberg;
+ERROR:  cannot inherit from partitioned table "inherit_trigger_t"
+DETAIL:  while running utility hook 'iceberg table options' in post-success phase for T_CreateStmt
+-- An unpartitioned table can gain a child before it has metadata.
+CREATE TABLE partitioned_ddl.inherit_trigger_t (id integer, region text)
+USING iceberg;
+SELECT count(*) AS inherited_edges FROM pg_inherits
+WHERE inhparent = 'partitioned_ddl.inherit_trigger_t'::regclass;
+ inherited_edges 
+-----------------
+               1
+(1 row)
+
+DROP EVENT TRIGGER partitioned_ddl_inherit_new_table;
+SET client_min_messages = warning;
+DROP SCHEMA partitioned_ddl CASCADE;
+RESET client_min_messages;
+-- Partitioned-table COPY routing, native delegation, and RLS query rewriting.
+CREATE SCHEMA partitioned_copy;
+CREATE ROLE partitioned_copy_user;
+GRANT USAGE ON SCHEMA partitioned_copy TO partitioned_copy_user;
+CREATE TABLE partitioned_copy.native_t (id integer PRIMARY KEY, region text);
+CREATE TABLE partitioned_copy.root_t (id integer, region text)
+PARTITION BY LIST (region) USING iceberg;
+INSERT INTO partitioned_copy.root_t VALUES (1, 'east'), (2, 'west');
+GRANT SELECT, INSERT ON partitioned_copy.native_t TO partitioned_copy_user;
+GRANT SELECT ON partitioned_copy.root_t TO partitioned_copy_user;
+-- The COPY write bridge must preserve ordinary COPY execution.
+CREATE TABLE partitioned_copy.execution_t (
+    id integer,
+    region text,
+    label text DEFAULT 'base'
+) PARTITION BY LIST (region) USING iceberg;
+CREATE FUNCTION partitioned_copy.before_insert()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.label := NEW.label || '_before';
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER execution_before
+BEFORE INSERT ON partitioned_copy.execution_t
+FOR EACH ROW EXECUTE FUNCTION partitioned_copy.before_insert();
+COPY partitioned_copy.execution_t (id, region) FROM stdin
+WITH (FORMAT csv) WHERE id >= 2;
+SELECT id, region, label FROM partitioned_copy.execution_t ORDER BY id;
+ id | region |    label    
+----+--------+-------------
+  2 | west   | base_before
+  3 | east   | base_before
+(2 rows)
+
+-- A current-database-qualified name must still reach the table.
+COPY :"DBNAME".partitioned_copy.root_t TO '/dev/null' WITH (FORMAT csv);
+ALTER TABLE partitioned_copy.root_t ENABLE ROW LEVEL SECURITY;
+CREATE POLICY visible_root_rows ON partitioned_copy.root_t
+FOR SELECT TO partitioned_copy_user USING (id = 1);
+SET ROLE partitioned_copy_user;
+-- A representative endpoint error must precede relation ACL checks.
+COPY partitioned_copy.root_t FROM '/dev/null';
+ERROR:  must be superuser or have privileges of the pg_read_server_files role to COPY from a file
+DETAIL:  while running utility hook 'CopyFromRouter' in consume phase for T_CopyStmt
+HINT:  Anyone can COPY to stdout or from stdin. psql's \copy command also works for anyone.
+-- Native relation COPY continues to use the parent executor.
+COPY partitioned_copy.native_t FROM stdin WITH (FORMAT csv);
+COPY partitioned_copy.native_t TO STDOUT WITH (FORMAT csv);
+10,native
+-- A temporary native table shadows the persistent root in search_path.
+SET search_path = pg_temp, partitioned_copy, public;
+CREATE TEMP TABLE root_t (id integer, region text);
+COPY root_t FROM stdin WITH (FORMAT csv);
+COPY root_t TO STDOUT WITH (FORMAT csv);
+99,temp
+DROP TABLE root_t;
+RESET search_path;
+-- RLS rewrites relation COPY TO as a query, while retaining root identity.
+COPY partitioned_copy.root_t TO STDOUT WITH (FORMAT csv);
+1,east
+COPY (SELECT id, region FROM partitioned_copy.root_t) TO STDOUT WITH (FORMAT csv);
+1,east
+RESET ROLE;
+-- Without connectors, native-format suffixes retain PostgreSQL text COPY.
+-- Check implicit input and decode the exported bytes explicitly as text.
+SELECT current_setting('data_directory') || '/iceberg-copy-routing-' || pg_backend_pid()
+       AS partitioned_copy_file_root
+\gset
+CREATE TABLE partitioned_copy.file_sink (id integer, region text)
+PARTITION BY LIST (region) USING iceberg;
+\set partitioned_copy_file :partitioned_copy_file_root '.json'
+COPY partitioned_copy.root_t TO :'partitioned_copy_file';
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file';
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+ id | region 
+----+--------
+(0 rows)
+
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file' WITH (format text);
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+ id | region 
+----+--------
+(0 rows)
+
+\set partitioned_copy_file :partitioned_copy_file_root '.avro'
+COPY partitioned_copy.root_t TO :'partitioned_copy_file';
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file';
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+ id | region 
+----+--------
+(0 rows)
+
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file' WITH (format text);
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+ id | region 
+----+--------
+(0 rows)
+
+\set partitioned_copy_file :partitioned_copy_file_root '.parquet'
+COPY partitioned_copy.root_t TO :'partitioned_copy_file';
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file';
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+ id | region 
+----+--------
+(0 rows)
+
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file' WITH (format text);
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+ id | region 
+----+--------
+(0 rows)
+
+\set partitioned_copy_file :partitioned_copy_file_root '.json.gz'
+COPY partitioned_copy.root_t TO :'partitioned_copy_file';
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file';
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+ id | region 
+----+--------
+(0 rows)
+
+TRUNCATE partitioned_copy.file_sink;
+COPY partitioned_copy.file_sink FROM :'partitioned_copy_file' WITH (format text);
+(TABLE partitioned_copy.root_t EXCEPT ALL TABLE partitioned_copy.file_sink)
+UNION ALL
+(TABLE partitioned_copy.file_sink EXCEPT ALL TABLE partitioned_copy.root_t);
+ id | region 
+----+--------
+(0 rows)
+
+SET client_min_messages = warning;
+DROP SCHEMA partitioned_copy CASCADE;
+RESET client_min_messages;
+DROP ROLE partitioned_copy_user;
+-- Managed Iceberg partitioned table INSERT, UPDATE, DELETE, MERGE, and COPY.
+CREATE SCHEMA dml_lifecycle;
+CREATE TABLE dml_lifecycle.part_t (
+    id integer,
+    region text,
+    label text
+) PARTITION BY LIST (region) USING iceberg;
+SELECT relkind = 'r' AND NOT relhassubclass AS partitioned_table_catalog_shape,
+       pg_get_partkeydef(oid) IS NULL AS pg_partition_key_hidden
+FROM pg_class
+WHERE oid = 'dml_lifecycle.part_t'::regclass;
+ partitioned_table_catalog_shape | pg_partition_key_hidden 
+---------------------------------+-------------------------
+ t                               | t
+(1 row)
+
+-- COPY FROM writes the table directly; PostgreSQL has no child partitions to
+-- route to.
+COPY dml_lifecycle.part_t FROM stdin WITH (FORMAT csv);
+INSERT INTO dml_lifecycle.part_t VALUES (40, 'west', 'd');
+UPDATE dml_lifecycle.part_t
+SET label = label || '_u'
+WHERE id IN (10, 20) AND EXISTS (SELECT 1);
+-- Moving an Iceberg identity partition value remains one logical-table
+-- update; it must not ask PostgreSQL for a destination child partition.
+UPDATE dml_lifecycle.part_t SET region = 'west' WHERE id = 10;
+DELETE FROM dml_lifecycle.part_t WHERE id = 30;
+SELECT id, region, label,
+       tableoid = 'dml_lifecycle.part_t'::regclass AS partitioned_tableoid
+FROM dml_lifecycle.part_t
+ORDER BY id;
+ id | region | label | partitioned_tableoid 
+----+--------+-------+----------------------
+ 10 | west   | a_u   | t
+ 20 | west   | b_u   | t
+ 40 | west   | d     | t
+(3 rows)
+
+SELECT count(*) = 3 AS only_partitioned_table_reads_data
+FROM ONLY dml_lifecycle.part_t;
+ only_partitioned_table_reads_data 
+-----------------------------------
+ t
+(1 row)
+
+MERGE INTO dml_lifecycle.part_t AS target
+USING (VALUES
+    (20, 'east', 'merged'),
+    (40, 'west', 'delete'),
+    (50, 'east', 'new')
+) AS source(id, region, label)
+ON target.id = source.id
+WHEN MATCHED AND source.label = 'delete' THEN DELETE
+WHEN MATCHED THEN
+    UPDATE SET region = source.region, label = source.label
+WHEN NOT MATCHED THEN
+    INSERT (id, region, label)
+    VALUES (source.id, source.region, source.label);
+SELECT id, region, label FROM dml_lifecycle.part_t ORDER BY id;
+ id | region | label  
+----+--------+--------
+ 10 | west   | a_u
+ 20 | east   | merged
+ 50 | east   | new
+(3 rows)
+
+BEGIN;
+INSERT INTO dml_lifecycle.part_t VALUES (60, 'west', 'tx');
+UPDATE dml_lifecycle.part_t SET label = 'tx-updated' WHERE id = 20;
+DELETE FROM dml_lifecycle.part_t WHERE id = 10;
+SELECT count(*) = 3 AS transaction_delta_visible
+FROM dml_lifecycle.part_t;
+ transaction_delta_visible 
+---------------------------
+ t
+(1 row)
+
+ROLLBACK;
+SELECT id, region, label FROM dml_lifecycle.part_t ORDER BY id;
+ id | region | label  
+----+--------+--------
+ 10 | west   | a_u
+ 20 | east   | merged
+ 50 | east   | new
+(3 rows)
+
+-- Partition-aware v3 deletion vectors use a different delete-file path from v2.
+CREATE TABLE dml_lifecycle.part_v3 (
+    id integer,
+    region text,
+    label text
+) PARTITION BY LIST (region) USING iceberg WITH ("format-version" = 3);
+INSERT INTO dml_lifecycle.part_v3
+VALUES (1, 'east', 'one'), (2, 'west', 'two'), (3, 'east', 'three');
+UPDATE dml_lifecycle.part_v3 SET region = 'west', label = 'moved' WHERE id = 1;
+DELETE FROM dml_lifecycle.part_v3 WHERE id = 2;
+SELECT id, region, label FROM dml_lifecycle.part_v3 ORDER BY id;
+ id | region | label 
+----+--------+-------
+  1 | west   | moved
+  3 | east   | three
+(2 rows)
+
+-- A composite partition Struct stays intact through row movement, deletion
+-- vectors, MERGE, and TRUNCATE.
+CREATE TABLE dml_lifecycle.composite_v3 (
+    id integer,
+    event_time timestamp,
+    region text,
+    label text
+) PARTITION BY LIST (region, date_trunc('day', event_time), iceberg.bucket(4, id))
+USING iceberg WITH ("format-version" = 3);
+INSERT INTO dml_lifecycle.composite_v3 VALUES
+    (1, '2026-01-01 10:00:00', 'east', 'one'),
+    (2, '2026-01-01 11:00:00', 'east', 'two'),
+    (3, '2026-01-02 10:00:00', 'west', 'three'),
+    (4, NULL, 'west', 'four');
+UPDATE dml_lifecycle.composite_v3
+SET event_time = '2026-01-03 00:00:00', region = 'west' WHERE id = 1;
+DELETE FROM dml_lifecycle.composite_v3 WHERE id = 2;
+MERGE INTO dml_lifecycle.composite_v3 AS target
+USING (VALUES (3, 'merged'), (4, 'delete'), (5, 'new')) AS source(id, label)
+ON target.id = source.id
+WHEN MATCHED AND source.label = 'delete' THEN DELETE
+WHEN MATCHED THEN UPDATE SET label = source.label
+WHEN NOT MATCHED THEN
+    INSERT (id, event_time, region, label)
+    VALUES (source.id, '2026-01-04 00:00:00', 'east', source.label);
+SELECT id, to_char(event_time, 'YYYY-MM-DD') AS event_day, region, label
+FROM dml_lifecycle.composite_v3 ORDER BY id;
+ id | event_day  | region | label  
+----+------------+--------+--------
+  1 | 2026-01-03 | west   | one
+  3 | 2026-01-02 | west   | merged
+  5 | 2026-01-04 | east   | new
+(3 rows)
+
+TRUNCATE dml_lifecycle.composite_v3;
+INSERT INTO dml_lifecycle.composite_v3
+VALUES (6, '2026-01-05 00:00:00', 'east', 'after');
+SELECT id, label FROM dml_lifecycle.composite_v3;
+ id | label 
+----+-------
+  6 | after
+(1 row)
+
+SELECT string_agg(field.spec->>'name', ', ' ORDER BY field.ordinal) AS partition_fields
+FROM iceberg.iceberg_metadata
+CROSS JOIN LATERAL (SELECT pg_read_file(metadata_location)::jsonb AS metadata) AS file
+CROSS JOIN LATERAL jsonb_array_elements(metadata->'partition-specs'->0->'fields')
+    WITH ORDINALITY AS field(spec, ordinal)
+WHERE relid = 'dml_lifecycle.composite_v3'::regclass;
+          partition_fields           
+-------------------------------------
+ region, event_time_day, id_bucket_4
+(1 row)
+
+SET client_min_messages = warning;
+DROP SCHEMA dml_lifecycle CASCADE;
+RESET client_min_messages;

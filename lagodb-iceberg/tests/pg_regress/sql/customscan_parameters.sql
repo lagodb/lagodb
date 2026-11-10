@@ -1,4 +1,7 @@
 -- Parameterized joins, parameter binding, and nested-loop rescans.
+-- PostgreSQL 15 and 16 show InitPlan outputs as $N parameters; _1.out is the
+-- PostgreSQL 16 output. PostgreSQL 15 also orients join clauses derived from
+-- equivalence classes differently; _2.out is its output.
 
 -- Ordinary parameterized joins.
 

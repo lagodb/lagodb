@@ -304,6 +304,12 @@ impl From<PgError> for IcebergError {
     }
 }
 
+impl From<PgReportError> for IcebergError {
+    fn from(error: PgReportError) -> Self {
+        Self::Postgres(error)
+    }
+}
+
 impl From<IcebergError> for ErrorReport {
     fn from(value: IcebergError) -> Self {
         match value {

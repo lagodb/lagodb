@@ -1,13 +1,13 @@
-//! PostgreSQL 16 ANALYZE sampling over the per-block callback protocol.
+//! PostgreSQL 15 and 16 ANALYZE sampling over the per-block callback protocol.
 //!
-//! PostgreSQL 16 passes one block number per callback and keeps both its
+//! PostgreSQL 15 and 16 pass one block number per callback and keep both its
 //! `BlockSampler` and `targrows` private, so the ticket count stays unknown
 //! until the scan ends. The first ticket therefore emits every candidate with
 //! zero weight. Each ticket then reports the same live-row share, which makes
 //! PostgreSQL's `liverows / visited_blocks * total_blocks` come out to the
 //! visible fraction of the physical rows however many tickets it visited.
 //!
-//! With no LagoDB PG16 ANALYZE executor/fork, this state receives a
+//! With no LagoDB PG15/PG16 ANALYZE executor/fork, this state receives a
 //! relation-local sample budget rather than the invocation's exact `targrows`.
 //! A non-inherited built-in ANALYZE remains statistically valid; a column-list
 //! invocation can do excess candidate work. For inherited ANALYZE, PostgreSQL

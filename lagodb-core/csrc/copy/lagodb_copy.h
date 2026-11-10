@@ -6,6 +6,14 @@
 #include "commands/copy.h"
 #include "lagodb_copy_write.h"
 
+#if LAGODB_PG16_LT
+/*
+ * PostgreSQL 16 added this callback type to commands/copy.h. The derived COPY
+ * TO executor owns its callback route on every supported major.
+ */
+typedef void (*copy_data_dest_cb) (void *data, int len);
+#endif
+
 /* Exact-build counterpart of Rust's CopyEndpoint. */
 typedef enum LagodbCopyEndpoint
 {
@@ -175,6 +183,12 @@ bool		lagodb_next_raw_fields(
 void		lagodb_end_raw_field_reader(LagodbRawFieldReader *reader);
 
 LagodbTextInputValidator *lagodb_begin_text_input_validator(Oid type_oid);
+
+/*
+ * Whether value is valid text input for the validator's type. PostgreSQL 16+
+ * reports rejection through soft input errors. PostgreSQL 15 treats an ERROR
+ * in the data-exception class as rejection and rethrows any other ERROR.
+ */
 bool		lagodb_text_input_accepts(
 									  LagodbTextInputValidator *validator,
 									  const char *value);

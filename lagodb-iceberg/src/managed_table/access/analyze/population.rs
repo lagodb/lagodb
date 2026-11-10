@@ -69,7 +69,7 @@ impl AnalyzePopulation {
 
     /// Plan up to `requested_candidates` candidate rows. The candidate count
     /// is bounded by PostgreSQL's `targrows` (a C `int`) on PG17/18 and by the
-    /// relation-local statistics budget (at most 300 * 10000) on PG16.
+    /// relation-local statistics budget (at most 300 * 10000) on PG15 and PG16.
     pub(super) fn locality_plan<R: Rng + ?Sized>(
         self,
         requested_candidates: u64,

@@ -312,7 +312,7 @@ impl ForeignPathKeys {
         let analyzer =
             RelationExprAnalyzer::new(RelationScope::relids(relation_relids));
 
-        #[cfg(any(feature = "pg16", feature = "pg17"))]
+        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
         {
             let ec_members = unsafe { (*eclass).ec_members };
             let length = unsafe { pg_sys::list_length(ec_members) };

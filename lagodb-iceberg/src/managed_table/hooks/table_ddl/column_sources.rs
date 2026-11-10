@@ -6,7 +6,7 @@
 
 use std::{ffi::CStr, ptr};
 
-use lagodb_core::catalog::range_var_get_relid;
+use lagodb_core::catalog::{CatalogObject, range_var_get_relid};
 use lagodb_core::datum::PgType;
 use lagodb_core::handles::RelationGuard;
 use lagodb_core::hooks::{HookError, UtilityHookError};
@@ -117,9 +117,7 @@ impl ColumnSource {
         unsafe {
             let (acl, object) = if kind == pg_sys::RELKIND_COMPOSITE_TYPE {
                 (
-                    pg_sys::object_aclcheck(
-                        pg_sys::TypeRelationId,
-                        (*(*rel.as_raw()).rd_rel).reltype,
+                    CatalogObject::Type((*(*rel.as_raw()).rd_rel).reltype).aclcheck(
                         pg_sys::GetUserId(),
                         pg_sys::ACL_USAGE as pg_sys::AclMode,
                     ),
@@ -127,8 +125,7 @@ impl ColumnSource {
                 )
             } else {
                 (
-                    pg_sys::pg_class_aclcheck(
-                        rel.oid(),
+                    CatalogObject::Relation(rel.oid()).aclcheck(
                         pg_sys::GetUserId(),
                         pg_sys::ACL_SELECT as pg_sys::AclMode,
                     ),
@@ -151,11 +148,7 @@ impl ColumnSource {
         // PG owns the remaining inheritance topology checks. Check ownership
         // before inspecting the parent's type tree, as MergeAttributes does.
         unsafe {
-            if !pg_sys::object_ownercheck(
-                pg_sys::RelationRelationId,
-                rel.oid(),
-                pg_sys::GetUserId(),
-            ) {
+            if !CatalogObject::Relation(rel.oid()).is_owned_by(pg_sys::GetUserId()) {
                 pg_sys::aclcheck_error(
                     pg_sys::AclResult::ACLCHECK_NOT_OWNER,
                     pg_sys::get_relkind_objtype(rel.relkind()),

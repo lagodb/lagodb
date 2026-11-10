@@ -18,9 +18,9 @@ use core::ffi::{CStr, c_char};
 use core::ptr;
 use std::panic::AssertUnwindSafe;
 
-use pgrx::{PgSqlErrorCode, PgTryBuilder, ereport, pg_sys};
+use pgrx::{PgSqlErrorCode, PgTryBuilder, pg_sys};
 
-use crate::diag::PgError;
+use crate::diag::PgReportError;
 use crate::expr::pg::PgExprRef;
 
 use super::RelationHandle;
@@ -34,13 +34,42 @@ pub enum PartitionStrategy {
 }
 
 impl PartitionStrategy {
-    fn from_raw(strategy: pg_sys::PartitionStrategy::Type) -> Self {
-        match strategy {
+    /// PostgreSQL 15 keeps the strategy word from the grammar and validates it
+    /// in `transformPartitionSpec()`, which this analysis replaces.
+    ///
+    /// # Safety
+    ///
+    /// `strategy` is the parser's NUL-terminated strategy word.
+    #[cfg(feature = "pg15")]
+    unsafe fn from_raw(strategy: *const c_char) -> Result<Self, PgReportError> {
+        // SAFETY: guaranteed by the caller.
+        let word = unsafe { CStr::from_ptr(strategy) };
+        match word.to_bytes() {
+            word if word.eq_ignore_ascii_case(b"hash") => Ok(Self::Hash),
+            word if word.eq_ignore_ascii_case(b"list") => Ok(Self::List),
+            word if word.eq_ignore_ascii_case(b"range") => Ok(Self::Range),
+            _ => Err(PgReportError::from_message(
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                format!(
+                    "unrecognized partitioning strategy \"{}\"",
+                    word.to_string_lossy()
+                ),
+            )),
+        }
+    }
+
+    /// The grammar of PostgreSQL 16 and later rejects any other strategy word,
+    /// so this never fails.
+    #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+    fn from_raw(
+        strategy: pg_sys::PartitionStrategy::Type,
+    ) -> Result<Self, PgReportError> {
+        Ok(match strategy {
             pg_sys::PartitionStrategy::PARTITION_STRATEGY_LIST => Self::List,
             pg_sys::PartitionStrategy::PARTITION_STRATEGY_RANGE => Self::Range,
             pg_sys::PartitionStrategy::PARTITION_STRATEGY_HASH => Self::Hash,
             _ => unreachable!("PostgreSQL parsed an invalid partition strategy"),
-        }
+        })
     }
 }
 
@@ -87,7 +116,7 @@ impl PartitionKey {
     /// lend the key to `lower`.
     ///
     /// `spec` is left unchanged. The caller holds the relation's creation lock.
-    pub fn analyze<R, E: From<PgError>>(
+    pub fn analyze<R, E: From<PgReportError>>(
         relation: &RelationHandle<'_>,
         spec: &pg_sys::PartitionSpec,
         lower: impl FnOnce(&Self) -> Result<R, E>,
@@ -97,9 +126,9 @@ impl PartitionKey {
         // which drops their cursor position, so the ParseState has no source text.
         let key = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(|| {
-                Ok(Self::analyze_elements(relation, spec))
+                Self::analyze_elements(relation, spec)
             }))
-            .catch_others(|error| Err(PgError::from_caught(error)))
+            .catch_others(|error| Err(PgReportError::from_caught(error)))
             .execute()
         }?;
         lower(&key)
@@ -108,11 +137,13 @@ impl PartitionKey {
     unsafe fn analyze_elements(
         relation: &RelationHandle<'_>,
         spec: &pg_sys::PartitionSpec,
-    ) -> Self {
+    ) -> Result<Self, PgReportError> {
         // SAFETY: the caller supplies a live raw PartitionSpec; its element
         // list holds PartitionElem nodes. The dummy ParseState mirrors
-        // transformPartitionSpec's sole-rangetable-entry setup.
+        // transformPartitionSpec's sole-rangetable-entry setup, which first
+        // resolves the strategy.
         unsafe {
+            let strategy = PartitionStrategy::from_raw(spec.strategy)?;
             let pstate = pg_sys::make_parsestate(ptr::null_mut());
             let nsitem = pg_sys::addRangeTableEntryForRelation(
                 pstate,
@@ -129,14 +160,13 @@ impl PartitionKey {
             for index in 0..count {
                 let element = pg_sys::list_nth(spec.partParams, index)
                     .cast::<pg_sys::PartitionElem>();
-                fields.push(PartitionKeyField::analyze(pstate, relation, &*element));
+                fields.push(PartitionKeyField::analyze(pstate, relation, &*element)?);
             }
+            // An error above leaves the ParseState to the memory context, as
+            // `transformPartitionSpec()` does on every path.
             pg_sys::free_parsestate(pstate);
 
-            Self {
-                strategy: PartitionStrategy::from_raw(spec.strategy),
-                fields,
-            }
+            Ok(Self { strategy, fields })
         }
     }
 
@@ -155,15 +185,14 @@ impl PartitionKeyField {
         pstate: *mut pg_sys::ParseState,
         relation: &RelationHandle<'_>,
         element: &pg_sys::PartitionElem,
-    ) -> Self {
+    ) -> Result<Self, PgReportError> {
         // A provider's partitioning has no PostgreSQL comparison semantics, so
         // accepting an operator class would ignore what the user wrote.
         if !element.opclass.is_null() {
-            ereport!(
-                ERROR,
+            return Err(PgReportError::from_message(
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                "operator classes are not supported in this table's PARTITION BY"
-            );
+                "operator classes are not supported in this table's PARTITION BY",
+            ));
         }
 
         // SAFETY: the parser sets exactly one of `name` and `expr`.
@@ -171,7 +200,7 @@ impl PartitionKeyField {
             if element.name.is_null() {
                 Self::for_expression(pstate, element.expr)
             } else {
-                Self::for_column(relation, element.name)
+                Self::for_column(relation, element.name)?
             }
         };
 
@@ -180,49 +209,61 @@ impl PartitionKeyField {
             if !element.collation.is_null() {
                 field.collation = pg_sys::get_collation_oid(element.collation, false);
             }
-            if field.collation != pg_sys::InvalidOid
-                && !pg_sys::type_is_collatable(field.type_oid)
-            {
+            // A collatable type needs a collation and any other type must have
+            // none, as `ComputePartitionAttrs()` checks.
+            if pg_sys::type_is_collatable(field.type_oid) {
+                if field.collation == pg_sys::InvalidOid {
+                    return Err(PgReportError::from_parts(
+                        PgSqlErrorCode::ERRCODE_INDETERMINATE_COLLATION,
+                        "could not determine which collation to use for partition expression",
+                        None,
+                        Some(
+                            "Use the COLLATE clause to set the collation explicitly."
+                                .into(),
+                        ),
+                    ));
+                }
+            } else if field.collation != pg_sys::InvalidOid {
                 let type_name =
                     CStr::from_ptr(pg_sys::format_type_be(field.type_oid));
-                ereport!(
-                    ERROR,
+                return Err(PgReportError::from_message(
                     PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH,
                     format!(
                         "collations are not supported by type {}",
                         type_name.to_string_lossy()
-                    )
-                );
+                    ),
+                ));
             }
         }
-        field
+        Ok(field)
     }
 
-    unsafe fn for_column(relation: &RelationHandle<'_>, name: *const c_char) -> Self {
+    unsafe fn for_column(
+        relation: &RelationHandle<'_>,
+        name: *const c_char,
+    ) -> Result<Self, PgReportError> {
         let relid = relation.oid();
         // SAFETY: the parser supplies a NUL-terminated column name, and
         // get_attnum has established the attribute exists before its lookup.
         unsafe {
             let attno = pg_sys::get_attnum(relid, name);
             if attno == 0 {
-                ereport!(
-                    ERROR,
+                return Err(PgReportError::from_message(
                     PgSqlErrorCode::ERRCODE_UNDEFINED_COLUMN,
                     format!(
                         "column \"{}\" named in partition key does not exist",
                         CStr::from_ptr(name).to_string_lossy()
-                    )
-                );
+                    ),
+                ));
             }
             if attno < 0 {
-                ereport!(
-                    ERROR,
+                return Err(PgReportError::from_message(
                     PgSqlErrorCode::ERRCODE_INVALID_OBJECT_DEFINITION,
                     format!(
                         "cannot use system column \"{}\" in partition key",
                         CStr::from_ptr(name).to_string_lossy()
-                    )
-                );
+                    ),
+                ));
             }
 
             let mut type_oid = pg_sys::InvalidOid;
@@ -235,12 +276,12 @@ impl PartitionKeyField {
                 &mut typmod,
                 &mut collation,
             );
-            Self {
+            Ok(Self {
                 source: AnalyzedSource::Column(attno),
                 type_oid,
                 typmod,
                 collation,
-            }
+            })
         }
     }
 

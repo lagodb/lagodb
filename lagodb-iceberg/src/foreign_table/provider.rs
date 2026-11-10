@@ -69,22 +69,21 @@ impl LagodbIceberg {
             unsafe { pg_sys::ReleaseSysCache(tuple) };
             return false;
         }
+        // `prosrc` is a NOT NULL catalog column.
+        let mut symbol_is_null = false;
         let symbol_datum = unsafe {
-            pg_sys::SysCacheGetAttrNotNull(
+            pg_sys::SysCacheGetAttr(
                 pg_sys::SysCacheIdentifier::PROCOID as i32,
                 tuple,
                 pg_sys::Anum_pg_proc_prosrc as i16,
+                &mut symbol_is_null,
             )
         };
         let module = unsafe {
-            pg_sys::text_to_cstring(
-                pg_sys::DatumGetPointer(module_datum).cast::<pg_sys::text>(),
-            )
+            pg_sys::text_to_cstring(module_datum.cast_mut_ptr::<pg_sys::text>())
         };
         let symbol = unsafe {
-            pg_sys::text_to_cstring(
-                pg_sys::DatumGetPointer(symbol_datum).cast::<pg_sys::text>(),
-            )
+            pg_sys::text_to_cstring(symbol_datum.cast_mut_ptr::<pg_sys::text>())
         };
         let matches = unsafe { CStr::from_ptr(module) } == Self::HANDLER_MODULE
             && unsafe { CStr::from_ptr(symbol) } == Self::HANDLER_SYMBOL;

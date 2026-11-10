@@ -7,6 +7,7 @@ use pgrx::pg_sys;
 
 use super::candidate::SingleRelationCandidate;
 use super::path_installation::QueryPathInstallation;
+use super::planner_info::PlannerInfoExt;
 use super::query_shape::QueryShape;
 use super::relation_plan::RelationPlanBuilder;
 use super::relation_tree::RelationTreePlanner;
@@ -156,17 +157,17 @@ impl JoinCandidate {
         planner: &pg_sys::PlannerInfo,
         relation: &pg_sys::RelOptInfo,
     ) -> bool {
-        if !unsafe { pg_sys::bms_is_subset(relation.relids, planner.all_query_rels) }
+        let final_relids = planner.final_join_relids();
+        if !unsafe { pg_sys::bms_is_subset(relation.relids, final_relids) }
             || !unsafe {
-                pg_sys::bms_is_subset(relation.lateral_relids, planner.all_query_rels)
+                pg_sys::bms_is_subset(relation.lateral_relids, final_relids)
             }
         {
             return false;
         }
         let mut member = -1;
         loop {
-            member =
-                unsafe { pg_sys::bms_next_member(planner.all_query_rels, member) };
+            member = unsafe { pg_sys::bms_next_member(final_relids, member) };
             if member < 0 {
                 return true;
             }

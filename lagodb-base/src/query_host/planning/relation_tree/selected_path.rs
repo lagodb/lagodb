@@ -9,8 +9,17 @@ use super::{PlannedRelationTree, RelationNode, RelationTreePlanner};
 use crate::query_host::planning::candidate::SingleRelationCandidate;
 use crate::query_host::planning::expression::{ExpressionScope, PredicateDomain};
 
+/// Identifies one join clause across a level's restriction lists.
+/// PostgreSQL 16 gives clones and child copies of a clause the parent's
+/// `rinfo_serial`; PostgreSQL 15 has no clones and compares RestrictInfos by
+/// pointer (`list_append_unique_ptr`).
+#[cfg(feature = "pg15")]
+type RestrictionIdentity = *const pg_sys::RestrictInfo;
+#[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+type RestrictionIdentity = i32;
+
 struct JoinLevelPredicates {
-    applied: Vec<i32>,
+    applied: Vec<RestrictionIdentity>,
     keys: Vec<JoinKey>,
     key_restrictions: Vec<*mut pg_sys::RestrictInfo>,
     join_restrictions: Vec<*mut pg_sys::RestrictInfo>,
@@ -73,6 +82,19 @@ impl JoinLevelPredicates {
             on_filters: Vec::new(),
             post_filters: Vec::new(),
         }
+    }
+
+    /// Record `restriction` as applied at this level; false if it already was.
+    fn mark_applied(&mut self, restriction: &pg_sys::RestrictInfo) -> bool {
+        #[cfg(feature = "pg15")]
+        let identity = ptr::from_ref(restriction);
+        #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+        let identity = restriction.rinfo_serial;
+        if self.applied.contains(&identity) {
+            return false;
+        }
+        self.applied.push(identity);
+        true
     }
 }
 
@@ -184,6 +206,7 @@ impl RelationTreePlanner {
                 join_path.outerjoinpath,
                 JoinType::LeftSemi,
             ),
+            #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
             pg_sys::JoinType::JOIN_RIGHT_ANTI => (
                 join_path.innerjoinpath,
                 join_path.outerjoinpath,
@@ -315,7 +338,7 @@ impl RelationTreePlanner {
             let restriction_ptr = unsafe { pg_sys::list_nth(restrictions, index) }
                 .cast::<pg_sys::RestrictInfo>();
             let restriction = unsafe { &*restriction_ptr };
-            if predicates.applied.contains(&restriction.rinfo_serial) {
+            if !predicates.mark_applied(restriction) {
                 continue;
             }
             if restriction.pseudoconstant
@@ -328,7 +351,6 @@ impl RelationTreePlanner {
             {
                 return None;
             }
-            predicates.applied.push(restriction.rinfo_serial);
             let pushed_down = restriction.is_pushed_down
                 || !unsafe {
                     pg_sys::bms_is_subset(

@@ -10,7 +10,12 @@ struct PgFeature {
     read_stream: bool,
 }
 
-static PG_FEATURES: [PgFeature; 3] = [
+static PG_FEATURES: [PgFeature; 4] = [
+    PgFeature {
+        environment: "CARGO_FEATURE_PG15",
+        pgrx_config: "pg15",
+        read_stream: false,
+    },
     PgFeature {
         environment: "CARGO_FEATURE_PG16",
         pgrx_config: "pg16",

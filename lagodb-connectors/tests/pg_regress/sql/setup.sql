@@ -7,13 +7,13 @@
 -- and the individual tests remain safe to run in any order after setup.
 
 \setenv PGDATABASE :DBNAME
-\! python3 ../../../scripts/pg_regress/regress_fixture.py setup
-\i ../../../scripts/pg_regress/fixture_command_result.sql
+\set fixture_command 'python3 ../../../scripts/pg_regress/regress_fixture.py setup'
+\i ../../../scripts/pg_regress/fixture_command.sql
 
 CREATE EXTENSION lagodb_base;
 CREATE EXTENSION lagodb_connectors;
-\! python3 ../../../scripts/pg_regress/regress_fixture.py wait-storage
-\i ../../../scripts/pg_regress/fixture_command_result.sql
+\set fixture_command 'python3 ../../../scripts/pg_regress/regress_fixture.py wait-storage'
+\i ../../../scripts/pg_regress/fixture_command.sql
 
 SELECT endpoint AS lagodb_regress_endpoint,
        bucket AS lagodb_regress_bucket,

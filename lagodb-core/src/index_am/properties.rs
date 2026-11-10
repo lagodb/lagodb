@@ -80,6 +80,7 @@ pub struct IndexAmProperties {
     pub can_build_parallel: bool,
     pub can_include: bool,
     pub uses_maintenance_work_mem: bool,
+    #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
     pub summarizing: bool,
     pub parallel_vacuum: ParallelVacuumOptions,
     pub key_type: pg_sys::Oid,
@@ -111,6 +112,7 @@ impl IndexAmProperties {
         can_build_parallel: false,
         can_include: false,
         uses_maintenance_work_mem: false,
+        #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
         summarizing: false,
         parallel_vacuum: ParallelVacuumOptions::NONE,
         key_type: pg_sys::InvalidOid,
@@ -143,7 +145,10 @@ impl IndexAmProperties {
         }
         routine.amcaninclude = self.can_include;
         routine.amusemaintenanceworkmem = self.uses_maintenance_work_mem;
-        routine.amsummarizing = self.summarizing;
+        #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+        {
+            routine.amsummarizing = self.summarizing;
+        }
         routine.amparallelvacuumoptions = self.parallel_vacuum.bits();
         routine.amkeytype = self.key_type;
     }

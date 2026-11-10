@@ -389,8 +389,10 @@ impl<'slot> ModifyPlanSlot<'slot> {
                 if value.is_null() {
                     return Err(ForeignRowIdentityError::NullIdentity);
                 }
-                let raw = unsafe { pg_sys::DatumGetItemPointer(value.datum()) };
-                if raw.is_null() || !unsafe { pg_sys::ItemPointerIsValid(raw) } {
+                // `DatumGetItemPointer`, then `ItemPointerIsValid`: a non-null
+                // pointer with a nonzero offset.
+                let raw = value.datum().cast_mut_ptr::<pg_sys::ItemPointerData>();
+                if raw.is_null() || unsafe { (*raw).ip_posid } == 0 {
                     return Err(ForeignRowIdentityError::InvalidItemPointer);
                 }
                 Ok(ForeignRowIdentity::ItemPointer(unsafe {

@@ -89,7 +89,7 @@ impl AnalyzeBatchCursor {
         }
     }
 
-    #[cfg(feature = "pg16")]
+    #[cfg(any(feature = "pg15", feature = "pg16"))]
     pub(super) const fn candidate_count(&self) -> u32 {
         self.candidate_count
     }

@@ -49,6 +49,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use lagodb_core::backend::VfdHandle;
 use pgrx::pg_sys;
 
 use crate::storage::local_file_wal::log_write_file;
@@ -375,15 +376,12 @@ impl PgFileRead {
     }
 
     fn read_into_at(&self, offset: i64, buf: &mut [u8]) -> io::Result<usize> {
-        let result = unsafe {
-            pg_sys::FileRead(
-                self.file.0,
-                buf.as_mut_ptr() as *mut std::ffi::c_void,
-                buf.len(),
-                offset as pg_sys::off_t,
-                pg_sys::WaitEventIO::WAIT_EVENT_DATA_FILE_READ,
-            )
-        };
+        // SAFETY: `self.file` keeps the VFD open for this reader.
+        let result = unsafe { VfdHandle::from_raw(self.file.0) }.read_at(
+            buf,
+            offset as pg_sys::off_t,
+            pg_sys::WaitEventIO::WAIT_EVENT_DATA_FILE_READ,
+        );
 
         if result < 0 {
             let err = io::Error::last_os_error();
@@ -399,15 +397,29 @@ impl PgFileRead {
         Ok(result as usize)
     }
 
-    /// Read bytes from a specific offset in the file.
-    fn read_at(&self, offset: i64, len: usize) -> io::Result<Vec<u8>> {
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-
+    /// Read exactly `len` bytes at `offset`. `FileRead` may return fewer bytes
+    /// than requested, so repeat until the range is complete; end of file
+    /// before that means the file is shorter than the size recorded at open.
+    fn read_exact_at(&self, offset: i64, len: usize) -> io::Result<Vec<u8>> {
         let mut buffer = vec![0u8; len];
-        let result = self.read_into_at(offset, &mut buffer)?;
-        buffer.truncate(result);
+        let mut filled = 0;
+        while filled < len {
+            let position = offset + filled as i64;
+            let read = self.read_into_at(position, &mut buffer[filled..])?;
+            if read == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "file '{}' ended at offset {} before range {}..{} was read",
+                        self.path,
+                        position,
+                        offset,
+                        offset + len as i64
+                    ),
+                ));
+            }
+            filled += read;
+        }
         Ok(buffer)
     }
 }
@@ -435,7 +447,7 @@ impl FileRead for PgFileRead {
 
         let start = range.start as i64;
         let len = (range.end - range.start) as usize;
-        let buffer = self.read_at(start, len)?;
+        let buffer = self.read_exact_at(start, len)?;
         Ok(Bytes::from(buffer))
     }
 
@@ -613,15 +625,12 @@ impl Write for PgFileWrite {
         // Step 1: Write to the file first
         // Following PostgreSQL's convention: write to file first, then WAL record.
         // This avoids issues if disk is full - we won't have orphaned WAL records.
-        let result = unsafe {
-            pg_sys::FileWrite(
-                self.file,
-                buf.as_ptr() as *const std::ffi::c_void,
-                buf.len(),
-                write_position as pg_sys::off_t,
-                pg_sys::WaitEventIO::WAIT_EVENT_DATA_FILE_WRITE,
-            )
-        };
+        // SAFETY: this writer keeps the VFD open until Drop.
+        let result = unsafe { VfdHandle::from_raw(self.file) }.write_at(
+            buf,
+            write_position as pg_sys::off_t,
+            pg_sys::WaitEventIO::WAIT_EVENT_DATA_FILE_WRITE,
+        );
 
         if result < 0 {
             let err = io::Error::last_os_error();

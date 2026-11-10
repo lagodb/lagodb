@@ -8,7 +8,7 @@ mod descriptor;
 use crate::diag::ReportableError;
 #[cfg(any(feature = "pg17", feature = "pg18"))]
 use crate::handles::AnalyzeReadStreamHandle;
-#[cfg(any(feature = "pg16", feature = "pg17"))]
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
 use crate::handles::TBMIterateResultHandle;
 #[cfg(feature = "pg18")]
 use crate::handles::{BitmapScanOutputHandle, TBMIteratorHandle};
@@ -289,7 +289,7 @@ where
 }
 
 #[pg_guard]
-#[cfg(any(feature = "pg16", feature = "pg17"))]
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
 pub extern "C-unwind" fn scan_bitmap_next_block<A>(
     scan: pg_sys::TableScanDesc,
     tbmres: *mut pg_sys::TBMIterateResult,
@@ -314,7 +314,7 @@ where
 }
 
 #[pg_guard]
-#[cfg(any(feature = "pg16", feature = "pg17"))]
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
 pub extern "C-unwind" fn scan_bitmap_next_tuple<A>(
     scan: pg_sys::TableScanDesc,
     tbmres: *mut pg_sys::TBMIterateResult,
@@ -524,7 +524,7 @@ pub extern "C-unwind" fn tuple_get_latest_tid<A>(
 }
 
 #[pg_guard]
-#[cfg(feature = "pg16")]
+#[cfg(any(feature = "pg15", feature = "pg16"))]
 pub extern "C-unwind" fn scan_analyze_next_block<A>(
     scan: pg_sys::TableScanDesc,
     block: pg_sys::BlockNumber,
@@ -635,7 +635,7 @@ where
     }
 
     if <A::ScanSession as AmScanSession>::BITMAP.is_some() {
-        #[cfg(any(feature = "pg16", feature = "pg17"))]
+        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
         {
             routine.scan_bitmap_next_block = Some(scan_bitmap_next_block::<A>);
         }

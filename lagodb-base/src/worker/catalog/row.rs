@@ -76,9 +76,9 @@ impl CatalogName {
     }
 
     fn datum(&self) -> pg_sys::Datum {
-        // SAFETY: `data` is a live PostgreSQL NameData value for the duration
-        // of the caller's `heap_form_tuple` call.
-        unsafe { pg_sys::NameGetDatum(&self.data) }
+        // `NameGetDatum`: `data` is a live PostgreSQL NameData value for the
+        // duration of the caller's `heap_form_tuple` call.
+        pg_sys::Datum::from(&raw const self.data)
     }
 }
 
@@ -142,8 +142,8 @@ impl<'a> WorkerTuple<'a> {
     }
 
     pub(super) fn worker_id(&self) -> WorkerId {
-        // SAFETY: WorkerId is the int4 column fixed by the tuple schema.
-        WorkerId::new(unsafe { pg_sys::DatumGetInt32(self.datum(Column::WorkerId)) })
+        // `DatumGetInt32`: WorkerId is the int4 column fixed by the tuple schema.
+        WorkerId::new(self.datum(Column::WorkerId).value() as i32)
     }
 
     pub(super) fn extension_name_eq(&self, extension_name: &CStr) -> bool {

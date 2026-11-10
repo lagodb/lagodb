@@ -4,7 +4,7 @@ use std::ffi::CStr;
 
 use pgrx::pg_sys;
 
-use crate::catalog::{CatalogRelation, CatalogSnapshot};
+use crate::catalog::{CatalogObject, CatalogRelation, CatalogSnapshot};
 use crate::storage::foreign::ForeignOptionView;
 
 use super::{
@@ -345,13 +345,7 @@ impl StorageServerCatalog {
     }
 
     fn has_usage(server_oid: pg_sys::Oid, effective_user: pg_sys::Oid) -> bool {
-        unsafe {
-            pg_sys::object_aclcheck(
-                pg_sys::ForeignServerRelationId,
-                server_oid,
-                effective_user,
-                pg_sys::ACL_USAGE.into(),
-            ) == pg_sys::AclResult::ACLCHECK_OK
-        }
+        CatalogObject::ForeignServer(server_oid)
+            .has_privilege(effective_user, pg_sys::ACL_USAGE as pg_sys::AclMode)
     }
 }

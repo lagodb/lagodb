@@ -138,36 +138,13 @@ impl ProjectionAnalysis {
             self.can_narrow = false;
         }
         for var in usage.user_vars() {
-            if let Some(existing) = self.vars_by_attno.get(var.attno) {
-                // SAFETY: the analyzer returns live planner Vars, and the
-                // attno index stores those same planner-owned nodes.
-                let same_nullingrels = unsafe {
-                    pg_sys::bms_equal(
-                        existing.as_ref().varnullingrels,
-                        var.raw.as_ref().varnullingrels,
-                    )
-                };
-                if !same_nullingrels {
-                    self.can_narrow = false;
-                }
-            } else {
-                self.vars_by_attno.insert(var.raw);
+            if !self.vars_by_attno.record(var.raw) {
+                self.can_narrow = false;
             }
-            if matches!(scope, DependencyScope::Executor) {
-                if let Some(existing) = self.executor_vars_by_attno.get(var.attno) {
-                    // SAFETY: both Vars are live for the current planner call.
-                    let same_nullingrels = unsafe {
-                        pg_sys::bms_equal(
-                            existing.as_ref().varnullingrels,
-                            var.raw.as_ref().varnullingrels,
-                        )
-                    };
-                    if !same_nullingrels {
-                        self.can_narrow = false;
-                    }
-                } else {
-                    self.executor_vars_by_attno.insert(var.raw);
-                }
+            if matches!(scope, DependencyScope::Executor)
+                && !self.executor_vars_by_attno.record(var.raw)
+            {
+                self.can_narrow = false;
             }
         }
     }

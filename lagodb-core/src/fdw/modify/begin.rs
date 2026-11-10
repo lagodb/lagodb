@@ -130,7 +130,7 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
             };
         let per_tuple_context = unsafe { Self::per_tuple_context(estate) };
         let effective_user_id =
-            unsafe { pg_sys::ExecGetResultRelCheckAsUser(rinfo, estate) };
+            unsafe { ExecutorHandle::from_raw(estate).result_relation_user(rinfo) };
         // SAFETY: PostgreSQL keeps the live result relation open for the modify
         // state.
         let row_layout = unsafe { ModifyRowLayout::from_relation(relation) };
@@ -232,7 +232,7 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         };
         let per_tuple_context = unsafe { Self::per_tuple_context(estate) };
         let effective_user_id =
-            unsafe { pg_sys::ExecGetResultRelCheckAsUser(rinfo, estate) };
+            unsafe { ExecutorHandle::from_raw(estate).result_relation_user(rinfo) };
         // COPY builds a plan-less temporary ModifyTable/EState without
         // es_output_cid or es_snapshot. Only normal tuple routing exposes an
         // ExecutorHandle; COPY providers request their CID independently.

@@ -2,8 +2,8 @@
 
 ## PostgreSQL source provenance
 
-- Baseline releases: PostgreSQL 16.15, 17.11 and 18.6
-- Upstream tags: `REL_16_15`, `REL_17_11` and `REL_18_6`
+- Baseline releases: PostgreSQL 15.19, 16.15, 17.11 and 18.6
+- Upstream tags: `REL_15_19`, `REL_16_15`, `REL_17_11` and `REL_18_6`
 - Internal contract: `src/include/commands/copy.h`
 - COPY preparation owner: `src/backend/commands/copy.c`
 - COPY FROM owner: `src/backend/commands/copyfrom.c`
@@ -11,25 +11,33 @@
 
 Audited baseline hashes:
 
-- `commands/copy.h`: PG16.15
+- `commands/copy.h`: PG15.19
+  `a172a2dd684dd270e9470832f2acc71be33d55ebb1a9aa69ba67d37e63314b9b`,
+  PG16.15
   `3c316924ad3ae5cca7f727752234bd26d35d58082f04cd6f0977b7815dad73d4`,
   PG17.11
   `cb4402e503464fd2988f0506fc1dd6e24dec3d8e2f0d2e5b9ecccc81f775d55b`,
   PG18.6
   `e03cbf5e07eef661f95b1a5d37111c729d30e7659970b26bb163b73d00e8bb88`
-- `copyfrom.c`: PG16.15
+- `copyfrom.c`: PG15.19
+  `2a915b286fa4c0495287093ed1eaf489ee31142b0b281c3bb307e2307dde2405`,
+  PG16.15
   `9cab577858992d631bef19a6d7280cfed3c3606de864d4f4ceebb8cc12c1f52a`,
   PG17.11
   `c78adfdcc4acfc678a798837b7b7f17663f27d485f6f3eb03b7b8c0ce618c10a`,
   PG18.6
   `2eacfb8e896414428a8d124921fdc38629afe55c391c0fc16bce99b2db8bd86f`
-- `copyto.c`: PG16.15
+- `copyto.c`: PG15.19
+  `092718f2488815a66dbdf846ad03382df134e50460de7ebeca921bc0751b80ef`,
+  PG16.15
   `eea3d037e88f70b1906389b6da2784de8e6ea57495524e432480ab9a2765d553`,
   PG17.11
   `21d2a34fd16fcea4c41f55f650729333fe300dc4242739522f82ab32ab0dfaa1`,
   PG18.6
   `f160930f5821d7320f3ac686f4edc4a7b341f84697ee5200eeff352f331c0bd5`
-- `commands/copy.c`: PG16.15
+- `commands/copy.c`: PG15.19
+  `db34f8d7f2addfb89f05d24a19e08274c0f5a4d73aab2add94d70ea1438d71d1`,
+  PG16.15
   `71ab43c934612c473dde6332317aafa5f058c21d5390b3b40ce8ad853a392947`,
   PG17.11
   `6336c0d7049f4e883a22c4be6ccc430539584857b79367f7ae8ba07245495d64`,
@@ -40,7 +48,7 @@ Audited baseline hashes:
 `src/backend/commands/copyfrom.c` and `src/backend/commands/copyto.c` at the
 recorded PostgreSQL release tag. Their externally visible PostgreSQL symbols are renamed, every
 LagoDB control-flow change is bounded by `LAGODB BEGIN/END`, and the build
-enables them only for the audited PG16, PG17 and PG18 features.
+enables them only for the audited PG15, PG16, PG17 and PG18 features.
 
 `lagodb_copy_prepare.c` owns the command preparation derived from `DoCopy`:
 utility restrictions, endpoint privileges, relation and column permissions,
@@ -73,8 +81,8 @@ Typed input reports format conversion failures as structured row rejections.
 The fork alone applies PostgreSQL `ON_ERROR` policy and owns skipped/processed
 counts. A rejection carries its original SQLSTATE, so `ON_ERROR STOP` does not
 collapse numeric, datetime, encoding, and other class-22 failures into one
-generic text-input error. PostgreSQL 16 has no `ON_ERROR` option, so every
-rejection there ends the statement with its SQLSTATE. Sources also expose a monotonic physical-byte
+generic text-input error. PostgreSQL 15 and 16 have no `ON_ERROR` option, so
+every rejection there ends the statement with its SQLSTATE. Sources also expose a monotonic physical-byte
 counter; the fork updates `PROGRESS_COPY_BYTES_PROCESSED` after every callback
 outcome, including rejected and final reads. Each accepted typed row reports
 the materialized pass-by-reference Datum footprint through the same callback,
@@ -129,15 +137,16 @@ per row or a line terminator. The encoder allocates its state in an explicitly
 owned context under `TopMemoryContext`; Rust's `CopyRowEncoder::finish`/`Drop`
 releases it through the local encoder cleanup function. The source-derived
 serializer contract was compared across `REL_17_0` through `REL_17_11` and
-against `REL_16_15` and `REL_18_6`; the owned contract is unchanged, so the row encoder needs
+against `REL_15_19`, `REL_16_15` and `REL_18_6`; the owned contract is unchanged, so the row encoder needs
 no version branch.
 
-The shared `lagodb_pg_compat.h` gate accepts PostgreSQL 16, 17 and 18. The
-public COPY preparation has local semantic epochs: PG16.0-16.10 and PG17.0-17.6
-have no generated-column validation, PG16.11-16.13 and PG17.7-17.9 add that
-validation (`LAGODB_HAS_COPY_WHERE_GENERATED_CHECK`), and PG16.14 and PG17.10
+The shared `lagodb_pg_compat.h` gate accepts PostgreSQL 15, 16, 17 and 18. The
+public COPY preparation has local semantic epochs: PG15.0-15.14, PG16.0-16.10
+and PG17.0-17.6 have no generated-column validation, PG15.15-15.17,
+PG16.11-16.13 and PG17.7-17.9 add that validation
+(`LAGODB_HAS_COPY_WHERE_GENERATED_CHECK`), and PG15.18, PG16.14 and PG17.10
 add the system-attribute guard that the bridge also applies to the earlier
-validation epoch. PG16 also lacks `ON_ERROR`, `LOG_VERBOSITY` and the
+validation epoch. PG15 and PG16 also lack `ON_ERROR`, `LOG_VERBOSITY` and the
 `PqMsg_*` protocol constants; the fork defines the COPY TO bytes locally. PG18
 COPY FROM delegates byte-format parsing through a
 `CopyFromRoutine`; the fork installs the matching text, CSV, or binary routine
@@ -150,6 +159,25 @@ layout is independent of PostgreSQL's private COPY executor layout. A future
 supported minor that changes the encoder's options, output-function, or
 serializer contract must add a local `PG_VERSION_NUM` branch here; a new major
 remains rejected by the shared compatibility gate.
+
+PostgreSQL 15 differences stay inside the bridge contract:
+
+- COPY has no `DEFAULT` option. `BeginCopyFrom` builds defaults only for
+  columns that are absent from the column list and not generated, and PG15's
+  `NextCopyFrom()` reads `defexprs[i]` alongside `defmap[i]`, so the fork fills
+  both arrays by position.
+- COPY FROM does not batch foreign-table inserts; a foreign target or foreign
+  partition uses single-row inserts.
+- Preparation has no `RTEPermissionInfo`. It records the required privileges
+  and columns on the range-table entry, checks them with `ExecCheckRTPerms()`,
+  and reports PG15's privilege error texts.
+- PostgreSQL 15 has no soft input errors. The text-input validator used by
+  delimited schema inference therefore runs the input function in an internal
+  subtransaction, following PL/pgSQL's exception block. It returns false for a
+  data exception and rethrows every other error.
+- Storage subtransaction IDs are `rd_*RelfilenodeSubid`, routing reads
+  `ri_RootToPartitionMap`, and `ExecInsertIndexTuples()` has no
+  summarizing-only flag.
 
 Before adopting a new PostgreSQL baseline or supporting another release:
 

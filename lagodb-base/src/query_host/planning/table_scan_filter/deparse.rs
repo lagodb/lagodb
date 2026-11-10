@@ -4,6 +4,7 @@ use std::ffi::{CString, c_void};
 use std::ptr;
 
 use lagodb_core::expr::explain::deparse_and_join;
+use lagodb_core::expr::pg::expression_tree_mutator;
 use pgrx::{pg_guard, pg_sys};
 
 use crate::query_host::error::QueryHostError;
@@ -109,12 +110,6 @@ impl<'a> FilterDeparser<'a> {
         if tag == pg_sys::NodeTag::T_Param {
             deparser.missing_binding = true;
         }
-        unsafe {
-            pg_sys::expression_tree_mutator_impl(
-                node,
-                Some(FilterDeparser::rewrite),
-                context,
-            )
-        }
+        unsafe { expression_tree_mutator(node, FilterDeparser::rewrite, context) }
     }
 }

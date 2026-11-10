@@ -50,6 +50,7 @@ jobs:
       fail-fast: false
       matrix:
         postgres:
+          - "15"
           - "16"
           - "17"
           - "18"
@@ -149,21 +150,27 @@ jobs:
         run: |
           set -euo pipefail
           if ! cargo pgrx info pg-config "${PG_VERSION}" >/dev/null 2>&1; then
-            if [ "${PG_VERSION}" = "pg16" ]; then
-              cargo pgrx init "--${PG_VERSION}=download"
-            else
-              cargo pgrx init "--${PG_VERSION}=download" \
-                --configure-flag=--enable-injection-points
-            fi
+            case "${PG_VERSION}" in
+              pg15 | pg16)
+                cargo pgrx init "--${PG_VERSION}=download"
+                ;;
+              *)
+                cargo pgrx init "--${PG_VERSION}=download" \
+                  --configure-flag=--enable-injection-points
+                ;;
+            esac
           fi
           PG_CONFIG="$(cargo pgrx info pg-config "${PG_VERSION}")"
           echo "PG_CONFIG=${PG_CONFIG}" >> "${GITHUB_ENV}"
           echo "$(dirname "${PG_CONFIG}")" >> "${GITHUB_PATH}"
           echo "${PG_CONFIG}"
-          if [ "${PG_VERSION}" != "pg16" ]; then
-            grep -Fx '#define USE_INJECTION_POINTS 1' \
-              "$("${PG_CONFIG}" --includedir-server)/pg_config.h"
-          fi
+          case "${PG_VERSION}" in
+            pg15 | pg16) ;;
+            *)
+              grep -Fx '#define USE_INJECTION_POINTS 1' \
+                "$("${PG_CONFIG}" --includedir-server)/pg_config.h"
+              ;;
+          esac
           test -x "$("${PG_CONFIG}" --pkglibdir)/pgxs/src/test/isolation/pg_isolation_regress"
 
       - name: Run clippy

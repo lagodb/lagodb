@@ -47,9 +47,10 @@ impl RelationTreePlanner {
     }
 
     /// Build the placeholder inner-join descriptor selectivity estimation
-    /// expects. PostgreSQL 16 keeps `init_dummy_sjinfo` private; the zeroed
-    /// remainder matches what it assigns.
-    #[cfg(feature = "pg16")]
+    /// expects. PostgreSQL 15 and 16 build this descriptor inline in
+    /// `make_join_rel()`; PostgreSQL 17 exports it as `init_dummy_sjinfo`. The
+    /// zeroed remainder matches what they assign.
+    #[cfg(any(feature = "pg15", feature = "pg16"))]
     fn dummy_join_info(
         left_relids: pg_sys::Relids,
         right_relids: pg_sys::Relids,

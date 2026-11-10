@@ -11,7 +11,7 @@ pub struct BackendProcess;
 
 impl BackendProcess {
     /// PostgreSQL's process number that identifies no backend.
-    #[cfg(feature = "pg16")]
+    #[cfg(any(feature = "pg15", feature = "pg16"))]
     pub const INVALID_PROC_NUMBER: c_int = pg_sys::INVALID_PGPROCNO as c_int;
     /// PostgreSQL's process number that identifies no backend.
     #[cfg(any(feature = "pg17", feature = "pg18"))]
@@ -22,7 +22,7 @@ impl BackendProcess {
     pub fn proc_number() -> c_int {
         // SAFETY: PostgreSQL publishes this identity before it enters extension
         // code and keeps it for the life of the backend.
-        #[cfg(feature = "pg16")]
+        #[cfg(any(feature = "pg15", feature = "pg16"))]
         unsafe {
             (*pg_sys::MyProc).pgprocno
         }
@@ -58,7 +58,7 @@ impl BackendProcess {
     /// Run PostgreSQL's registered process-exit callbacks and terminate the
     /// current backend with `code`.
     pub fn exit(code: c_int) -> ! {
-        #[cfg(any(feature = "pg16", feature = "pg17"))]
+        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
         unsafe {
             // SAFETY: PostgreSQL owns the current backend process and exposes
             // proc_exit as its normal callback-aware termination path.

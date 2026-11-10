@@ -50,7 +50,7 @@ impl<'a> IndexInfoHandle<'a> {
 
     /// Number of parallel workers PostgreSQL planned for this index build.
     ///
-    /// PostgreSQL 16 plans workers only for btree, and PostgreSQL 17+ only
+    /// PostgreSQL 15 and 16 plan workers only for btree, and PostgreSQL 17+ only
     /// for access methods declaring `amcanbuildparallel`; otherwise this is
     /// zero. The access method owns the parallel build itself.
     #[inline]

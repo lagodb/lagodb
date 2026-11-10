@@ -4,7 +4,7 @@
  * ExecInitNode/ExecEndNode dispatch ModifyTable to the server's implementation.
  * Keep their common contracts here while selecting the extension's fork.
  * Initialization and teardown follow execProcnode.c from PostgreSQL 17.11
- * and 18.6, audited for PG16.15; execution uses the backend's
+ * and 18.6, audited for PG16.15 and PG15.19; execution uses the backend's
  * ExecSetExecProcNode/ExecProcNode wrappers.
  */
 #include "postgres.h"

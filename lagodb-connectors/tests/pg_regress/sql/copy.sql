@@ -249,7 +249,7 @@ WITH (server 'lagodb_connectors_regress_s3', format 'json');
 \set VERBOSITY default
 SELECT count(*) AS rows_after_error FROM lagodb_connectors_regress.copy_typmod_sink;
 
--- PostgreSQL 17 introduced ON_ERROR; _1.out is the PostgreSQL 16 output.
+-- PostgreSQL 17 introduced ON_ERROR; _1.out is the PostgreSQL 15 and 16 output.
 SELECT current_setting('server_version_num')::int >= 170000 AS has_copy_on_error \gset
 \if :has_copy_on_error
 SET client_min_messages = notice;

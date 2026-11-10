@@ -1,10 +1,10 @@
 use std::ffi::CStr;
 
+use pgrx::pg_sys::ForkNumber;
 use pgrx::pg_sys::ffi::pg_guard_ffi_boundary;
-use pgrx::pg_sys::{ForkNumber, RelFileLocator as PgRelFileLocator};
 use pgrx::{PgTryBuilder, pg_sys};
 
-use super::{RelFileLocator, RelationHandle};
+use super::{PgRelFileLocator, RelFileLocator, RelationHandle};
 use crate::diag::PgError;
 
 // Manually declare log_smgrcreate because catalog/storage_xlog.h is not in
@@ -20,7 +20,7 @@ impl RelFileLocator {
     /// Main-fork path, including PostgreSQL's temporary-backend prefix.
     pub fn path(self, backend: i32) -> String {
         // SAFETY: GetRelationPath only formats the supplied storage identity.
-        // PG17 returns a palloc string; PG18 returns an inline RelPathStr.
+        // PG15-PG17 return a palloc string; PG18 returns an inline RelPathStr.
         unsafe {
             let path = pg_sys::GetRelationPath(
                 self.db_oid,
@@ -29,7 +29,7 @@ impl RelFileLocator {
                 backend,
                 ForkNumber::MAIN_FORKNUM,
             );
-            #[cfg(any(feature = "pg16", feature = "pg17"))]
+            #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
             {
                 let owned = CStr::from_ptr(path).to_string_lossy().into_owned();
                 pg_sys::pfree(path.cast());
@@ -52,11 +52,7 @@ impl RelFileLocator {
     pub fn create_storage(self, persistence: u8) -> Result<(), PgError> {
         unsafe {
             PgTryBuilder::new(move || {
-                let pg_locator = PgRelFileLocator {
-                    spcOid: self.spc_oid,
-                    dbOid: self.db_oid,
-                    relNumber: self.rel_number,
-                };
+                let pg_locator = self.to_raw();
                 let storage =
                     pg_sys::RelationCreateStorage(pg_locator, persistence as _, true);
                 pg_sys::smgrclose(storage);

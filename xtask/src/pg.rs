@@ -16,6 +16,7 @@ use crate::process::{cargo_pgrx, run_command};
 /// the raw argument.
 #[derive(Clone, Copy, Default)]
 pub(crate) enum PgMajor {
+    Pg15,
     Pg16,
     Pg17,
     /// Must match the `default` feature of every PostgreSQL-aware crate's
@@ -41,6 +42,7 @@ impl PgMajor {
 
     fn from_label(label: &OsStr) -> Option<Self> {
         match label.to_str()? {
+            "pg15" => Some(Self::Pg15),
             "pg16" => Some(Self::Pg16),
             "pg17" => Some(Self::Pg17),
             "pg18" => Some(Self::Pg18),
@@ -50,6 +52,7 @@ impl PgMajor {
 
     const fn label(self) -> &'static str {
         match self {
+            Self::Pg15 => "pg15",
             Self::Pg16 => "pg16",
             Self::Pg17 => "pg17",
             Self::Pg18 => "pg18",
@@ -159,7 +162,7 @@ impl PgInstallation {
 
     pub(crate) fn prepare_injection_points(&self) -> Result<(), String> {
         // PostgreSQL 17 introduced injection points.
-        if matches!(self.major, PgMajor::Pg16) {
+        if matches!(self.major, PgMajor::Pg15 | PgMajor::Pg16) {
             return Ok(());
         }
 

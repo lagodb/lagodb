@@ -11,5 +11,7 @@ that PostgreSQL exposes only to C. It is an adapter, not a source fork.
   `nbtinsert.c` `_bt_check_unique` reports. `errtableconstraint` sets the
   schema, table and constraint fields, which a Rust error value cannot carry.
 
-Baselines: PostgreSQL 16.15, 17.11 and 18.6. The macro body is identical in
-all three; `scan->instrument` exists only on PostgreSQL 18.
+Baselines: PostgreSQL 15.19, 16.15, 17.11 and 18.6. The macro body is
+identical from PostgreSQL 16; PostgreSQL 15 names the relation counter
+`t_counts.t_numscans`, which the macro hides. `scan->instrument` exists only on
+PostgreSQL 18.

@@ -1,6 +1,6 @@
 //! Index insertion.
 //!
-//! PostgreSQL 16 has no `aminsertcleanup`: the session is only dropped with
+//! PostgreSQL 15 and 16 have no `aminsertcleanup`: the session is only dropped with
 //! `ii_Context`, and dropping is not a successful finish, so each `insert`
 //! must be durable on its own.
 

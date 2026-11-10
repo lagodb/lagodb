@@ -1,0 +1,1207 @@
+-- query_offload_aggregates.sql
+-- Basic single-relation grouping, aggregate, FILTER, and HAVING coverage.
+-- PostgreSQL 15 has no presorted aggregates, so its plans have no Sort below
+-- an ordered or DISTINCT aggregate; _1.out is the PostgreSQL 15 output.
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
+-- A small batch limit exercises multiple Arrow batches.
+-- Keep CustomScan off while comparing query offload with PostgreSQL.
+SET lagodb.query_batch_rows = 2;
+SET timezone = 'UTC';
+CREATE TABLE query_offload_aggregate_basic (
+    id integer,
+    group_i4 integer,
+    group_i8 bigint,
+    value_i2 smallint,
+    value_i4 integer,
+    value_i8 bigint,
+    value_f4 real,
+    value_f8 double precision,
+    value_numeric numeric(12, 2),
+    value_bool boolean,
+    value_date date,
+    value_time time,
+    value_timestamp timestamp,
+    value_timestamptz timestamptz,
+    value_text text,
+    value_text_c text COLLATE "C"
+) USING iceberg;
+INSERT INTO query_offload_aggregate_basic VALUES
+    (1, 1, 10,  1,  10,  100,  1.0,  10.0,  1.25, true,
+     DATE '2024-01-01', TIME '10:00:00',
+     TIMESTAMP '2024-01-01 10:00:00',
+     TIMESTAMPTZ '2024-01-01 10:00:00+00', 'alpha', 'alpha'),
+    (2, 1, 10,  2,  20,  200,  2.0,  20.0,  2.50, false,
+     DATE '2024-01-02', TIME '11:00:00',
+     TIMESTAMP '2024-01-02 11:00:00',
+     TIMESTAMPTZ '2024-01-02 11:00:00+00', 'beta', 'beta'),
+    (3, 2, 20, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+     NULL, NULL, NULL, NULL, NULL, NULL),
+    (4, 2, 20, -2, -20, -200, -2.0, -20.0, -2.50, true,
+     DATE '2023-12-31', TIME '09:00:00',
+     TIMESTAMP '2023-12-31 09:00:00',
+     TIMESTAMPTZ '2023-12-31 09:00:00+00', 'alpha', 'alpha'),
+    (5, 2, 30,  3,  30,  300,  3.0,  30.0,  3.75, false,
+     DATE '2024-01-03', TIME '12:00:00',
+     TIMESTAMP '2024-01-03 12:00:00',
+     TIMESTAMPTZ '2024-01-03 12:00:00+00', 'gamma', 'gamma'),
+    (6, 3, 30, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+     NULL, NULL, NULL, NULL, NULL, NULL);
+-- ============================================================================
+-- GUC ownership: either path family remains usable while the other is off.
+-- ============================================================================
+-- Relation CustomScan only.
+SET lagodb.customscan_mode = 'force';
+SET lagodb.query_offload_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT count(*)
+FROM query_offload_aggregate_basic
+WHERE id = 1;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (lagodb-iceberg) on query_offload_aggregate_basic
+         Pushed Filter: (id = 1)
+(3 rows)
+
+-- Query offload only.
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*)
+FROM query_offload_aggregate_basic
+WHERE id = 1;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on query_offload_aggregate_basic
+               Access Method: iceberg
+               Filter: (id = 1)
+               Pushed Filter: (id = 1)
+(8 rows)
+
+-- Auto mode prices the offload path against PostgreSQL's plan. Extreme engine
+-- costs make each side win whatever the calibrated defaults are.
+SET lagodb.query_offload_mode = 'auto';
+SET lagodb.query_offload_setup_cost = 1e10;
+EXPLAIN (COSTS OFF)
+SELECT group_i4, count(*)
+FROM query_offload_aggregate_basic
+GROUP BY group_i4;
+                   QUERY PLAN                    
+-------------------------------------------------
+ HashAggregate
+   Group Key: group_i4
+   ->  Seq Scan on query_offload_aggregate_basic
+(3 rows)
+
+SET lagodb.query_offload_setup_cost = 0;
+SET lagodb.query_offload_cpu_cost_multiplier = 0;
+EXPLAIN (COSTS OFF)
+SELECT group_i4, count(*)
+FROM query_offload_aggregate_basic
+GROUP BY group_i4;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Group Key: group_i4
+         Aggregates: COUNT(*)
+         ->  Table Scan on query_offload_aggregate_basic
+               Access Method: iceberg
+(7 rows)
+
+-- The Iceberg reader's per-row CPU prices only the relation CustomScan, which
+-- replaces the SeqScan when CustomScan is on. Against an offload path costing
+-- its setup of 10 plus the same pages, the reader cost of the six rows decides:
+-- nothing at multiplier 0, and 6 * cpu_tuple_cost * 1000 = 60 at 1000.
+SET lagodb.customscan_mode = 'auto';
+SET lagodb.query_offload_setup_cost = 10;
+SET lagodb_iceberg.scan_cpu_cost_multiplier = 0;
+EXPLAIN (COSTS OFF)
+SELECT group_i4, count(*)
+FROM query_offload_aggregate_basic
+GROUP BY group_i4;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ HashAggregate
+   Group Key: group_i4
+   ->  Custom Scan (lagodb-iceberg) on query_offload_aggregate_basic
+(3 rows)
+
+SET lagodb_iceberg.scan_cpu_cost_multiplier = 1000;
+EXPLAIN (COSTS OFF)
+SELECT group_i4, count(*)
+FROM query_offload_aggregate_basic
+GROUP BY group_i4;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Group Key: group_i4
+         Aggregates: COUNT(*)
+         ->  Table Scan on query_offload_aggregate_basic
+               Access Method: iceberg
+(7 rows)
+
+RESET lagodb_iceberg.scan_cpu_cost_multiplier;
+RESET lagodb.query_offload_setup_cost;
+RESET lagodb.query_offload_cpu_cost_multiplier;
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'force';
+-- ============================================================================
+-- Metadata COUNT: exact snapshot counts and reader fallback for deletes.
+-- ============================================================================
+CREATE TABLE query_offload_metadata_count (id integer) USING iceberg;
+-- An empty snapshot still produces one COUNT row.
+SELECT count(*) FROM query_offload_metadata_count;
+ count 
+-------
+     0
+(1 row)
+
+-- Count all rows across two files, including NULL, using a reusable plan.
+INSERT INTO query_offload_metadata_count VALUES (1), (NULL);
+INSERT INTO query_offload_metadata_count VALUES (3);
+PREPARE metadata_count AS SELECT count(*) FROM query_offload_metadata_count;
+EXECUTE metadata_count;
+ count 
+-------
+     3
+(1 row)
+
+-- COUNT(column) must retain NULL exclusion.
+SELECT count(id) FROM query_offload_metadata_count;
+ count 
+-------
+     2
+(1 row)
+
+-- Each execution sees current transaction data, not a cached COUNT value.
+BEGIN;
+INSERT INTO query_offload_metadata_count VALUES (4);
+EXECUTE metadata_count;
+ count 
+-------
+     4
+(1 row)
+
+ROLLBACK;
+EXECUTE metadata_count;
+ count 
+-------
+     3
+(1 row)
+
+DEALLOCATE metadata_count;
+-- A positional delete requires reader fallback instead of raw file counts.
+DELETE FROM query_offload_metadata_count WHERE id = 1;
+SELECT count(*) FROM query_offload_metadata_count;
+ count 
+-------
+     2
+(1 row)
+
+DROP TABLE query_offload_metadata_count;
+-- ============================================================================
+-- Unfiltered and filtered grouped aggregates, pure GROUP BY, COUNT, and
+-- integer MIN/MAX. The filtered EXPLAIN must show both the exact `Filter`
+-- evaluated by DataFusion and the provider-accepted `Pushed Filter` used
+-- for Iceberg storage pruning.
+-- ============================================================================
+-- Query offload plan and result.
+EXPLAIN (COSTS OFF)
+SELECT group_i4,
+       group_i8,
+       count(*) AS rows,
+       count(value_i4) AS nonnull_i4,
+       min(value_i4) AS min_i4,
+       max(value_i4) AS max_i4,
+       min(value_i8) AS min_i8,
+       max(value_i8) AS max_i8
+FROM query_offload_aggregate_basic
+GROUP BY group_i4, group_i8
+ORDER BY group_i4, group_i8;
+                                                   QUERY PLAN                                                    
+-----------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Sort
+         Sort Key: group_i4 ASC NULLS LAST, group_i8 ASC NULLS LAST
+         ->  Aggregate
+               Group Key: group_i4, group_i8
+               Aggregates: COUNT(*), COUNT(value_i4), MIN(value_i4), MAX(value_i4), MIN(value_i8), MAX(value_i8)
+               ->  Table Scan on query_offload_aggregate_basic
+                     Access Method: iceberg
+(9 rows)
+
+SELECT group_i4,
+       group_i8,
+       count(*) AS rows,
+       count(value_i4) AS nonnull_i4,
+       min(value_i4) AS min_i4,
+       max(value_i4) AS max_i4,
+       min(value_i8) AS min_i8,
+       max(value_i8) AS max_i8
+FROM query_offload_aggregate_basic
+GROUP BY group_i4, group_i8
+ORDER BY group_i4, group_i8;
+ group_i4 | group_i8 | rows | nonnull_i4 | min_i4 | max_i4 | min_i8 | max_i8 
+----------+----------+------+------------+--------+--------+--------+--------
+        1 |       10 |    2 |          2 |     10 |     20 |    100 |    200
+        2 |       20 |    2 |          1 |    -20 |    -20 |   -200 |   -200
+        2 |       30 |    1 |          1 |     30 |     30 |    300 |    300
+        3 |       30 |    1 |          0 |        |        |        |       
+(4 rows)
+
+-- PostgreSQL native result.
+SET lagodb.query_offload_mode = 'off';
+SELECT group_i4,
+       group_i8,
+       count(*) AS rows,
+       count(value_i4) AS nonnull_i4,
+       min(value_i4) AS min_i4,
+       max(value_i4) AS max_i4,
+       min(value_i8) AS min_i8,
+       max(value_i8) AS max_i8
+FROM query_offload_aggregate_basic
+GROUP BY group_i4, group_i8
+ORDER BY group_i4, group_i8;
+ group_i4 | group_i8 | rows | nonnull_i4 | min_i4 | max_i4 | min_i8 | max_i8 
+----------+----------+------+------------+--------+--------+--------+--------
+        1 |       10 |    2 |          2 |     10 |     20 |    100 |    200
+        2 |       20 |    2 |          1 |    -20 |    -20 |   -200 |   -200
+        2 |       30 |    1 |          1 |     30 |     30 |    300 |    300
+        3 |       30 |    1 |          0 |        |        |        |       
+(4 rows)
+
+-- Query offload filtered plan and result.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT group_i4,
+       count(*) AS rows,
+       min(value_i4) AS min_i4,
+       max(value_i4) AS max_i4
+FROM query_offload_aggregate_basic
+WHERE id >= 2
+GROUP BY group_i4
+ORDER BY group_i4;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Sort
+         Sort Key: group_i4 ASC NULLS LAST
+         ->  Aggregate
+               Group Key: group_i4
+               Aggregates: COUNT(*), MIN(value_i4), MAX(value_i4)
+               ->  Table Scan on query_offload_aggregate_basic
+                     Access Method: iceberg
+                     Filter: (id >= 2)
+                     Pushed Filter: (id >= 2)
+(11 rows)
+
+SELECT group_i4,
+       count(*) AS rows,
+       min(value_i4) AS min_i4,
+       max(value_i4) AS max_i4
+FROM query_offload_aggregate_basic
+WHERE id >= 2
+GROUP BY group_i4
+ORDER BY group_i4;
+ group_i4 | rows | min_i4 | max_i4 
+----------+------+--------+--------
+        1 |    1 |     20 |     20
+        2 |    3 |    -20 |     30
+        3 |    1 |        |       
+(3 rows)
+
+-- PostgreSQL native filtered result.
+SET lagodb.query_offload_mode = 'off';
+SELECT group_i4,
+       count(*) AS rows,
+       min(value_i4) AS min_i4,
+       max(value_i4) AS max_i4
+FROM query_offload_aggregate_basic
+WHERE id >= 2
+GROUP BY group_i4
+ORDER BY group_i4;
+ group_i4 | rows | min_i4 | max_i4 
+----------+------+--------+--------
+        1 |    1 |     20 |     20
+        2 |    3 |    -20 |     30
+        3 |    1 |        |       
+(3 rows)
+
+-- Query offload plan and result.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT group_i4, group_i8
+FROM query_offload_aggregate_basic
+GROUP BY group_i4, group_i8
+ORDER BY group_i4, group_i8;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Sort
+         Sort Key: group_i4 ASC NULLS LAST, group_i8 ASC NULLS LAST
+         ->  Aggregate
+               Group Key: group_i4, group_i8
+               ->  Table Scan on query_offload_aggregate_basic
+                     Access Method: iceberg
+(8 rows)
+
+SELECT group_i4, group_i8
+FROM query_offload_aggregate_basic
+GROUP BY group_i4, group_i8
+ORDER BY group_i4, group_i8;
+ group_i4 | group_i8 
+----------+----------
+        1 |       10
+        2 |       20
+        2 |       30
+        3 |       30
+(4 rows)
+
+-- PostgreSQL native result.
+SET lagodb.query_offload_mode = 'off';
+SELECT group_i4, group_i8
+FROM query_offload_aggregate_basic
+GROUP BY group_i4, group_i8
+ORDER BY group_i4, group_i8;
+ group_i4 | group_i8 
+----------+----------
+        1 |       10
+        2 |       20
+        2 |       30
+        3 |       30
+(4 rows)
+
+-- ============================================================================
+-- Integer aggregates, aggregate FILTER, and HAVING.
+-- Cast AVG results to a fixed scale so the accepted native-Float64 transition
+-- contract is compared over values with a stable PostgreSQL representation.
+-- ============================================================================
+-- Query offload plan and result.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT group_i4,
+       count(*) FILTER (WHERE id >= 2) AS filtered_rows,
+       sum(value_i4) FILTER (WHERE id >= 2) AS filtered_sum_i4,
+       sum(value_i2) AS sum_i2,
+       sum(value_i4) AS sum_i4,
+       sum(value_i8) AS sum_i8,
+       avg(value_i2)::numeric(20, 4) AS avg_i2,
+       avg(value_i4)::numeric(20, 4) AS avg_i4,
+       avg(value_i8)::numeric(20, 4) AS avg_i8
+FROM query_offload_aggregate_basic
+GROUP BY group_i4
+HAVING count(*) >= 2
+ORDER BY group_i4;
+                                                                                                              QUERY PLAN                                                                                                               
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Sort
+         Sort Key: group_i4 ASC NULLS LAST
+         ->  Filter
+               Filter: ((COUNT(*) >= runtime value))
+               ->  Aggregate
+                     Group Key: group_i4
+                     Aggregates: COUNT(*) FILTER (WHERE (id >= runtime value)), SUM(value_i4) FILTER (WHERE (id >= runtime value)), SUM(value_i2), SUM(value_i4), SUM(value_i8), AVG(value_i2), AVG(value_i4), AVG(value_i8), COUNT(*)
+                     ->  Table Scan on query_offload_aggregate_basic
+                           Access Method: iceberg
+(11 rows)
+
+SELECT group_i4,
+       count(*) FILTER (WHERE id >= 2) AS filtered_rows,
+       sum(value_i4) FILTER (WHERE id >= 2) AS filtered_sum_i4,
+       sum(value_i2) AS sum_i2,
+       sum(value_i4) AS sum_i4,
+       sum(value_i8) AS sum_i8,
+       avg(value_i2)::numeric(20, 4) AS avg_i2,
+       avg(value_i4)::numeric(20, 4) AS avg_i4,
+       avg(value_i8)::numeric(20, 4) AS avg_i8
+FROM query_offload_aggregate_basic
+GROUP BY group_i4
+HAVING count(*) >= 2
+ORDER BY group_i4;
+ group_i4 | filtered_rows | filtered_sum_i4 | sum_i2 | sum_i4 | sum_i8 | avg_i2 | avg_i4  |  avg_i8  
+----------+---------------+-----------------+--------+--------+--------+--------+---------+----------
+        1 |             1 |              20 |      3 |     30 |    300 | 1.5000 | 15.0000 | 150.0000
+        2 |             3 |              10 |      1 |     10 |    100 | 0.5000 |  5.0000 |  50.0000
+(2 rows)
+
+-- PostgreSQL native result.
+SET lagodb.query_offload_mode = 'off';
+SELECT group_i4,
+       count(*) FILTER (WHERE id >= 2) AS filtered_rows,
+       sum(value_i4) FILTER (WHERE id >= 2) AS filtered_sum_i4,
+       sum(value_i2) AS sum_i2,
+       sum(value_i4) AS sum_i4,
+       sum(value_i8) AS sum_i8,
+       avg(value_i2)::numeric(20, 4) AS avg_i2,
+       avg(value_i4)::numeric(20, 4) AS avg_i4,
+       avg(value_i8)::numeric(20, 4) AS avg_i8
+FROM query_offload_aggregate_basic
+GROUP BY group_i4
+HAVING count(*) >= 2
+ORDER BY group_i4;
+ group_i4 | filtered_rows | filtered_sum_i4 | sum_i2 | sum_i4 | sum_i8 | avg_i2 | avg_i4  |  avg_i8  
+----------+---------------+-----------------+--------+--------+--------+--------+---------+----------
+        1 |             1 |              20 |      3 |     30 |    300 | 1.5000 | 15.0000 | 150.0000
+        2 |             3 |              10 |      1 |     10 |    100 | 0.5000 |  5.0000 |  50.0000
+(2 rows)
+
+-- HAVING over integer SUM and integer AVG exercises the Int64 and Float64
+-- physical result domains used by the query engine.
+-- Query offload plan and result.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT group_i4,
+       sum(value_i4) AS sum_i4,
+       avg(value_i4)::numeric(20, 4) AS avg_i4
+FROM query_offload_aggregate_basic
+GROUP BY group_i4
+HAVING sum(value_i4) >= 0 AND avg(value_i4) >= 10
+ORDER BY group_i4;
+                                          QUERY PLAN                                           
+-----------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Sort
+         Sort Key: group_i4 ASC NULLS LAST
+         ->  Filter
+               Filter: ((SUM(value_i4) >= runtime value) AND (AVG(value_i4) >= runtime value))
+               ->  Aggregate
+                     Group Key: group_i4
+                     Aggregates: SUM(value_i4), AVG(value_i4)
+                     ->  Table Scan on query_offload_aggregate_basic
+                           Access Method: iceberg
+(11 rows)
+
+SELECT group_i4,
+       sum(value_i4) AS sum_i4,
+       avg(value_i4)::numeric(20, 4) AS avg_i4
+FROM query_offload_aggregate_basic
+GROUP BY group_i4
+HAVING sum(value_i4) >= 0 AND avg(value_i4) >= 10
+ORDER BY group_i4;
+ group_i4 | sum_i4 | avg_i4  
+----------+--------+---------
+        1 |     30 | 15.0000
+(1 row)
+
+-- PostgreSQL native result.
+SET lagodb.query_offload_mode = 'off';
+SELECT group_i4,
+       sum(value_i4) AS sum_i4,
+       avg(value_i4)::numeric(20, 4) AS avg_i4
+FROM query_offload_aggregate_basic
+GROUP BY group_i4
+HAVING sum(value_i4) >= 0 AND avg(value_i4) >= 10
+ORDER BY group_i4;
+ group_i4 | sum_i4 | avg_i4  
+----------+--------+---------
+        1 |     30 | 15.0000
+(1 row)
+
+-- ============================================================================
+-- Bounded NUMERIC aggregates.
+-- ============================================================================
+-- Query offload plan and result.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT min(value_numeric) AS min_numeric,
+       max(value_numeric) AS max_numeric,
+       sum(value_numeric)::numeric(20, 2) AS sum_numeric,
+       avg(value_numeric)::numeric(20, 4) AS avg_numeric
+FROM query_offload_aggregate_basic;
+                                             QUERY PLAN                                             
+----------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: MIN(value_numeric), MAX(value_numeric), SUM(value_numeric), AVG(value_numeric)
+         ->  Table Scan on query_offload_aggregate_basic
+               Access Method: iceberg
+(6 rows)
+
+SELECT min(value_numeric) AS min_numeric,
+       max(value_numeric) AS max_numeric,
+       sum(value_numeric)::numeric(20, 2) AS sum_numeric,
+       avg(value_numeric)::numeric(20, 4) AS avg_numeric
+FROM query_offload_aggregate_basic;
+ min_numeric | max_numeric | sum_numeric | avg_numeric 
+-------------+-------------+-------------+-------------
+       -2.50 |        3.75 |        5.00 |      1.2500
+(1 row)
+
+-- PostgreSQL native result.
+SET lagodb.query_offload_mode = 'off';
+SELECT min(value_numeric) AS min_numeric,
+       max(value_numeric) AS max_numeric,
+       sum(value_numeric)::numeric(20, 2) AS sum_numeric,
+       avg(value_numeric)::numeric(20, 4) AS avg_numeric
+FROM query_offload_aggregate_basic;
+ min_numeric | max_numeric | sum_numeric | avg_numeric 
+-------------+-------------+-------------+-------------
+       -2.50 |        3.75 |        5.00 |      1.2500
+(1 row)
+
+-- ============================================================================
+-- Float, temporal, boolean, ARRAY_AGG, and STRING_AGG families.
+-- Only finite exactly representable float inputs are used by this basic
+-- parity test; NaN and signed-zero differences are documented in
+-- docs/query-offload-semantics.md.
+-- ============================================================================
+-- Query offload plan and result.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT min(value_f4) AS min_f4,
+       max(value_f4) AS max_f4,
+       sum(value_f4)::numeric(20, 4) AS sum_f4,
+       avg(value_f4)::numeric(20, 4) AS avg_f4,
+       min(value_f8) AS min_f8,
+       max(value_f8) AS max_f8,
+       sum(value_f8)::numeric(20, 4) AS sum_f8,
+       avg(value_f8)::numeric(20, 4) AS avg_f8,
+       min(value_date) AS min_date,
+       max(value_date) AS max_date,
+       min(value_time) AS min_time,
+       max(value_time) AS max_time,
+       min(value_timestamp) AS min_timestamp,
+       max(value_timestamp) AS max_timestamp,
+       min(value_timestamptz) AS min_timestamptz,
+       max(value_timestamptz) AS max_timestamptz,
+       bool_and(value_bool) AS all_true,
+       bool_or(value_bool) AS any_true,
+       array_agg(value_i4 ORDER BY id) AS ordered_i4,
+       string_agg(value_text, ',' ORDER BY id) AS ordered_text,
+       string_agg(value_text, NULL ORDER BY id) AS concatenated_text
+FROM query_offload_aggregate_basic;
+                                                                                                                                                                                                                                                      QUERY PLAN                                                                                                                                                                                                                                                      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: MIN(value_f4), MAX(value_f4), SUM(value_f4), AVG(value_f4), MIN(value_f8), MAX(value_f8), SUM(value_f8), AVG(value_f8), MIN(value_date), MAX(value_date), MIN(value_time), MAX(value_time), MIN(value_timestamp), MAX(value_timestamp), MIN(value_timestamptz), MAX(value_timestamptz), BOOL_AND(value_bool), BOOL_OR(value_bool), ARRAY_AGG(value_i4 ORDER BY id ASC NULLS LAST), STRING_AGG(value_text, ',' ORDER BY id ASC NULLS LAST), STRING_AGG(value_text, '' ORDER BY id ASC NULLS LAST)
+         ->  Table Scan on query_offload_aggregate_basic
+               Access Method: iceberg
+(6 rows)
+
+SELECT min(value_f4) AS min_f4,
+       max(value_f4) AS max_f4,
+       sum(value_f4)::numeric(20, 4) AS sum_f4,
+       avg(value_f4)::numeric(20, 4) AS avg_f4,
+       min(value_f8) AS min_f8,
+       max(value_f8) AS max_f8,
+       sum(value_f8)::numeric(20, 4) AS sum_f8,
+       avg(value_f8)::numeric(20, 4) AS avg_f8,
+       min(value_date) AS min_date,
+       max(value_date) AS max_date,
+       min(value_time) AS min_time,
+       max(value_time) AS max_time,
+       min(value_timestamp) AS min_timestamp,
+       max(value_timestamp) AS max_timestamp,
+       min(value_timestamptz) AS min_timestamptz,
+       max(value_timestamptz) AS max_timestamptz,
+       bool_and(value_bool) AS all_true,
+       bool_or(value_bool) AS any_true,
+       array_agg(value_i4 ORDER BY id) AS ordered_i4,
+       string_agg(value_text, ',' ORDER BY id) AS ordered_text,
+       string_agg(value_text, NULL ORDER BY id) AS concatenated_text
+FROM query_offload_aggregate_basic;
+ min_f4 | max_f4 | sum_f4 | avg_f4 | min_f8 | max_f8 | sum_f8  | avg_f8  |  min_date  |  max_date  | min_time | max_time |      min_timestamp       |      max_timestamp       |       min_timestamptz        |       max_timestamptz        | all_true | any_true |        ordered_i4        |      ordered_text      |  concatenated_text  
+--------+--------+--------+--------+--------+--------+---------+---------+------------+------------+----------+----------+--------------------------+--------------------------+------------------------------+------------------------------+----------+----------+--------------------------+------------------------+---------------------
+     -2 |      3 | 4.0000 | 1.0000 |    -20 |     30 | 40.0000 | 10.0000 | 12-31-2023 | 01-03-2024 | 09:00:00 | 12:00:00 | Sun Dec 31 09:00:00 2023 | Wed Jan 03 12:00:00 2024 | Sun Dec 31 09:00:00 2023 UTC | Wed Jan 03 12:00:00 2024 UTC | f        | t        | {10,20,NULL,-20,30,NULL} | alpha,beta,alpha,gamma | alphabetaalphagamma
+(1 row)
+
+-- PostgreSQL native result.
+SET lagodb.query_offload_mode = 'off';
+SELECT min(value_f4) AS min_f4,
+       max(value_f4) AS max_f4,
+       sum(value_f4)::numeric(20, 4) AS sum_f4,
+       avg(value_f4)::numeric(20, 4) AS avg_f4,
+       min(value_f8) AS min_f8,
+       max(value_f8) AS max_f8,
+       sum(value_f8)::numeric(20, 4) AS sum_f8,
+       avg(value_f8)::numeric(20, 4) AS avg_f8,
+       min(value_date) AS min_date,
+       max(value_date) AS max_date,
+       min(value_time) AS min_time,
+       max(value_time) AS max_time,
+       min(value_timestamp) AS min_timestamp,
+       max(value_timestamp) AS max_timestamp,
+       min(value_timestamptz) AS min_timestamptz,
+       max(value_timestamptz) AS max_timestamptz,
+       bool_and(value_bool) AS all_true,
+       bool_or(value_bool) AS any_true,
+       array_agg(value_i4 ORDER BY id) AS ordered_i4,
+       string_agg(value_text, ',' ORDER BY id) AS ordered_text,
+       string_agg(value_text, NULL ORDER BY id) AS concatenated_text
+FROM query_offload_aggregate_basic;
+ min_f4 | max_f4 | sum_f4 | avg_f4 | min_f8 | max_f8 | sum_f8  | avg_f8  |  min_date  |  max_date  | min_time | max_time |      min_timestamp       |      max_timestamp       |       min_timestamptz        |       max_timestamptz        | all_true | any_true |        ordered_i4        |      ordered_text      |  concatenated_text  
+--------+--------+--------+--------+--------+--------+---------+---------+------------+------------+----------+----------+--------------------------+--------------------------+------------------------------+------------------------------+----------+----------+--------------------------+------------------------+---------------------
+     -2 |      3 | 4.0000 | 1.0000 |    -20 |     30 | 40.0000 | 10.0000 | 12-31-2023 | 01-03-2024 | 09:00:00 | 12:00:00 | Sun Dec 31 09:00:00 2023 | Wed Jan 03 12:00:00 2024 | Sun Dec 31 09:00:00 2023 UTC | Wed Jan 03 12:00:00 2024 UTC | f        | t        | {10,20,NULL,-20,30,NULL} | alpha,beta,alpha,gamma | alphabetaalphagamma
+(1 row)
+
+-- ============================================================================
+-- Aggregate-local ORDER BY classification.
+-- ============================================================================
+-- ORDER BY does not affect these transition functions. Query offload may
+-- discard it after validating direct-column keys and built-in comparators.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(value_i4 ORDER BY value_time DESC) AS count_i4,
+       min(value_i4 ORDER BY id DESC) AS min_i4,
+       max(value_i4 ORDER BY id) AS max_i4,
+       bool_and(value_bool ORDER BY value_bool DESC) AS all_true,
+       string_agg(value_text_c, ',' ORDER BY value_time) AS ordered_time,
+       string_agg(value_text_c, ',' ORDER BY value_text_c USING ~<~)
+           AS ordered_pattern
+FROM query_offload_aggregate_basic;
+                                                                                                          QUERY PLAN                                                                                                           
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(value_i4), MIN(value_i4), MAX(value_i4), BOOL_AND(value_bool), STRING_AGG(value_text_c, ',' ORDER BY value_time ASC NULLS LAST), STRING_AGG(value_text_c, ',' ORDER BY value_text_c ASC NULLS LAST)
+         ->  Table Scan on query_offload_aggregate_basic
+               Access Method: iceberg
+(6 rows)
+
+SELECT count(value_i4 ORDER BY value_time DESC) AS count_i4,
+       min(value_i4 ORDER BY id DESC) AS min_i4,
+       max(value_i4 ORDER BY id) AS max_i4,
+       bool_and(value_bool ORDER BY value_bool DESC) AS all_true,
+       string_agg(value_text_c, ',' ORDER BY value_time) AS ordered_time,
+       string_agg(value_text_c, ',' ORDER BY value_text_c USING ~<~)
+           AS ordered_pattern
+FROM query_offload_aggregate_basic;
+ count_i4 | min_i4 | max_i4 | all_true |      ordered_time      |    ordered_pattern     
+----------+--------+--------+----------+------------------------+------------------------
+        4 |    -20 |     30 | f        | alpha,alpha,beta,gamma | alpha,alpha,beta,gamma
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT count(value_i4 ORDER BY value_time DESC) AS count_i4,
+       min(value_i4 ORDER BY id DESC) AS min_i4,
+       max(value_i4 ORDER BY id) AS max_i4,
+       bool_and(value_bool ORDER BY value_bool DESC) AS all_true,
+       string_agg(value_text_c, ',' ORDER BY value_time) AS ordered_time,
+       string_agg(value_text_c, ',' ORDER BY value_text_c USING ~<~)
+           AS ordered_pattern
+FROM query_offload_aggregate_basic;
+ count_i4 | min_i4 | max_i4 | all_true |      ordered_time      |    ordered_pattern     
+----------+--------+--------+----------+------------------------+------------------------
+        4 |    -20 |     30 | f        | alpha,alpha,beta,gamma | alpha,alpha,beta,gamma
+(1 row)
+
+-- ARRAY_AGG honors ORDER BY, so a boolean key exercises the executed-order
+-- BOOLOID admission rather than only the order-insensitive classification.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT array_agg(value_bool ORDER BY value_bool)
+FROM query_offload_aggregate_basic;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: ARRAY_AGG(value_bool ORDER BY value_bool ASC NULLS LAST)
+         ->  Table Scan on query_offload_aggregate_basic
+               Access Method: iceberg
+(6 rows)
+
+-- Floating transitions remain order-sensitive. SUM covers arithmetic state;
+-- MIN and MAX separately protect their signed-zero and NaN transition rules.
+EXPLAIN (COSTS OFF)
+SELECT sum(value_f8 ORDER BY id)
+FROM query_offload_aggregate_basic;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Aggregate
+   ->  Seq Scan on query_offload_aggregate_basic
+(2 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT min(value_f8 ORDER BY id)
+FROM query_offload_aggregate_basic;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Aggregate
+   ->  Seq Scan on query_offload_aggregate_basic
+(2 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT max(value_f8 ORDER BY id)
+FROM query_offload_aggregate_basic;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Aggregate
+   ->  Seq Scan on query_offload_aggregate_basic
+(2 rows)
+
+-- Ignored ORDER BY expressions must be direct columns.
+EXPLAIN (COSTS OFF)
+SELECT count(value_i4 ORDER BY id + 0)
+FROM query_offload_aggregate_basic;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Aggregate
+   ->  Seq Scan on query_offload_aggregate_basic
+(2 rows)
+
+-- A user-defined btree ordering operator is not an admissible built-in even
+-- when it delegates to the same comparison function.
+CREATE OPERATOR #<# (
+    LEFTARG = integer,
+    RIGHTARG = integer,
+    PROCEDURE = int4lt
+);
+CREATE OPERATOR FAMILY query_offload_int4_ops USING btree;
+ALTER OPERATOR FAMILY query_offload_int4_ops USING btree ADD
+    OPERATOR 1 #<# (integer, integer),
+    OPERATOR 3 = (integer, integer);
+EXPLAIN (COSTS OFF)
+SELECT count(value_i4 ORDER BY id USING #<#)
+FROM query_offload_aggregate_basic;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Aggregate
+   ->  Seq Scan on query_offload_aggregate_basic
+(2 rows)
+
+DROP OPERATOR FAMILY query_offload_int4_ops USING btree;
+DROP OPERATOR #<# (integer, integer);
+-- ============================================================================
+-- Variance/stddev output and empty-input aggregate semantics.
+-- ============================================================================
+-- Query offload plan and result.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT round(var_pop(value_i4), 6) AS var_pop_i4,
+       round(var_samp(value_i4), 6) AS var_samp_i4,
+       round(stddev_pop(value_i4), 6) AS stddev_pop_i4,
+       round(stddev_samp(value_i4), 6) AS stddev_samp_i4
+FROM query_offload_aggregate_basic
+WHERE id <= 2;
+                                               QUERY PLAN                                               
+--------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: VAR_POP(value_i4), VAR_SAMP(value_i4), STDDEV_POP(value_i4), STDDEV_SAMP(value_i4)
+         ->  Table Scan on query_offload_aggregate_basic
+               Access Method: iceberg
+               Filter: (id <= 2)
+               Pushed Filter: (id <= 2)
+(8 rows)
+
+SELECT round(var_pop(value_i4), 6) AS var_pop_i4,
+       round(var_samp(value_i4), 6) AS var_samp_i4,
+       round(stddev_pop(value_i4), 6) AS stddev_pop_i4,
+       round(stddev_samp(value_i4), 6) AS stddev_samp_i4
+FROM query_offload_aggregate_basic
+WHERE id <= 2;
+ var_pop_i4 | var_samp_i4 | stddev_pop_i4 | stddev_samp_i4 
+------------+-------------+---------------+----------------
+  25.000000 |   50.000000 |      5.000000 |       7.071068
+(1 row)
+
+-- PostgreSQL native result.
+SET lagodb.query_offload_mode = 'off';
+SELECT round(var_pop(value_i4), 6) AS var_pop_i4,
+       round(var_samp(value_i4), 6) AS var_samp_i4,
+       round(stddev_pop(value_i4), 6) AS stddev_pop_i4,
+       round(stddev_samp(value_i4), 6) AS stddev_samp_i4
+FROM query_offload_aggregate_basic
+WHERE id <= 2;
+ var_pop_i4 | var_samp_i4 | stddev_pop_i4 | stddev_samp_i4 
+------------+-------------+---------------+----------------
+  25.000000 |   50.000000 |      5.000000 |       7.071068
+(1 row)
+
+-- Query offload plan and result.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS rows,
+       count(value_i4) AS nonnull_i4,
+       min(value_i4) AS min_i4,
+       max(value_i4) AS max_i4,
+       sum(value_i4) AS sum_i4,
+       avg(value_i4)::numeric(20, 4) AS avg_i4
+FROM query_offload_aggregate_basic
+WHERE id > 100;
+                                                QUERY PLAN                                                 
+-----------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*), COUNT(value_i4), MIN(value_i4), MAX(value_i4), SUM(value_i4), AVG(value_i4)
+         ->  Table Scan on query_offload_aggregate_basic
+               Access Method: iceberg
+               Filter: (id > 100)
+               Pushed Filter: (id > 100)
+(8 rows)
+
+SELECT count(*) AS rows,
+       count(value_i4) AS nonnull_i4,
+       min(value_i4) AS min_i4,
+       max(value_i4) AS max_i4,
+       sum(value_i4) AS sum_i4,
+       avg(value_i4)::numeric(20, 4) AS avg_i4
+FROM query_offload_aggregate_basic
+WHERE id > 100;
+ rows | nonnull_i4 | min_i4 | max_i4 | sum_i4 | avg_i4 
+------+------------+--------+--------+--------+--------
+    0 |          0 |        |        |        |       
+(1 row)
+
+-- PostgreSQL native result.
+SET lagodb.query_offload_mode = 'off';
+SELECT count(*) AS rows,
+       count(value_i4) AS nonnull_i4,
+       min(value_i4) AS min_i4,
+       max(value_i4) AS max_i4,
+       sum(value_i4) AS sum_i4,
+       avg(value_i4)::numeric(20, 4) AS avg_i4
+FROM query_offload_aggregate_basic
+WHERE id > 100;
+ rows | nonnull_i4 | min_i4 | max_i4 | sum_i4 | avg_i4 
+------+------------+--------+--------+--------+--------
+    0 |          0 |        |        |        |       
+(1 row)
+
+-- ============================================================================
+-- Exact-expression fallback smoke coverage.
+-- Detailed expression-shape, lazy-evaluation, codec, and overflow coverage is
+-- kept in query_offload_expressions.sql rather than this basic aggregate suite.
+-- ============================================================================
+-- The exact filter contains both conjuncts, while Iceberg receives only the
+-- independently safe integer conjunct. VERBOSE also locks the shared
+-- `Filter` / `Pushed Filter Conservative` EXPLAIN vocabulary.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT group_i4, count(*) AS rows
+FROM query_offload_aggregate_basic
+WHERE id >= 2 AND lower(value_text) = 'alpha'
+GROUP BY group_i4
+ORDER BY group_i4;
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Output: group_i4, (count(*))
+   Engine: DataFusion
+   Maximum Batch Rows: 2
+   PostgreSQL Expression Fallbacks: 1
+   ->  Sort
+         Sort Key: group_i4 ASC NULLS LAST
+         ->  Projection
+               Output: group_i4, COUNT(*)
+               ->  Aggregate
+                     Group Key: group_i4
+                     Aggregates: COUNT(*)
+                     ->  Table Scan on public.query_offload_aggregate_basic
+                           Access Method: iceberg
+                           Scan ID: 0
+                           Output: id, group_i4, value_text
+                           Filter: (id >= 2) AND (lower(value_text) = 'alpha'::text)
+                           Pushed Filter Conservative: (id >= 2)
+(18 rows)
+
+SELECT group_i4, count(*) AS rows
+FROM query_offload_aggregate_basic
+WHERE id >= 2 AND lower(value_text) = 'alpha'
+GROUP BY group_i4
+ORDER BY group_i4;
+ group_i4 | rows 
+----------+------
+        2 |    1
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT group_i4, count(*) AS rows
+FROM query_offload_aggregate_basic
+WHERE id >= 2 AND lower(value_text) = 'alpha'
+GROUP BY group_i4
+ORDER BY group_i4;
+ group_i4 | rows 
+----------+------
+        2 |    1
+(1 row)
+
+-- Aggregate FILTER and HAVING use the same exact-expression planner.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT group_i4,
+       count(*) FILTER (WHERE lower(value_text) = 'alpha') AS alpha_rows
+FROM query_offload_aggregate_basic
+GROUP BY group_i4
+HAVING mod(sum(value_i4), 7) >= 0
+ORDER BY group_i4;
+                                                   QUERY PLAN                                                   
+----------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   PostgreSQL Expression Fallbacks: 2
+   ->  Sort
+         Sort Key: group_i4 ASC NULLS LAST
+         ->  Filter
+               Filter: ((PostgreSQL expression >= runtime value))
+               ->  Aggregate
+                     Group Key: group_i4
+                     Aggregates: COUNT(*) FILTER (WHERE (PostgreSQL expression = runtime value)), SUM(value_i4)
+                     ->  Table Scan on query_offload_aggregate_basic
+                           Access Method: iceberg
+(12 rows)
+
+SELECT group_i4,
+       count(*) FILTER (WHERE lower(value_text) = 'alpha') AS alpha_rows
+FROM query_offload_aggregate_basic
+GROUP BY group_i4
+HAVING mod(sum(value_i4), 7) >= 0
+ORDER BY group_i4;
+ group_i4 | alpha_rows 
+----------+------------
+        1 |          1
+        2 |          1
+(2 rows)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT group_i4,
+       count(*) FILTER (WHERE lower(value_text) = 'alpha') AS alpha_rows
+FROM query_offload_aggregate_basic
+GROUP BY group_i4
+HAVING mod(sum(value_i4), 7) >= 0
+ORDER BY group_i4;
+ group_i4 | alpha_rows 
+----------+------------
+        1 |          1
+        2 |          1
+(2 rows)
+
+-- PostgreSQL evaluates FILTER before aggregate arguments. This expression
+-- argument must therefore keep the complete query on the native path.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT sum(abs(value_i4)) FILTER (WHERE id >= 2)
+FROM query_offload_aggregate_basic;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Aggregate
+   ->  Seq Scan on query_offload_aggregate_basic
+(2 rows)
+
+SELECT sum(abs(value_i4)) FILTER (WHERE id >= 2)
+FROM query_offload_aggregate_basic;
+ sum 
+-----
+  70
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+EXPLAIN (COSTS OFF)
+SELECT sum(abs(value_i4)) FILTER (WHERE id >= 2)
+FROM query_offload_aggregate_basic;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Aggregate
+   ->  Seq Scan on query_offload_aggregate_basic
+(2 rows)
+
+SELECT sum(abs(value_i4)) FILTER (WHERE id >= 2)
+FROM query_offload_aggregate_basic;
+ sum 
+-----
+  70
+(1 row)
+
+-- SUM(real) must round to Float32 before HAVING, not only at final output.
+-- 2^24 + 1 is exact in Float64 but rounds to 2^24 in Float32.
+SET lagodb.query_offload_mode = 'force';
+CREATE TABLE query_offload_real_sum (group_id integer, value real) USING iceberg;
+INSERT INTO query_offload_real_sum VALUES (1, 16777216), (1, 1), (2, NULL);
+SELECT sum(value) = 16777216::real AS rounded
+FROM query_offload_real_sum
+GROUP BY group_id
+HAVING sum(value) = 16777216::real;
+ rounded 
+---------
+ t
+(1 row)
+
+SELECT sum(value) IS NULL AS empty_sum
+FROM query_offload_real_sum WHERE value < 0;
+ empty_sum 
+-----------
+ t
+(1 row)
+
+TRUNCATE query_offload_real_sum;
+INSERT INTO query_offload_real_sum VALUES (1, 3e38::real), (1, 3e38::real);
+\set VERBOSITY sqlstate
+SELECT sum(value) FROM query_offload_real_sum;
+ERROR:  22003
+\set VERBOSITY default
+DROP TABLE query_offload_real_sum;
+-- Float GROUP BY and HAVING comparison run in the engine; ORDER BY on a float
+-- stays in PostgreSQL. The data holds a single NaN bit pattern, so the NaN
+-- payload difference documented in docs/query-offload-semantics.md cannot
+-- appear. It holds both 0 and -0, which form one group whose displayed sign
+-- may differ from PostgreSQL; HAVING max(f8) > 0 filters that group out.
+CREATE TABLE query_offload_float_keys (id integer, f4 real, f8 double precision)
+USING iceberg;
+INSERT INTO query_offload_float_keys VALUES
+    (1, 0, 0), (2, '-0', '-0'), (3, 'NaN', 'NaN'), (4, 1.5, 1.5),
+    (5, 1.5, 1.5), (6, -1.5, -1.5), (7, 'Infinity', 'Infinity'), (8, NULL, NULL);
+EXPLAIN (COSTS OFF)
+SELECT f4, count(*) AS rows
+FROM query_offload_float_keys
+GROUP BY f4
+HAVING max(f8) > 0
+ORDER BY f4 DESC;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Sort
+   Sort Key: f4 DESC
+   ->  Custom Scan (LagoDB Query Offload)
+         Engine: DataFusion
+         ->  Filter
+               Filter: ((MAX(f8) > runtime value))
+               ->  Aggregate
+                     Group Key: f4
+                     Aggregates: COUNT(*), MAX(f8)
+                     ->  Table Scan on query_offload_float_keys
+                           Access Method: iceberg
+(11 rows)
+
+SELECT f4, count(*) AS rows
+FROM query_offload_float_keys
+GROUP BY f4
+HAVING max(f8) > 0
+ORDER BY f4 DESC;
+    f4    | rows 
+----------+------
+      NaN |    1
+ Infinity |    1
+      1.5 |    2
+(3 rows)
+
+DROP TABLE query_offload_float_keys;
+-- SUM(int8) accumulates as NUMERIC(38,0): two int8 maxima exceed int8, and
+-- HAVING compares the exact sum with an integral constant.
+CREATE TABLE query_offload_int8_sum (group_id integer, value bigint) USING iceberg;
+INSERT INTO query_offload_int8_sum VALUES
+    (1, 9223372036854775807), (1, 9223372036854775807),
+    (2, -9223372036854775808), (2, -1), (3, NULL);
+EXPLAIN (COSTS OFF)
+SELECT group_id, sum(value) AS total
+FROM query_offload_int8_sum
+GROUP BY group_id
+HAVING sum(value) > 9223372036854775807
+ORDER BY group_id;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Sort
+         Sort Key: group_id ASC NULLS LAST
+         ->  Filter
+               Filter: ((SUM(value) > runtime value::decimal(38, 0)))
+               ->  Aggregate
+                     Group Key: group_id
+                     Aggregates: SUM(value)
+                     ->  Table Scan on query_offload_int8_sum
+                           Access Method: iceberg
+(11 rows)
+
+SELECT group_id, sum(value) AS total
+FROM query_offload_int8_sum
+GROUP BY group_id
+HAVING sum(value) > 9223372036854775807
+ORDER BY group_id;
+ group_id |        total         
+----------+----------------------
+        1 | 18446744073709551614
+(1 row)
+
+DROP TABLE query_offload_int8_sum;
+-- ============================================================================
+-- PARAM_EXTERN is bound when each query-offload execution begins.
+-- Separate prepared statements prevent a cached generic plan from crossing
+-- the offload/native comparison boundary.
+-- ============================================================================
+SET plan_cache_mode = force_generic_plan;
+SET lagodb.query_offload_mode = 'force';
+PREPARE query_offload_aggregate_param(integer) AS
+SELECT count(*)
+FROM query_offload_aggregate_basic
+WHERE id >= $1;
+EXPLAIN (VERBOSE, COSTS OFF)
+EXECUTE query_offload_aggregate_param(2);
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Output: (count(*))
+   Engine: DataFusion
+   Maximum Batch Rows: 2
+   ->  Projection
+         Output: COUNT(*)
+         ->  Aggregate
+               Aggregates: COUNT(*)
+               ->  Table Scan on public.query_offload_aggregate_basic
+                     Access Method: iceberg
+                     Scan ID: 0
+                     Output: id
+                     Filter: (id >= $1)
+                     Pushed Filter Conservative: (id >= $1)
+(14 rows)
+
+EXECUTE query_offload_aggregate_param(2);
+ count 
+-------
+     5
+(1 row)
+
+EXECUTE query_offload_aggregate_param(100);
+ count 
+-------
+     0
+(1 row)
+
+DEALLOCATE query_offload_aggregate_param;
+SET lagodb.query_offload_mode = 'off';
+PREPARE query_native_aggregate_param(integer) AS
+SELECT count(*)
+FROM query_offload_aggregate_basic
+WHERE id >= $1;
+EXECUTE query_native_aggregate_param(2);
+ count 
+-------
+     5
+(1 row)
+
+EXECUTE query_native_aggregate_param(100);
+ count 
+-------
+     0
+(1 row)
+
+DEALLOCATE query_native_aggregate_param;
+RESET plan_cache_mode;
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+DROP TABLE query_offload_aggregate_basic;
+RESET timezone;
+RESET lagodb.query_batch_rows;
+RESET lagodb.query_offload_mode;
+RESET lagodb.customscan_mode;

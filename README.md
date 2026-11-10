@@ -2,7 +2,7 @@
 
 [![Build Status](https://github.com/lagodb/lagodb/actions/workflows/ci.yml/badge.svg)](https://github.com/lagodb/lagodb/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-1.97.1%2B-blue.svg)](https://www.rust-lang.org)
-[![PostgreSQL](https://img.shields.io/badge/postgresql-16%20%7C%2017%20%7C%2018-blue.svg)](https://www.postgresql.org)
+[![PostgreSQL](https://img.shields.io/badge/postgresql-15%20%7C%2016%20%7C%2017%20%7C%2018-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 **A lakehouse database built on PostgreSQL.**
@@ -67,10 +67,10 @@ and isolation levels follow
 ## Quick start
 
 LagoDB is currently built from source with [pgrx](https://github.com/pgcentralfoundation/pgrx).
-Choose PostgreSQL 16, 17 or 18 and point `PG_CONFIG` at that installation:
+Choose PostgreSQL 15, 16, 17 or 18 and point `PG_CONFIG` at that installation:
 
 ```bash
-PG_MAJOR=18 # or 16, 17
+PG_MAJOR=18 # or 15, 16, 17
 PG_CONFIG=/path/to/pg_config
 
 cargo pgrx init "--pg${PG_MAJOR}=${PG_CONFIG}"
@@ -246,8 +246,8 @@ SELECT * FROM s3_events WHERE device_id = 101;
 
 ## PostgreSQL support
 
-LagoDB supports PostgreSQL 16, 17 and 18. PostgreSQL 18 is the default for
-ordinary Cargo commands; selecting PG16 or PG17 explicitly is documented in
+LagoDB supports PostgreSQL 15, 16, 17 and 18. PostgreSQL 18 is the default for
+ordinary Cargo commands; selecting PG15, PG16 or PG17 explicitly is documented in
 [Build from source](docs/build-from-source.md).
 
 ## Contributing

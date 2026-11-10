@@ -1,6 +1,7 @@
 //! Managed admission and primitive storage mapping over core's PostgreSQL type.
 
 use iceberg_lite::spec::{PrimitiveType, Type};
+use lagodb_core::catalog::get_extension_schema;
 use lagodb_core::datum::PgType;
 use lagodb_core::handles::RelationGuard;
 use pgrx::{PgBuiltInOids, PgOid, pg_sys};
@@ -168,7 +169,7 @@ impl ManagedTypeMapping {
             if extension == pg_sys::InvalidOid {
                 return false;
             }
-            let namespace = pg_sys::get_extension_schema(extension);
+            let namespace = get_extension_schema(extension);
             let hstore = pg_sys::GetSysCacheOid(
                 pg_sys::SysCacheIdentifier::TYPENAMENSP as i32,
                 pg_sys::Anum_pg_type_oid as pg_sys::AttrNumber,

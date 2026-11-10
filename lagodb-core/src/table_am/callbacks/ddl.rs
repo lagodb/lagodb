@@ -5,14 +5,14 @@
 //! trait implementation safe.
 
 use crate::diag::ReportableError;
-use crate::handles::{RelFileLocator, RelationHandle};
+use crate::handles::{PgRelFileLocator, RelFileLocator, RelationHandle};
 use crate::table_am::TableAccessMethod;
 use pgrx::prelude::*;
 
 #[pg_guard]
 pub extern "C-unwind" fn relation_set_new_filelocator<A>(
     rel: pg_sys::Relation,
-    newrlocator: *const pg_sys::RelFileLocator,
+    newrlocator: *const PgRelFileLocator,
     persistence: ::core::ffi::c_char,
     freeze_xid: *mut pg_sys::TransactionId,
     minmulti: *mut pg_sys::MultiXactId,
@@ -49,7 +49,7 @@ where
 #[pg_guard]
 pub extern "C-unwind" fn relation_copy_data<A>(
     rel: pg_sys::Relation,
-    newrlocator: *const pg_sys::RelFileLocator,
+    newrlocator: *const PgRelFileLocator,
 ) where
     A: TableAccessMethod,
 {
@@ -105,7 +105,16 @@ pub fn register<A>(routine: &mut pg_sys::TableAmRoutine)
 where
     A: TableAccessMethod,
 {
-    routine.relation_set_new_filelocator = Some(relation_set_new_filelocator::<A>);
+    // PostgreSQL 16 renamed the `relation_set_new_filenode` callback.
+    #[cfg(feature = "pg15")]
+    {
+        routine.relation_set_new_filenode = Some(relation_set_new_filelocator::<A>);
+    }
+    #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+    {
+        routine.relation_set_new_filelocator =
+            Some(relation_set_new_filelocator::<A>);
+    }
     routine.relation_nontransactional_truncate =
         Some(relation_nontransactional_truncate::<A>);
     routine.relation_copy_data = Some(relation_copy_data::<A>);

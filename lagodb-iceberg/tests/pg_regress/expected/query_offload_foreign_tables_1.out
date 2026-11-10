@@ -1,0 +1,862 @@
+-- query_offload_foreign_tables.sql
+-- Foreign scan binding, transaction visibility, worker reconstruction and
+-- nested output contracts. Operator matrices live in the focused managed-table
+-- suites; this file keeps representative foreign-provider integration cases.
+-- PostgreSQL 15 has no presorted aggregates, so its plans have no Sort below
+-- an ordered or DISTINCT aggregate; _1.out is the PostgreSQL 15 output.
+\setenv PGDATABASE :DBNAME
+\set iceberg_fixture query-offload-writes
+\i include/iceberg_fixture.sql
+-- Caller supplies a consumer selection; failure must stop this SQL testcase.
+\setenv LAGODB_ICEBERG_FIXTURE :iceberg_fixture
+\set fixture_command 'python3 ../../../scripts/pg_regress/regress_fixture.py provision "$LAGODB_ICEBERG_FIXTURE"'
+\i ../../../scripts/pg_regress/fixture_command.sql
+-- Run :fixture_command and stop the testcase on any nonzero exit.
+-- PostgreSQL 15's psql has no SHELL_ERROR, so the status returns through a
+-- backtick. The command's stdout goes to stderr, which pg_regress writes to
+-- the same result file. Include with \i from the suite root: pg_regress feeds
+-- top-level SQL via stdin. Only failed infrastructure commands enable
+-- ON_ERROR_STOP; expected SQL errors in the actual regression cases retain
+-- their normal pg_regress behavior.
+\set fixture_failed `if :fixture_command >&2; then echo false; else echo true; fi`
+iceberg_fixture_provisioned: query-offload-writes
+\unset fixture_command
+\if :fixture_failed
+\set ON_ERROR_STOP on
+DO $$ BEGIN RAISE EXCEPTION 'Regression fixture command failed'; END $$;
+\endif
+SELECT rest_uri AS regress_rest_uri
+FROM lagodb_regress.object_storage_fixture
+\gset
+SET client_min_messages = warning;
+DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
+RESET client_min_messages;
+CREATE EXTENSION lagodb_iceberg;
+CREATE SCHEMA query_offload_foreign;
+CREATE SERVER query_offload_foreign_rest
+TYPE 'rest'
+FOREIGN DATA WRAPPER lagodb_iceberg
+OPTIONS (uri :'regress_rest_uri');
+CREATE USER MAPPING FOR CURRENT_USER SERVER query_offload_foreign_rest;
+CREATE FOREIGN TABLE query_offload_foreign.left_source (
+    id integer,
+    group_key integer,
+    measure integer,
+    payload text COLLATE "C"
+)
+SERVER query_offload_foreign_rest
+OPTIONS (
+    table 'query_offload_reads.left_source'
+);
+CREATE FOREIGN TABLE query_offload_foreign.writable_source (
+    id integer,
+    group_key integer,
+    measure integer,
+    payload text
+)
+SERVER query_offload_foreign_rest
+OPTIONS (
+    table 'query_offload_writes.left_source'
+);
+CREATE FOREIGN TABLE query_offload_foreign.parallel_source (
+    id integer,
+    group_key integer,
+    measure integer,
+    file_group integer
+)
+SERVER query_offload_foreign_rest
+OPTIONS (
+    table 'query_offload_writes.parallel_source'
+);
+-- Filter runtime EXPLAIN to the execution properties each case protects.
+CREATE FUNCTION pg_temp.foreign_analyze(query text) RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE
+    result jsonb;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) '
+        || query INTO result;
+    RETURN result;
+END;
+$$;
+SET lagodb.query_batch_rows = 2;
+SET lagodb.customscan_mode = 'off';
+SET lagodb.query_offload_mode = 'force';
+SET max_parallel_workers_per_gather = 0;
+-- Decimal conversion must fall back before offloaded filtering or aggregation.
+CREATE FOREIGN TABLE query_offload_foreign.decimals (id integer, amount numeric(5,2))
+SERVER query_offload_foreign_rest OPTIONS (table 'fdw_schema.decimals', schema_id '0');
+SELECT sum(amount) FROM query_offload_foreign.decimals WHERE id < 3 AND amount > 10;
+  sum   
+--------
+ 135.79
+(1 row)
+
+\set VERBOSITY default
+SELECT sum(amount) FROM query_offload_foreign.decimals WHERE id = 3;
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
+\set VERBOSITY terse
+DROP FOREIGN TABLE query_offload_foreign.decimals;
+-- Different selected schemas of the same remote table share its read view.
+-- The historical definition includes an unused removed column; scans use current.
+CREATE FOREIGN TABLE query_offload_foreign.historical (body text, id integer, removed integer)
+SERVER query_offload_foreign_rest
+OPTIONS (table 'fdw_schema.evolving', schema_id '1');
+CREATE FOREIGN TABLE query_offload_foreign.current_definition (id integer, body text)
+SERVER query_offload_foreign_rest OPTIONS (table 'fdw_schema.evolving');
+SELECT h.id, h.body
+FROM query_offload_foreign.historical h
+JOIN query_offload_foreign.current_definition c ON h.id = c.id AND h.body = c.body
+WHERE h.body >= 'one'
+ORDER BY h.id;
+ id | body 
+----+------
+  1 | one
+  2 | two
+(2 rows)
+
+-- A column-free aggregate exercises the foreign CountRows scan projection.
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS rows
+FROM query_offload_foreign.left_source;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on left_source
+               Foreign Data Wrapper: lagodb_iceberg
+(6 rows)
+
+SELECT count(*) AS rows
+FROM query_offload_foreign.left_source;
+ rows 
+------
+    5
+(1 row)
+
+-- A generic parameter is retained as a runtime binding and can execute with
+-- different values against the same planned foreign source.
+SET plan_cache_mode = force_generic_plan;
+PREPARE query_offload_foreign_by_id(integer) AS
+SELECT count(*) AS rows, sum(measure) AS total
+FROM query_offload_foreign.left_source
+WHERE id >= $1;
+EXPLAIN (COSTS OFF) EXECUTE query_offload_foreign_by_id(3);
+                     QUERY PLAN                     
+----------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*), SUM(measure)
+         ->  Table Scan on left_source
+               Foreign Data Wrapper: lagodb_iceberg
+               Filter: (id >= $1)
+               Pushed Filter: (id >= $1)
+(8 rows)
+
+EXECUTE query_offload_foreign_by_id(3);
+ rows | total 
+------+-------
+    3 |    90
+(1 row)
+
+EXECUTE query_offload_foreign_by_id(5);
+ rows | total 
+------+-------
+    1 |    50
+(1 row)
+
+DEALLOCATE query_offload_foreign_by_id;
+RESET plan_cache_mode;
+-- One projected aggregate covers foreign grouping, scalar expressions and
+-- a scan-local filter; detailed aggregate semantics live in the managed suite.
+EXPLAIN (COSTS OFF)
+SELECT group_key, count(*) AS rows, sum(abs(measure)) AS absolute_total
+FROM query_offload_foreign.left_source
+WHERE id >= 2
+GROUP BY group_key
+ORDER BY group_key NULLS LAST;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Sort
+         Sort Key: group_key ASC NULLS LAST
+         ->  Aggregate
+               Group Key: group_key
+               Aggregates: COUNT(*), SUM(abs(measure))
+               ->  Table Scan on left_source
+                     Foreign Data Wrapper: lagodb_iceberg
+                     Filter: (id >= 2)
+                     Pushed Filter: (id >= 2)
+(11 rows)
+
+SELECT group_key, count(*) AS rows, sum(abs(measure)) AS absolute_total
+FROM query_offload_foreign.left_source
+WHERE id >= 2
+GROUP BY group_key
+ORDER BY group_key NULLS LAST;
+ group_key | rows | absolute_total 
+-----------+------+----------------
+         2 |    2 |             20
+         3 |    1 |             40
+           |    1 |             50
+(3 rows)
+
+-- Explicit C ordering lets DISTINCT, sorting and pagination share one offloaded
+-- fragment across platforms.
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT payload
+FROM query_offload_foreign.left_source
+ORDER BY payload NULLS LAST
+LIMIT 3 OFFSET 1;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Limit
+         ->  Sort
+               Sort Key: payload ASC NULLS LAST
+               ->  Distinct
+                     Distinct Key: payload
+                     ->  Table Scan on left_source
+                           Foreign Data Wrapper: lagodb_iceberg
+(9 rows)
+
+SELECT DISTINCT payload
+FROM query_offload_foreign.left_source
+ORDER BY payload NULLS LAST
+LIMIT 3 OFFSET 1;
+ payload 
+---------
+ beta
+ orphan
+ 
+(3 rows)
+
+-- A foreign source and a managed source must resolve independently rather
+-- than coupling either adapter to the other.
+CREATE TABLE query_offload_foreign_managed (
+    group_key integer,
+    label text
+) USING iceberg;
+INSERT INTO query_offload_foreign_managed VALUES
+    (1, 'managed-one'),
+    (2, 'managed-two'),
+    (4, 'managed-four');
+EXPLAIN (COSTS OFF)
+SELECT f.id, m.label
+FROM query_offload_foreign.left_source AS f
+JOIN query_offload_foreign_managed AS m USING (group_key)
+ORDER BY f.id;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Sort
+         Sort Key: f.id ASC NULLS LAST
+         ->  Projection
+               ->  Hash Join
+                     Join Type: Inner
+                     Hash Cond: f.group_key = m.group_key
+                     ->  Table Scan on left_source f
+                           Foreign Data Wrapper: lagodb_iceberg
+                     ->  Table Scan on query_offload_foreign_managed m
+                           Access Method: iceberg
+(12 rows)
+
+SELECT f.id, m.label
+FROM query_offload_foreign.left_source AS f
+JOIN query_offload_foreign_managed AS m USING (group_key)
+ORDER BY f.id;
+ id |    label    
+----+-------------
+  1 | managed-one
+  2 | managed-two
+  3 | managed-two
+(3 rows)
+
+-- Multiple scans share a remote source within one execution. Reusing the
+-- parameter-free generic plan after a commit must bind the new remote version.
+PREPARE foreign_read_view AS
+SELECT count(*) AS matches
+FROM query_offload_foreign.writable_source a
+JOIN query_offload_foreign.writable_source b USING (id)
+WHERE a.id = 9001;
+EXECUTE foreign_read_view;
+ matches 
+---------
+       0
+(1 row)
+
+INSERT INTO query_offload_foreign.writable_source
+VALUES (9001, 9, 90, 'read-view');
+EXECUTE foreign_read_view;
+ matches 
+---------
+       1
+(1 row)
+
+DEALLOCATE foreign_read_view;
+DELETE FROM query_offload_foreign.writable_source WHERE id = 9001;
+-- A writable source binds through the transaction-local Iceberg view. The
+-- offloaded scan must observe the staged data file before PostgreSQL commits,
+-- and the native FDW path must expose the same statement-visible rows.
+BEGIN;
+INSERT INTO query_offload_foreign.writable_source
+VALUES (6, 4, 60, 'staged');
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS rows, sum(measure) AS total
+FROM query_offload_foreign.writable_source
+WHERE id >= 5;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*), SUM(measure)
+         ->  Table Scan on writable_source
+               Foreign Data Wrapper: lagodb_iceberg
+               Filter: (id >= 5)
+               Pushed Filter: (id >= 5)
+(8 rows)
+
+SELECT count(*) AS rows, sum(measure) AS total
+FROM query_offload_foreign.writable_source
+WHERE id >= 5;
+ rows | total 
+------+-------
+    2 |   110
+(1 row)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT count(*) AS rows, sum(measure) AS total
+FROM query_offload_foreign.writable_source
+WHERE id >= 5;
+ rows | total 
+------+-------
+    2 |   110
+(1 row)
+
+ROLLBACK;
+-- The writable source has enough independently written files for at least two
+-- Iceberg work groups. Worker reconstruction must preserve its remote table
+-- identity while executing every work group and reporting complete metrics.
+SET max_parallel_workers_per_gather = 2;
+SET lagodb.query_offload_parallel_min_scan_rows = 0;
+-- A transaction-staged create is visible only through the leader backend's
+-- foreign transaction. Any such source makes the complete offloaded fragment
+-- serial even when another source has enough work to launch parallel workers.
+BEGIN;
+CREATE FOREIGN TABLE query_offload_foreign.staged_source (
+    id integer,
+    payload text
+)
+SERVER query_offload_foreign_rest
+OPTIONS (
+    table 'query_offload_writes.staged_source',
+    create_remote_if_missing 'true'
+);
+INSERT INTO query_offload_foreign.staged_source VALUES (1, 'staged');
+SELECT offload->>'Execution Mode' = 'Serial' AS staged_create_serial
+FROM pg_temp.foreign_analyze(
+    'SELECT count(*)
+     FROM query_offload_foreign.staged_source s
+     JOIN query_offload_foreign.parallel_source p USING (id)') AS document(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Custom Plan Provider" == "LagoDB Query Offload")') AS nodes(offload);
+ staged_create_serial 
+----------------------
+ t
+(1 row)
+
+ROLLBACK;
+SELECT offload->>'Execution Mode' = 'Parallel' AS parallel,
+       (offload->>'Maximum Launched Workers')::integer > 0 AS worker_launched,
+       (offload->>'Parallel Runs')::integer = 1 AS one_run,
+       (offload->>'Worker Metric Reports')::integer > 0
+           AND offload->'Worker Metric Reports' = offload->'Expected Worker Metric Reports' AS metrics_complete,
+       (offload->>'Actual Rows')::numeric = 4 AS output_rows_ok,
+       (scan->>'Actual Input Rows')::bigint = 33 AS input_rows_ok,
+       (scan->>'Scan Tasks')::bigint = 33
+           AND (scan->>'Data Files Selected')::bigint = 33 AS inventory_complete,
+       (scan->>'Selected File Bytes')::bigint > 0 AS file_bytes_reported,
+       (offload->>'Maximum Worker Fragment Peak Memory Bytes')::bigint > 0
+           AND (offload->>'Maximum Worker Participant Peak Memory Bytes')::bigint > 0
+           AND (offload->>'Local Engine Peak Memory Bytes')::bigint > 0 AS memory_reported,
+       strpos(scan->>'Pushed Filter', 'id >= 1') > 0 AS filter_pushed
+FROM pg_temp.foreign_analyze(
+    'SELECT group_key, count(*) AS rows, sum(measure) AS total
+     FROM query_offload_foreign.parallel_source
+     WHERE id >= 1 GROUP BY group_key ORDER BY group_key') AS document(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Custom Plan Provider" == "LagoDB Query Offload")') AS nodes(offload)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Node Type" == "Table Scan")') AS scans(scan);
+ parallel | worker_launched | one_run | metrics_complete | output_rows_ok | input_rows_ok | inventory_complete | file_bytes_reported | memory_reported | filter_pushed 
+----------+-----------------+---------+------------------+----------------+---------------+--------------------+---------------------+-----------------+---------------
+ t        | t               | t       | t                | t              | t             | t                  | t                   | t               | t
+(1 row)
+
+SELECT group_key, count(*) AS rows, sum(measure) AS total
+FROM query_offload_foreign.parallel_source
+WHERE id >= 1
+GROUP BY group_key
+ORDER BY group_key;
+ group_key | rows | total 
+-----------+------+-------
+         0 |    8 |  1440
+         1 |    9 |  1530
+         2 |    8 |  1280
+         3 |    8 |  1360
+(4 rows)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT group_key, count(*) AS rows, sum(measure) AS total
+FROM query_offload_foreign.parallel_source
+WHERE id >= 1
+GROUP BY group_key
+ORDER BY group_key;
+ group_key | rows | total 
+-----------+------+-------
+         0 |    8 |  1440
+         1 |    9 |  1530
+         2 |    8 |  1280
+         3 |    8 |  1360
+(4 rows)
+
+-- Nested Arrow outputs use the same JSONB conversion as direct FDW reads.
+SET max_parallel_workers_per_gather = 0;
+SET TimeZone = 'America/New_York';
+SET DateStyle = 'SQL, DMY';
+-- JSON float output must retain precision even when SQL float output rounds.
+SET extra_float_digits = 0;
+IMPORT FOREIGN SCHEMA fdw_nested LIMIT TO (rows_v2)
+FROM SERVER query_offload_foreign_rest INTO query_offload_foreign;
+CREATE FOREIGN TABLE query_offload_foreign.explicit_jsonb (
+    id integer,
+    record jsonb,
+    items jsonb,
+    labels jsonb,
+    indexed jsonb,
+    structured jsonb,
+    numbers integer[]
+)
+SERVER query_offload_foreign_rest
+OPTIONS (
+    table 'fdw_nested.rows_v2'
+);
+CREATE FOREIGN TABLE query_offload_foreign.batches ()
+SERVER query_offload_foreign_rest
+OPTIONS (
+    table 'fdw_nested.batches_v2'
+);
+CREATE FOREIGN TABLE query_offload_foreign.invalid_string ()
+SERVER query_offload_foreign_rest
+OPTIONS (
+    table 'fdw_nested.invalid_string_v2'
+);
+CREATE FOREIGN TABLE query_offload_foreign.nanos ()
+SERVER query_offload_foreign_rest
+OPTIONS (
+    table 'fdw_nanos.rows_v3'
+);
+-- Preserve FDW results before exercising the same mappings through offload.
+CREATE TEMP TABLE nested_fdw_rows AS
+SELECT *, numbers AS imported_numbers FROM query_offload_foreign.explicit_jsonb;
+CREATE TEMP TABLE nanos_pg AS SELECT id, detail, ts, tz FROM query_offload_foreign.nanos;
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT a.id, a.record, a.items, a.labels, a.indexed, a.structured, b.numbers,
+       a.numbers AS imported_numbers
+FROM query_offload_foreign.rows_v2 a
+JOIN query_offload_foreign.explicit_jsonb b ON a.id = b.id;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Result
+   ->  Custom Scan (LagoDB Query Offload)
+         Engine: DataFusion
+         ->  Projection
+               ->  Hash Join
+                     Join Type: Inner
+                     Hash Cond: a.id = b.id
+                     ->  Table Scan on rows_v2 a
+                           Foreign Data Wrapper: lagodb_iceberg
+                     ->  Table Scan on explicit_jsonb b
+                           Foreign Data Wrapper: lagodb_iceberg
+(11 rows)
+
+-- CTAS retains nested outputs from both sides and native arrays from
+-- imported and explicitly declared foreign columns in the same query.
+-- JSONB comparisons run afterwards on local materialized results.
+CREATE TEMP TABLE nested_join_rows AS
+SELECT a.id, a.record, a.items, a.labels, a.indexed, a.structured, b.numbers,
+       a.numbers AS imported_numbers
+FROM query_offload_foreign.rows_v2 a
+JOIN query_offload_foreign.explicit_jsonb b ON a.id = b.id;
+-- Compare every nested field, including decimal, timestamps and map keys.
+SELECT count(*) = 3 AND bool_and(a IS NOT DISTINCT FROM b) AS same_values
+FROM nested_fdw_rows a FULL JOIN nested_join_rows b USING (id);
+ same_values 
+-------------
+ t
+(1 row)
+
+-- Write nested values, then read the committed Parquet output through offload.
+CREATE FOREIGN TABLE query_offload_foreign.nested_writable (
+    id integer, record jsonb, items jsonb, labels jsonb,
+    indexed jsonb, structured jsonb, numbers integer[]
+)
+SERVER query_offload_foreign_rest
+OPTIONS (
+    table 'query_offload_writes.nested_rows_v2'
+);
+INSERT INTO query_offload_foreign.nested_writable
+SELECT id + 10, record, items, labels, indexed, structured, numbers FROM nested_fdw_rows;
+EXPLAIN (COSTS OFF)
+SELECT a.id, a.record, a.items, a.labels, a.indexed, a.structured, b.numbers
+FROM query_offload_foreign.nested_writable a
+JOIN query_offload_foreign.nested_writable b ON a.id = b.id WHERE a.id > 10;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Projection
+         ->  Hash Join
+               Join Type: Inner
+               Hash Cond: a.id = b.id
+               ->  Table Scan on nested_writable a
+                     Foreign Data Wrapper: lagodb_iceberg
+                     Filter: (id > 10)
+                     Pushed Filter: (id > 10)
+               ->  Table Scan on nested_writable b
+                     Foreign Data Wrapper: lagodb_iceberg
+(12 rows)
+
+CREATE TEMP TABLE nested_written_rows AS
+SELECT a.id, a.record, a.items, a.labels, a.indexed, a.structured, b.numbers
+FROM query_offload_foreign.nested_writable a
+JOIN query_offload_foreign.nested_writable b ON a.id = b.id WHERE a.id > 10;
+SELECT count(*) = 3 AND bool_and(
+           ROW(a.record, a.items, a.labels, a.indexed, a.structured, a.numbers)
+           IS NOT DISTINCT FROM
+           ROW(b.record, b.items, b.labels, b.indexed, b.structured, b.numbers)) AS write_roundtrip
+FROM nested_written_rows a JOIN nested_fdw_rows b ON a.id = b.id + 10;
+ write_roundtrip 
+-----------------
+ t
+(1 row)
+
+DROP TABLE nested_written_rows;
+-- Reading nested values does not imply that different physical containers
+-- can be combined inside DataFusion. PG evaluates these JSONB expressions.
+EXPLAIN (COSTS OFF)
+SELECT a.id,
+       CASE WHEN a.id = 1 THEN a.record ELSE b.labels END AS chosen,
+       coalesce(a.record, b.labels) AS first_value
+FROM query_offload_foreign.rows_v2 a
+JOIN query_offload_foreign.rows_v2 b ON a.id = b.id;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Result
+   ->  Custom Scan (LagoDB Query Offload)
+         Engine: DataFusion
+         ->  Projection
+               ->  Hash Join
+                     Join Type: Inner
+                     Hash Cond: a.id = b.id
+                     ->  Table Scan on rows_v2 a
+                           Foreign Data Wrapper: lagodb_iceberg
+                     ->  Table Scan on rows_v2 b
+                           Foreign Data Wrapper: lagodb_iceberg
+(11 rows)
+
+CREATE TEMP TABLE nested_branch_rows AS
+SELECT a.id,
+       CASE WHEN a.id = 1 THEN a.record ELSE b.labels END AS chosen,
+       coalesce(a.record, b.labels) AS first_value
+FROM query_offload_foreign.rows_v2 a
+JOIN query_offload_foreign.rows_v2 b ON a.id = b.id;
+SELECT count(*) = 3 AND bool_and(
+    r.id IS NOT DISTINCT FROM f.id
+    AND r.chosen IS NOT DISTINCT FROM CASE WHEN f.id = 1 THEN f.record ELSE f.labels END
+    AND r.first_value IS NOT DISTINCT FROM coalesce(f.record, f.labels)) AS branches_ok
+FROM nested_branch_rows r FULL JOIN nested_fdw_rows f USING (id);
+ branches_ok 
+-------------
+ t
+(1 row)
+
+DROP TABLE nested_branch_rows;
+DROP TABLE nested_fdw_rows;
+DROP TABLE nested_join_rows;
+-- Nested values can also be consumed internally without JSONB output.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM query_offload_foreign.rows_v2 a
+JOIN query_offload_foreign.rows_v2 b ON a.id = b.id WHERE a.record IS NULL;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Hash Join
+               Join Type: Inner
+               Hash Cond: b.id = a.id
+               ->  Table Scan on rows_v2 b
+                     Foreign Data Wrapper: lagodb_iceberg
+               ->  Table Scan on rows_v2 a
+                     Foreign Data Wrapper: lagodb_iceberg
+                     Filter: (record IS NULL)
+(12 rows)
+
+SELECT count(*) AS null_records
+FROM query_offload_foreign.rows_v2 a
+JOIN query_offload_foreign.rows_v2 b ON a.id = b.id
+WHERE a.record IS NULL;
+ null_records 
+--------------
+            2
+(1 row)
+
+-- Reordered aliases, repeated columns and outer-join null extension retain
+-- the source field contract. Only id=1 has a matching right-side row.
+EXPLAIN (COSTS OFF)
+SELECT b.items AS right_items, a.id, a.items AS left_items, a.items AS repeated
+FROM query_offload_foreign.rows_v2 a
+LEFT JOIN query_offload_foreign.rows_v2 b ON a.id = b.id AND b.id = 1;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Result
+   ->  Custom Scan (LagoDB Query Offload)
+         Engine: DataFusion
+         ->  Projection
+               ->  Hash Join
+                     Join Type: Left
+                     Hash Cond: a.id = b.id
+                     ->  Table Scan on rows_v2 a
+                           Foreign Data Wrapper: lagodb_iceberg
+                     ->  Table Scan on rows_v2 b
+                           Foreign Data Wrapper: lagodb_iceberg
+                           Filter: (id = 1)
+                           Pushed Filter: (id = 1)
+(13 rows)
+
+CREATE TEMP TABLE nested_outer_rows AS
+SELECT b.items AS right_items, a.id, a.items AS left_items, a.items AS repeated
+FROM query_offload_foreign.rows_v2 a
+LEFT JOIN query_offload_foreign.rows_v2 b ON a.id = b.id AND b.id = 1;
+SELECT id, left_items IS NOT DISTINCT FROM repeated AS alias_ok,
+       CASE WHEN id = 1 THEN right_items = left_items
+            ELSE right_items IS NULL END AS outer_ok
+FROM nested_outer_rows ORDER BY id;
+ id | alias_ok | outer_ok 
+----+----------+----------
+  1 | t        | t
+  2 | t        | t
+  3 | t        | t
+(3 rows)
+
+DROP TABLE nested_outer_rows;
+-- Materialize the complete nested result across batches through query offload.
+SELECT jsonb_path_exists(pg_temp.foreign_analyze(
+    'SELECT a.id, b.value FROM query_offload_foreign.batches a
+     JOIN query_offload_foreign.batches b ON a.id = b.id'),
+    '$[0].Plan.** ? (@."Custom Plan Provider" == "LagoDB Query Offload" && @."Execution Mode" == "Serial")') AS serial_offloaded;
+ serial_offloaded 
+------------------
+ t
+(1 row)
+
+CREATE TEMP TABLE nested_serial_rows AS
+SELECT a.id, b.value FROM query_offload_foreign.batches a
+JOIN query_offload_foreign.batches b ON a.id = b.id;
+SELECT count(*) AS rows,
+       bool_and(value = jsonb_build_object(
+           'id', id, 'values', jsonb_build_array(id, NULL))) AS values_ok
+FROM nested_serial_rows;
+ rows | values_ok 
+------+-----------
+ 4097 | t
+(1 row)
+
+-- The same projected schema crosses worker reconstruction and Arrow IPC.
+SET max_parallel_workers_per_gather = 2;
+SELECT jsonb_path_exists(pg_temp.foreign_analyze(
+    'SELECT a.id, b.value FROM query_offload_foreign.batches a
+     JOIN query_offload_foreign.batches b ON a.id = b.id'),
+    '$[0].Plan.** ? (@."Custom Plan Provider" == "LagoDB Query Offload" && @."Execution Mode" == "Parallel" && @."Maximum Launched Workers" > 0)') AS parallel_offloaded;
+ parallel_offloaded 
+--------------------
+ t
+(1 row)
+
+CREATE TEMP TABLE nested_parallel_rows AS
+SELECT a.id, b.value FROM query_offload_foreign.batches a
+JOIN query_offload_foreign.batches b ON a.id = b.id;
+SELECT count(*) = 4097 AND bool_and(a IS NOT DISTINCT FROM b) AS same_values
+FROM nested_serial_rows a FULL JOIN nested_parallel_rows b USING (id);
+ same_values 
+-------------
+ t
+(1 row)
+
+DROP TABLE nested_parallel_rows;
+DROP TABLE nested_serial_rows;
+-- Confirm schema-option binding in an actual parallel offload execution.
+-- Integer predicates avoid PostgreSQL expression fallback, which executes serially.
+SELECT offload->>'Execution Mode' = 'Parallel' AS parallel,
+       (offload->>'Maximum Launched Workers')::integer > 0 AS worker_launched
+FROM pg_temp.foreign_analyze(
+    'SELECT h.id, h.body
+     FROM query_offload_foreign.historical h
+     JOIN query_offload_foreign.current_definition c ON h.id = c.id
+     WHERE h.id >= 1 ORDER BY h.id') AS document(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Custom Plan Provider" == "LagoDB Query Offload")') AS nodes(offload);
+ parallel | worker_launched 
+----------+-----------------
+ t        | t
+(1 row)
+
+SELECT h.id, h.body
+FROM query_offload_foreign.historical h
+JOIN query_offload_foreign.current_definition c ON h.id = c.id AND h.body = c.body
+WHERE h.body >= 'one'
+ORDER BY h.id;
+ id | body 
+----+------
+  1 | one
+  2 | two
+(2 rows)
+
+SET max_parallel_workers_per_gather = 0;
+-- Nanosecond leaf formatting and top-level projection survive query output binding.
+EXPLAIN (COSTS OFF)
+SELECT a.id, a.detail, a.ts, a.tz FROM query_offload_foreign.nanos a
+JOIN query_offload_foreign.nanos b ON a.id = b.id;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Projection
+         ->  Hash Join
+               Join Type: Inner
+               Hash Cond: a.id = b.id
+               ->  Table Scan on nanos a
+                     Foreign Data Wrapper: lagodb_iceberg
+               ->  Table Scan on nanos b
+                     Foreign Data Wrapper: lagodb_iceberg
+(10 rows)
+
+CREATE TEMP TABLE nanos_offload AS
+SELECT a.id, a.detail, a.ts, a.tz FROM query_offload_foreign.nanos a
+JOIN query_offload_foreign.nanos b ON a.id = b.id;
+-- Whole-row equality includes id, including the all-NULL payload at id=9.
+SELECT count(*) = 9 AND bool_and(a IS NOT DISTINCT FROM b) AS same_rows
+FROM nanos_pg a FULL JOIN nanos_offload b USING (id);
+ same_rows 
+-----------
+ t
+(1 row)
+
+-- Nanosecond equality stays in PG even when some source values are aligned.
+-- Include values that decode to the same microsecond and the NULL row.
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT ts), count(DISTINCT tz)
+FROM query_offload_foreign.nanos;
+         QUERY PLAN          
+-----------------------------
+ Aggregate
+   ->  Foreign Scan on nanos
+(2 rows)
+
+SELECT count(DISTINCT ts) AS ts_count, count(DISTINCT tz) AS tz_count
+FROM query_offload_foreign.nanos;
+ ts_count | tz_count 
+----------+----------
+        4 |        4
+(1 row)
+
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT ts FROM query_offload_foreign.nanos;
+         QUERY PLAN          
+-----------------------------
+ HashAggregate
+   Group Key: ts
+   ->  Foreign Scan on nanos
+(3 rows)
+
+SELECT count(*) AS distinct_rows
+FROM (SELECT DISTINCT ts FROM query_offload_foreign.nanos) AS timestamps;
+ distinct_rows 
+---------------
+             5
+(1 row)
+
+DROP TABLE nanos_offload, nanos_pg;
+-- Require the JOIN's output plan to be offloaded before checking its error.
+-- Plain EXPLAIN does not read the invalid string or construct its JSONB value.
+EXPLAIN (COSTS OFF)
+SELECT a.value FROM query_offload_foreign.invalid_string a
+JOIN query_offload_foreign.rows_v2 b ON a.id = b.id;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Projection
+         ->  Hash Join
+               Join Type: Inner
+               Hash Cond: a.id = b.id
+               ->  Table Scan on invalid_string a
+                     Foreign Data Wrapper: lagodb_iceberg
+               ->  Table Scan on rows_v2 b
+                     Foreign Data Wrapper: lagodb_iceberg
+(10 rows)
+
+\set VERBOSITY sqlstate
+SELECT a.value FROM query_offload_foreign.invalid_string a
+JOIN query_offload_foreign.rows_v2 b ON a.id = b.id;
+ERROR:  22P05
+\set VERBOSITY default
+-- A normal offloaded scan must still execute after the output conversion error.
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS rows_after_error
+FROM query_offload_foreign.batches
+WHERE value IS NOT NULL;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on batches
+               Foreign Data Wrapper: lagodb_iceberg
+               Filter: (value IS NOT NULL)
+(7 rows)
+
+SELECT count(*) AS rows_after_error
+FROM query_offload_foreign.batches
+WHERE value IS NOT NULL;
+ rows_after_error 
+------------------
+             4097
+(1 row)
+
+DROP FUNCTION pg_temp.foreign_analyze(text);
+RESET TimeZone;
+RESET DateStyle;
+RESET extra_float_digits;
+DROP TABLE query_offload_foreign_managed;
+SET client_min_messages = warning;
+DROP SCHEMA query_offload_foreign CASCADE;
+DROP SERVER query_offload_foreign_rest CASCADE;
+RESET client_min_messages;
+RESET max_parallel_workers_per_gather;
+RESET lagodb.query_offload_parallel_min_scan_rows;
+RESET lagodb.query_offload_mode;
+RESET lagodb.customscan_mode;
+RESET lagodb.query_batch_rows;

@@ -2,7 +2,7 @@
 
 use std::ffi::CStr;
 
-use lagodb_core::catalog::{LockedDatabase, get_tablespace_oid};
+use lagodb_core::catalog::{CatalogObject, LockedDatabase, get_tablespace_oid};
 use lagodb_core::diag::{PgError, SqlStateError};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
@@ -79,7 +79,7 @@ impl StorageVolumeTablespacePolicy {
         }
         let destination_tablespace = get_tablespace_oid(destination_name, true)?;
         if destination_tablespace == pg_sys::InvalidOid
-            || !unsafe { Self::current_user_can_create_in(destination_tablespace) }
+            || !Self::current_user_can_create_in(destination_tablespace)
         {
             return Ok(());
         }
@@ -105,18 +105,10 @@ impl StorageVolumeTablespacePolicy {
         Some(unsafe { CStr::from_ptr(value) })
     }
 
-    /// # Safety
-    ///
-    /// PostgreSQL must have initialized the current backend user and catalog
-    /// access state.
-    unsafe fn current_user_can_create_in(tablespace: pg_sys::Oid) -> bool {
-        unsafe {
-            pg_sys::object_aclcheck(
-                pg_sys::TableSpaceRelationId,
-                tablespace,
-                pg_sys::GetUserId(),
-                pg_sys::ACL_CREATE.into(),
-            ) == pg_sys::AclResult::ACLCHECK_OK
-        }
+    fn current_user_can_create_in(tablespace: pg_sys::Oid) -> bool {
+        CatalogObject::Tablespace(tablespace).has_privilege(
+            unsafe { pg_sys::GetUserId() },
+            pg_sys::ACL_CREATE as pg_sys::AclMode,
+        )
     }
 }

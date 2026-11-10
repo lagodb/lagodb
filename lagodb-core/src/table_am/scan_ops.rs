@@ -1,5 +1,5 @@
 use super::AmResult;
-#[cfg(any(feature = "pg16", feature = "pg17"))]
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
 use crate::handles::TBMIterateResultHandle;
 #[cfg(feature = "pg18")]
 use crate::handles::{BitmapScanOutputHandle, TBMIteratorHandle};
@@ -50,13 +50,13 @@ impl<S: ?Sized> TidRangeOps<S> {
 /// PostgreSQL selects a bitmap block before `next_block`; `next_tuple` then
 /// produces the visible tuples selected from that block. PostgreSQL requires
 /// these callbacks to be present or absent together.
-#[cfg(any(feature = "pg16", feature = "pg17"))]
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
 pub struct BitmapScanOps<S: ?Sized> {
     next_block: fn(&mut S, &TBMIterateResultHandle) -> AmResult<bool>,
     next_tuple: fn(&mut S, &TBMIterateResultHandle, &mut Row) -> AmResult<bool>,
 }
 
-#[cfg(any(feature = "pg16", feature = "pg17"))]
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
 impl<S: ?Sized> BitmapScanOps<S> {
     #[must_use]
     pub const fn new(

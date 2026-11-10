@@ -42,7 +42,7 @@ pub trait IndexParallelScan: IndexScanSession {
         region: &IndexParallelRegion<'_, Self::Shared>,
     ) -> IndexAmResult<()>;
 
-    #[cfg(feature = "pg16")]
+    #[cfg(any(feature = "pg15", feature = "pg16"))]
     fn trailing_size() -> usize {
         0
     }
@@ -84,7 +84,7 @@ impl<'a, T: IndexParallelShared> IndexParallelRegion<'a, T> {
             if parallel.is_null() {
                 return None;
             }
-            #[cfg(any(feature = "pg16", feature = "pg17"))]
+            #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
             let offset = (*parallel).ps_offset;
             #[cfg(feature = "pg18")]
             let offset = (*parallel).ps_offset_am;
@@ -142,7 +142,7 @@ fn estimate<S: IndexParallelScan>(trailing: usize) -> pg_sys::Size {
     unsafe { pg_sys::add_size(shared_size::<S::Shared>(), trailing) }
 }
 
-#[cfg(feature = "pg16")]
+#[cfg(any(feature = "pg15", feature = "pg16"))]
 #[pg_guard]
 pub(in crate::index_am) extern "C-unwind" fn amestimateparallelscan<A>()
 -> pg_sys::Size

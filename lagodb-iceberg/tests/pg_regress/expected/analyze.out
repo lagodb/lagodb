@@ -213,7 +213,14 @@ CREATE TABLE partitioned_table_t (
 INSERT INTO partitioned_table_t
 SELECT value, CASE WHEN value <= 150 THEN 'common' ELSE 'rare' END
 FROM generate_series(1, 200) AS value;
+-- PostgreSQL 16 added BUFFER_USAGE_LIMIT, which the routed ANALYZE forwards.
+SELECT current_setting('server_version_num')::int >= 160000
+    AS has_buffer_usage_limit \gset
+\if :has_buffer_usage_limit
 ANALYZE (BUFFER_USAGE_LIMIT '128kB') partitioned_table_t;
+\else
+ANALYZE partitioned_table_t;
+\endif
 SELECT reltuples::bigint = 200 AS partitioned_table_rows_estimated
 FROM pg_class
 WHERE oid = 'partitioned_table_t'::regclass;

@@ -13,7 +13,9 @@
 #include "mb/pg_wchar.h"
 #include "nodes/bitmapset.h"
 #include "nodes/makefuncs.h"
+#if LAGODB_PG16_GE
 #include "nodes/miscnodes.h"
+#endif
 #include "optimizer/optimizer.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_collate.h"
@@ -24,13 +26,14 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/resowner.h"
 #include "utils/rls.h"
 #include "miscadmin.h"
 #include "tcop/utility.h"
 
 /*
  * The row encoder owns its state and uses the source-derived text/CSV
- * serializer audited across PG16.15, PG17.0-PG17.11 and PG18.6. Keep
+ * serializer audited across PG15.19, PG16.15, PG17.0-PG17.11 and PG18.6. Keep
  * minor-version branches local to this code when a future audit finds a
  * relevant options, output-function, or serializer contract change.
  */
@@ -230,6 +233,7 @@ lagodb_begin_text_input_validator(Oid type_oid)
 	return validator;
 }
 
+#if LAGODB_PG16_GE
 bool
 lagodb_text_input_accepts(LagodbTextInputValidator *validator,
 						  const char *value)
@@ -261,6 +265,56 @@ lagodb_text_input_accepts(LagodbTextInputValidator *validator,
 	MemoryContextSwitchTo(oldcontext);
 	return accepted;
 }
+#else
+
+/*
+ * PostgreSQL 15 has no soft input errors, so trap the input function's ERROR
+ * in an internal subtransaction, as PL/pgSQL's exec_stmt_block() does. An
+ * ERROR in the data-exception class rejects the value; any other error, such
+ * as a cancel or out-of-memory, is rethrown.
+ */
+bool
+lagodb_text_input_accepts(LagodbTextInputValidator *validator,
+						  const char *value)
+{
+	MemoryContext oldcontext = CurrentMemoryContext;
+	ResourceOwner oldowner = CurrentResourceOwner;
+	bool		accepted;
+
+	MemoryContextReset(validator->call_context);
+	BeginInternalSubTransaction(NULL);
+	MemoryContextSwitchTo(validator->call_context);
+	PG_TRY();
+	{
+		/*
+		 * Input functions receive mutable text, so isolate the parser's field
+		 * buffer.
+		 */
+		(void) InputFunctionCall(&validator->input_function, pstrdup(value),
+								 validator->typioparam, -1);
+		accepted = true;
+		ReleaseCurrentSubTransaction();
+		MemoryContextSwitchTo(oldcontext);
+		CurrentResourceOwner = oldowner;
+	}
+	PG_CATCH();
+	{
+		ErrorData  *edata;
+
+		MemoryContextSwitchTo(validator->call_context);
+		edata = CopyErrorData();
+		FlushErrorState();
+		RollbackAndReleaseCurrentSubTransaction();
+		MemoryContextSwitchTo(oldcontext);
+		CurrentResourceOwner = oldowner;
+		if (ERRCODE_TO_CATEGORY(edata->sqlerrcode) != ERRCODE_DATA_EXCEPTION)
+			ReThrowError(edata);
+		accepted = false;
+	}
+	PG_END_TRY();
+	return accepted;
+}
+#endif
 
 void
 lagodb_end_text_input_validator(LagodbTextInputValidator *validator)

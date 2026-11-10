@@ -17,6 +17,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [] }
 
 [features]
 default = ["pg18"]
+pg15 = ["pgrx/pg15", "lagodb-core/pg15", "lagodb-arrow/pg15"]
 pg16 = ["pgrx/pg16", "lagodb-core/pg16", "lagodb-arrow/pg16"]
 pg17 = ["pgrx/pg17", "lagodb-core/pg17", "lagodb-arrow/pg17"]
 pg18 = ["pgrx/pg18", "lagodb-core/pg18", "lagodb-arrow/pg18"]

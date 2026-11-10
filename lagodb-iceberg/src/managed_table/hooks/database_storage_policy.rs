@@ -18,7 +18,7 @@ use std::cell::Cell;
 use std::ffi::CStr;
 use std::ptr::NonNull;
 
-use lagodb_core::catalog::{LockedDatabase, get_tablespace_oid};
+use lagodb_core::catalog::{CatalogObject, LockedDatabase, get_tablespace_oid};
 use lagodb_core::hooks::{
     AlterDatabaseStmtNode, CreatedbStmtNode, HookError, OBJECT_ACCESS_POST_CREATE,
     ObjectAccessEvent, ObjectAccessFilter, ObjectAccessHook, ObjectAccessHookError,
@@ -273,14 +273,10 @@ impl ManagedDatabaseRelocationGuard {
     }
 
     fn current_user_can_create_in(tablespace_oid: pg_sys::Oid) -> bool {
-        unsafe {
-            pg_sys::object_aclcheck(
-                pg_sys::TableSpaceRelationId,
-                tablespace_oid,
-                pg_sys::GetUserId(),
-                pg_sys::ACL_CREATE.into(),
-            ) == pg_sys::AclResult::ACLCHECK_OK
-        }
+        CatalogObject::Tablespace(tablespace_oid).has_privilege(
+            unsafe { pg_sys::GetUserId() },
+            pg_sys::ACL_CREATE as pg_sys::AclMode,
+        )
     }
 }
 

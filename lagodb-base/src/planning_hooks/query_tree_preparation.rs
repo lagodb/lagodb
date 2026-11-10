@@ -66,7 +66,7 @@ impl QueryTreePreparation {
         // expression lists. The walk borrows this state synchronously; default
         // flags include RTE subqueries, sublinks, and CTEs.
         unsafe {
-            pg_sys::query_tree_walker_impl(
+            pg_sys::query_tree_walker(
                 parse,
                 Some(Self::visit_node),
                 ptr::from_mut(self).cast(),
@@ -99,7 +99,7 @@ impl QueryTreePreparation {
                 }
                 return false;
             }
-            pg_sys::expression_tree_walker_impl(node, Some(Self::visit_node), context)
+            pg_sys::expression_tree_walker(node, Some(Self::visit_node), context)
         }
     }
 }

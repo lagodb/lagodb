@@ -40,5 +40,5 @@ DROP TABLESPACE IF EXISTS regress_object;
 DROP TABLE IF EXISTS lagodb_regress.object_storage_fixture;
 DROP SCHEMA IF EXISTS lagodb_regress;
 RESET client_min_messages;
-\! python3 ../../../scripts/pg_regress/regress_fixture.py teardown
-\i ../../../scripts/pg_regress/fixture_command_result.sql
+\set fixture_command 'python3 ../../../scripts/pg_regress/regress_fixture.py teardown'
+\i ../../../scripts/pg_regress/fixture_command.sql

@@ -313,18 +313,8 @@ impl LayoutAnalysis {
             self.can_narrow_tuple = false;
         }
         for var in usage.user_vars() {
-            if let Some(existing) = self.vars_by_attno.get(var.attno) {
-                let equal = unsafe {
-                    pg_sys::bms_equal(
-                        existing.as_ref().varnullingrels,
-                        var.raw.as_ref().varnullingrels,
-                    )
-                };
-                if !equal {
-                    self.can_narrow_tuple = false;
-                }
-            } else {
-                self.vars_by_attno.insert(var.raw);
+            if !self.vars_by_attno.record(var.raw) {
+                self.can_narrow_tuple = false;
             }
         }
     }

@@ -80,7 +80,8 @@ impl<'a> RelationHandle<'a> {
         unsafe { (*self.rd_rel()).relnamespace }
     }
 
-    /// The relation's physical file locator (`rd_locator`).
+    /// The relation's physical file locator (`rd_locator`, `rd_node` before
+    /// PostgreSQL 16).
     ///
     /// For relation kinds with physical storage, the locator carries the
     /// resolved `spc_oid` PostgreSQL uses for storage. Storage-less relation
@@ -88,7 +89,14 @@ impl<'a> RelationHandle<'a> {
     /// placement should use [`Self::tablespace`].
     #[inline]
     pub fn locator(&self) -> RelFileLocator {
-        unsafe { RelFileLocator::from_raw_unchecked(&(*self.as_raw()).rd_locator) }
+        // SAFETY: the open relation owns its relcache locator.
+        unsafe {
+            #[cfg(feature = "pg15")]
+            let raw = &(*self.as_raw()).rd_node;
+            #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+            let raw = &(*self.as_raw()).rd_locator;
+            RelFileLocator::from_raw_unchecked(raw)
+        }
     }
 
     /// Copy the relation name into inline storage, preserving server-encoding
@@ -138,12 +146,18 @@ impl<'a> RelationHandle<'a> {
         let entry = unsafe { pg_sys::pgstat_fetch_stat_tabentry(self.oid()) };
         let live_tuples = unsafe { entry.as_ref() }.map_or_else(
             || self.reltuples().max(0.0) as pg_sys::PgStat_Counter,
-            |entry| entry.live_tuples,
+            |entry| {
+                #[cfg(feature = "pg15")]
+                let live_tuples = entry.n_live_tuples;
+                #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+                let live_tuples = entry.live_tuples;
+                live_tuples
+            },
         );
         // SAFETY: the open relation identifies a local table, and the caller
         // runs inside PostgreSQL's VACUUM of that relation.
         unsafe {
-            #[cfg(any(feature = "pg16", feature = "pg17"))]
+            #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
             pg_sys::pgstat_report_vacuum(self.oid(), false, live_tuples, 0);
             #[cfg(feature = "pg18")]
             pg_sys::pgstat_report_vacuum(
@@ -179,7 +193,11 @@ impl<'a> RelationHandle<'a> {
             if xlog_is_needed() {
                 return true;
             }
-            (*rel).rd_createSubid == 0 && (*rel).rd_firstRelfilelocatorSubid == 0
+            #[cfg(feature = "pg15")]
+            let first_storage_subid = (*rel).rd_firstRelfilenodeSubid;
+            #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+            let first_storage_subid = (*rel).rd_firstRelfilelocatorSubid;
+            (*rel).rd_createSubid == 0 && first_storage_subid == 0
         }
     }
 
@@ -238,36 +256,73 @@ impl<'a> RelationHandle<'a> {
     }
 }
 
+/// PostgreSQL's physical storage identity: `RelFileLocator`, named
+/// `RelFileNode` before PostgreSQL 16.
+#[cfg(feature = "pg15")]
+pub type PgRelFileLocator = pg_sys::RelFileNode;
+/// PostgreSQL's physical storage identity: `RelFileLocator`, named
+/// `RelFileNode` before PostgreSQL 16.
+#[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+pub type PgRelFileLocator = pg_sys::RelFileLocator;
+
+/// Physical storage identity of a relation fork set. `rel_number` is
+/// PostgreSQL's `RelFileNumber`, an OID-typed file number.
 #[derive(Debug, Clone, Copy)]
 pub struct RelFileLocator {
     pub spc_oid: pg_sys::Oid,
     pub db_oid: pg_sys::Oid,
-    pub rel_number: pg_sys::RelFileNumber,
+    pub rel_number: pg_sys::Oid,
 }
 
 impl RelFileLocator {
     /// # Safety
     ///
     /// `ptr` must be non-null and point to a valid PostgreSQL
-    /// `RelFileLocator`.
+    /// [`PgRelFileLocator`].
     #[inline]
-    pub unsafe fn from_raw_unchecked(ptr: *const pg_sys::RelFileLocator) -> Self {
+    pub unsafe fn from_raw_unchecked(ptr: *const PgRelFileLocator) -> Self {
         unsafe {
             let sys = &*ptr;
-            Self {
+            #[cfg(feature = "pg15")]
+            let locator = Self {
+                spc_oid: sys.spcNode,
+                db_oid: sys.dbNode,
+                rel_number: sys.relNode,
+            };
+            #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+            let locator = Self {
                 spc_oid: sys.spcOid,
                 db_oid: sys.dbOid,
                 rel_number: sys.relNumber,
-            }
+            };
+            locator
         }
+    }
+
+    /// The PostgreSQL representation of this locator.
+    #[inline]
+    pub(crate) const fn to_raw(self) -> PgRelFileLocator {
+        #[cfg(feature = "pg15")]
+        let raw = PgRelFileLocator {
+            spcNode: self.spc_oid,
+            dbNode: self.db_oid,
+            relNode: self.rel_number,
+        };
+        #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+        let raw = PgRelFileLocator {
+            spcOid: self.spc_oid,
+            dbOid: self.db_oid,
+            relNumber: self.rel_number,
+        };
+        raw
     }
 
     /// # Safety
     ///
     /// If `ptr` is non-null, it must point to a valid PostgreSQL
-    /// `RelFileLocator`.
+    /// [`PgRelFileLocator`].
     #[inline]
-    pub unsafe fn from_raw(ptr: *const pg_sys::RelFileLocator) -> Option<Self> {
+    pub unsafe fn from_raw(ptr: *const PgRelFileLocator) -> Option<Self> {
         unsafe {
             if ptr.is_null() {
                 None

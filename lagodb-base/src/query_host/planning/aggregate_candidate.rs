@@ -7,6 +7,7 @@ use pgrx::pg_sys;
 use super::aggregate_plan::AggregatePlanBuilder;
 use super::candidate::SingleRelationCandidate;
 use super::path_installation::QueryPathInstallation;
+use super::planner_info::PlannerInfoExt;
 use super::query_shape::QueryShape;
 use super::relation_tree::RelationTreePlanner;
 use crate::query_host::error::QueryHostError;
@@ -72,14 +73,12 @@ impl AggregateCandidate {
     }
 
     unsafe fn estimate_group_rows(root: *mut pg_sys::PlannerInfo, rows: f64) -> f64 {
-        if unsafe { (*root).processed_groupClause.is_null() } {
+        let group_clause = unsafe { (*root).processed_group_clause() };
+        if group_clause.is_null() {
             return 1.0;
         }
         let groups = unsafe {
-            pg_sys::get_sortgrouplist_exprs(
-                (*root).processed_groupClause,
-                (*(*root).parse).targetList,
-            )
+            pg_sys::get_sortgrouplist_exprs(group_clause, (*(*root).parse).targetList)
         };
         unsafe {
             pg_sys::estimate_num_groups(

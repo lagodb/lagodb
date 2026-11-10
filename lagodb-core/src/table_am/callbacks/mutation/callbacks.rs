@@ -130,6 +130,14 @@ pub(super) extern "C-unwind" fn tuple_delete(
     unsupported_callback("tuple_delete").report_unwrap()
 }
 
+/// `tuple_update`'s index-maintenance output, a `bool` before PostgreSQL 16.
+#[cfg(feature = "pg15")]
+type UpdateIndexes = bool;
+/// `tuple_update`'s index-maintenance output, which PostgreSQL 16 widened to
+/// select summarizing-only index updates.
+#[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+type UpdateIndexes = pg_sys::TU_UpdateIndexes::Type;
+
 #[pg_guard]
 #[allow(clippy::too_many_arguments)] // PG TableAmRoutine::tuple_update ABI.
 pub(super) extern "C-unwind" fn tuple_update(
@@ -142,7 +150,7 @@ pub(super) extern "C-unwind" fn tuple_update(
     _wait: bool,
     _tmfd: *mut pg_sys::TM_FailureData,
     _lockmode: *mut pg_sys::LockTupleMode::Type,
-    _update_indexes: *mut pg_sys::TU_UpdateIndexes::Type,
+    _update_indexes: *mut UpdateIndexes,
 ) -> pg_sys::TM_Result::Type {
     unsupported_callback("tuple_update").report_unwrap()
 }

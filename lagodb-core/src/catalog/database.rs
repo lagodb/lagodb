@@ -4,6 +4,7 @@ use std::ffi::CStr;
 
 use pgrx::{PgTryBuilder, pg_sys};
 
+use super::CatalogObject;
 use crate::diag::PgError;
 use crate::handles::search_syscache1;
 
@@ -108,13 +109,7 @@ impl LockedDatabase {
 
     /// Whether the current user owns this database.
     pub fn is_owned_by_current_user(&self) -> bool {
-        unsafe {
-            pg_sys::object_ownercheck(
-                pg_sys::DatabaseRelationId,
-                self.oid,
-                pg_sys::GetUserId(),
-            )
-        }
+        CatalogObject::Database(self.oid).is_owned_by(unsafe { pg_sys::GetUserId() })
     }
 
     /// Whether another backend or prepared transaction is using the database.

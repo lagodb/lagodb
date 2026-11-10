@@ -6,7 +6,7 @@ use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{pg_guard, pg_sys};
 
 use super::lookup::range_var_get_relid_extended;
-use super::{CatalogRelation, CatalogScanKey, CatalogSnapshot};
+use super::{CatalogObject, CatalogRelation, CatalogScanKey, CatalogSnapshot};
 use crate::diag::{PgError, PgReportError, ReportableError};
 use crate::handles::{RelationTablespace, search_syscache1};
 
@@ -85,13 +85,9 @@ impl RenameColumnTarget {
             ));
         }
 
-        if unsafe {
-            !pg_sys::object_ownercheck(
-                pg_sys::RelationRelationId,
-                relation_oid,
-                pg_sys::GetUserId(),
-            )
-        } {
+        if !CatalogObject::Relation(relation_oid)
+            .is_owned_by(unsafe { pg_sys::GetUserId() })
+        {
             unsafe {
                 pg_sys::aclcheck_error(
                     pg_sys::AclResult::ACLCHECK_NOT_OWNER,

@@ -5,8 +5,8 @@
 
 /*
  * LagoDB's own Datum-to-JSON classification. PostgreSQL's JsonTypeCategory
- * differs across supported majors and is private in PostgreSQL 16, so Rust
- * depends on these values alone, returned as uint32 so that no enum
+ * differs across supported majors and is private in PostgreSQL 15 and 16, so
+ * Rust depends on these values alone, returned as uint32 so that no enum
  * representation crosses FFI. Keep them in step with the
  * LAGODB_JSON_CATEGORY_* constants in src/datum/json/object_encoder.rs.
  */

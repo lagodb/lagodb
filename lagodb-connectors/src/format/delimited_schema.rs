@@ -263,6 +263,9 @@ impl TypeCandidates {
     }
 }
 
+/// Validators for the inferable column types. Their built-in input functions
+/// report every invalid value with a data-exception SQLSTATE, which is what
+/// `CopyTextInputValidator` treats as rejection on PostgreSQL 15.
 struct TypeValidators {
     boolean: CopyTextInputValidator,
     int8: CopyTextInputValidator,

@@ -3,6 +3,7 @@
 //! This module provides safe wrappers around PostgreSQL's WAL record structures.
 
 use crate::diag;
+use crate::handles::{PgRelFileLocator, RelFileLocator};
 use pgrx::pg_sys;
 use std::marker::PhantomData;
 
@@ -171,12 +172,9 @@ impl<'a> WalRecord<'a> {
     /// Get the RelFileLocator for a block reference
     ///
     /// This identifies which relation/table the block belongs to.
-    pub fn block_rel_file_locator(
-        &self,
-        block_id: u8,
-    ) -> Option<pg_sys::RelFileLocator> {
+    pub fn block_rel_file_locator(&self, block_id: u8) -> Option<RelFileLocator> {
         unsafe {
-            let mut locator = std::mem::zeroed::<pg_sys::RelFileLocator>();
+            let mut locator = std::mem::zeroed::<PgRelFileLocator>();
             if pg_sys::XLogRecGetBlockTagExtended(
                 self.record,
                 block_id,
@@ -185,7 +183,7 @@ impl<'a> WalRecord<'a> {
                 std::ptr::null_mut(), // 5: blknum
                 std::ptr::null_mut(), // 6: prefetch_buffer
             ) {
-                Some(locator)
+                Some(RelFileLocator::from_raw_unchecked(&locator))
             } else {
                 None
             }
@@ -263,6 +261,11 @@ impl<'data> WalRecordBuilder<'data> {
     /// during [`insert`](Self::insert), so `data` must stay alive until then.
     pub fn register_data(&mut self, data: &'data [u8]) -> &mut Self {
         unsafe {
+            #[cfg(feature = "pg15")]
+            pg_sys::XLogRegisterData(
+                data.as_ptr().cast_mut().cast(),
+                data.len() as i32,
+            );
             #[cfg(any(feature = "pg16", feature = "pg17"))]
             pg_sys::XLogRegisterData(
                 data.as_ptr().cast_mut().cast(),
@@ -325,6 +328,12 @@ impl<'data> WalRecordBuilder<'data> {
         data: &'data [u8],
     ) -> &mut Self {
         unsafe {
+            #[cfg(feature = "pg15")]
+            pg_sys::XLogRegisterBufData(
+                block_id,
+                data.as_ptr().cast_mut().cast(),
+                data.len() as i32,
+            );
             #[cfg(any(feature = "pg16", feature = "pg17"))]
             pg_sys::XLogRegisterBufData(
                 block_id,

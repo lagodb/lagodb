@@ -2,6 +2,10 @@
 
 ## PostgreSQL source provenance
 
+- PostgreSQL 15 baseline: `REL_15_19`
+  - Source: `src/backend/executor/nodeModifyTable.c`
+  - SHA-256:
+    `2b801f382f287e6b4dac19e45adf25b0f022a208e1b56a5c9b8b6be771e84277`
 - PostgreSQL 16 baseline: `REL_16_15`
   - Source: `src/backend/executor/nodeModifyTable.c`
   - SHA-256:
@@ -18,6 +22,8 @@
 - Lifecycle adapter: `lagodb_modify.c`
 - Lifecycle contracts: `src/backend/executor/execProcnode.c` at the corresponding
   baseline release
+  - PG15.19 SHA-256:
+    `19836c50a272741a4eac653541e655437c2e00710a541e5348d6a277d0669d7c`
   - PG16.15 SHA-256:
     `e48c08e555f8cb4e4bb43df516c4b8906ce9bc374b2a745d98a1fc8c22cc5099`
   - PG17.11 SHA-256:
@@ -90,18 +96,40 @@ lifecycle.
 
 PostgreSQL minor compatibility epochs are kept at their semantic sites:
 
-- PG16.5 and PG17.1 added `ResultRelInfo::ri_needLockTagTuple` and its
+- PG15.2 added the `EState` lists of pending FDW batch inserts
+  (`LAGODB_HAS_INSERT_PENDING_LISTS`); PG15.0-15.1 flush the remaining batches
+  from the opened or routed result relations when the node finishes;
+- PG15.2 added `ResultRelInfoExtra` (`LAGODB_HAS_RESULT_REL_INFO_EXTRA`), which
+  holds the generated columns that PostgreSQL's `ExecGetExtraUpdatedCols()`
+  reads; PG15.0-15.1 read the planner's `extraUpdatedCols` instead;
+- PG15.4 added `EvalPlanQualInitExt()` with the result relations that EPQ
+  blocks (`LAGODB_HAS_EPQ_RESULT_RELATIONS`); PostgreSQL 16 takes them in
+  `EvalPlanQualInit()`;
+- PG15.9, PG16.5 and PG17.1 added `ResultRelInfo::ri_needLockTagTuple` and its
   tuple-lock flow (`LAGODB_HAS_RI_NEED_LOCK_TAG_TUPLE`);
 - PG17.6 added the merge-aware `ExecBR*TriggersNew()` entry points;
-- PG16.10 and PG17.6 added inherited MERGE root-relation projection
+- PG15.14, PG16.10 and PG17.6 added inherited MERGE root-relation projection
   initialization (`LAGODB_HAS_MERGE_ROOT_WITH_CHECK`);
-- PG16.11 and PG17.7 added `CheckValidResultRelNew()` while retaining the older
-  entry point (`LAGODB_HAS_CHECK_VALID_RESULT_REL_NEW`).
+- PG15.15, PG16.11 and PG17.7 added `CheckValidResultRelNew()` while retaining
+  the older entry point (`LAGODB_HAS_CHECK_VALID_RESULT_REL_NEW`).
+
+PG15.3 added `ExecBR*TriggersNew()` with TM result outputs. Those outputs are
+written only when the trigger locks a row by TID; the fork always passes the
+carried wholerow, so it calls the original `ExecBR*Triggers()` entry points
+present in every PG15 release.
 
 The fork selects those paths with local `PG_VERSION_NUM` branches and the named
 capabilities in `lagodb_pg_compat.h`. Other PostgreSQL
 minor differences remain part of the baseline diff review; they must not be
 promoted into global minor-version rejection.
+
+PostgreSQL 15 differs from PostgreSQL 16 only in executor APIs: one
+`ri_GeneratedExprs` array per result relation, which `ExecInitModifyTable`
+fills for every generated column because a MERGE can both update and insert;
+a boolean index-update result; the 7-argument `ExecInsertIndexTuples()`; the
+2-argument `build_attrmap_by_name()`; `ri_RootToPartitionMap` instead of
+`ExecGetRootToChildMap()`; and the 2-argument `pgstat_count_heap_update()`.
+Its MERGE control flow matches PostgreSQL 16.
 
 PostgreSQL 16 keeps MERGE actions in separate `ri_matchedMergeAction` and
 `ri_notMatchedMergeAction` lists selected by `MergeAction::matched`, and records

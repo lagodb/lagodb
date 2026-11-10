@@ -29,7 +29,7 @@ pub(crate) unsafe fn create_foreign_path(
     // SAFETY: the current planner callback owns all pointer arguments;
     // PostgreSQL retains them in the planner memory context.
     unsafe {
-        #[cfg(feature = "pg16")]
+        #[cfg(any(feature = "pg15", feature = "pg16"))]
         let path = pg_sys::create_foreignscan_path(
             root,
             baserel,

@@ -9,7 +9,7 @@ use pgrx::pg_sys;
 
 use super::QueryExpressionPlanner;
 
-#[cfg(any(feature = "pg16", feature = "pg17"))]
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
 const REVERSE_TEXT_FUNCTION_OID: u32 = pg_sys::F_REVERSE;
 #[cfg(feature = "pg18")]
 const REVERSE_TEXT_FUNCTION_OID: u32 = pg_sys::F_REVERSE_TEXT;

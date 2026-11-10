@@ -12,6 +12,7 @@ mod materialize;
 mod path_installation;
 mod path_private;
 mod planned_query;
+mod planner_info;
 mod provider_scan_planner;
 mod query_shape;
 mod relation_plan;

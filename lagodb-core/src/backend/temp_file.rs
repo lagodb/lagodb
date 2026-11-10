@@ -7,7 +7,8 @@
 //! deletion. It reports I/O the way `buffile.c` does, because `FileRead` and
 //! `FileWrite` leave the `temp_blks_*` counters to their caller.
 
-use std::ffi::c_void;
+#[cfg(feature = "pg15")]
+use std::ffi::c_long;
 use std::io::{self, ErrorKind};
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -16,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use pgrx::{PgSqlErrorCode, pg_sys};
 
+use super::VfdHandle;
 use crate::diag::PgReportError;
 use crate::resource::pg_cleanup_suppressed;
 
@@ -52,17 +54,11 @@ impl PgTempFile {
     ) -> Result<usize, PgReportError> {
         PgReportError::capture(|| {
             let started = Self::io_timer();
-            // SAFETY: `buffer` is writable for its whole length, and `self`
-            // owns the open VFD.
-            let read = unsafe {
-                pg_sys::FileRead(
-                    self.file,
-                    buffer.as_mut_ptr().cast::<c_void>(),
-                    buffer.len(),
-                    offset as pg_sys::off_t,
-                    pg_sys::WaitEventIO::WAIT_EVENT_BUFFILE_READ,
-                )
-            };
+            let read = self.vfd().read_at(
+                buffer,
+                offset as pg_sys::off_t,
+                pg_sys::WaitEventIO::WAIT_EVENT_BUFFILE_READ,
+            );
             if read < 0 {
                 return Err(Self::io_error("read from", io::Error::last_os_error()));
             }
@@ -80,17 +76,11 @@ impl PgTempFile {
             let mut remaining = bytes;
             let mut position = offset;
             while !remaining.is_empty() {
-                // SAFETY: `remaining` is readable for its whole length, and
-                // `self` owns the open VFD.
-                let written = unsafe {
-                    pg_sys::FileWrite(
-                        self.file,
-                        remaining.as_ptr().cast::<c_void>(),
-                        remaining.len(),
-                        position as pg_sys::off_t,
-                        pg_sys::WaitEventIO::WAIT_EVENT_BUFFILE_WRITE,
-                    )
-                };
+                let written = self.vfd().write_at(
+                    remaining,
+                    position as pg_sys::off_t,
+                    pg_sys::WaitEventIO::WAIT_EVENT_BUFFILE_WRITE,
+                );
                 if written <= 0 {
                     return Err(Self::io_error(
                         "write to",
@@ -107,6 +97,12 @@ impl PgTempFile {
         })?
     }
 
+    #[inline]
+    fn vfd(&self) -> VfdHandle {
+        // SAFETY: this owner keeps the VFD open until Drop.
+        unsafe { VfdHandle::from_raw(self.file) }
+    }
+
     fn io_timer() -> Option<Instant> {
         // SAFETY: backend-local GUC read on the backend thread.
         unsafe { pg_sys::track_io_timing }.then(Instant::now)
@@ -117,8 +113,10 @@ impl PgTempFile {
         unsafe {
             pg_sys::pgBufferUsage.temp_blks_read += Self::blocks(bytes);
             if let Some(elapsed) = elapsed {
-                pg_sys::pgBufferUsage.temp_blk_read_time.ticks +=
-                    elapsed.as_nanos() as i64;
+                Self::add_io_time(
+                    &raw mut pg_sys::pgBufferUsage.temp_blk_read_time,
+                    elapsed,
+                );
             }
         }
     }
@@ -128,9 +126,39 @@ impl PgTempFile {
         unsafe {
             pg_sys::pgBufferUsage.temp_blks_written += Self::blocks(bytes);
             if let Some(elapsed) = elapsed {
-                pg_sys::pgBufferUsage.temp_blk_write_time.ticks +=
-                    elapsed.as_nanos() as i64;
+                Self::add_io_time(
+                    &raw mut pg_sys::pgBufferUsage.temp_blk_write_time,
+                    elapsed,
+                );
             }
+        }
+    }
+
+    /// `INSTR_TIME_ADD` of `elapsed`. PostgreSQL 16 counts nanosecond ticks;
+    /// PostgreSQL 15 keeps a normalized `timespec`.
+    ///
+    /// # Safety
+    ///
+    /// `time` points to a backend-local `instr_time` that nothing else
+    /// accesses during the call.
+    unsafe fn add_io_time(time: *mut pg_sys::instr_time, elapsed: Duration) {
+        // SAFETY: guaranteed by the caller. The binding names `time_t`
+        // differently per platform (`__time_t` on glibc, `__darwin_time_t` on
+        // macOS), but both define it as `long`; POSIX declares `tv_nsec` as
+        // `long`.
+        #[cfg(feature = "pg15")]
+        unsafe {
+            (*time).tv_sec += elapsed.as_secs() as c_long;
+            (*time).tv_nsec += c_long::from(elapsed.subsec_nanos());
+            while (*time).tv_nsec >= 1_000_000_000 {
+                (*time).tv_nsec -= 1_000_000_000;
+                (*time).tv_sec += 1;
+            }
+        }
+        // SAFETY: guaranteed by the caller.
+        #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+        unsafe {
+            (*time).ticks += elapsed.as_nanos() as i64;
         }
     }
 

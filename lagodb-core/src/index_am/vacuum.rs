@@ -29,6 +29,8 @@ pub trait IndexVacuum: Sized {
 pub struct IndexVacuumContext<'a, A> {
     info: &'a pg_sys::IndexVacuumInfo,
     index: RelationHandle<'a>,
+    /// PostgreSQL 15 does not pass the table to index VACUUM.
+    #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
     heap: RelationHandle<'a>,
     _access_method: PhantomData<fn() -> A>,
 }
@@ -47,6 +49,7 @@ impl<'a, A: IndexAccessMethod> IndexVacuumContext<'a, A> {
             Self {
                 info,
                 index: RelationHandle::from_raw(info.index),
+                #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
                 heap: RelationHandle::from_raw(info.heaprel),
                 _access_method: PhantomData,
             }
@@ -63,6 +66,7 @@ impl<'a, A: IndexAccessMethod> IndexVacuumContext<'a, A> {
         IndexOptions::of_index(&self.index)
     }
 
+    #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
     #[inline]
     pub fn heap(&self) -> &RelationHandle<'a> {
         &self.heap
@@ -102,7 +106,7 @@ impl<'a, A: IndexAccessMethod> IndexVacuumContext<'a, A> {
     pub fn vacuum_delay_point(&self) {
         // SAFETY: called from a VACUUM or ANALYZE callback.
         unsafe {
-            #[cfg(any(feature = "pg16", feature = "pg17"))]
+            #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
             pg_sys::vacuum_delay_point();
             // Index VACUUM is never the ANALYZE sampling path.
             #[cfg(feature = "pg18")]

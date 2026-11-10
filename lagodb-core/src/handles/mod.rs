@@ -35,7 +35,7 @@ mod index;
 mod mutation;
 mod partition_key;
 mod relation;
-#[cfg(feature = "pg16")]
+#[cfg(any(feature = "pg15", feature = "pg16"))]
 mod relation_analyze;
 mod relation_column;
 mod relation_guard;
@@ -62,8 +62,8 @@ pub use partition_key::{
     PartitionKey, PartitionKeyField, PartitionKeySource, PartitionStrategy,
 };
 pub use relation::{
-    AttrWidthsHandle, BufferAccessStrategyHandle, RelFileLocator, RelationHandle,
-    SnapshotHandle, VacuumParamsHandle, VarlenaHandle,
+    AttrWidthsHandle, BufferAccessStrategyHandle, PgRelFileLocator, RelFileLocator,
+    RelationHandle, SnapshotHandle, VacuumParamsHandle, VarlenaHandle,
 };
 pub use relation_column::RelationColumn;
 pub use relation_guard::RelationGuard;

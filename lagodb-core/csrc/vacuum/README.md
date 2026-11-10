@@ -2,10 +2,12 @@
 
 ## PostgreSQL source provenance
 
-- Baseline releases: PostgreSQL 16.15, 17.11 and 18.6
-- Upstream tags: `REL_16_15`, `REL_17_11` and `REL_18_6`
+- Baseline releases: PostgreSQL 15.19, 16.15, 17.11 and 18.6
+- Upstream tags: `REL_15_19`, `REL_16_15`, `REL_17_11` and `REL_18_6`
 - Primary source: `src/backend/commands/vacuum.c`
 - Primary source SHA-256:
+  - PG15.19:
+    `ed7c0b1b0962118d17b3d38821ef1226857f7b15bb2c0407ebaf13b8bd51e89c`
   - PG16.15:
     `a266c29d7695fc84093f722a6b6fb61acc19c5ffe688a89618497e1dd28a3f17`
   - PG17.11:
@@ -14,6 +16,8 @@
     `bb9071c3813d8dc92b67364a5886aa6139c9ac27e3dc5952e1cb3032b16a0106`
 - Public contract: `src/include/commands/vacuum.h`
 - Public contract SHA-256:
+  - PG15.19:
+    `d4e0b1ed8ef9c1f2ede5f888ac80ef268b60aaf75bcb25543b523844b9dd07d7`
   - PG16.15:
     `30221f19f758dc4d07b28cd3f9d83cebbbf9f09a15e4a1b67cd7435951376cf1`
   - PG17.11:
@@ -100,11 +104,24 @@ These cycles follow PostgreSQL's `lock.c::LockConflicts` and `proc.c::ProcSleep`
 Locking before fallback also makes parent hooks run with target locks already
 held; releasing the locks before fallback restores the same window.
 
-PostgreSQL 16 predates the `MAINTAIN` privilege and `RestrictSearchPath()`. There
-the adapter checks permissions with `vacuum_is_relation_owner()` and leaves
-`search_path` unchanged, as PostgreSQL 16's own `vacuum_rel()` does.
+PostgreSQL 15 and 16 predate the `MAINTAIN` privilege and
+`RestrictSearchPath()`. There the adapter checks permissions with
+`vacuum_is_relation_owner()` and leaves `search_path` unchanged, as their own
+`vacuum_rel()` does.
 
-PostgreSQL 16.15, 17.11 and 18.6 are the provenance baselines, not the only
+PostgreSQL 15 has no `PROCESS_MAIN`, `SKIP_DATABASE_STATS`,
+`ONLY_DATABASE_STATS` or `BUFFER_USAGE_LIMIT` option, so the parser rejects them
+as unrecognized there; FULL always processes the main relation and the command
+always updates `datfrozenxid`. A database-wide expansion checks permissions
+before the relkind filter, as PostgreSQL 15's `get_all_vacuum_rels()` does.
+PostgreSQL 15 checks `DISABLE_PAGE_SKIPPING` and `PROCESS_TOAST` against FULL in
+`vacuum()`, after the transaction-block check; preparation checks them first on
+every major. A statement failing both checks reports the option error instead of
+the transaction-block error. Either way it fails before any relation is
+touched. The `vacuum.c` changes across 15.0–15.19 do not touch option parsing,
+expansion or `vacuum_rel()`'s FULL path.
+
+PostgreSQL 15.19, 16.15, 17.11 and 18.6 are the provenance baselines, not the only
 accepted minor releases. Before adopting a new baseline or extending another major:
 
 1. Compare option parsing and validation in `ExecVacuum()`.

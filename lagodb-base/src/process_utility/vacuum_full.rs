@@ -43,7 +43,7 @@ pub(super) unsafe fn try_route(args: ProcessUtilityArgs) -> Result<bool, HookErr
             args.query_env,
             args.context == pg_sys::ProcessUtilityContext::PROCESS_UTILITY_TOPLEVEL,
         );
-        if command.options() & pg_sys::VACOPT_PROCESS_MAIN == 0
+        if !command.processes_main()
             || !MaintenanceExecutor::probe_vacuum(stmt, is_provider_am)
         {
             return Ok(false);

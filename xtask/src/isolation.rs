@@ -61,8 +61,10 @@ pub(crate) fn run(pg: &PgInstallation, specs: &[OsString]) -> Result<(), String>
         .current_dir(&tests_dir)
         .arg(format!("--bindir={}", bindir.display()))
         .arg(format!("--dlpath={}", pkglibdir.display()))
+        // isolation_main.c reads `<outputdir>/expected`, then
+        // `<inputdir>/expected`; it never uses `--expecteddir`, which
+        // PostgreSQL 15 does not accept.
         .arg("--inputdir=.")
-        .arg("--expecteddir=.")
         .arg(format!("--outputdir={}", output_dir.display()))
         .arg(format!("--temp-instance={}", temp_instance_dir.display()))
         .arg(format!("--temp-config={}", temp_config.display()))

@@ -11,6 +11,7 @@ use super::node::{RelationScan, RelationScanFilter};
 use super::{RelationBinding, RelationNode, RelationTreePlanner};
 use crate::query_host::planning::candidate::SingleRelationCandidate;
 use crate::query_host::planning::expression::{ExpressionScope, PredicateDomain};
+use crate::query_host::planning::planner_info::PlannerInfoExt;
 
 #[derive(Clone, Copy)]
 struct LiftedSubPlan {
@@ -283,7 +284,7 @@ impl RelationTreePlanner {
         }
         let inner_relation = unsafe { Self::find_final_relation(inner_root) }?;
         let rtis = unsafe {
-            Self::collect_base_relids(inner_root, (*inner_root).all_query_rels)
+            Self::collect_base_relids(inner_root, (*inner_root).final_join_relids())
         }?;
         if rtis.is_empty() {
             return None;

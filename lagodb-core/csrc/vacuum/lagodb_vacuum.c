@@ -8,7 +8,7 @@
  * so this file mirrors them, then runs the provider rewrite for provider
  * relations. Native relations and every ANALYZE phase return to PostgreSQL.
  *
- * Provenance: PostgreSQL 16.15, 17.11 and 18.6, primarily
+ * Provenance: PostgreSQL 15.19, 16.15, 17.11 and 18.6, primarily
  * src/backend/commands/vacuum.c.
  * Every exported lagodb_* function below is a version-pinned adapter for
  * parse_vacuum_options(), expand_vacuum_rel(), and vacuum_rel() semantics that
@@ -42,7 +42,8 @@
 
 /*
  * PostgreSQL 17 added the MAINTAIN privilege and renamed this check. Its
- * signature is unchanged, and PostgreSQL 16 tests table ownership instead.
+ * signature is unchanged, and PostgreSQL 15 and 16 test table ownership
+ * instead.
  */
 #if LAGODB_PG17_LT
 #define vacuum_is_permitted_for_relation vacuum_is_relation_owner
@@ -82,13 +83,15 @@ lagodb_parse_vacuum_options(VacuumStmt *stmt, const char *query_string,
 	bool		disable_page_skipping = false;
 	bool		freeze = false;
 	bool		full = false;
-	bool		only_database_stats = false;
-	bool		process_main = true;
 	bool		process_toast = true;
-	bool		skip_database_stats = false;
 	bool		skip_locked = false;
 	bool		verbose = false;
+#if LAGODB_PG16_GE
+	bool		only_database_stats = false;
+	bool		process_main = true;
+	bool		skip_database_stats = false;
 	bool		has_buffer_usage_limit = false;
+#endif
 	ParseState *pstate;
 	ListCell   *lc;
 
@@ -112,6 +115,7 @@ lagodb_parse_vacuum_options(VacuumStmt *stmt, const char *query_string,
 			verbose = defGetBoolean(opt);
 		else if (strcmp(opt->defname, "skip_locked") == 0)
 			skip_locked = defGetBoolean(opt);
+#if LAGODB_PG16_GE
 		else if (strcmp(opt->defname, "buffer_usage_limit") == 0)
 		{
 			const char *hintmsg = NULL;
@@ -130,6 +134,7 @@ lagodb_parse_vacuum_options(VacuumStmt *stmt, const char *query_string,
 								MAX_BAS_VAC_RING_SIZE_KB),
 						 hintmsg ? errhint("%s", _(hintmsg)) : 0));
 		}
+#endif
 		else if (strcmp(opt->defname, "analyze") == 0)
 			analyze = defGetBoolean(opt);
 		else if (strcmp(opt->defname, "freeze") == 0)
@@ -152,8 +157,10 @@ lagodb_parse_vacuum_options(VacuumStmt *stmt, const char *query_string,
 					params->index_cleanup = lagodb_vacoptval_from_boolean(opt);
 			}
 		}
+#if LAGODB_PG16_GE
 		else if (strcmp(opt->defname, "process_main") == 0)
 			process_main = defGetBoolean(opt);
+#endif
 		else if (strcmp(opt->defname, "process_toast") == 0)
 			process_toast = defGetBoolean(opt);
 		else if (strcmp(opt->defname, "truncate") == 0)
@@ -177,10 +184,12 @@ lagodb_parse_vacuum_options(VacuumStmt *stmt, const char *query_string,
 			if (params->nworkers == 0)
 				params->nworkers = -1;
 		}
+#if LAGODB_PG16_GE
 		else if (strcmp(opt->defname, "skip_database_stats") == 0)
 			skip_database_stats = defGetBoolean(opt);
 		else if (strcmp(opt->defname, "only_database_stats") == 0)
 			only_database_stats = defGetBoolean(opt);
+#endif
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
@@ -196,19 +205,23 @@ lagodb_parse_vacuum_options(VacuumStmt *stmt, const char *query_string,
 		(freeze ? VACOPT_FREEZE : 0) |
 		(full ? VACOPT_FULL : 0) |
 		(disable_page_skipping ? VACOPT_DISABLE_PAGE_SKIPPING : 0) |
+#if LAGODB_PG16_GE
 		(process_main ? VACOPT_PROCESS_MAIN : 0) |
-		(process_toast ? VACOPT_PROCESS_TOAST : 0) |
 		(skip_database_stats ? VACOPT_SKIP_DATABASE_STATS : 0) |
-		(only_database_stats ? VACOPT_ONLY_DATABASE_STATS : 0);
+		(only_database_stats ? VACOPT_ONLY_DATABASE_STATS : 0) |
+#endif
+		(process_toast ? VACOPT_PROCESS_TOAST : 0);
 
 	if (full && params->nworkers > 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("VACUUM FULL cannot be performed in parallel")));
+#if LAGODB_PG16_GE
 	if (full && has_buffer_usage_limit && !analyze)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("BUFFER_USAGE_LIMIT cannot be specified for VACUUM FULL")));
+#endif
 	if (!(params->options & VACOPT_ANALYZE))
 	{
 		foreach(lc, stmt->rels)
@@ -229,6 +242,7 @@ lagodb_parse_vacuum_options(VacuumStmt *stmt, const char *query_string,
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("PROCESS_TOAST required with VACUUM FULL")));
+#if LAGODB_PG16_GE
 	if (only_database_stats)
 	{
 		if (stmt->rels != NIL)
@@ -242,6 +256,7 @@ lagodb_parse_vacuum_options(VacuumStmt *stmt, const char *query_string,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("ONLY_DATABASE_STATS cannot be specified with other VACUUM options")));
 	}
+#endif
 
 	params->freeze_min_age = freeze ? 0 : -1;
 	params->freeze_table_age = freeze ? 0 : -1;
@@ -376,13 +391,24 @@ lagodb_expand_vacuum_relations(VacuumStmt *stmt, VacuumParams *params,
 		{
 			Form_pg_class classform = (Form_pg_class) GETSTRUCT(tuple);
 
+			/*
+			 * PostgreSQL 15 checks permissions before the relkind filter, so
+			 * it warns about every relation the user cannot vacuum.
+			 */
+#if LAGODB_PG16_LT
+			if (!vacuum_is_permitted_for_relation(classform->oid, classform,
+												  params->options))
+				continue;
+#endif
 			if (classform->relkind != RELKIND_RELATION &&
 				classform->relkind != RELKIND_MATVIEW &&
 				classform->relkind != RELKIND_PARTITIONED_TABLE)
 				continue;
+#if LAGODB_PG16_GE
 			if (!vacuum_is_permitted_for_relation(classform->oid, classform,
 												  params->options))
 				continue;
+#endif
 			{
 				MemoryContext oldcontext = MemoryContextSwitchTo(context);
 

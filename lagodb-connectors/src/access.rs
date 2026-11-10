@@ -6,6 +6,7 @@
 
 use std::ffi::{CStr, CString};
 
+use lagodb_core::catalog::CatalogObject;
 use lagodb_core::diag::PgReportError;
 use lagodb_core::storage::profile::{
     StorageProfileConfig, StorageServerCatalog, StorageServerPolicy,
@@ -161,15 +162,8 @@ impl ConnectorAccess {
         effective_user: pg_sys::Oid,
     ) -> Result<(), ConnectorError> {
         // Local files need server USAGE, but no object-store profile or user mapping.
-        // SAFETY: the caller resolved a live foreign-server OID on the backend.
-        let allowed = unsafe {
-            pg_sys::object_aclcheck(
-                pg_sys::ForeignServerRelationId,
-                server_oid,
-                effective_user,
-                pg_sys::ACL_USAGE.into(),
-            ) == pg_sys::AclResult::ACLCHECK_OK
-        };
+        let allowed = CatalogObject::ForeignServer(server_oid)
+            .has_privilege(effective_user, pg_sys::ACL_USAGE as pg_sys::AclMode);
         if allowed {
             Ok(())
         } else {

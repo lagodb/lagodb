@@ -83,7 +83,7 @@ impl<'a, P: LagodbCustomModifyProvider> ModifyScanBinder<'a, P> {
             }
         }
         unsafe {
-            pg_sys::planstate_tree_walker_impl(
+            pg_sys::planstate_tree_walker(
                 state,
                 Some(Self::walker),
                 ptr::from_mut(self).cast(),

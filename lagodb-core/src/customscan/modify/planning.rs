@@ -281,7 +281,7 @@ unsafe extern "C-unwind" fn find_target_system_column(
         }
     }
     unsafe {
-        pg_sys::expression_tree_walker_impl(
+        pg_sys::expression_tree_walker(
             node,
             Some(find_target_system_column),
             raw_context,
@@ -316,7 +316,7 @@ unsafe fn reject_explicit_target_system_columns(
         found: false,
     };
     unsafe {
-        pg_sys::query_tree_walker_impl(
+        pg_sys::query_tree_walker(
             parse,
             Some(find_target_system_column),
             ptr::from_mut(&mut context).cast(),

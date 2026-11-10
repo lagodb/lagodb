@@ -11,8 +11,8 @@ pub struct ExtensionWaitEvent(u32);
 impl ExtensionWaitEvent {
     /// Allocate a wait event visible under `name`.
     ///
-    /// PostgreSQL 16 has no named extension wait events, so every name reports
-    /// the generic `Extension` event there.
+    /// PostgreSQL 15 and 16 have no named extension wait events, so every name
+    /// reports the generic `Extension` event there.
     #[cfg(any(feature = "pg17", feature = "pg18"))]
     pub fn register(name: &'static CStr) -> Self {
         // SAFETY: `name` is a static NUL-terminated string.
@@ -21,9 +21,9 @@ impl ExtensionWaitEvent {
 
     /// Allocate a wait event visible under `name`.
     ///
-    /// PostgreSQL 16 has no named extension wait events, so every name reports
-    /// the generic `Extension` event there.
-    #[cfg(feature = "pg16")]
+    /// PostgreSQL 15 and 16 have no named extension wait events, so every name
+    /// reports the generic `Extension` event there.
+    #[cfg(any(feature = "pg15", feature = "pg16"))]
     pub fn register(_name: &'static CStr) -> Self {
         Self(pg_sys::PG_WAIT_EXTENSION)
     }

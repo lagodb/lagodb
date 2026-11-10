@@ -1,4 +1,6 @@
 -- Local VACUUM correctness, failure recovery, and FULL routing coverage.
+-- PostgreSQL 15 words the VACUUM permission warning differently; _1.out is
+-- the PostgreSQL 15 output.
 
 -- Cross-DSO routing/GUC authority and end-to-end row preservation.
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
@@ -295,8 +297,15 @@ FROM vacuum_full_routing_test.partitioned_table_t;
 SELECT array_agg(id ORDER BY id) = ARRAY[10, 20] AS heap_rows_preserved
 FROM vacuum_full_routing_test.heap_t;
 
+-- PostgreSQL 16 added BUFFER_USAGE_LIMIT, which the routed ANALYZE forwards.
+SELECT current_setting('server_version_num')::int >= 160000
+    AS has_buffer_usage_limit \gset
+\if :has_buffer_usage_limit
 VACUUM (ANALYZE, BUFFER_USAGE_LIMIT '128kB')
     vacuum_full_routing_test.partitioned_table_t;
+\else
+VACUUM (ANALYZE) vacuum_full_routing_test.partitioned_table_t;
+\endif
 SELECT reltuples::bigint = 16 AS routine_vacuum_analyze_updated_partitioned_table
 FROM pg_class
 WHERE oid = 'vacuum_full_routing_test.partitioned_table_t'::regclass;

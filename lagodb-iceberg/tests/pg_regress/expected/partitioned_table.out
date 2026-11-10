@@ -1,4 +1,6 @@
 -- Managed partitioned tables: definitions, PostgreSQL catalog policy, COPY, and DML.
+-- PostgreSQL 15 words the COPY file-permission error differently; _1.out is
+-- the PostgreSQL 15 output.
 -- Managed partition definitions and PostgreSQL catalog policy.
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION lagodb_iceberg;

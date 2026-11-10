@@ -96,7 +96,8 @@ impl TriggerRowLayout {
         unsafe {
             // Probing skipped rows only needs the leading, non-null token.
             pg_sys::slot_getsomeattrs(row, 1);
-            pg_sys::DatumGetInt64(*(*row).tts_values) as u64
+            // `DatumGetInt64` on PostgreSQL's 64-bit pass-by-value Datum.
+            (*(*row).tts_values).value() as u64
         }
     }
 

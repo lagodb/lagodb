@@ -5,6 +5,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use lagodb_core::expr::ExprType;
+use lagodb_core::expr::pg::expression_tree_mutator;
 use lagodb_query::plan::{
     ExecutionExpr, PostgresEvalExpr, PostgresEvalInput, PostgresExprVolatility,
 };
@@ -224,9 +225,9 @@ unsafe extern "C-unwind" fn dependency_mutator(
         };
     }
     unsafe {
-        pg_sys::expression_tree_mutator_impl(
+        expression_tree_mutator(
             node,
-            Some(dependency_mutator),
+            dependency_mutator,
             ptr::from_ref(context).cast_mut().cast(),
         )
     }

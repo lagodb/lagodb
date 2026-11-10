@@ -104,6 +104,46 @@ impl RelationVarsByAttno {
         }
     }
 
+    /// Record `var` for its attribute, or report whether the Var already
+    /// recorded there can stand in for it. A narrowed scan target list holds
+    /// one entry per attribute, and setrefs matches scan Vars by `varno` and
+    /// `varattno`, plus `varnullingrels` from PostgreSQL 16 on.
+    pub(crate) fn record(&mut self, var: NonNull<pg_sys::Var>) -> bool {
+        match self.get(unsafe { var.as_ref().varattno }) {
+            Some(existing) => Self::same_nulling(existing, var),
+            None => {
+                self.insert(var);
+                true
+            }
+        }
+    }
+
+    /// Before PostgreSQL 16 a Var carries no outer-join nulling marks.
+    #[cfg(feature = "pg15")]
+    #[inline]
+    fn same_nulling(
+        _existing: NonNull<pg_sys::Var>,
+        _var: NonNull<pg_sys::Var>,
+    ) -> bool {
+        true
+    }
+
+    #[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
+    #[inline]
+    fn same_nulling(
+        existing: NonNull<pg_sys::Var>,
+        var: NonNull<pg_sys::Var>,
+    ) -> bool {
+        // SAFETY: the index holds live planner Vars, and callers pass Vars
+        // that live for the same planner call.
+        unsafe {
+            pg_sys::bms_equal(
+                existing.as_ref().varnullingrels,
+                var.as_ref().varnullingrels,
+            )
+        }
+    }
+
     #[inline]
     pub(crate) fn get(
         &self,

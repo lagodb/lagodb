@@ -52,7 +52,9 @@
 #include "lagodb_copy.h"
 
 #if LAGODB_PG17_LT
-/* PostgreSQL 16 predates libpq/protocol.h and spells these bytes inline. */
+/*
+ * PostgreSQL 15 and 16 predate libpq/protocol.h and spell these bytes inline.
+ */
 #define PqMsg_CopyOutResponse 'H'
 #define PqMsg_CopyDone 'c'
 #define PqMsg_CopyData 'd'

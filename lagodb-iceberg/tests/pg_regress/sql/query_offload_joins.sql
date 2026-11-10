@@ -483,7 +483,7 @@ ANALYZE query_offload_join_right;
 SET enable_nestloop = off;
 SET enable_mergejoin = off;
 SET lagodb.query_offload_mode = 'off';
--- PostgreSQL 16 and 17 have no JOIN_RIGHT_SEMI; _1.out is their output. On
+-- PostgreSQL 15 to 17 have no JOIN_RIGHT_SEMI; _1.out is their output. On
 -- PostgreSQL 18 the native plan must choose it, or the offloaded plan below no
 -- longer covers the normalization.
 EXPLAIN (COSTS OFF)

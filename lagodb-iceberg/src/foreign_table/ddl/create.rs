@@ -38,7 +38,7 @@
 
 use std::{ffi::CStr, panic::AssertUnwindSafe};
 
-use lagodb_core::catalog::{CatalogSnapshot, RelationCatalogEntry};
+use lagodb_core::catalog::{CatalogObject, CatalogSnapshot, RelationCatalogEntry};
 use lagodb_core::diag::PgError;
 use lagodb_core::handles::RelationGuard;
 use lagodb_core::hooks::{
@@ -264,15 +264,9 @@ impl IcebergForeignTableDdl {
         user: pg_sys::Oid,
         server_name: &CStr,
     ) -> Result<(), IcebergFdwError> {
-        let result = unsafe {
-            pg_sys::object_aclcheck(
-                pg_sys::ForeignServerRelationId,
-                server_oid,
-                user,
-                pg_sys::ACL_USAGE.into(),
-            )
-        };
-        if result != pg_sys::AclResult::ACLCHECK_OK {
+        if !CatalogObject::ForeignServer(server_oid)
+            .has_privilege(user, pg_sys::ACL_USAGE as pg_sys::AclMode)
+        {
             return Err(IcebergFdwError::ServerUsageDenied {
                 server: server_name.to_string_lossy().into_owned(),
             });

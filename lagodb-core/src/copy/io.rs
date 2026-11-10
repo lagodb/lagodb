@@ -14,6 +14,7 @@ use pgrx::{pg_guard, pg_sys};
 
 use super::error::CopyError;
 use super::layout::CopyColumnLayout;
+use super::pg::CopyDataDestCallback;
 use super::progress::CopyOutputProgress;
 use crate::diag::PgReportError;
 
@@ -122,7 +123,7 @@ pub(super) struct DestinationGuard<'a> {
 
 impl<'a> DestinationGuard<'a> {
     /// The native COPY destination callback that writes to the innermost guard.
-    pub(super) const fn callback() -> pg_sys::copy_data_dest_cb {
+    pub(super) const fn callback() -> CopyDataDestCallback {
         Some(copy_destination_callback)
     }
 

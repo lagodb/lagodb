@@ -1,7 +1,7 @@
 # Contributing
 
 The primary SQL-facing implementation is `lagodb-iceberg` on supported
-PostgreSQL 16, 17 and 18 installations.
+PostgreSQL 15, 16, 17 and 18 installations.
 Changes should preserve PostgreSQL lifecycle semantics, keep the Iceberg
 storage path as the product focus, and avoid presenting the Delta skeleton as
 a second implementation.
@@ -26,27 +26,28 @@ See [Build from source](docs/build-from-source.md) for local installation.
 Run the full suite for each target major:
 
 ```bash
-cargo xtask test-all pg16
-cargo xtask test-all pg17
-cargo xtask test-all pg18
+for pg in pg15 pg16 pg17 pg18; do
+  cargo xtask test-all "${pg}"
+done
 ```
 
 The full command runs workspace unit tests, pgrx backend tests, extension
 tests, SQL regression, and isolation tests. It requires:
 
-- a pgrx-managed PostgreSQL 16, 17 or 18, with 17 and 18 configured with
+- a pgrx-managed PostgreSQL 15, 16, 17 or 18, with 17 and 18 configured with
   `--enable-injection-points`; and
 - Docker for the object-storage, Iceberg REST catalog, and Spark fixtures used
   by the SQL regression suites.
 
-PostgreSQL 16 has no injection points or COPY `ON_ERROR`, so its run skips those
-regression cases and the worker lifecycle backend tests. `expected/<test>_1.out`
-holds the alternate output of a test whose output varies by major, normally
-PostgreSQL 16; `query_offload_joins_1.out` holds PostgreSQL 16 and 17, because
-only PostgreSQL 18 has `JOIN_RIGHT_SEMI`. Update it together with
-`<test>.out`. Initialize the servers with:
+PostgreSQL 15 and 16 have no injection points or COPY `ON_ERROR`, so their runs
+skip those regression cases and the worker lifecycle backend tests. A test whose
+output varies by major keeps each variant as `expected/<test>_N.out`, which
+pg_regress accepts in place of `<test>.out`; the numbers carry no version
+meaning. The test's `.sql` file names the majors each alternate covers and why.
+Update the alternates together with `<test>.out`. Initialize the servers with:
 
 ```bash
+cargo pgrx init --pg15=download
 cargo pgrx init --pg16=download
 cargo pgrx init --pg17=download \
   --configure-flag=--enable-injection-points
@@ -59,7 +60,7 @@ target pgrx PostgreSQL installation. The following runs the focused tests and
 isolation suite for each target major:
 
 ```bash
-for pg in pg16 pg17 pg18; do
+for pg in pg15 pg16 pg17 pg18; do
   cargo pgrx install \
     --package lagodb-base \
     --pg-config "$(cargo pgrx info pg-config "${pg}")"
