@@ -32,13 +32,22 @@ arrow-schema = { version = "59.2.0", features = ["serde", "canonical_extension_t
 arrow-select = "59.2.0"
 arrow-string = "59.2.0"
 datafusion = { version = "=55.0.0", default-features = false }
-datafusion-distributed = { git = "https://github.com/lagodb/datafusion-distributed.git", rev = "c13dfa931dbbd3072ca2234c1fdbaa35208afcba", default-features = false }
+datafusion-distributed = {
+    git = "https://github.com/lagodb/datafusion-distributed.git",
+    rev = "e09e50a8d4fdfc4a8d5329daa3798e148351c6be",
+    default-features = false,
+    features = ["grpc"],
+}
 datafusion-proto = { version = "=55.0.0", default-features = false }
 pgrx = { version = "=0.19.2" }
 pgrx-pg-sys = { version = "=0.19.2" }
 pgrx-tests = { version = "=0.19.2" }
 prost = "0.14.1"
+hyper-util = { version = "0.1.16", default-features = false, features = ["tokio"] }
+tonic = { version = "0.14.1", features = ["transport"] }
+tower = { version = "0.5.2", default-features = false, features = ["util"] }
 roaring = { version = "0.11" }
+url = "2.5.7"
 lagodb-storage = { git = "https://github.com/lagodb/lagodb-storage.git", rev = "59a53c284a20a0cd336f3f093e0584a4a3207e2a" }
 
 # The 'dev' profile is used when you run `cargo build`.

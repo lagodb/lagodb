@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::datafusion::parallel::ParallelRuntime;
 use arrow_array::RecordBatch;
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::execution::runtime_env::RuntimeEnv;
@@ -9,7 +10,6 @@ use futures::StreamExt;
 use lagodb_core::expr::RuntimeValueState;
 use lagodb_core::resource::without_pg_cleanup;
 use pgrx::pg_sys;
-use tokio::runtime::{Builder, Runtime};
 
 use super::super::output::QueryOutputDecoder;
 use super::QueryRun;
@@ -42,7 +42,7 @@ pub(super) struct PreparedQueryExecution {
     metrics: Option<Arc<ExecutionMetrics>>,
     fragment: QueryFragment,
     postgres: PgExprRuntime,
-    runtime: Runtime,
+    runtime: ParallelRuntime,
     environment: Arc<RuntimeEnv>,
     bound_scans: BoundTableScans,
     runtime_values: RuntimeValueState,
@@ -73,10 +73,18 @@ impl PreparedQueryExecution {
         let setup_metrics = metrics.map(Arc::as_ref);
         let result: Result<_, QueryExecutionError> =
             ExecutionMetrics::time_setup(setup_metrics, SetupPhase::Engine, || {
-                let runtime = Builder::new_current_thread()
-                    .enable_time()
-                    .build()
-                    .map_err(QueryExecutionError::Runtime)?;
+                // Reactor construction is strict. Only the leader's preparation
+                // layer owns the policy that a construction failure falls back
+                // to a plain serial runtime.
+                let (runtime, parallel) = match parallel {
+                    Some(options) => {
+                        match ParallelRuntime::with_reactor(&options.host) {
+                            Ok(runtime) => (runtime, Some(options)),
+                            Err(_) => (ParallelRuntime::serial()?, None),
+                        }
+                    }
+                    None => (ParallelRuntime::serial()?, None),
+                };
                 let runtime_resources = limits.planning_runtime_env()?;
                 let environment = runtime_resources.environment;
                 // Preparation runs at first execution, after PG has supplied outer
@@ -91,6 +99,7 @@ impl PreparedQueryExecution {
                 let prepared_plan =
                     PreparedPhysicalPlan::prepare(PhysicalPlanPreparation {
                         runtime: &runtime,
+                        parallel: parallel.as_ref(),
                         environment: Arc::clone(&environment),
                         fragment,
                         limits,
@@ -98,16 +107,15 @@ impl PreparedQueryExecution {
                         bound_scans: &bound_scans,
                         postgres,
                         runtime_values: &runtime_values,
-                        parallel: parallel.as_ref(),
                     })?;
                 let output = QueryOutputDecoder::try_new(
                     layout,
                     &prepared_plan.plan().schema(),
                 )?;
-                Ok((prepared_plan, runtime, environment, output))
+                Ok((prepared_plan, runtime, environment, output, parallel))
             });
         match result {
-            Ok((prepared_plan, runtime, environment, output)) => Ok((
+            Ok((prepared_plan, runtime, environment, output, parallel)) => Ok((
                 Self {
                     parallel_run: None,
                     prepared_plan,
@@ -187,6 +195,7 @@ impl PreparedQueryExecution {
                             prepared,
                             options,
                             self.limits,
+                            &self.runtime,
                             self.metrics.as_ref(),
                         )
                     },
@@ -249,7 +258,7 @@ impl PreparedQueryExecution {
     ) -> Result<Option<RecordBatch>, QueryExecutionError> {
         match &self.parallel_run {
             Some(parallel) => parallel.next_batch(&self.runtime, stream),
-            None => Ok(self.runtime.block_on(stream.next()).transpose()?),
+            None => Ok(self.runtime.block_on(stream.next())?.transpose()?),
         }
     }
 

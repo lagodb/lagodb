@@ -377,8 +377,6 @@ ROLLBACK;
 SELECT offload->>'Execution Mode' = 'Parallel' AS parallel,
        (offload->>'Maximum Launched Workers')::integer > 0 AS worker_launched,
        (offload->>'Parallel Runs')::integer = 1 AS one_run,
-       (offload->>'Worker Metric Reports')::integer > 0
-           AND offload->'Worker Metric Reports' = offload->'Expected Worker Metric Reports' AS metrics_complete,
        (offload->>'Actual Rows')::numeric = 4 AS output_rows_ok,
        (scan->>'Actual Input Rows')::bigint = 33 AS input_rows_ok,
        (scan->>'Scan Tasks')::bigint = 33
@@ -396,9 +394,9 @@ CROSS JOIN LATERAL jsonb_path_query_first(plan,
     '$[0].Plan.** ? (@."Custom Plan Provider" == "LagoDB Query Offload")') AS nodes(offload)
 CROSS JOIN LATERAL jsonb_path_query_first(plan,
     '$[0].Plan.** ? (@."Node Type" == "Table Scan")') AS scans(scan);
- parallel | worker_launched | one_run | metrics_complete | output_rows_ok | input_rows_ok | inventory_complete | file_bytes_reported | memory_reported | filter_pushed 
-----------+-----------------+---------+------------------+----------------+---------------+--------------------+---------------------+-----------------+---------------
- t        | t               | t       | t                | t              | t             | t                  | t                   | t               | t
+ parallel | worker_launched | one_run | output_rows_ok | input_rows_ok | inventory_complete | file_bytes_reported | memory_reported | filter_pushed 
+----------+-----------------+---------+----------------+---------------+--------------------+---------------------+-----------------+---------------
+ t        | t               | t       | t              | t             | t                  | t                   | t               | t
 (1 row)
 
 SELECT group_key, count(*) AS rows, sum(measure) AS total

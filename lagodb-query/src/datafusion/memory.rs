@@ -2,7 +2,6 @@
 
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
@@ -28,7 +27,12 @@ use super::error::QueryExecutionError;
 use super::join_planning::AdaptiveHashJoinExec;
 use super::spill::PgTempFileFactory;
 
-/// DataFusion's own default, kept as the ceiling for larger `work_mem`.
+mod worker;
+
+pub(in crate::datafusion) use worker::{ParticipantMemoryRecorder, TaskMemoryPool};
+
+/// DataFusion's default merge reservation, kept as the ceiling for larger
+/// `work_mem`.
 const MAXIMUM_SORT_MERGE_RESERVATION: usize = 10 * 1024 * 1024;
 
 /// Shared by the `ExternalSorter[p]` and `ExternalSorterMerge[p]` consumers.
@@ -39,105 +43,12 @@ pub(super) struct RuntimeResources {
     pub(super) memory: Arc<PeakRecordingPool>,
 }
 
-/// Worker-local high-water mark across independently bounded fragment pools.
+/// `FairSpillPool` that books a Sort's refusal up to its merge reservation.
 ///
-/// The recorder observes reservation deltas only when execution metrics are
-/// enabled. It never participates in admission, so one fragment cannot consume
-/// another fragment's PostgreSQL operation budget.
-#[derive(Debug, Default)]
-pub(super) struct ParticipantMemoryRecorder {
-    reserved: AtomicUsize,
-    peak: AtomicUsize,
-}
-
-impl ParticipantMemoryRecorder {
-    pub(super) fn peak_reserved(&self) -> usize {
-        self.peak.load(Ordering::Relaxed)
-    }
-
-    fn grow(&self, additional: usize) {
-        let reserved =
-            self.reserved.fetch_add(additional, Ordering::Relaxed) + additional;
-        self.peak.fetch_max(reserved, Ordering::Relaxed);
-    }
-
-    fn shrink(&self, returned: usize) {
-        self.reserved.fetch_sub(returned, Ordering::Relaxed);
-    }
-}
-
-#[derive(Debug)]
-struct ParticipantRecordingPool {
-    fragment: Arc<PeakRecordingPool>,
-    participant: Arc<ParticipantMemoryRecorder>,
-}
-
-impl Display for ParticipantRecordingPool {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        Display::fmt(&self.fragment, formatter)
-    }
-}
-
-impl MemoryPool for ParticipantRecordingPool {
-    fn name(&self) -> &str {
-        self.fragment.name()
-    }
-
-    fn register(&self, consumer: &MemoryConsumer) {
-        self.fragment.register(consumer);
-    }
-
-    fn unregister(&self, consumer: &MemoryConsumer) {
-        self.fragment.unregister(consumer);
-    }
-
-    fn grow(&self, reservation: &MemoryReservation, additional: usize) {
-        self.fragment.grow(reservation, additional);
-        self.participant.grow(additional);
-    }
-
-    fn shrink(&self, reservation: &MemoryReservation, returned: usize) {
-        self.fragment.shrink(reservation, returned);
-        self.participant.shrink(returned);
-    }
-
-    fn try_grow(
-        &self,
-        reservation: &MemoryReservation,
-        additional: usize,
-    ) -> Result<(), DataFusionError> {
-        self.fragment.try_grow(reservation, additional)?;
-        self.participant.grow(additional);
-        Ok(())
-    }
-
-    fn reserved(&self) -> usize {
-        self.fragment.reserved()
-    }
-
-    fn memory_limit(&self) -> MemoryLimit {
-        self.fragment.memory_limit()
-    }
-}
-
-/// `FairSpillPool` that does not refuse a Sort holding no more than its merge
-/// reservation.
-///
-/// `ExternalSorter` reserves twice the size of a batch it already holds, and
-/// the pool only keeps accounts, so a refusal frees nothing. With nothing
-/// buffered to spill, that refusal ends the query, while PostgreSQL's
-/// `work_mem` is soft: `tuplesort_puttuple_common` stores the tuple and checks
-/// `LACKMEM` after. Up to this floor a refused Sort is booked anyway. Above it
-/// the refusal stands and Sort spills as usual, so a batch wider than its share
-/// becomes a run of its own, and a merge that cannot seat two runs re-spills
-/// them with smaller batches.
-///
-/// Only Sort gets the floor. Other consumers start empty too, `BroadcastExec`
-/// once per batch, so a rule on size alone would leave them unbounded.
-///
-/// Recheck three `ExternalSorter` behaviors on a DataFusion upgrade: its
-/// consumers keep these names, a refusal with batches buffered still spills, and
-/// a merge that cannot seat two runs still ends in `SplitThenRetry`.
+/// `ExternalSorter` reserves twice a batch it already holds and the pool keeps
+/// only accounts, so a refusal frees nothing and would end the query. Only Sort
+/// gets the floor: other consumers also start empty, so size alone cannot
+/// bound them.
 #[derive(Debug)]
 struct SortFloorPool {
     inner: FairSpillPool,
@@ -206,23 +117,11 @@ impl MemoryPool for SortFloorPool {
 
 /// PostgreSQL operation budgets and scan batch shape for one query execution.
 ///
-/// Every executable plan or worker fragment receives its own pool. The pool
-/// rejects growth that reserves before allocation. DataFusion 55's
-/// native DISTINCT accumulators update their state before resizing their
-/// reservation, so this type does not claim a reservation-first hard limit for
-/// that state.
-///
-/// With spilling enabled the pool is `FairSpillPool`: the plan-wide total is
-/// fixed, and operators that can spill share what the others leave. An
-/// individual operator's share is therefore not a hard per-operator limit. A
-/// Sort can also pass the total by about its merge reservation and one batch,
-/// see `SortFloorPool`.
-///
-/// With spilling disabled an operator has nowhere to put what does not fit, so
-/// a `work_mem` budget would turn PostgreSQL's soft allowance into a query
-/// failure. The pool has no limit instead. It stays a `GreedyMemoryPool` because
-/// DataFusion picks a different aggregate stream for a pool that reports
-/// `MemoryLimit::Infinite`.
+/// Every executable plan or worker fragment gets its own pool. With spilling
+/// enabled it is a `FairSpillPool`: the plan-wide total is fixed, so an
+/// operator's share is not a hard per-operator limit. Without spilling the pool
+/// is a `GreedyMemoryPool` limited to `usize::MAX`, because DataFusion picks a
+/// different aggregate stream for a pool reporting `MemoryLimit::Infinite`.
 #[derive(Debug, Clone, Copy)]
 pub struct QueryExecutionLimits {
     work_mem_bytes: usize,
@@ -249,8 +148,8 @@ impl QueryExecutionLimits {
         ))
     }
 
-    /// Rebuild limits from the parts of a validated instance, such as the
-    /// leader limits carried to a parallel worker by its bootstrap.
+    /// Rebuild limits from a validated instance, such as the leader limits
+    /// carried to a parallel worker.
     pub(in crate::datafusion) const fn restore(
         work_mem_bytes: usize,
         hash_memory_bytes: usize,
@@ -286,11 +185,20 @@ impl QueryExecutionLimits {
         (self.work_mem_bytes / 4).min(MAXIMUM_SORT_MERGE_RESERVATION)
     }
 
-    /// Session settings shared by leader planning and worker decoding. Sort
-    /// reads its merge reservation from the session, so a worker needs the same
-    /// value as the leader.
+    /// Session settings shared by leader planning and worker tasks; Sort reads
+    /// its merge reservation from the session.
     pub(super) fn session_config(self, target_partitions: usize) -> SessionConfig {
-        let mut config = SessionConfig::new()
+        self.apply_session_policy(SessionConfig::new(), target_partitions)
+    }
+
+    /// Applies PostgreSQL's execution policy to a config that already carries
+    /// the session's own options.
+    pub(super) fn apply_session_policy(
+        self,
+        config: SessionConfig,
+        target_partitions: usize,
+    ) -> SessionConfig {
+        let mut config = config
             .with_target_partitions(target_partitions)
             .with_batch_size(self.maximum_batch_rows());
         config.options_mut().optimizer.use_statistics_registry = true;
@@ -302,32 +210,19 @@ impl QueryExecutionLimits {
         config
     }
 
-    /// Build the bounded environment used only while constructing a physical
-    /// plan. Execution replaces it with a plan-sized environment.
+    /// Bounded environment used only while constructing a physical plan.
     pub(super) fn planning_runtime_env(self) -> DataFusionResult<RuntimeResources> {
-        self.runtime_env(self.work_mem_bytes, None)
+        self.runtime_env(self.work_mem_bytes)
     }
 
-    /// Build the pool of one executable plan. Each worker fragment calls this
-    /// independently, so concurrently assigned fragments cannot consume one
-    /// another's reservation budget.
+    /// Environment of one executable leader plan; a worker computes the same
+    /// budget when its decoded plan reaches the rewrite hook.
     pub(super) fn runtime_env_for_plan(
         self,
         plan: &Arc<dyn ExecutionPlan>,
     ) -> DataFusionResult<RuntimeResources> {
         let bytes = self.pool_bytes(plan)?;
-        self.runtime_env(bytes, None)
-    }
-
-    /// Build one independently bounded worker-fragment environment while
-    /// observing the aggregate reservation of this worker participant.
-    pub(super) fn runtime_env_for_fragment(
-        self,
-        plan: &Arc<dyn ExecutionPlan>,
-        participant: Arc<ParticipantMemoryRecorder>,
-    ) -> DataFusionResult<RuntimeResources> {
-        let bytes = self.pool_bytes(plan)?;
-        self.runtime_env(bytes, Some(participant))
+        self.runtime_env(bytes)
     }
 
     fn pool_bytes(self, plan: &Arc<dyn ExecutionPlan>) -> DataFusionResult<usize> {
@@ -338,8 +233,8 @@ impl QueryExecutionLimits {
         }
     }
 
-    /// Spilling needs a real total, because the pool share is what tells an
-    /// operator when to spill. PostgreSQL's per-operation memory model gives it.
+    /// Spilling needs a real total: the pool share is what tells an operator
+    /// when to spill.
     fn plan_memory_bytes(
         self,
         plan: &Arc<dyn ExecutionPlan>,
@@ -354,30 +249,21 @@ impl QueryExecutionLimits {
         Ok(bytes.max(self.work_mem_bytes))
     }
 
-    /// Budget for one node of one task, granting `hash_mem` to hash tables and
-    /// `work_mem` to the rest. PostgreSQL grants one allowance per process, but
-    /// a task's partitions share a backend, so a per-partition budget here is
-    /// wider. Only an adaptive hash join divides its `hash_mem` among them.
-    /// Partial and final aggregates are separate nodes and count separately.
-    /// Repartition holds no PostgreSQL-style operation memory, but each output
-    /// registers a spillable consumer that takes a share of the pool, so it
-    /// brings its own allowance rather than shrinking the other operators.
+    /// Budget for one node of one task: `hash_mem` for hash tables, `work_mem`
+    /// for the rest. A task's partitions share a backend, so these
+    /// per-partition budgets are wider than PostgreSQL's per-process allowance.
     fn node_memory_bytes(
         self,
         node: &Arc<dyn ExecutionPlan>,
     ) -> DataFusionResult<usize> {
         let partitions = node.output_partitioning().partition_count();
         let (per_partition, partitions) = if node.is::<HashJoinExec>() {
-            // CollectLeft builds one table that every partition probes. Any
-            // other join runs under `AdaptiveHashJoinExec`, which holds each
-            // partition to its share of one `hash_mem`. Null-aware joins, the
-            // only ones it skips, are always CollectLeft.
+            // CollectLeft builds one table every partition probes; other joins
+            // run under `AdaptiveHashJoinExec`.
             (self.hash_memory_bytes, 1)
         } else if node.is::<AdaptiveHashJoinExec>() {
-            // A partition that falls back sorts both inputs. The plan does
-            // not show those Sorts, so their usual budgets are granted here.
-            // Sharing the join's `hash_mem` instead would shrink each Sort's
-            // runs as partitions grow.
+            // A partition that falls back sorts both inputs, and the plan does
+            // not show those Sorts.
             (self.work_mem_bytes, 2 * partitions)
         } else if let Some(aggregate) = node.downcast_ref::<AggregateExec>() {
             if aggregate.group_expr().is_true_no_grouping() {
@@ -388,8 +274,7 @@ impl QueryExecutionLimits {
         } else if node.is::<NestedLoopJoinExec>() {
             (self.work_mem_bytes, 1)
         } else if node.is::<BroadcastExec>() {
-            // One cached build feeds every consumer task, so its virtual
-            // output partitions do not multiply the memory it holds.
+            // One cached build feeds every consumer task.
             (self.hash_memory_bytes, 1)
         } else if node.is::<SortExec>()
             || node.is::<SortMergeJoinExec>()
@@ -404,65 +289,50 @@ impl QueryExecutionLimits {
             .ok_or_else(Self::budget_overflow)
     }
 
-    fn runtime_env(
-        self,
-        bytes: usize,
-        participant: Option<Arc<ParticipantMemoryRecorder>>,
-    ) -> DataFusionResult<RuntimeResources> {
-        let (pool, disk): (Arc<dyn MemoryPool>, DiskManagerBuilder) = if self
-            .spill_enabled
-        {
-            // TODO(datafusion-nlj-fallback): a temp-file disk manager also
-            // enables NestedLoopJoin's fallback, which on ResourcesExhausted
-            // executes its left child again with no reset. In serial, a
-            // CollectLeft HashJoin under that child keeps its finished build and
-            // skips final emission, so LEFT SEMI/ANTI/OUTER rows go missing with
-            // no error. In parallel the rerun ends in an internal ERROR. This is
-            // apache/datafusion#24676, fixed on main by #24677 but not in 55.2.0;
-            // see also #25701 and datafusion-distributed#674. Recheck them on
-            // every DataFusion upgrade and remove this once the fix is pinned.
-            //
-            // TODO(datafusion-aggregate-spill): a grouped aggregate writes each
-            // spill run in batches of up to `batch_size` rows whatever their
-            // size in bytes, and reading the runs back seats each one with twice
-            // its widest batch. A run that holds fewer groups than one batch is a
-            // single batch about the size of the aggregate's share, so the merge
-            // is refused and the query fails with ResourcesExhausted where
-            // PostgreSQL's soft work_mem would continue. This is
-            // apache/datafusion#25851, open, with byte-bounded spill batches
-            // proposed in #26987. One group whose state outgrows the share fails
-            // the same way, in the merge or in the replay, which cannot spill;
-            // #25851 does not cover that case. Recheck both on every DataFusion
-            // upgrade and remove this once they are resolved.
-            (
-                Arc::new(SortFloorPool {
-                    inner: FairSpillPool::new(bytes),
-                    sort_floor_bytes: self.sort_merge_reservation_bytes(),
-                }),
-                PgTempFileFactory::disk_manager(self.work_mem_bytes),
-            )
-        } else {
-            (
-                Arc::new(GreedyMemoryPool::new(bytes)),
-                DiskManagerBuilder::default().with_mode(DiskManagerMode::Disabled),
-            )
-        };
-        let memory = Arc::new(PeakRecordingPool::new(pool));
-        let memory_pool: Arc<dyn MemoryPool> = match participant {
-            Some(participant) => Arc::new(ParticipantRecordingPool {
-                fragment: Arc::clone(&memory),
-                participant,
-            }),
-            None => Arc::clone(&memory) as Arc<dyn MemoryPool>,
-        };
+    fn runtime_env(self, bytes: usize) -> DataFusionResult<RuntimeResources> {
+        let memory = Arc::new(PeakRecordingPool::new(self.memory_pool(bytes)));
         let environment = RuntimeEnvBuilder::new()
-            .with_memory_pool(memory_pool)
-            .with_disk_manager_builder(disk)
+            .with_memory_pool(Arc::clone(&memory) as Arc<dyn MemoryPool>)
+            .with_disk_manager_builder(self.disk_manager())
             .build()?;
         Ok(RuntimeResources {
             environment: Arc::new(environment),
             memory,
         })
+    }
+
+    /// Memory admission policy for `bytes`, shared by leader plans and worker
+    /// tasks.
+    fn memory_pool(self, bytes: usize) -> Arc<dyn MemoryPool> {
+        if self.spill_enabled {
+            // TODO(datafusion-aggregate-spill): a grouped aggregate writes each
+            // spill run in batches of up to `batch_size` rows whatever their
+            // byte size, and the merge seats each run with twice its widest
+            // batch, so a run with fewer groups than one batch fails with
+            // ResourcesExhausted where PostgreSQL's soft `work_mem` would
+            // continue. See apache/datafusion#25851 and #26987; recheck on every
+            // DataFusion upgrade.
+            Arc::new(SortFloorPool {
+                inner: FairSpillPool::new(bytes),
+                sort_floor_bytes: self.sort_merge_reservation_bytes(),
+            })
+        } else {
+            Arc::new(GreedyMemoryPool::new(bytes))
+        }
+    }
+
+    /// Disk policy shared by leader and worker runtime environments.
+    fn disk_manager(self) -> DiskManagerBuilder {
+        if self.spill_enabled {
+            // TODO(datafusion-nlj-fallback): a temp-file disk manager also
+            // enables NestedLoopJoin's fallback, which reruns its left child
+            // without reset and loses rows under a finished CollectLeft build.
+            // apache/datafusion#24676 is fixed on main but not in 55.0.0;
+            // recheck on every DataFusion upgrade.
+            PgTempFileFactory::disk_manager(self.work_mem_bytes)
+        } else {
+            DiskManagerBuilder::default().with_mode(DiskManagerMode::Disabled)
+        }
     }
 
     fn budget_overflow() -> DataFusionError {

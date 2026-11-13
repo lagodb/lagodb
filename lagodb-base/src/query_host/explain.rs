@@ -30,8 +30,6 @@ const PROP_ENGINE_SETUP_TIME: &CStr = c"Engine Setup Time";
 const PROP_PARALLEL_STARTUP_TIME: &CStr = c"Parallel Startup Time";
 const PROP_PARALLEL_WORKERS: &CStr = c"Maximum Launched Workers";
 const PROP_PARALLEL_RUNS: &CStr = c"Parallel Runs";
-const PROP_WORKER_METRIC_REPORTS: &CStr = c"Worker Metric Reports";
-const PROP_EXPECTED_WORKER_METRIC_REPORTS: &CStr = c"Expected Worker Metric Reports";
 const GROUP_ENGINE_PLAN: &CStr = c"Engine Plan";
 const ENGINE_NAME: &CStr = c"DataFusion";
 
@@ -179,18 +177,6 @@ impl QueryOffloadExplain {
                         PROP_PARALLEL_RUNS.as_ptr(),
                         ptr::null(),
                         metrics.parallel_runs,
-                        explain,
-                    );
-                    pg_sys::ExplainPropertyUInteger(
-                        PROP_WORKER_METRIC_REPORTS.as_ptr(),
-                        ptr::null(),
-                        metrics.worker_metric_reports,
-                        explain,
-                    );
-                    pg_sys::ExplainPropertyUInteger(
-                        PROP_EXPECTED_WORKER_METRIC_REPORTS.as_ptr(),
-                        ptr::null(),
-                        metrics.expected_worker_metric_reports,
                         explain,
                     );
                     pg_sys::ExplainPropertyUInteger(

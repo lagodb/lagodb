@@ -1,7 +1,4 @@
 //! Provider-neutral parallel scan leaf and worker-local Arrow stream.
-//!
-//! The implemented distribution contract uses unknown partitioning and balanced
-//! round-robin assignment of provider work groups to logical tasks.
 
 mod stream;
 
@@ -27,6 +24,8 @@ use datafusion_distributed::{
 };
 use lagodb_core::query_contract::ScanId;
 use lagodb_core::runtime_api::SourceWorkId;
+
+use std::num::NonZeroUsize;
 
 use super::host::ParallelWorkerHost;
 use super::scan_metrics::ParallelScanMetrics;
@@ -185,11 +184,17 @@ impl ParallelTableScanExec {
         event: DesiredTaskCountEvent<'_>,
     ) -> Option<Result<DesiredTaskCountEventResponse>> {
         let scan = event.plan.downcast_ref::<Self>()?;
-        Some(Ok(if scan.supported {
-            DesiredTaskCountEventResponse::maximum(scan.work_count as usize)
+        // One task per provider work group: upstream sizes the stage from the
+        // smallest maximum.
+        let maximum = if scan.supported {
+            NonZeroUsize::new(scan.work_count as usize).unwrap_or(NonZeroUsize::MIN)
         } else {
-            DesiredTaskCountEventResponse::maximum(1)
-        }))
+            NonZeroUsize::MIN
+        };
+        Some(Ok(DesiredTaskCountEventResponse::max(
+            maximum,
+            scan.work_count,
+        )))
     }
 
     pub(in crate::datafusion) fn scale_up(

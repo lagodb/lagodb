@@ -8,14 +8,11 @@ use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{AggregateUDF, ScalarUDF};
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion_distributed::{
-    DispatchPlanSource, DistributedCodec, DistributedConfig, TaskKey,
-};
+use datafusion_distributed::DistributedConfig;
 use datafusion_proto::physical_plan::{
-    ComposedPhysicalExtensionCodec, DeduplicatingProtoConverter,
-    PhysicalExtensionCodec, PhysicalPlanNodeExt, PhysicalProtoConverterExtension,
+    PhysicalExtensionCodec, PhysicalProtoConverterExtension,
 };
-use datafusion_proto::protobuf::{self, PhysicalPlanNode, proto_error};
+use datafusion_proto::protobuf::{self, proto_error};
 use prost::Message;
 
 use super::catalog::WorkerSourceCatalog;
@@ -102,13 +99,6 @@ impl LagoPhysicalCodec {
         Self {
             sources: Some(sources),
         }
-    }
-
-    pub(super) fn combined(self) -> ComposedPhysicalExtensionCodec {
-        ComposedPhysicalExtensionCodec::new(vec![
-            Arc::new(DistributedCodecHostingLagoFunctions(DistributedCodec {})),
-            Arc::new(self),
-        ])
     }
 }
 
@@ -252,76 +242,5 @@ impl PhysicalExtensionCodec for LagoPhysicalCodec {
             "LagoDB UDAF codec does not encode {}",
             node.name(),
         )))
-    }
-}
-
-/// The distributed codec must remain position zero for ordinary built-ins to
-/// keep name-only encoding. It only declines LagoDB functions so position one
-/// can carry their definitions.
-#[derive(Debug)]
-struct DistributedCodecHostingLagoFunctions(DistributedCodec);
-
-impl PhysicalExtensionCodec for DistributedCodecHostingLagoFunctions {
-    fn try_decode(
-        &self,
-        buf: &[u8],
-        inputs: &[Arc<dyn ExecutionPlan>],
-        ctx: &TaskContext,
-        proto_converter: &dyn PhysicalProtoConverterExtension,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        self.0.try_decode(buf, inputs, ctx, proto_converter)
-    }
-
-    fn try_encode(
-        &self,
-        node: Arc<dyn ExecutionPlan>,
-        buf: &mut Vec<u8>,
-        proto_converter: &dyn PhysicalProtoConverterExtension,
-    ) -> Result<()> {
-        self.0.try_encode(node, buf, proto_converter)
-    }
-
-    fn try_encode_udf(&self, node: &ScalarUDF, _buf: &mut Vec<u8>) -> Result<()> {
-        if PgIntegerAbsUdf::codec_tag(node).is_some() || node.name() == real_sum::NAME
-        {
-            return Err(DataFusionError::NotImplemented(
-                "PostgreSQL scalar semantics are encoded by the LagoDB codec"
-                    .to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn try_encode_udaf(&self, node: &AggregateUDF, _buf: &mut Vec<u8>) -> Result<()> {
-        if udaf_by_name(node.name()).is_some() {
-            return Err(DataFusionError::NotImplemented(
-                "LagoDB aggregate is encoded by the LagoDB codec".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-}
-
-/// Per-query dispatcher for ready-to-run specialized stage plans.
-#[derive(Default)]
-pub(in crate::datafusion) struct LagoStagePlanDispatch;
-
-impl DispatchPlanSource for LagoStagePlanDispatch {
-    fn dispatch_plan_proto(
-        &self,
-        _task: &TaskKey,
-        specialized: &Arc<dyn ExecutionPlan>,
-    ) -> Option<Result<Vec<u8>>> {
-        // The coordinator calls dispatch once for the task-specialized plan.
-        // Do not retain another copy of each plan or key a rescan's bytes only
-        // by stage/task IDs, which are reused by a new isolated run.
-        Some(
-            PhysicalPlanNode::try_from_physical_plan_with_converter(
-                Arc::clone(specialized),
-                &LagoPhysicalCodec::leader().combined(),
-                &DeduplicatingProtoConverter::default(),
-            )
-            .map(|node| node.encode_to_vec()),
-        )
     }
 }

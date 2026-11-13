@@ -10,7 +10,7 @@ use datafusion::common::{DataFusionError, Result};
 use datafusion::physical_plan::RecordBatchStream;
 use futures::Stream;
 
-use super::super::host::ParallelWorkerHost;
+use super::super::host::{ParallelInterrupt, ParallelWorkerHost};
 use super::super::scan_metrics::ParallelScanMetrics;
 use crate::datafusion::error::QueryExecutionError;
 use crate::datafusion::scan_callbacks::WorkerProviderStreamReader;
@@ -40,7 +40,7 @@ impl ParallelTableScanStream {
     }
 
     fn poll_cancellation(&mut self) -> Option<Poll<Option<Result<RecordBatch>>>> {
-        if self.host.interrupt_pending() {
+        if self.host.interrupt() != ParallelInterrupt::None {
             self.finished = true;
             let primary = QueryExecutionError::interrupted();
             let error = match self.reader.close() {

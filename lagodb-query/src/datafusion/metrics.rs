@@ -38,8 +38,6 @@ pub(super) struct ExecutionMetrics {
     serial_runs: AtomicU64,
     parallel_runs: AtomicU64,
     maximum_workers: AtomicU64,
-    worker_metric_reports: AtomicU64,
-    expected_worker_metric_reports: AtomicU64,
     maximum_worker_fragment_peak_memory_bytes: AtomicU64,
     maximum_worker_participant_peak_memory_bytes: AtomicU64,
 }
@@ -56,8 +54,6 @@ impl ExecutionMetrics {
             serial_runs: AtomicU64::new(0),
             parallel_runs: AtomicU64::new(0),
             maximum_workers: AtomicU64::new(0),
-            worker_metric_reports: AtomicU64::new(0),
-            expected_worker_metric_reports: AtomicU64::new(0),
             maximum_worker_fragment_peak_memory_bytes: AtomicU64::new(0),
             maximum_worker_participant_peak_memory_bytes: AtomicU64::new(0),
         }
@@ -142,30 +138,21 @@ impl ExecutionMetrics {
             .fetch_add(bytes, Ordering::Relaxed);
     }
 
-    pub(super) fn record_worker_metric_reports(
-        &self,
-        received: usize,
-        expected: usize,
-    ) {
-        self.worker_metric_reports.fetch_add(
-            u64::try_from(received).expect("worker report count fits in u64"),
-            Ordering::Relaxed,
-        );
-        self.expected_worker_metric_reports.fetch_add(
-            u64::try_from(expected).expect("worker report count fits in u64"),
-            Ordering::Relaxed,
-        );
-    }
-
     pub(super) fn record_worker_memory_peaks(
         &self,
-        fragment_peak_memory_bytes: u64,
-        participant_peak_memory_bytes: u64,
+        fragment_peak_memory_bytes: usize,
+        participant_peak_memory_bytes: usize,
     ) {
-        self.maximum_worker_fragment_peak_memory_bytes
-            .fetch_max(fragment_peak_memory_bytes, Ordering::Relaxed);
-        self.maximum_worker_participant_peak_memory_bytes
-            .fetch_max(participant_peak_memory_bytes, Ordering::Relaxed);
+        self.maximum_worker_fragment_peak_memory_bytes.fetch_max(
+            u64::try_from(fragment_peak_memory_bytes)
+                .expect("worker memory byte count fits in u64"),
+            Ordering::Relaxed,
+        );
+        self.maximum_worker_participant_peak_memory_bytes.fetch_max(
+            u64::try_from(participant_peak_memory_bytes)
+                .expect("worker memory byte count fits in u64"),
+            Ordering::Relaxed,
+        );
     }
 
     pub(super) fn snapshot(
@@ -198,10 +185,6 @@ impl ExecutionMetrics {
             serial_runs: self.serial_runs.load(Ordering::Relaxed),
             parallel_runs: self.parallel_runs.load(Ordering::Relaxed),
             maximum_workers: self.maximum_workers.load(Ordering::Relaxed),
-            worker_metric_reports: self.worker_metric_reports.load(Ordering::Relaxed),
-            expected_worker_metric_reports: self
-                .expected_worker_metric_reports
-                .load(Ordering::Relaxed),
             maximum_worker_fragment_peak_memory_bytes: self
                 .maximum_worker_fragment_peak_memory_bytes
                 .load(Ordering::Relaxed),
@@ -235,8 +218,6 @@ pub struct ExecutionMetricsSnapshot {
     pub serial_runs: u64,
     pub parallel_runs: u64,
     pub maximum_workers: u64,
-    pub worker_metric_reports: u64,
-    pub expected_worker_metric_reports: u64,
     pub maximum_worker_fragment_peak_memory_bytes: u64,
     pub maximum_worker_participant_peak_memory_bytes: u64,
 }

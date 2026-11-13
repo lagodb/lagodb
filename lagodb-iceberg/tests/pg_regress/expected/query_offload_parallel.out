@@ -47,14 +47,17 @@ INSERT INTO query_offload_parallel_small VALUES (1, 1, 10);
 -- counts are masked as in partition_prune.sql because their text format
 -- differs across major versions. LagoDB worker peak memory depends on how
 -- producer batches interleave in each worker, so it is masked as
--- select_parallel.sql masks parallel sort memory; other LagoDB metrics are left
--- unchanged. LagoDB duration properties ("N ms") are masked as explain.sql
--- masks them, but PostgreSQL's per-node actual time is not, so callers that
--- request timing select only the properties they assert.
+-- select_parallel.sql masks parallel sort memory. A caller can opt into the
+-- same treatment for a leader network-boundary peak while retaining the
+-- invariant that the peak is nonzero. Other LagoDB metrics are left unchanged.
+-- LagoDB duration properties ("N ms") are masked as explain.sql masks them,
+-- but PostgreSQL's per-node actual time is not, so callers that request timing
+-- select only the properties they assert.
 CREATE FUNCTION pg_temp.explain_analyze_text(
     query text,
     verbose_plan boolean DEFAULT false,
-    timing boolean DEFAULT false
+    timing boolean DEFAULT false,
+    mask_local_memory boolean DEFAULT false
 ) RETURNS SETOF text
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -68,6 +71,12 @@ BEGIN
         ln := regexp_replace(ln, 'actual rows=\d+(?:\.\d+)? loops=\d+',
                              'actual rows=N loops=N');
         ln := regexp_replace(ln, '(Worker \w+ Peak Memory Bytes): \d+', '\1: N');
+        IF mask_local_memory THEN
+            ln := regexp_replace(
+                ln,
+                '(Local Engine Peak Memory Bytes): [1-9][0-9]*',
+                '\1: N');
+        END IF;
         ln := regexp_replace(ln, '\d+\.\d+ ms', 'N ms', 'g');
         RETURN NEXT ln;
     END LOOP;
@@ -170,8 +179,6 @@ $$);
    Execution Mode: Parallel
    Maximum Launched Workers: 2
    Parallel Runs: 1
-   Worker Metric Reports: 4
-   Expected Worker Metric Reports: 4
    Maximum Worker Fragment Peak Memory Bytes: N
    Maximum Worker Participant Peak Memory Bytes: N
    Local Engine Peak Memory Bytes: 3072
@@ -189,7 +196,7 @@ $$);
                      Scan Tasks: 33
                      Data Files Selected: 33
                      Selected File Bytes: 53886
-(24 rows)
+(22 rows)
 
 -- With timing, a launched parallel run also reports its startup time.
 SELECT ln FROM pg_temp.explain_analyze_text($$
@@ -235,8 +242,6 @@ $$);
    Execution Mode: Parallel
    Maximum Launched Workers: 2
    Parallel Runs: 1
-   Worker Metric Reports: 4
-   Expected Worker Metric Reports: 4
    Maximum Worker Fragment Peak Memory Bytes: N
    Maximum Worker Participant Peak Memory Bytes: N
    Local Engine Peak Memory Bytes: 4096
@@ -252,7 +257,7 @@ $$);
                      Scan Tasks: 33
                      Data Files Selected: 33
                      Selected File Bytes: 53886
-(22 rows)
+(20 rows)
 
 SELECT key,
        string_agg(label, ',' ORDER BY id) AS labels_by_id,
@@ -310,7 +315,7 @@ FROM query_offload_parallel_left AS l
 JOIN query_offload_parallel_right AS r USING (key)
 ORDER BY left_id, right_id
 LIMIT 8
-$$);
+$$, mask_local_memory => true);
                                explain_analyze_text                               
 ----------------------------------------------------------------------------------
  Limit (actual rows=N loops=N)
@@ -323,11 +328,9 @@ $$);
                      Execution Mode: Parallel
                      Maximum Launched Workers: 2
                      Parallel Runs: 1
-                     Worker Metric Reports: 5
-                     Expected Worker Metric Reports: 5
                      Maximum Worker Fragment Peak Memory Bytes: N
                      Maximum Worker Participant Peak Memory Bytes: N
-                     Local Engine Peak Memory Bytes: 0
+                     Local Engine Peak Memory Bytes: N
                      ->  Projection
                            ->  Hash Join
                                  Join Type: Inner
@@ -346,7 +349,7 @@ $$);
                                        Scan Tasks: 1
                                        Data Files Selected: 1
                                        Selected File Bytes: 1513
-(33 rows)
+(31 rows)
 
 SELECT l.id AS left_id, r.id AS right_id, l.key
 FROM query_offload_parallel_left AS l
@@ -404,8 +407,6 @@ $$);
    Execution Mode: Parallel
    Maximum Launched Workers: 2
    Parallel Runs: 1
-   Worker Metric Reports: 5
-   Expected Worker Metric Reports: 5
    Maximum Worker Fragment Peak Memory Bytes: N
    Maximum Worker Participant Peak Memory Bytes: N
    Local Engine Peak Memory Bytes: 3072
@@ -433,7 +434,7 @@ $$);
                                  Scan Tasks: 1
                                  Data Files Selected: 1
                                  Selected File Bytes: 1513
-(34 rows)
+(32 rows)
 
 SELECT l.key,
        count(*) AS joined_rows,
@@ -473,7 +474,7 @@ ORDER BY l.key;
 DROP TABLE query_offload_parallel_small;
 DROP TABLE query_offload_parallel_right;
 DROP TABLE query_offload_parallel_left;
-DROP FUNCTION pg_temp.explain_analyze_text(text, boolean, boolean);
+DROP FUNCTION pg_temp.explain_analyze_text(text, boolean, boolean, boolean);
 RESET max_parallel_workers_per_gather;
 RESET lagodb.query_offload_parallel_min_scan_rows;
 RESET lagodb.query_batch_rows;

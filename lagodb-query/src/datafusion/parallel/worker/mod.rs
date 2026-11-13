@@ -1,46 +1,34 @@
-//! Worker-local decode, request execution and source release.
-
-mod fragment;
+//! Worker-local decode, serving and source release.
 
 use std::ffi::CStr;
-use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use datafusion::common::{DataFusionError, Result};
-use datafusion::execution::{TaskContext, context::SessionContext};
-use datafusion_distributed::DistributedTaskContext;
-use datafusion_distributed::shm::{
-    CooperativeDrainSet, MppMesh as ParallelMesh, MppSender as ParallelSender,
-    region_total, worker_setup,
+use datafusion::common::{DataFusionError, Result as DataFusionResult};
+use datafusion::execution::context::SessionState;
+use datafusion_distributed::{
+    ChannelResolver, DistributedExt, Worker, WorkerQueryContext, WorkerSessionBuilder,
 };
-use datafusion_proto::physical_plan::{
-    DeduplicatingProtoConverter, PhysicalPlanNodeExt,
-};
-use datafusion_proto::protobuf::PhysicalPlanNode;
-use futures::future::try_join_all;
 use lagodb_core::query_contract::{TableScanRoute, TableScanRouteKind};
 use prost::Message;
-use tokio::runtime::Builder;
 
 use super::bootstrap::ParallelBootstrap;
 use super::catalog::WorkerSourceCatalog;
 use super::codec::LagoPhysicalCodec;
-use super::host::{ParallelInterruptGuard, ParallelWorkerHost};
-use super::metrics::WorkerMemoryMetrics;
-use super::session::{ParallelSession, TransportHost};
+use super::host::{ParallelExecutionHost, ParallelWorkerHost};
 use super::source_inventory::MappedSourceInventory;
-use super::stages::{ParallelStageCatalog, ParallelStageRouting};
+use super::transport::{
+    ParallelChannelResolver, ParallelRuntime, RunRole, RunSignal, RunWatch,
+    ServerStreams, StreamContext, TransportRegion, WakerSet,
+};
 use crate::ExecutionProfile;
 use crate::datafusion::error::QueryExecutionError;
-use crate::datafusion::memory::ParticipantMemoryRecorder;
-use crate::datafusion::memory::QueryExecutionLimits;
+use crate::datafusion::memory::{
+    ParticipantMemoryRecorder, QueryExecutionLimits, TaskMemoryPool,
+};
+use crate::datafusion::scan_callbacks::WorkerTableScanSource;
 
-use fragment::{WorkerFragment, WorkerPartitionSink};
-
-const DEBUG_DEADLOCK_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Drive a restored PG parallel worker using its leader-initialized mapping.
+/// Drive a restored PG parallel worker through the upstream gRPC service.
 ///
 /// # Safety
 /// The host must retain its attached mapping, invoke this on the backend main
@@ -48,42 +36,30 @@ const DEBUG_DEADLOCK_TIMEOUT: Duration = Duration::from_secs(30);
 pub unsafe fn run_parallel_worker<H: ParallelWorkerHost + 'static>(
     host: Arc<H>,
 ) -> Result<(), QueryExecutionError> {
-    let adapter = Arc::new(TransportHost(Arc::clone(&host)));
-    // SAFETY: the caller supplies the active PG mapping. The transport header
-    // owns only the mapping prefix; the published mapping length also includes
-    // the shared source-inventory tail.
-    let transport_bytes =
-        unsafe { region_total(host.region().as_ptr().cast_const()) };
-    // SAFETY: `transport_bytes` was read from this initialized mapping's
-    // transport header; the host keeps the mapping attached for this call.
-    // Keep this as the first fallible engine operation after activation.  The
-    // errors before sender attachment only validate the leader-published DSM
-    // layout and PostgreSQL's dense worker index; bootstrap decoding starts
-    // only after `WorkerSession` has registered this worker's senders.
-    let transport = unsafe {
-        worker_setup(
-            host.region().as_ptr(),
-            transport_bytes,
-            host.process_index(),
-            adapter.clone(),
-            host.receiver_token(),
-            adapter,
-        )
-    }?;
-    host.watch_mapping(transport.mesh.detached_flag())
-        .map_err(QueryExecutionError::ParallelHost)?;
-    let bootstrap = ParallelBootstrap::decode(transport.plan_bytes.as_slice())
-        .map_err(|error| {
+    // SAFETY: the caller supplies the active PG mapping; its published length
+    // covers the transport prefix and the shared source-inventory tail.
+    let transport =
+        unsafe { TransportRegion::attach(host.region(), host.region_bytes()) };
+    // A worker that enters after the leader ended the run has nothing to serve,
+    // and the durable flag means it cannot miss that notice.
+    if transport.shutdown().load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let bootstrap =
+        ParallelBootstrap::decode(transport.bootstrap()).map_err(|error| {
             DataFusionError::Plan(format!(
                 "failed to decode parallel source inventory: {error}"
             ))
         })?;
-    // The leader encodes every bootstrap size from a `usize` of this same
-    // build and platform, so narrowing back to `usize` is lossless.
+    // The leader encodes every bootstrap size from a `usize` of this same build
+    // and platform, so narrowing back to `usize` is lossless.
     let inventory_len = bootstrap.source_inventory_bytes as usize;
+    transport.verify_layout(host.region_bytes(), inventory_len);
+    let transport = Arc::new(transport);
+    transport.publish_token(host.process_index(), host.receiver_token());
     // SAFETY: activation publishes the complete mapping length only after the
-    // leader has initialized both the transport prefix and inventory tail.
-    let source_inventory = unsafe {
+    // leader initialized the transport prefix and the inventory tail.
+    let inventory = unsafe {
         MappedSourceInventory::new(host.region(), host.region_bytes(), inventory_len)
     };
     // The bootstrap carries the leader's validated `QueryExecutionLimits`.
@@ -93,24 +69,54 @@ pub unsafe fn run_parallel_worker<H: ParallelWorkerHost + 'static>(
         ExecutionProfile::restore(bootstrap.maximum_batch_rows as usize),
         bootstrap.spill_enabled,
     );
-    // The shared session is used for plan decoding. Each executable fragment
-    // installs its own plan-sized RuntimeEnv below.
-    let memory = limits.planning_runtime_env()?;
-    let session = ParallelSession::build(
-        memory.environment,
+    let sources = WorkerRun::resolve_sources(&host, &bootstrap, &inventory)?;
+    let source_host: Arc<dyn ParallelWorkerHost> = host.clone();
+    let sources = WorkerSourceCatalog::new(sources, source_host);
+    let live = Arc::new(AtomicBool::new(true));
+    host.watch_mapping(Arc::clone(&live))
+        .map_err(QueryExecutionError::ParallelHost)?;
+    let run = WorkerRun {
+        host: Arc::clone(&host),
+        transport: Arc::clone(&transport),
+        live,
         limits,
-        transport.mesh.n_workers() as usize,
-        bootstrap.collect_metrics,
-        None,
-    )?;
-    let session = ParallelSession::attach(session, Arc::clone(&transport.mesh));
-    let runtime = Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .map_err(QueryExecutionError::Runtime)?;
-    let mut sources = Vec::with_capacity(bootstrap.sources.len());
-    let source_result: Result<()> = (|| {
-        for source in bootstrap.sources {
+        collect_metrics: bootstrap.collect_metrics,
+        sources: &sources,
+    };
+    let result = run.serve();
+    // Every task plan and stream has dropped before sources are released.
+    drop(run);
+    let cleanup = sources.close();
+    drop(transport);
+    let interrupts = host
+        .process_interrupts()
+        .map_err(QueryExecutionError::ParallelHost);
+    // PgTryBuilder turns PostgreSQL ERROR into this Result rather than reporting
+    // it, so the first observed error is preserved while cleanup still runs.
+    result
+        .and(cleanup.map_err(QueryExecutionError::from))
+        .and(interrupts)
+}
+
+/// One worker's serving state for one run.
+struct WorkerRun<'a, H: ParallelWorkerHost> {
+    host: Arc<H>,
+    transport: Arc<TransportRegion>,
+    live: Arc<AtomicBool>,
+    limits: QueryExecutionLimits,
+    collect_metrics: bool,
+    sources: &'a WorkerSourceCatalog,
+}
+
+impl<H: ParallelWorkerHost + 'static> WorkerRun<'_, H> {
+    /// Decodes every provider payload and binds it to its route.
+    fn resolve_sources(
+        host: &Arc<H>,
+        bootstrap: &ParallelBootstrap,
+        inventory: &MappedSourceInventory<'_>,
+    ) -> DataFusionResult<Vec<Arc<WorkerTableScanSource>>> {
+        let mut sources = Vec::with_capacity(bootstrap.sources.len());
+        for source in &bootstrap.sources {
             let kind = TableScanRouteKind::from_code(source.route_kind).ok_or_else(
                 || {
                     DataFusionError::Plan(
@@ -129,189 +135,120 @@ pub unsafe fn run_parallel_worker<H: ParallelWorkerHost + 'static>(
                 .map_err(|error| DataFusionError::External(Box::new(error)))?;
             sources.push(Arc::new(
                 callbacks
-                    .decode(source_inventory.payload(&source))
+                    .decode(inventory.payload(source))
                     .map_err(|error| DataFusionError::External(Box::new(error)))?,
             ));
         }
-        Ok(())
-    })();
-    let source_host: Arc<dyn ParallelWorkerHost> = host.clone();
-    let sources = WorkerSourceCatalog::new(sources, source_host);
-    let result = match source_result {
-        Err(error) => Err(error),
-        Ok(()) => {
-            let stages = ParallelStageCatalog::from_stages(bootstrap.stages);
-            let outbound = Arc::new(transport.outbound_senders().to_vec());
-            let _held = ParallelInterruptGuard::new(host.as_ref());
-            runtime.block_on(
-                WorkerExecution {
-                    stages: &stages,
-                    session: &session,
-                    sources: &sources,
-                    mesh: Arc::clone(&transport.mesh),
-                    outbound,
-                    limits,
-                    collect_metrics: bootstrap.collect_metrics,
-                    debug_deadlock_detector: bootstrap.debug_deadlock_detector,
-                }
-                .run(),
-            )
-        }
-    };
-    // All fragment futures/plans have dropped before sources are released.
-    drop(session);
-    drop(runtime);
-    let cleanup = sources.close();
-    drop(transport);
-    let interrupts = host
-        .process_interrupts()
-        .map_err(QueryExecutionError::ParallelHost);
-    // PgTryBuilder turns PostgreSQL ERROR into this Result; it does not report
-    // immediately. Preserve the already-observed execution/cleanup error when
-    // the final interrupt service also returns an error.
-    result
-        .map_err(QueryExecutionError::from)
-        .and(cleanup.map_err(QueryExecutionError::from))
-        .and(interrupts)
-}
+        Ok(sources)
+    }
 
-struct WorkerExecution<'a> {
-    stages: &'a ParallelStageCatalog,
-    session: &'a SessionContext,
-    sources: &'a WorkerSourceCatalog,
-    mesh: Arc<ParallelMesh>,
-    outbound: Arc<Vec<Option<ParallelSender>>>,
-    limits: QueryExecutionLimits,
-    collect_metrics: bool,
-    debug_deadlock_detector: bool,
-}
-
-impl WorkerExecution<'_> {
-    async fn run(self) -> Result<()> {
-        let width = NonZeroU32::new(self.mesh.n_workers())
-            .expect("worker mesh includes producer processes");
-        let codec = LagoPhysicalCodec::worker(self.sources.clone()).combined();
-        let participant_memory = self
+    /// Serves this run's gRPC traffic until the run ends.
+    fn serve(&self) -> Result<(), QueryExecutionError> {
+        let host: Arc<dyn ParallelExecutionHost> = self.host.clone();
+        let runtime = ParallelRuntime::with_reactor(&host)?;
+        let reactor = runtime
+            .reactor()
+            .expect("a reactor runtime contains its registered reactor");
+        let wakers = Arc::new(WakerSet::new(self.transport.workers()));
+        let attachment = reactor.attach(Arc::clone(&wakers));
+        let streams = StreamContext::new(
+            Arc::clone(&self.transport),
+            Arc::clone(&host),
+            Arc::clone(&wakers),
+            Arc::clone(&self.live),
+        );
+        // Exactly one resolver per run: every task shares it, or each would open
+        // its own HTTP/2 connection over the same DSM stream pair.
+        let resolver: Arc<dyn ChannelResolver + Send + Sync> = Arc::new(
+            ParallelChannelResolver::new(streams.clone(), self.host.process_index()),
+        );
+        // One peak recorder per worker participant: tasks take turns observing the
+        // same reservation.
+        let participant = self
             .collect_metrics
             .then(|| Arc::new(ParticipantMemoryRecorder::default()));
-        let mut fragments = Vec::new();
-        for assignment in self.stages.assignments(self.mesh.this_proc, width) {
-            let frame = {
-                let receive = self
-                    .mesh
-                    .take_set_plan(assignment.stage_id, assignment.task_id);
-                tokio::pin!(receive);
-                loop {
-                    tokio::select! {
-                        frame = &mut receive => break frame?,
-                        _ = tokio::time::sleep(Duration::from_millis(1)) => {
-                            self.mesh.try_drain_pass()?;
-                            self.mesh.check_interrupt()?;
-                        }
-                    }
-                }
-            };
-            let (request, _) = frame.into_parts()?;
-            let config =
-                self.session
-                    .state()
-                    .config()
-                    .clone()
-                    .with_extension(Arc::new(DistributedTaskContext {
-                        task_index: assignment.task_id as usize,
-                        task_count: assignment.task_count as usize,
-                    }));
-            let decode_context = Arc::new(
-                TaskContext::from(self.session).with_session_config(config.clone()),
-            );
-            let proto = PhysicalPlanNode::decode(request.plan_proto.as_slice())
-                .map_err(|error| {
-                    DataFusionError::Plan(format!(
-                        "failed to decode parallel stage plan: {error}"
-                    ))
-                })?;
-            let plan = proto.try_into_physical_plan_with_converter(
-                &decode_context,
-                &codec,
-                &DeduplicatingProtoConverter::default(),
-            )?;
-            let resources = match &participant_memory {
-                Some(participant) => self
-                    .limits
-                    .runtime_env_for_fragment(&plan, Arc::clone(participant))?,
-                None => self.limits.runtime_env_for_plan(&plan)?,
-            };
-            let memory_metrics = participant_memory.as_ref().map(|participant| {
-                WorkerMemoryMetrics::new(
-                    Arc::clone(&resources.memory),
-                    Arc::clone(participant),
-                )
-            });
-            let context = Arc::new(
-                TaskContext::from(self.session)
-                    .with_session_config(config)
-                    .with_runtime(resources.environment),
-            );
-            let stage = self
-                .stages
-                .stages()
-                .iter()
-                .find(|stage| stage.stage_id == assignment.stage_id)
-                .expect("assignment belongs to the stage inventory")
-                .clone();
-            let routing =
-                ParallelStageRouting::try_from(stage.routing).map_err(|_| {
-                    DataFusionError::Plan(format!(
-                        "parallel stage {} has unknown routing {}",
-                        stage.stage_id, stage.routing,
-                    ))
-                })?;
-            let sink = Arc::new(WorkerPartitionSink::new(
-                stage,
-                routing,
-                Arc::clone(&self.mesh),
-                Arc::clone(&self.outbound),
-            ));
-            fragments.push(WorkerFragment::new(
-                assignment,
-                plan,
-                context,
-                sink,
-                memory_metrics,
-            ));
-        }
-        // Network-boundary execution constructs every upstream stream eagerly.
-        // Dropping a consumer before EOF sends a stream-level Cancel to its
-        // producer; fragment request loops therefore finish without a separate
-        // worker-wide cancellation monitor.
-        let execution = async {
-            try_join_all(fragments.iter().map(WorkerFragment::execute))
-                .await
-                .map(|_| ())
-        };
-        let result = if self.debug_deadlock_detector {
-            match tokio::time::timeout(DEBUG_DEADLOCK_TIMEOUT, execution).await {
-                Ok(result) => result,
-                Err(_) => Err(DataFusionError::Internal(
-                    "parallel worker fragment execution exceeded 30 seconds; deadlock detector triggered"
-                        .to_owned(),
-                )),
+        let worker = Worker::from_session_builder(TaskSessionBuilder {
+            sources: self.sources.clone(),
+            limits: self.limits,
+            target_partitions: self.transport.workers() as usize,
+            resolver,
+            participant,
+        });
+        let server = tonic::transport::Server::builder()
+            .add_service(worker.into_worker_server());
+        let incoming = ServerStreams::new(&streams, self.host.process_index());
+        let served = runtime.block_on(async {
+            let watch =
+                RunWatch::new(&self.transport, &self.live, &wakers, RunRole::Worker);
+            tokio::select! {
+                served = server.serve_with_incoming(incoming) => Served::Done(served),
+                signal = watch => Served::Signalled(signal),
             }
-        } else {
-            execution.await
-        };
-        let mut metrics_error = None;
-        if self.collect_metrics {
-            for fragment in &fragments {
-                let sent = fragment.send_metrics().await;
-                if metrics_error.is_none() {
-                    metrics_error = sent.err();
-                }
+        })?;
+        drop(attachment);
+        drop(runtime);
+        match served {
+            Served::Done(served) => served
+                .map_err(|error| DataFusionError::External(Box::new(error)).into()),
+            // The leader ended the run.
+            Served::Signalled(RunSignal::Shutdown) => Ok(()),
+            Served::Signalled(RunSignal::Abort) => {
+                Err(QueryExecutionError::interrupted().into())
             }
         }
-        result.and(match metrics_error {
-            Some(error) => Err(error),
-            None => Ok(()),
-        })
+    }
+}
+
+/// What ended the serve loop.
+enum Served {
+    Done(Result<(), tonic::transport::Error>),
+    Signalled(RunSignal),
+}
+
+/// Builds the upstream session of one task.
+///
+/// Only the task-specific pieces live here: the run-scoped resolver and the
+/// worker codec are installed on top of the distributed task config. A worker
+/// has no statement-wide session to inherit from, and a codec registration
+/// appends rather than replaces.
+struct TaskSessionBuilder {
+    sources: WorkerSourceCatalog,
+    limits: QueryExecutionLimits,
+    /// Partitions this worker sized its stage plans for.
+    target_partitions: usize,
+    /// The run's per-participant gRPC clients, shared by every task.
+    resolver: Arc<dyn ChannelResolver + Send + Sync>,
+    /// The participant-wide peak recorder, absent when metrics are off.
+    participant: Option<Arc<ParticipantMemoryRecorder>>,
+}
+
+#[async_trait::async_trait]
+impl WorkerSessionBuilder for TaskSessionBuilder {
+    async fn build_session_state(
+        &self,
+        mut ctx: WorkerQueryContext,
+    ) -> DataFusionResult<SessionState> {
+        let memory = TaskMemoryPool::new(self.limits, self.participant.clone());
+        let config = ctx
+            .builder
+            .config()
+            .take()
+            .expect("a distributed task always carries its session config");
+        let config = self
+            .limits
+            .apply_session_policy(config, self.target_partitions);
+        Ok(ctx
+            .builder
+            .with_config(config)
+            .with_runtime_env(memory.environment())
+            .with_distributed_channel_resolver(Arc::clone(&self.resolver))
+            .with_distributed_user_codec(LagoPhysicalCodec::worker(
+                self.sources.clone(),
+            ))
+            // The plan arrives after the session exists: the rewrite hook publishes
+            // the task's memory limit, the finished hook reports its peaks.
+            .with_distributed_worker_plan_rewrite_handler(memory.clone())
+            .with_distributed_task_finished_handler(memory)
+            .build())
     }
 }

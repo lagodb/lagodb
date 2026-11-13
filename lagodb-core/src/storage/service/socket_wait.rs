@@ -9,9 +9,11 @@ use std::time::Instant;
 use lagodb_storage::{SocketInterest, SocketWait, SocketWaitContext};
 use pgrx::pg_sys;
 
+use crate::backend::{BackendLatch, BackendProcess};
+
 pub(super) struct PostgresSocketWait {
-    // PostgreSQL backend-local state. This waiter must be used and dropped on
-    // the backend thread that created its event set.
+    // Backend-local PostgreSQL state: this waiter must be used and dropped on the
+    // backend thread that created its event set.
     event_set: Option<PgWaitEventSet>,
 }
 
@@ -32,6 +34,7 @@ impl SocketWait for PostgresSocketWait {
             .as_mut()
             .expect("event set was initialized above");
         event_set.configure(interest, context)?;
+        let mut dropped_latch = BackendLatch::preserve_dropped_latch();
 
         loop {
             let timeout = Self::timeout_millis(deadline)?;
@@ -56,27 +59,38 @@ impl SocketWait for PostgresSocketWait {
                 unsafe {
                     pg_sys::ResetLatch(latch.as_ptr());
                 }
-                // Parallel execution holds PostgreSQL interrupts while a
-                // current-thread runtime is live. Return a non-retryable I/O
-                // error so ClientIo poisons the partial protocol exchange and
-                // the worker can unwind to the safe interrupt-service point.
-                // Without the holdoff, preserve PostgreSQL's normal ERROR path.
-                // SAFETY: these backend-local signal flags and holdoff counter
-                // are read on the owning PostgreSQL backend thread.
-                if unsafe {
-                    pg_sys::InterruptHoldoffCount != 0
-                        && (pg_sys::QueryCancelPending != 0
-                            || pg_sys::ProcDiePending != 0)
-                } {
+                let interrupts_held = BackendProcess::interrupts_held();
+                if interrupts_held {
+                    // The holder services this wakeup once its hold ends, so
+                    // PostgreSQL's dropped-latch protocol sets the latch again on
+                    // every exit path.
+                    dropped_latch.mark_dropped();
+                }
+                // A hold comes from the parallel runtime polling a future, or
+                // from PostgreSQL running transaction-end callbacks: commit,
+                // abort and subtransaction abort hold interrupts first. Under
+                // either, a cancel or termination ends the request with an error
+                // so ClientIo poisons the partial exchange, and the interrupt
+                // stays pending for the holder. Without a hold, keep PostgreSQL's
+                // normal ERROR path.
+                //
+                // Every other reason stays pending until this request completes:
+                // transaction timeout and recovery conflicts (PostgreSQL 17+), a
+                // lost-client check, and benign reasons such as barriers or
+                // parallel messages. Foreground requests have no deadline, so a
+                // stalled storage service stretches that delay until a cancel or
+                // termination arrives. The remedy depends on the holder: the
+                // runtime must run this wait outside its held poll, while
+                // transaction-end I/O needs a bounded cleanup deadline, as
+                // postgres_fdw gives its abort cleanup.
+                if interrupts_held && BackendProcess::query_interrupt_pending() {
                     return Err(io::Error::new(
                         io::ErrorKind::ConnectionAborted,
                         "storage socket wait deferred a PostgreSQL interrupt",
                     ));
                 }
-                // A latch can signal either a canceling or a benign PostgreSQL
-                // interrupt. Canceling interrupts unwind through ClientIo::Drop,
-                // which poisons the in-flight protocol connection. Benign
-                // interrupts return normally and leave the connection reusable.
+                // A canceling interrupt unwinds through ClientIo::Drop and poisons
+                // the connection; a benign one returns and leaves it reusable.
                 pg_sys::check_for_interrupts!();
             }
             if occurred & event_set.socket_event() != 0 {
@@ -133,9 +147,8 @@ struct PgWaitEventSet {
 impl PgWaitEventSet {
     fn new(socket_fd: RawFd, interest: SocketInterest) -> io::Result<Self> {
         let latch = Self::current_latch()?;
-        // A NULL ResourceOwner, or TopMemoryContext where PostgreSQL 15 and 16 take
-        // a context instead, gives the set session lifetime. Rust owns the
-        // returned set and frees it when this connection generation ends.
+        // A NULL ResourceOwner, or TopMemoryContext where PostgreSQL 15 and 16
+        // take a context instead, gives the set session lifetime.
         #[cfg(any(feature = "pg15", feature = "pg16"))]
         let owner = unsafe { pg_sys::TopMemoryContext };
         #[cfg(any(feature = "pg17", feature = "pg18"))]
@@ -155,11 +168,11 @@ impl PgWaitEventSet {
             latch,
         };
 
-        // PgWaitEventSet already owns `raw`, so an ERROR from any registration
-        // unwinds through its Drop implementation. Capacity three covers the
-        // backend latch, postmaster death, and this generation's socket.
-        // SAFETY: MyLatch belongs to the current backend, socket_fd remains
-        // open for the generation, and every pointer is valid for the call.
+        // PgWaitEventSet owns `raw` from here, so an ERROR from any registration
+        // unwinds through its Drop. Capacity three covers the backend latch,
+        // postmaster death and this generation's socket.
+        // SAFETY: socket_fd stays open for the generation, and every pointer is
+        // valid for the call.
         unsafe {
             event_set.latch_pos = pg_sys::AddWaitEventToSet(
                 event_set.raw.as_ptr(),
@@ -216,8 +229,8 @@ impl PgWaitEventSet {
         if latch != self.latch {
             // Passing NULL disables latch delivery during cleanup without
             // changing the underlying reusable kernel wait object.
-            // SAFETY: latch_pos identifies the latch event registered by new().
-            // A non-NULL latch is owned by the current PostgreSQL backend.
+            // SAFETY: latch_pos identifies the event registered by new(), and a
+            // non-NULL latch belongs to the current backend.
             unsafe {
                 pg_sys::ModifyWaitEvent(
                     self.raw.as_ptr(),

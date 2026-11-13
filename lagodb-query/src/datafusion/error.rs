@@ -20,6 +20,8 @@ pub enum QueryExecutionError {
     InvalidLimits,
     #[error("failed to create current-thread query runtime: {0}")]
     Runtime(#[source] io::Error),
+    #[error("failed to register a parallel transport descriptor: {0}")]
+    Transport(#[source] io::Error),
     #[error("DataFusion query execution failed: {0}")]
     DataFusion(#[from] DataFusionError),
     #[error("table scan binding failed: {0}")]
@@ -63,6 +65,7 @@ impl SqlStateError for QueryExecutionError {
             Self::InvalidQueryOutput { .. } => PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
             Self::InvalidLimits
             | Self::Runtime(_)
+            | Self::Transport(_)
             | Self::RuntimeValues(_)
             | Self::ScanCallbackCount { .. }
             | Self::MissingScanMetadata { .. }

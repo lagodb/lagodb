@@ -1,8 +1,7 @@
 //! GUCs and work-memory budget for query-subtree offload.
 //!
-//! Planning and execution read their settings at separate points. A cached
-//! plan keeps the settings it was planned and costed with, while executor
-//! settings follow the session values in effect when the scan starts.
+//! A cached plan keeps the settings it was planned and costed with, while
+//! executor settings follow the session values in effect when the scan starts.
 
 use lagodb_query::datafusion::QueryExecutionLimits;
 use lagodb_query::{
@@ -16,17 +15,8 @@ static QUERY_OFFLOAD_MODE: GucSetting<QueryOffloadMode> =
     GucSetting::<QueryOffloadMode>::new(QueryOffloadMode::Off);
 static QUERY_BATCH_ROWS: GucSetting<i32> =
     GucSetting::<i32>::new(DEFAULT_MAXIMUM_BATCH_ROWS);
-// Defaults measured on PostgreSQL 18. Serial Engine Setup Time was 0.5-0.95 ms
-// (median 0.66 ms) on an Apple M5 and 0.29-0.87 ms (median 0.55 ms) on an
-// x86-64 server, where one cost unit of serial PostgreSQL plans took 7.1 us and
-// 12-16 us, so setup is about 93 and 35-45 units; setup 40 follows the x86-64
-// server. There, with multiplier 0.05 and the Iceberg scan defaults, the
-// cheaper estimate matched the faster path on 157 of 162 managed-table points
-// (aggregate, filtered aggregate, DISTINCT and join; serial and parallel; with
-// and without spill) and 97 of 104 partitioned foreign-table points (LIST
-// equality and day ranges), and every miss differed by under 2 ms. Setup 90
-// with multiplier 0.1 matched 149 and 96, and 18 of its 21 misses chose
-// PostgreSQL where offload ran faster.
+// Setup 40 and multiplier 0.05 follow the x86-64 measurements in
+// docs/query-offload-auto-cost-model.md (sections 6.2 and 6.3).
 static QUERY_OFFLOAD_SETUP_COST: GucSetting<f64> = GucSetting::<f64>::new(40.0);
 static QUERY_OFFLOAD_CPU_COST_MULTIPLIER: GucSetting<f64> =
     GucSetting::<f64>::new(0.05);
@@ -34,8 +24,6 @@ static QUERY_OFFLOAD_PARALLEL_MIN_SCAN_ROWS: GucSetting<i32> =
     GucSetting::<i32>::new(500_000);
 static QUERY_OFFLOAD_PARALLEL_QUEUE_SIZE: GucSetting<i32> =
     GucSetting::<i32>::new(8 * 1_024 * 1_024);
-static QUERY_OFFLOAD_PARALLEL_DEBUG: GucSetting<bool> =
-    GucSetting::<bool>::new(false);
 static QUERY_OFFLOAD_SPILL: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PostgresGucEnum)]
@@ -80,7 +68,6 @@ pub(super) struct QueryExecutionSettings {
     pub(super) spill: bool,
     pub(super) parallel_min_scan_rows: f64,
     pub(super) parallel_queue_size: usize,
-    pub(super) parallel_debug: bool,
 }
 
 impl QueryExecutionSettings {
@@ -96,7 +83,6 @@ impl QueryExecutionSettings {
             .expect(
                 "query_offload_parallel_queue_size GUC enforces a positive i32 value",
             ),
-            parallel_debug: QUERY_OFFLOAD_PARALLEL_DEBUG.get(),
         }
     }
 
@@ -106,8 +92,8 @@ impl QueryExecutionSettings {
         self,
         execution: ExecutionProfile,
     ) -> Result<QueryExecutionLimits, QueryHostError> {
-        // SAFETY: PostgreSQL derives this backend-local limit from work_mem and
-        // hash_mem_multiplier with the same size_t clamp used by its executor.
+        // SAFETY: PostgreSQL derives this limit from work_mem and
+        // hash_mem_multiplier; both are backend-local.
         let hash_memory_bytes = unsafe { pg_sys::get_hash_memory_limit() };
         QueryExecutionLimits::try_new(
             WorkMemBudget::bytes(),
@@ -123,11 +109,9 @@ pub(super) struct WorkMemBudget;
 
 impl WorkMemBudget {
     /// PostgreSQL defines `work_mem` in KiB and bounds it to
-    /// `64..=MAX_KILOBYTES` (`utils/guc.h`), which keeps the byte count within
-    /// `size_t` on every supported platform.
+    /// `64..=MAX_KILOBYTES` (`utils/guc.h`), so the byte count fits a `size_t`.
     pub(super) fn bytes() -> usize {
-        // SAFETY: `work_mem` is a backend-local PostgreSQL GUC read on the
-        // backend main thread.
+        // SAFETY: `work_mem` is a backend-local GUC read on the backend thread.
         let kib = unsafe { pg_sys::work_mem };
         kib as usize * 1_024
     }
@@ -184,21 +168,13 @@ pub(super) fn define() {
     );
     GucRegistry::define_int_guc(
         c"lagodb.query_offload_parallel_queue_size",
-        c"Per-inbox ring size for parallel query-offload shuffles",
-        c"Each parallel query-offload run allocates one inbox per participant; frames larger than an inbox stream through it in chunks.",
+        c"Transport budget for parallel query-offload shuffles",
+        c"Target size of the shared-memory rings one parallel run allocates, divided across the 2*W*W rings of its launch width; a floor per ring keeps small budgets usable, so the run may allocate more than this.",
         &QUERY_OFFLOAD_PARALLEL_QUEUE_SIZE,
         64 * 1_024,
         1_024 * 1_024 * 1_024,
         GucContext::Userset,
         GucFlags::UNIT_BYTE,
-    );
-    GucRegistry::define_bool_guc(
-        c"lagodb.query_offload_parallel_debug",
-        c"Enable diagnostic safeguards for parallel query-offload execution",
-        c"Enables the 30-second worker fragment deadlock detector; intended for diagnosis, not normal query timeouts.",
-        &QUERY_OFFLOAD_PARALLEL_DEBUG,
-        GucContext::Userset,
-        GucFlags::default(),
     );
     GucRegistry::define_bool_guc(
         c"lagodb.query_offload_spill",

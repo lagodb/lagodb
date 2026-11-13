@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::datafusion::parallel::ParallelRuntime;
 use datafusion::common::DataFusionError;
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::execution::context::SessionContext;
@@ -10,15 +11,14 @@ use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::execution::session_state::SessionStateBuilder;
 use lagodb_core::expr::RuntimeValueState;
 use lagodb_core::query_contract::ScanId;
-use tokio::runtime::Runtime;
 
 use crate::datafusion::compiler::{DataFusionPlanCompiler, DataFusionPlanError};
 use crate::datafusion::join_planning::QuerySessionRules;
 use crate::datafusion::memory::QueryExecutionLimits;
 use crate::datafusion::metrics::ExecutionMetrics;
 use crate::datafusion::parallel::{
-    ParallelInterruptGuard, ParallelQueryOptions, ParallelSession,
-    ParallelSourceCatalog, PreparedParallelPlan,
+    ParallelQueryOptions, ParallelSession, ParallelSourceCatalog,
+    PreparedParallelPlan,
 };
 use crate::datafusion::physical_plan::{
     CompiledPhysicalPlan, PhysicalPlanMetricsAccumulator,
@@ -45,7 +45,8 @@ impl From<DataFusionPlanError> for QueryExecutionError {
 }
 
 pub(super) struct PhysicalPlanPreparation<'a> {
-    pub(super) runtime: &'a Runtime,
+    pub(super) runtime: &'a ParallelRuntime,
+    pub(super) parallel: Option<&'a ParallelQueryOptions>,
     pub(super) environment: Arc<RuntimeEnv>,
     pub(super) fragment: &'a QueryFragment,
     pub(super) limits: QueryExecutionLimits,
@@ -53,7 +54,6 @@ pub(super) struct PhysicalPlanPreparation<'a> {
     pub(super) bound_scans: &'a BoundTableScans,
     pub(super) postgres: PgExprRuntime,
     pub(super) runtime_values: &'a RuntimeValueState,
-    pub(super) parallel: Option<&'a ParallelQueryOptions>,
 }
 
 pub(super) struct PreparedSerialPlan {
@@ -185,7 +185,7 @@ impl PhysicalPlanPreparation<'_> {
             self.fragment,
             &providers,
             self.runtime_values.values(),
-        ))?;
+        ))??;
         let resources = self.limits.runtime_env_for_plan(plan.plan())?;
         let state = SessionStateBuilder::new_from_existing(session.state())
             .with_runtime_env(resources.environment)
@@ -215,7 +215,7 @@ impl PhysicalPlanPreparation<'_> {
             self.limits,
             worker_cap as usize,
             self.metrics.is_some(),
-            Some(self.fragment),
+            self.fragment,
         )?;
         let providers = self.bound_scans.parallel_providers(
             self.fragment,
@@ -224,20 +224,13 @@ impl PhysicalPlanPreparation<'_> {
             Arc::clone(&sources),
         )?;
         let compiler = DataFusionPlanCompiler::new(&session, self.postgres);
-        let plan = {
-            let _held = ParallelInterruptGuard::new(options.host.as_ref());
-            self.runtime.block_on(compiler.compile_parallel(
-                self.fragment,
-                &providers,
-                self.runtime_values.values(),
-            ))
-        };
-        options
-            .host
-            .process_interrupts()
-            .map_err(QueryExecutionError::ParallelHost)?;
+        let plan = self.runtime.block_on(compiler.compile_parallel(
+            self.fragment,
+            &providers,
+            self.runtime_values.values(),
+        ))??;
         PreparedParallelPlan::try_new(
-            plan?,
+            plan,
             session,
             &sources,
             worker_cap,

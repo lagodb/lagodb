@@ -2,9 +2,8 @@
 
 use std::mem;
 
-use datafusion_distributed::shm::LeaderSession;
-
 use super::host::ParallelWorkers;
+use super::run::LeaderTransport;
 
 /// Owns a launched worker group until transport initialization has completed.
 /// Any partial-launch error follows the same non-blocking abort ownership as a
@@ -16,7 +15,7 @@ pub(super) struct ParallelWorkerLaunch {
 enum ParallelWorkerLaunchState {
     Workers(Box<dyn ParallelWorkers>),
     Transport {
-        transport: LeaderSession,
+        transport: LeaderTransport,
         workers: Box<dyn ParallelWorkers>,
     },
     Complete,
@@ -53,7 +52,7 @@ impl ParallelWorkerLaunch {
         }
     }
 
-    pub(super) fn install_transport(&mut self, transport: LeaderSession) {
+    pub(super) fn install_transport(&mut self, transport: LeaderTransport) {
         let state =
             mem::replace(&mut self.state, ParallelWorkerLaunchState::Complete);
         let ParallelWorkerLaunchState::Workers(workers) = state else {
@@ -62,19 +61,7 @@ impl ParallelWorkerLaunch {
         self.state = ParallelWorkerLaunchState::Transport { transport, workers };
     }
 
-    pub(super) fn transport(&self) -> &LeaderSession {
-        match &self.state {
-            ParallelWorkerLaunchState::Transport { transport, .. } => transport,
-            ParallelWorkerLaunchState::Workers(_) => {
-                unreachable!("transport is requested only after initialization")
-            }
-            ParallelWorkerLaunchState::Complete => {
-                unreachable!("completed launch transferred the transport")
-            }
-        }
-    }
-
-    pub(super) fn complete(mut self) -> (LeaderSession, Box<dyn ParallelWorkers>) {
+    pub(super) fn complete(mut self) -> (LeaderTransport, Box<dyn ParallelWorkers>) {
         let state =
             mem::replace(&mut self.state, ParallelWorkerLaunchState::Complete);
         let ParallelWorkerLaunchState::Transport { transport, workers } = state
@@ -92,6 +79,8 @@ impl Drop for ParallelWorkerLaunch {
         match state {
             ParallelWorkerLaunchState::Workers(workers) => workers.abandon(),
             ParallelWorkerLaunchState::Transport { transport, workers } => {
+                // Dropping the transport ends the run for every worker while the
+                // mapping is still attached, then detaches the reactor.
                 drop(transport);
                 workers.abandon();
             }

@@ -2,27 +2,21 @@
 
 use prost::Message;
 
-use super::stages::ParallelStage;
-
 #[derive(Clone, PartialEq, Message)]
 pub(super) struct ParallelBootstrap {
     #[prost(message, repeated, tag = "1")]
-    pub stages: Vec<ParallelStage>,
-    #[prost(message, repeated, tag = "2")]
     pub sources: Vec<ParallelSource>,
-    #[prost(uint64, tag = "3")]
+    #[prost(uint64, tag = "2")]
     pub work_mem_bytes: u64,
-    #[prost(uint32, tag = "4")]
+    #[prost(uint32, tag = "3")]
     pub maximum_batch_rows: u32,
-    #[prost(bool, tag = "5")]
+    #[prost(bool, tag = "4")]
     pub collect_metrics: bool,
-    #[prost(uint64, tag = "6")]
+    #[prost(uint64, tag = "5")]
     pub source_inventory_bytes: u64,
-    #[prost(bool, tag = "7")]
-    pub debug_deadlock_detector: bool,
-    #[prost(uint64, tag = "8")]
+    #[prost(uint64, tag = "6")]
     pub hash_memory_bytes: u64,
-    #[prost(bool, tag = "9")]
+    #[prost(bool, tag = "7")]
     pub spill_enabled: bool,
 }
 

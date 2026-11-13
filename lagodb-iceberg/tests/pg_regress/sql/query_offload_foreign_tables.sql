@@ -234,8 +234,6 @@ ROLLBACK;
 SELECT offload->>'Execution Mode' = 'Parallel' AS parallel,
        (offload->>'Maximum Launched Workers')::integer > 0 AS worker_launched,
        (offload->>'Parallel Runs')::integer = 1 AS one_run,
-       (offload->>'Worker Metric Reports')::integer > 0
-           AND offload->'Worker Metric Reports' = offload->'Expected Worker Metric Reports' AS metrics_complete,
        (offload->>'Actual Rows')::numeric = 4 AS output_rows_ok,
        (scan->>'Actual Input Rows')::bigint = 33 AS input_rows_ok,
        (scan->>'Scan Tasks')::bigint = 33

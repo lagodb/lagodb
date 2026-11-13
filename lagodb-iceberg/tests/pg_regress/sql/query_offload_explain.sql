@@ -293,7 +293,7 @@ RESET enable_material;
 DROP TABLE query_offload_explain_outer;
 
 DROP FUNCTION query_offload_explain_json(text, text);
-DROP FUNCTION pg_temp.explain_analyze_text(text, boolean, boolean);
+DROP FUNCTION pg_temp.explain_analyze_text(text, boolean, boolean, boolean);
 DROP TABLE query_offload_explain_right;
 DROP TABLE query_offload_explain_left;
 

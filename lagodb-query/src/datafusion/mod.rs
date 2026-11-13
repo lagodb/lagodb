@@ -43,7 +43,7 @@ pub use metrics::{
     ExecutionMetricsSnapshot, QueryExecutionMode, ScanExecutionMetricsSnapshot,
 };
 pub use parallel::{
-    InterruptHoldState, ParallelExecutionHost, ParallelQueryOptions,
-    ParallelWorkerHost, ParallelWorkers, run_parallel_worker,
+    InterruptHoldState, ParallelExecutionHost, ParallelInterrupt,
+    ParallelQueryOptions, ParallelWorkerHost, ParallelWorkers, run_parallel_worker,
 };
 pub use scan_callbacks::{TableScanCallbacks, WorkerTableScanCallbacks};

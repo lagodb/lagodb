@@ -164,7 +164,7 @@ FROM query_offload_parallel_left AS l
 JOIN query_offload_parallel_right AS r USING (key)
 ORDER BY left_id, right_id
 LIMIT 8
-$$);
+$$, mask_local_memory => true);
 
 SELECT l.id AS left_id, r.id AS right_id, l.key
 FROM query_offload_parallel_left AS l
@@ -218,7 +218,7 @@ ORDER BY l.key;
 DROP TABLE query_offload_parallel_small;
 DROP TABLE query_offload_parallel_right;
 DROP TABLE query_offload_parallel_left;
-DROP FUNCTION pg_temp.explain_analyze_text(text, boolean, boolean);
+DROP FUNCTION pg_temp.explain_analyze_text(text, boolean, boolean, boolean);
 
 RESET max_parallel_workers_per_gather;
 RESET lagodb.query_offload_parallel_min_scan_rows;

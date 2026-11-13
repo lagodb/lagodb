@@ -1,173 +1,68 @@
-//! Merge worker task reports into physical-plan and statement metrics.
+//! Merge worker task reports into statement metrics.
+//!
+//! Upstream collects one report per task and hands them to the leader once every
+//! task is accounted for.
 
 use std::sync::Arc;
 
-use super::scan_metrics::ParallelScanMetrics;
-use crate::datafusion::metrics::ExecutionMetrics;
 use datafusion::common::Result;
-use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion::execution::memory_pool::PeakRecordingPool;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion_distributed::shm::MppMesh as ParallelMesh;
 use datafusion_distributed::{
-    DistributedExec, DistributedMetricsFormat, MetricsStore, NetworkBoundaryExt,
-    TaskKey, decode_task_metrics, proto, rewrite_distributed_plan_with_metrics,
+    DistributedExec, DistributedMetricsFormat, TaskMetrics,
+    rewrite_distributed_plan_with_metrics,
 };
-use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::datafusion::memory::ParticipantMemoryRecorder;
+use super::scan_metrics::ParallelScanMetrics;
+use crate::datafusion::memory::TaskMemoryPool;
+use crate::datafusion::metrics::ExecutionMetrics;
 
-const FRAGMENT_PEAK_MEMORY: &str = "lagodb_fragment_peak_memory_bytes";
-const PARTICIPANT_PEAK_MEMORY: &str = "lagodb_participant_peak_memory_bytes";
-
-/// Memory telemetry attached to one worker fragment's normal task report.
-///
-/// The participant recorder is shared by every fragment on the worker, while
-/// the fragment recorder belongs to this task's independent bounded pool.
-pub(super) struct WorkerMemoryMetrics {
-    fragment: Arc<PeakRecordingPool>,
-    participant: Arc<ParticipantMemoryRecorder>,
-}
-
-impl WorkerMemoryMetrics {
-    pub(super) fn new(
-        fragment: Arc<PeakRecordingPool>,
-        participant: Arc<ParticipantMemoryRecorder>,
-    ) -> Self {
-        Self {
-            fragment,
-            participant,
-        }
-    }
-
-    pub(super) fn attach_to(&self, report: &mut proto::TaskMetrics) {
-        let task_metrics = report.task_metrics.get_or_insert_default();
-        task_metrics.metrics.extend([
-            proto::Metric {
-                labels: Vec::new(),
-                partition: None,
-                value: Some(proto::metric::Value::PeakMemoryUsage(
-                    proto::PeakMemoryUsage {
-                        name: FRAGMENT_PEAK_MEMORY.to_owned(),
-                        value: self.fragment.peak_reserved() as u64,
-                    },
-                )),
-            },
-            proto::Metric {
-                labels: Vec::new(),
-                partition: None,
-                value: Some(proto::metric::Value::PeakMemoryUsage(
-                    proto::PeakMemoryUsage {
-                        name: PARTICIPANT_PEAK_MEMORY.to_owned(),
-                        value: self.participant.peak_reserved() as u64,
-                    },
-                )),
-            },
-        ]);
-    }
-
-    fn record_report(report: &proto::TaskMetrics, execution: &ExecutionMetrics) {
-        let Some(task_metrics) = &report.task_metrics else {
-            return;
-        };
-        let mut fragment_peak = 0;
-        let mut participant_peak = 0;
-        for metric in &task_metrics.metrics {
-            let Some(proto::metric::Value::PeakMemoryUsage(memory)) = &metric.value
-            else {
-                continue;
-            };
-            match memory.name.as_str() {
-                FRAGMENT_PEAK_MEMORY => fragment_peak = memory.value,
-                PARTICIPANT_PEAK_MEMORY => participant_peak = memory.value,
-                _ => {}
-            }
-        }
-        execution.record_worker_memory_peaks(fragment_peak, participant_peak);
-    }
-}
+/// What upstream reports once every task finished.
+pub(super) type TaskReports = Vec<TaskMetrics>;
 
 pub(super) struct ParallelMetrics {
-    receiver: UnboundedReceiver<(u32, u32, proto::TaskMetrics)>,
-    store: Arc<MetricsStore>,
-    key: TaskKey,
-    expected: usize,
-    received: usize,
+    plan: Arc<dyn ExecutionPlan>,
     execution: Option<Arc<ExecutionMetrics>>,
 }
 
 impl ParallelMetrics {
     pub(super) fn new(
         plan: &Arc<dyn ExecutionPlan>,
-        mesh: &ParallelMesh,
         execution: Option<&Arc<ExecutionMetrics>>,
-    ) -> Result<Option<Self>> {
-        let mut store = None;
-        let mut key = None;
-        let mut expected = 0;
-        plan.apply(|node| {
-            if let Some(distributed) = node.downcast_ref::<DistributedExec>() {
-                store = distributed.metrics_store();
-            }
-            if let Some(boundary) = node.as_network_boundary() {
-                let stage = boundary.input_stage();
-                key.get_or_insert(TaskKey {
-                    query_id: stage.query_id(),
-                    stage_id: 0,
-                    task_number: 0,
-                });
-                expected += stage.task_count();
-            }
-            Ok(TreeNodeRecursion::Continue)
-        })?;
-        Ok(match (store, key) {
-            (Some(store), Some(key)) => {
-                mesh.take_task_metrics_receiver().map(|receiver| Self {
-                    receiver,
-                    store,
-                    key,
-                    expected,
-                    received: 0,
-                    execution: execution.map(Arc::clone),
-                })
-            }
-            _ => None,
+    ) -> Option<Self> {
+        // The planner inserts exactly one `DistributedExec` at the root, and it
+        // is also the only node that holds the report store.
+        plan.downcast_ref::<DistributedExec>()?;
+        Some(Self {
+            plan: Arc::clone(plan),
+            execution: execution.map(Arc::clone),
         })
     }
 
-    pub(super) fn drain(&mut self) -> Result<()> {
-        while let Ok((stage_id, task_number, metrics)) = self.receiver.try_recv() {
-            if let Some(execution) = &self.execution {
-                WorkerMemoryMetrics::record_report(&metrics, execution);
+    /// Waits for every task's report; `None` means the plan collects none.
+    ///
+    /// The caller must still race the wait against the run watch, because a
+    /// failed worker never reports.
+    pub(super) async fn wait(&self) -> Option<TaskReports> {
+        self.plan
+            .downcast_ref::<DistributedExec>()?
+            .wait_for_metrics()
+            .await
+            // Every report is folded identically here, so only the values are
+            // retained instead of coupling LagoDB to DSD's task map.
+            .map(|reports| reports.into_values().collect())
+    }
+
+    pub(super) fn record(&self, reports: TaskReports) -> Result<()> {
+        let Some(execution) = &self.execution else {
+            return Ok(());
+        };
+        for report in &reports {
+            TaskMemoryPool::record_worker_peaks(&report.task_metrics, execution);
+            for node in &report.pre_order_plan_metrics {
+                ParallelScanMetrics::merge_worker_report(node, execution)?;
             }
-            let metrics = decode_task_metrics(metrics)?;
-            if let Some(execution) = &self.execution {
-                for node in &metrics.pre_order_plan_metrics {
-                    ParallelScanMetrics::merge_worker_report(node, execution)?;
-                }
-            }
-            self.store.insert(
-                TaskKey {
-                    stage_id: stage_id as usize,
-                    task_number: task_number as usize,
-                    ..self.key
-                },
-                metrics,
-            );
-            // Each worker sends one report per prepared fragment after execution.
-            self.received += 1;
         }
         Ok(())
-    }
-
-    pub(super) fn complete(&self) -> bool {
-        self.received == self.expected
-    }
-
-    pub(super) fn record_report_counts(&self) {
-        if let Some(execution) = &self.execution {
-            execution.record_worker_metric_reports(self.received, self.expected);
-        }
     }
 
     pub(super) async fn plan_with_metrics(

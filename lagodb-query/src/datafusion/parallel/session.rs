@@ -1,4 +1,6 @@
-//! Shared session configuration and the two transport adapter seams.
+//! Session configuration for leader planning and per-task worker execution.
+//!
+//! The leader plans on one session per statement; a worker builds one per task.
 
 use std::sync::Arc;
 
@@ -6,18 +8,15 @@ use datafusion::common::Result;
 use datafusion::execution::context::SessionContext;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::execution::session_state::SessionStateBuilder;
-use datafusion_distributed::shm::{
-    InProcessWorkerResolver, Interrupt, MppMesh as ParallelMesh, ShmChannelResolver,
-    Wakeup,
-};
 use datafusion_distributed::{
     DistributedConfig, DistributedExt, SessionStateBuilderExt,
 };
 
-use super::codec::{LagoPhysicalCodec, LagoStagePlanDispatch};
-use super::host::ParallelExecutionHost;
+use super::codec::LagoPhysicalCodec;
 use super::scan_exec::ParallelTableScanExec;
-use crate::datafusion::error::QueryExecutionError;
+use super::transport::{
+    ParallelChannelResolver, ParallelWorkerResolver, StreamContext,
+};
 use crate::datafusion::join_planning::QuerySessionRules;
 use crate::datafusion::memory::QueryExecutionLimits;
 use crate::plan::QueryFragment;
@@ -25,25 +24,20 @@ use crate::plan::QueryFragment;
 pub(in crate::datafusion) struct ParallelSession;
 
 impl ParallelSession {
-    /// `fragment` is the query being planned; a worker only decodes finished
-    /// stage plans and passes `None`.
+    /// The leader's session for one statement: distributed options, planning
+    /// resolvers and the leader's codec.
     pub(in crate::datafusion) fn build(
         environment: Arc<RuntimeEnv>,
         limits: QueryExecutionLimits,
         worker_cap: usize,
         collect_metrics: bool,
-        fragment: Option<&QueryFragment>,
+        fragment: &QueryFragment,
     ) -> Result<SessionContext> {
         let mut config = limits.session_config(worker_cap);
         // Zero thresholds keep JoinSelection from promoting a Partitioned hash
-        // join to CollectLeft. PostgreSQL's estimates reach it through
-        // `QuerySessionRules` to pick build sides, and a broadcast sized from
-        // them would have no way back from an estimate that proves too small.
-        //
-        // Join dynamic filters stay off here. Parallel scans accept none, and a
-        // Partitioned filter waits for a report from every partition, which
-        // `AdaptiveHashJoinExec` cannot give once a partition leaves the hash
-        // join.
+        // join to CollectLeft. Dynamic filters stay off: parallel scans accept
+        // none, and a Partitioned filter waits for reports that
+        // `AdaptiveHashJoinExec` cannot give once a partition leaves the join.
         let optimizer = &mut config.options_mut().optimizer;
         optimizer.hash_join_single_partition_threshold = 0;
         optimizer.hash_join_single_partition_threshold_rows = 0;
@@ -53,8 +47,8 @@ impl ParallelSession {
             .with_runtime_env(environment)
             .with_default_features()
             .with_distributed_option_extension(DistributedConfig::default())
-            .with_distributed_worker_resolver(InProcessWorkerResolver::new(
-                worker_cap,
+            .with_distributed_worker_resolver(ParallelWorkerResolver::planning(
+                worker_cap as u32,
             ))
             .with_distributed_desired_task_count_handler(
                 ParallelTableScanExec::desired_task_count,
@@ -64,46 +58,40 @@ impl ParallelSession {
                 ParallelTableScanExec::scale_up,
             )
             .with_distributed_user_codec(LagoPhysicalCodec::leader())
-            .with_distributed_dispatch_plan_source(LagoStagePlanDispatch)
             .with_distributed_metrics_collection(collect_metrics)?
+            // Scan counters carry ScanId as a metric label, which DSD's
+            // worker-side aggregate_by_name drops, so merge per-partition
+            // metrics on the leader instead.
+            .with_distributed_aggregate_metrics_on_workers_before_collection(false)?
             .with_distributed_dynamic_filter_collection(false)?
             .with_distributed_broadcast_joins(true)?
+            // The rings live in this machine's memory, so compression would only
+            // burn CPU on both ends.
+            .with_distributed_compression(None)?
+            // A parallel scan accepts no dynamic filter.
+            .with_distributed_remote_dynamic_filters(false)?
             .with_distributed_planner()
             .build();
-        Ok(SessionContext::new_with_state(match fragment {
-            Some(fragment) => QuerySessionRules::new(fragment, limits).apply(state),
-            None => state,
-        }))
+        Ok(SessionContext::new_with_state(
+            QuerySessionRules::new(fragment, limits).apply(state),
+        ))
     }
 
+    /// Installs the transport's resolvers for one run, so the router addresses
+    /// only the workers PostgreSQL attached.
     pub(in crate::datafusion) fn attach(
         session: SessionContext,
-        mesh: Arc<ParallelMesh>,
+        streams: StreamContext,
+        this_proc: u32,
     ) -> SessionContext {
         let state = session
             .state()
-            .with_distributed_channel_resolver(ShmChannelResolver::new(mesh));
+            .with_distributed_worker_resolver(ParallelWorkerResolver::attached(
+                streams.region().workers(),
+            ))
+            .with_distributed_channel_resolver(ParallelChannelResolver::new(
+                streams, this_proc,
+            ));
         SessionContext::new_with_state(state)
-    }
-}
-
-pub(super) struct TransportHost<H: ParallelExecutionHost + ?Sized>(pub Arc<H>);
-
-impl<H: ParallelExecutionHost + ?Sized> Wakeup for TransportHost<H> {
-    fn wake(&self, token: u64) {
-        self.0.wake(token);
-    }
-}
-
-impl<H: ParallelExecutionHost + ?Sized> Interrupt for TransportHost<H> {
-    fn check(&self) -> Result<()> {
-        // Only cancel/die are execution interrupts. Task-scoped parallel worker failures use the
-        // transport's TaskError protocol to make the active stream return;
-        // `ParallelMessagePending` is then serviced at the idle-runtime boundary in
-        // `ParallelRun::next_batch`.
-        if self.0.interrupt_pending() {
-            return Err(QueryExecutionError::interrupted());
-        }
-        Ok(())
     }
 }

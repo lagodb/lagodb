@@ -182,7 +182,6 @@ unsafe fn begin_scan(
                 &scans,
                 workers,
                 settings.parallel_queue_size,
-                settings.parallel_debug,
             )
         })
     } else {
