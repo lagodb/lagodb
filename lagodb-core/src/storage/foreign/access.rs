@@ -121,6 +121,13 @@ impl ObjectAccess {
         self.store.delete(self.bucket.as_ref(), self.key.as_ref())
     }
 
+    /// Deletes this authorized object from a transaction-end callback, bounded
+    /// by the cleanup timeout and without reconnecting.
+    pub fn delete_cleanup(&self) -> StorageResult<()> {
+        self.store
+            .delete_cleanup(self.bucket.as_ref(), self.key.as_ref())
+    }
+
     /// Explicitly retires this object's cache residency.
     pub fn invalidate_cache(&self) -> StorageResult<bool> {
         self.store

@@ -113,6 +113,12 @@ impl StorageHandle {
         self.entry.service.delete(bucket, key)
     }
 
+    /// Deletes one object from a transaction-end callback; see
+    /// [`BackendStorageService::delete_cleanup`].
+    pub fn delete_cleanup(&self, bucket: &str, key: &str) -> StorageResult<()> {
+        self.entry.service.delete_cleanup(bucket, key)
+    }
+
     /// Starts a listing pinned to one storage connection generation.
     pub(crate) fn list_session(
         &self,

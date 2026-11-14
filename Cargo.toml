@@ -48,7 +48,7 @@ tonic = { version = "0.14.1", features = ["transport"] }
 tower = { version = "0.5.2", default-features = false, features = ["util"] }
 roaring = { version = "0.11" }
 url = "2.5.7"
-lagodb-storage = { git = "https://github.com/lagodb/lagodb-storage.git", rev = "59a53c284a20a0cd336f3f093e0584a4a3207e2a" }
+lagodb-storage = { git = "https://github.com/lagodb/lagodb-storage.git", rev = "f1fa860b1688238d1ce85b201b59ed8d754920b5" }
 
 # The 'dev' profile is used when you run `cargo build`.
 [profile.dev]

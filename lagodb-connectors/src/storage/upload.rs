@@ -238,7 +238,8 @@ impl std::fmt::Debug for UploadedObjectDelete {
 
 impl PendingDelete for UploadedObjectDelete {
     fn execute(&self) {
-        match self.object.delete() {
+        // Pending deletes run only from transaction-end callbacks.
+        match self.object.delete_cleanup() {
             Ok(()) => {}
             Err(error) if error.kind() == StorageErrorKind::NotFound => {}
             Err(error) => report_warning(format_args!(

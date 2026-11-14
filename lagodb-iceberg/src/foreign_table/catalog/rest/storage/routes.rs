@@ -100,6 +100,12 @@ impl CatalogRoute {
             .map_err(storage_err)
     }
 
+    fn delete_cleanup(&self, key: &str) -> Result<()> {
+        self.service
+            .delete_cleanup(self.bucket.as_ref(), key)
+            .map_err(storage_err)
+    }
+
     fn delete_prefix(&self, key: &str) -> Result<()> {
         self.service
             .delete_prefix(self.bucket.as_ref(), key)
@@ -169,7 +175,7 @@ impl CatalogRoute {
 
 /// Storage router that binds only selected REST/local configurations and
 /// retains each service for subsequent file operations.
-pub(super) struct CatalogStorage {
+pub(crate) struct CatalogStorage {
     scheme: String,
     default_location: ObjectUriPrefix,
     default_binding: RouteBinding,
@@ -235,6 +241,14 @@ impl CatalogStorage {
             .iter()
             .find(|binding| binding.matches(object))
             .unwrap_or(&self.default_binding)
+    }
+
+    /// `FileIO::delete` from a transaction-end callback, through the same
+    /// credential route an ordinary delete selects; see
+    /// [`BackendStorageService::delete_cleanup`].
+    pub(crate) fn delete_cleanup(&self, path: &str) -> Result<()> {
+        let (route, key) = self.resolve(path)?;
+        route.delete_cleanup(&key)
     }
 
     fn resolve<'a>(&self, path: &'a str) -> Result<(Rc<CatalogRoute>, Cow<'a, str>)> {

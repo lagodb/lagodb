@@ -3973,7 +3973,7 @@ dependencies = [
 [[package]]
 name = "lagodb-storage"
 version = "0.1.0"
-source = "git+https://github.com/lagodb/lagodb-storage.git?rev=59a53c284a20a0cd336f3f093e0584a4a3207e2a#59a53c284a20a0cd336f3f093e0584a4a3207e2a"
+source = "git+https://github.com/lagodb/lagodb-storage.git?rev=f1fa860b1688238d1ce85b201b59ed8d754920b5#f1fa860b1688238d1ce85b201b59ed8d754920b5"
 dependencies = [
  "arc-swap",
  "async-trait",

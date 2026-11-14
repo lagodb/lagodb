@@ -3,7 +3,9 @@
 //! The batch owns the common execution policy used by VACUUM cleanup and
 //! canceled transaction-created files. Local WAL-enabled storage records and
 //! flushes every representable delete before primary unlink begins. Object
-//! storage and WAL-free local storage proceed directly to deletion.
+//! storage and WAL-free local storage proceed directly to deletion; remote
+//! deletes still run under PostgreSQL's interrupt hold, so they go through
+//! [`FileIoCleanup`].
 
 use std::fmt;
 
@@ -14,7 +16,7 @@ use lagodb_core::transaction::cleanup::{
 };
 use lagodb_core::wal::flush_wal;
 
-use super::LocalStorage;
+use super::{FileIoCleanup, LocalStorage};
 use crate::storage::local_file_wal::record::{
     delete_file_fits_wal, log_delete_files,
 };
@@ -108,7 +110,8 @@ impl PostCommitFileDeleteBatch {
     fn delete_all(&self) {
         let mut failed = 0_usize;
         for path in &self.paths {
-            if let Err(error) = self.file_io.delete(path) {
+            // Pending deletes run only from transaction-end callbacks.
+            if let Err(error) = self.file_io.delete_cleanup(path) {
                 failed += 1;
                 if failed <= MAX_DELETE_FAILURE_WARNINGS {
                     if path.as_bytes().contains(&0) {

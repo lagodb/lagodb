@@ -126,7 +126,7 @@ impl BackendAttachedContext {
         self.key
     }
 
-    fn reusable_client(&self) -> StorageResult<Option<StorageClient>> {
+    pub(super) fn reusable_client(&self) -> StorageResult<Option<StorageClient>> {
         let stale = {
             let mut current = self.current.try_borrow_mut().map_err(|_| {
                 StorageError::protocol(

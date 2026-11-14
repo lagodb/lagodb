@@ -81,8 +81,9 @@ impl SocketWait for PostgresSocketWait {
                 // stalled storage service stretches that delay until a cancel or
                 // termination arrives. The remedy depends on the holder: the
                 // runtime must run this wait outside its held poll, while
-                // transaction-end I/O needs a bounded cleanup deadline, as
-                // postgres_fdw gives its abort cleanup.
+                // transaction-end I/O belongs on the client's cleanup requests
+                // (such as `delete_cleanup`), which wait without the latch under
+                // a deadline, as postgres_fdw's abort cleanup does.
                 if interrupts_held && BackendProcess::query_interrupt_pending() {
                     return Err(io::Error::new(
                         io::ErrorKind::ConnectionAborted,

@@ -167,6 +167,23 @@ impl BackendStorageService {
         self.with_non_replayable_client("delete", |client| client.delete(bucket, key))
     }
 
+    /// Deletes an object from a transaction-end callback; see
+    /// [`Self::cleanup_client`].
+    pub fn delete_cleanup(&self, bucket: &str, key: &str) -> StorageResult<()> {
+        self.cleanup_client()?.delete_cleanup(bucket, key)
+    }
+
+    /// Deletes every object under `prefix` from a transaction-end callback;
+    /// see [`Self::cleanup_client`]. When a prefix cannot finish within the
+    /// cleanup timeout, how many of its objects were removed is unknown.
+    pub fn delete_prefix_cleanup(
+        &self,
+        bucket: &str,
+        prefix: &str,
+    ) -> StorageResult<u64> {
+        self.cleanup_client()?.delete_prefix_cleanup(bucket, prefix)
+    }
+
     pub fn delete_prefix(&self, bucket: &str, prefix: &str) -> StorageResult<u64> {
         self.with_non_replayable_client("delete prefix", |client| {
             client.delete_prefix(bucket, prefix)
@@ -189,6 +206,25 @@ impl BackendStorageService {
     ) -> StorageResult<T> {
         let client = self.acquire_client()?;
         operation(&client)
+    }
+
+    /// The connection for a transaction-end callback, which PostgreSQL runs
+    /// with interrupts held.
+    ///
+    /// As postgres_fdw's abort cleanup does, cleanup uses only this context's
+    /// established connection, whose cleanup timeout bounds each request. It
+    /// never connects or attaches, because neither is bounded by that timeout.
+    /// No connection is usable when an earlier failure or cleanup timeout
+    /// poisoned it, or when the idle cache
+    /// (`lagodb.storage_backend_max_idle_connections`) reclaimed this context's
+    /// healthy connection for another context. The cleanup then fails with an
+    /// error the caller reports as a warning, and its objects remain behind.
+    fn cleanup_client(&self) -> StorageResult<StorageClient> {
+        self.context.reusable_client()?.ok_or_else(|| {
+            StorageError::protocol(
+                "transaction cleanup has no established storage connection",
+            )
+        })
     }
 
     /// Runs an operation whose externally visible result cannot be inferred

@@ -132,6 +132,25 @@ impl ObjectStorage {
         Ok(paths)
     }
 
+    /// `FileIO::delete` from a transaction-end callback; see
+    /// [`BackendStorageService::delete_cleanup`].
+    pub(crate) fn delete_cleanup(&self, uri: &str) -> Result<()> {
+        let relative = resolve_object_uri(&self.effective_base_uri, uri)?;
+        self.service
+            .delete_cleanup(self.bucket.as_ref(), &uri[relative..])
+            .map_err(storage_err)
+    }
+
+    /// `FileIO::remove_dir_all` from a transaction-end callback; see
+    /// [`BackendStorageService::delete_prefix_cleanup`].
+    pub(crate) fn remove_dir_all_cleanup(&self, uri: &str) -> Result<()> {
+        let relative = resolve_object_uri(&self.effective_base_uri, uri)?;
+        self.service
+            .delete_prefix_cleanup(self.bucket.as_ref(), &uri[relative..])
+            .map(|_| ())
+            .map_err(storage_err)
+    }
+
     pub(crate) fn location_is_empty(&self, location: &str) -> Result<bool> {
         let relative = resolve_object_uri(&self.effective_base_uri, location)?;
         let prefix = format!("{}/", location[relative..].trim_end_matches('/'));

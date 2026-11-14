@@ -1,13 +1,14 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use lagodb_core::resource::CommittedCleanup;
 use lagodb_core::transaction::{self, TransactionResource};
 use lagodb_storage::ObjectLocation;
 use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult};
 
-use super::resource::{ObjectFileState, StorageResource};
+use super::resource::{CleanupContext, ObjectFileState, StorageResource};
 
 const TOP_LEVEL_NEST_LEVEL: i32 = 1;
 
@@ -357,7 +358,7 @@ impl StorageTransactionResource {
         let cleanup_required: Vec<_> = resources
             .into_iter()
             .rev()
-            .filter_map(StorageResource::on_abort)
+            .filter_map(|resource| resource.on_abort(CleanupContext::Statement))
             .collect();
         if !cleanup_required.is_empty() {
             self.inner
@@ -422,8 +423,15 @@ impl TransactionResource for StorageTransactionResource {
         {
             resource.on_commit();
         }
-        for resource in resources.cleanup_metadata {
-            let _ = resource.on_abort();
+        // Physical post-commit deletion runs after lock release, as the
+        // transaction resource contract requires.
+        let cleanup_metadata = resources.cleanup_metadata;
+        if !cleanup_metadata.is_empty() {
+            CommittedCleanup::defer(move || {
+                for resource in cleanup_metadata {
+                    let _ = resource.on_abort(CleanupContext::TransactionEnd);
+                }
+            });
         }
         CURRENT.with(|slot| *slot.borrow_mut() = None);
     }
@@ -437,7 +445,7 @@ impl TransactionResource for StorageTransactionResource {
             .chain(resources.promoted_metadata)
             .chain(resources.cleanup_metadata)
         {
-            let _ = resource.on_abort();
+            let _ = resource.on_abort(CleanupContext::TransactionEnd);
         }
         CURRENT.with(|slot| *slot.borrow_mut() = None);
     }
@@ -459,7 +467,7 @@ impl TransactionResource for StorageTransactionResource {
             .borrow_mut()
             .take_aborted_subtransaction_resources(current_nest_level);
         for entry in entries {
-            let _ = entry.resource.on_abort();
+            let _ = entry.resource.on_abort(CleanupContext::TransactionEnd);
         }
     }
 }

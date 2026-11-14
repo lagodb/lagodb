@@ -7,3 +7,4 @@ mod factory;
 mod routes;
 
 pub(crate) use factory::PgStorageFactory;
+pub(crate) use routes::CatalogStorage;

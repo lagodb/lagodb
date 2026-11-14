@@ -4,10 +4,23 @@ use iceberg_lite::io::FileIO;
 use lagodb_core::storage::service::BackendStorageService;
 use lagodb_storage::{ObjectLocation, StorageErrorKind};
 
+use crate::storage::FileIoCleanup;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ObjectFileState {
     Staged,
     Uploaded,
+}
+
+/// Where a rejected resource is cleaned up, which decides how a remote delete
+/// waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CleanupContext {
+    /// A statement discards its own attempt; the delete stays interruptible.
+    Statement,
+    /// A transaction-end callback, which PostgreSQL runs with interrupts held;
+    /// the delete is bounded by the storage cleanup timeout.
+    TransactionEnd,
 }
 
 pub(super) enum StorageResource {
@@ -79,11 +92,17 @@ impl StorageResource {
         }
     }
 
-    pub(super) fn on_abort(self) -> Option<Self> {
+    pub(super) fn on_abort(self, context: CleanupContext) -> Option<Self> {
         let cleaned = match &self {
             Self::CreatedLocalFile { path } => Self::unlink_file(path),
             Self::CreatedTableDir { location, file_io } => {
-                match file_io.remove_dir_all(location) {
+                let removed = match context {
+                    CleanupContext::Statement => file_io.remove_dir_all(location),
+                    CleanupContext::TransactionEnd => {
+                        file_io.remove_dir_all_cleanup(location)
+                    }
+                };
+                match removed {
                     Ok(()) => true,
                     Err(error) => {
                         lagodb_core::diag::report_warning(format_args!(
@@ -101,7 +120,14 @@ impl StorageResource {
                 state,
             } => {
                 let remote_deleted = if *state == ObjectFileState::Uploaded {
-                    match service.delete(location.bucket(), location.key()) {
+                    let (bucket, key) = (location.bucket(), location.key());
+                    let deleted = match context {
+                        CleanupContext::Statement => service.delete(bucket, key),
+                        CleanupContext::TransactionEnd => {
+                            service.delete_cleanup(bucket, key)
+                        }
+                    };
+                    match deleted {
                         Ok(()) => true,
                         Err(error) if error.kind() == StorageErrorKind::NotFound => {
                             true
