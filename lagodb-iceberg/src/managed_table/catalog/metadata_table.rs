@@ -9,14 +9,21 @@
 //!     metadata_location text,
 //!     previous_metadata_location text,
 //!     maintenance_due_at timestamptz,
+//!     is_partitioned boolean NOT NULL,
 //!     PRIMARY KEY (relid)
 //! );
 //! ```
+//!
+//! `is_partitioned` projects the current default partition spec for SQL
+//! catalog queries. Iceberg metadata stays authoritative: the DDL statement
+//! that sets the spec writes the projection, and metadata-pointer CAS updates
+//! preserve it.
 
 mod rebuild;
 
 use std::ffi::CStr;
 
+use iceberg_lite::table::Table;
 use lagodb_core::catalog::{
     CatalogRelation, CatalogScanKey, CatalogSnapshot, CatalogUpdateResult,
     get_namespace_oid, get_relation_oid,
@@ -48,6 +55,7 @@ mod column {
     pub const METADATA_LOCATION: i16 = 2;
     pub const PREVIOUS_METADATA_LOCATION: i16 = 3;
     pub const MAINTENANCE_DUE_AT: i16 = 4;
+    pub const IS_PARTITIONED: i16 = 5;
 }
 
 // ---------------------------------------------------------------------------
@@ -317,25 +325,35 @@ impl MaintenanceCandidate {
 // ---------------------------------------------------------------------------
 
 /// One row of `iceberg.iceberg_metadata`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct IcebergMetadata {
     pub relid: pg_sys::Oid,
     pub metadata_location: Option<String>,
     pub previous_metadata_location: Option<String>,
     pub maintenance_due_at: Option<pg_sys::TimestampTz>,
+    pub is_partitioned: bool,
 }
 
 impl IcebergMetadata {
-    pub fn new(relid: pg_sys::Oid) -> Self {
-        Self {
+    /// The first row of a relation, derived from its bootstrapped Iceberg
+    /// table so the catalog pointer and partition projection share one source.
+    pub(crate) fn for_bootstrapped_table(
+        relid: pg_sys::Oid,
+        table: &Table,
+    ) -> ManagedResult<Self> {
+        let metadata_location = table
+            .metadata_location()
+            .ok_or(ManagedTableError::MetadataLocationNull)?;
+        Ok(Self {
             relid,
-            ..Self::default()
-        }
-    }
-
-    pub fn with_metadata_location(mut self, location: impl Into<String>) -> Self {
-        self.metadata_location = Some(location.into());
-        self
+            metadata_location: Some(metadata_location.to_owned()),
+            previous_metadata_location: None,
+            maintenance_due_at: None,
+            is_partitioned: !table
+                .metadata()
+                .default_partition_spec()
+                .is_unpartitioned(),
+        })
     }
 
     // -- catalog OID accessors ------------------------------------------------
@@ -375,6 +393,7 @@ impl IcebergMetadata {
             self.previous_metadata_location.as_deref(),
         );
         fields.set(column::MAINTENANCE_DUE_AT, self.maintenance_due_at);
+        fields.set(column::IS_PARTITIONED, Some(self.is_partitioned));
 
         // SAFETY: `heap_form_tuple` returns an owned heap tuple freed by
         // `HeapTupleGuard` via `heap_freetuple`.
@@ -816,6 +835,12 @@ impl IcebergMetadata {
                     column::MAINTENANCE_DUE_AT,
                 )
                 .map(TimestampWithTimeZone::into_inner),
+                is_partitioned: get_attr_required(
+                    tuple,
+                    tup_desc,
+                    column::IS_PARTITIONED,
+                    "is_partitioned",
+                )?,
             })
         }
     }

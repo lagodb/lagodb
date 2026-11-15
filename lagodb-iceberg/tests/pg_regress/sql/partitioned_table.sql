@@ -53,6 +53,32 @@ CROSS JOIN LATERAL jsonb_array_elements(metadata->'partition-specs'->0->'fields'
     WITH ORDINALITY AS field(spec, ordinal)
 ORDER BY relation, field.ordinal;
 
+-- The SQL introspection interface reports the same current spec without
+-- exposing the metadata file, and the catalog projection classifies tables.
+CREATE TABLE partitioned_ddl.unpartitioned_t (id integer) USING iceberg;
+SELECT tablename, is_partitioned
+FROM iceberg.managed_tables
+WHERE schemaname = 'partitioned_ddl'
+ORDER BY tablename;
+SELECT spec.*
+FROM (VALUES ('partitioned_ddl.composite_list_t'::regclass),
+             ('partitioned_ddl.same_source_t'::regclass),
+             ('partitioned_ddl.unpartitioned_t'::regclass)) AS definition(table_id)
+CROSS JOIN LATERAL iceberg.partition_spec(definition.table_id) AS spec
+ORDER BY definition.table_id::text, spec.ordinal_position;
+-- Source columns follow this transaction's staged rename.
+BEGIN;
+ALTER TABLE partitioned_ddl.composite_list_t RENAME COLUMN region TO area;
+SELECT ordinal_position, partition_field_name, source_column
+FROM iceberg.partition_spec('partitioned_ddl.composite_list_t')
+ORDER BY ordinal_position;
+ROLLBACK;
+-- Only managed Iceberg tables have a partition spec.
+CREATE TABLE partitioned_ddl.heap_t (id integer) USING heap;
+SELECT * FROM iceberg.partition_spec('partitioned_ddl.heap_t');
+\echo :LAST_ERROR_SQLSTATE
+DROP TABLE partitioned_ddl.heap_t, partitioned_ddl.unpartitioned_t;
+
 -- Each entry projects the shared source column for its own transform.
 INSERT INTO partitioned_ddl.same_source_t VALUES (1, 'one'), (3, 'three'), (NULL, 'none');
 SELECT id, payload FROM partitioned_ddl.same_source_t ORDER BY id;
@@ -97,6 +123,10 @@ GRANT USAGE, CREATE ON SCHEMA partitioned_ddl TO partitioned_ddl_user;
 SET ROLE partitioned_ddl_user;
 CREATE TABLE partitioned_ddl.role_bucket_t (id integer)
 PARTITION BY HASH (iceberg.bucket(8, id)) USING iceberg;
+-- Any role reads the classification view without the private catalog.
+SELECT is_partitioned FROM iceberg.managed_tables
+WHERE relid = 'partitioned_ddl.role_bucket_t'::regclass;
+SELECT count(*) FROM iceberg.iceberg_metadata;
 RESET ROLE;
 DROP TABLE partitioned_ddl.role_bucket_t;
 REVOKE ALL ON SCHEMA partitioned_ddl FROM partitioned_ddl_user;

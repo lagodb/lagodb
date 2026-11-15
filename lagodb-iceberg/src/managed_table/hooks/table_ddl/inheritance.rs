@@ -1,12 +1,13 @@
 //! Partitioned Iceberg tables stay out of regular inheritance.
 //!
 //! PostgreSQL enforces this from relkind, which cannot identify a managed
-//! partitioned table: its partition spec lives only in Iceberg metadata. The
-//! spec is fixed at CREATE, so validating each new edge is sufficient once the
-//! metadata exists. Until the CREATE post-hook writes it, a ddl_command_end
-//! event trigger can still add edges, which that post-hook rejects. These checks
-//! run after PostgreSQL's own permission and column checks, whose errors
-//! therefore take precedence, unlike for a native partitioned table.
+//! partitioned table: its partition spec lives in Iceberg metadata, projected
+//! into the catalog row. The spec is fixed at CREATE, so validating each new
+//! edge is sufficient once that row exists. Until the CREATE post-hook writes
+//! it, a ddl_command_end event trigger can still add edges, which that
+//! post-hook rejects. These checks run after PostgreSQL's own permission and
+//! column checks, whose errors therefore take precedence, unlike for a native
+//! partitioned table.
 
 use lagodb_core::catalog::{has_inheritance_children, has_inheritance_parents};
 use lagodb_core::handles::{RelationGuard, RelationHandle};
@@ -16,8 +17,7 @@ use pgrx::prelude::PgSqlErrorCode;
 
 use crate::create_command::CreateCommandStack;
 use crate::managed_table::ManagedResult;
-use crate::managed_table::storage::StorageContext;
-use crate::managed_table::transaction::ManagedTransaction;
+use crate::managed_table::catalog::metadata_table::IcebergMetadata;
 
 pub(in crate::managed_table) struct PartitionedInheritance;
 
@@ -59,19 +59,16 @@ impl PartitionedInheritance {
         Ok(())
     }
 
-    /// Reads the definition directly, as schema evolution does.
-    /// ManagedTableReadView would reject REPEATABLE READ, which only data reads
-    /// cannot honor. A relation mid-CREATE has no metadata yet: the pre-hook
+    /// Reads the catalog projection, which the statement that sets the default
+    /// partition spec keeps transaction-consistent, so no metadata file is
+    /// opened. A relation mid-CREATE has no catalog row yet: the pre-hook
     /// rejected PARTITION BY with INHERITS, and validate_created() covers the
-    /// edges added afterwards.
+    /// edges added afterwards. Any other missing row is a catalog error.
     fn is_partitioned(relation: &RelationHandle<'_>) -> ManagedResult<bool> {
         if CreateCommandStack::is_creating(relation.oid()) {
             return Ok(false);
         }
-        let context = StorageContext::for_read(relation)?;
-        let loaded = ManagedTransaction::current()
-            .current_table_metadata(relation.oid(), context.file_io())?;
-        Ok(loaded.is_partitioned())
+        Ok(IcebergMetadata::get(relation.oid())?.is_partitioned)
     }
 
     fn partitioned_child() -> HookError {

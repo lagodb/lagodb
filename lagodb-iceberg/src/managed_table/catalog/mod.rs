@@ -1,6 +1,7 @@
 pub mod access_method;
 pub mod bridge;
 pub mod error;
+mod introspection;
 pub(crate) mod local_storage;
 pub mod metadata_table;
 pub(crate) mod schema_evolution;

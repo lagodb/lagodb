@@ -5,6 +5,10 @@ CREATE TABLE iceberg.iceberg_metadata (
     metadata_location text,
     previous_metadata_location text,
     maintenance_due_at timestamptz,
+    -- Transaction-consistent projection of the current default partition
+    -- spec in the Iceberg metadata, which remains authoritative. The DDL
+    -- statement that changes the spec maintains it; commit CAS preserves it.
+    is_partitioned boolean NOT NULL,
     PRIMARY KEY (relid)
 ) WITH (user_catalog_table = true);
 

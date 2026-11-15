@@ -65,6 +65,63 @@ ORDER BY relation, field.ordinal;
  partitioned_ddl.timestamptz_t     |       1 | day        | event_time_day   | 1
 (13 rows)
 
+-- The SQL introspection interface reports the same current spec without
+-- exposing the metadata file, and the catalog projection classifies tables.
+CREATE TABLE partitioned_ddl.unpartitioned_t (id integer) USING iceberg;
+SELECT tablename, is_partitioned
+FROM iceberg.managed_tables
+WHERE schemaname = 'partitioned_ddl'
+ORDER BY tablename;
+     tablename     | is_partitioned 
+-------------------+----------------
+ composite_list_t  | t
+ composite_range_t | t
+ date_t            | t
+ hash_bucket_t     | t
+ hash_default_t    | t
+ hash_temporal_t   | t
+ same_source_t     | t
+ timestamp_t       | t
+ timestamptz_t     | t
+ unpartitioned_t   | f
+(10 rows)
+
+SELECT spec.*
+FROM (VALUES ('partitioned_ddl.composite_list_t'::regclass),
+             ('partitioned_ddl.same_source_t'::regclass),
+             ('partitioned_ddl.unpartitioned_t'::regclass)) AS definition(table_id)
+CROSS JOIN LATERAL iceberg.partition_spec(definition.table_id) AS spec
+ORDER BY definition.table_id::text, spec.ordinal_position;
+ spec_id | ordinal_position | partition_field_id | partition_field_name | source_field_id | source_column | transform 
+---------+------------------+--------------------+----------------------+-----------------+---------------+-----------
+       0 |                1 |               1000 | region               |               2 | region        | identity
+       0 |                2 |               1001 | site                 |               3 | site          | identity
+       0 |                3 |               1002 | event_time_hour      |               1 | event_time    | hour
+       0 |                1 |               1000 | id_bucket_4          |               1 | id            | bucket[4]
+       0 |                2 |               1001 | id_bucket_8          |               1 | id            | bucket[8]
+(5 rows)
+
+-- Source columns follow this transaction's staged rename.
+BEGIN;
+ALTER TABLE partitioned_ddl.composite_list_t RENAME COLUMN region TO area;
+SELECT ordinal_position, partition_field_name, source_column
+FROM iceberg.partition_spec('partitioned_ddl.composite_list_t')
+ORDER BY ordinal_position;
+ ordinal_position | partition_field_name | source_column 
+------------------+----------------------+---------------
+                1 | region               | area
+                2 | site                 | site
+                3 | event_time_hour      | event_time
+(3 rows)
+
+ROLLBACK;
+-- Only managed Iceberg tables have a partition spec.
+CREATE TABLE partitioned_ddl.heap_t (id integer) USING heap;
+SELECT * FROM iceberg.partition_spec('partitioned_ddl.heap_t');
+ERROR:  "heap_t" is not a managed Iceberg table
+\echo :LAST_ERROR_SQLSTATE
+42809
+DROP TABLE partitioned_ddl.heap_t, partitioned_ddl.unpartitioned_t;
 -- Each entry projects the shared source column for its own transform.
 INSERT INTO partitioned_ddl.same_source_t VALUES (1, 'one'), (3, 'three'), (NULL, 'none');
 SELECT id, payload FROM partitioned_ddl.same_source_t ORDER BY id;
@@ -125,6 +182,16 @@ GRANT USAGE, CREATE ON SCHEMA partitioned_ddl TO partitioned_ddl_user;
 SET ROLE partitioned_ddl_user;
 CREATE TABLE partitioned_ddl.role_bucket_t (id integer)
 PARTITION BY HASH (iceberg.bucket(8, id)) USING iceberg;
+-- Any role reads the classification view without the private catalog.
+SELECT is_partitioned FROM iceberg.managed_tables
+WHERE relid = 'partitioned_ddl.role_bucket_t'::regclass;
+ is_partitioned 
+----------------
+ t
+(1 row)
+
+SELECT count(*) FROM iceberg.iceberg_metadata;
+ERROR:  permission denied for table iceberg_metadata
 RESET ROLE;
 DROP TABLE partitioned_ddl.role_bucket_t;
 REVOKE ALL ON SCHEMA partitioned_ddl FROM partitioned_ddl_user;

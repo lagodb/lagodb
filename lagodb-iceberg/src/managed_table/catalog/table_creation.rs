@@ -2,6 +2,7 @@
 
 use iceberg_lite::catalog::TableCreation;
 use iceberg_lite::spec::SortOrder;
+use iceberg_lite::table::Table;
 use lagodb_core::handles::RelationHandle;
 use lagodb_core::object_cleanup::ObjectCleanupQueue;
 use lagodb_core::options::TableOptions;
@@ -45,11 +46,9 @@ impl<'a> ManagedTableCreation<'a> {
             .storage
             .local_storage()
             .map(|_| operation.storage.file_io().clone());
-        let metadata_location = operation.bootstrap(resolved_options, definition)?;
+        let table = operation.bootstrap(resolved_options, definition)?;
 
-        IcebergMetadata::new(rel.oid())
-            .with_metadata_location(metadata_location)
-            .insert()?;
+        IcebergMetadata::for_bootstrapped_table(rel.oid(), &table)?.insert()?;
         if let Some(file_io) = local_file_io {
             ManagedTransaction::current().record_local_rebuild(rel.oid(), &file_io);
         }
@@ -78,7 +77,7 @@ impl<'a> ManagedTableCreation<'a> {
         self,
         table_options: ResolvedIcebergOptions,
         definition: ManagedTableDefinition,
-    ) -> ManagedResult<String> {
+    ) -> ManagedResult<Table> {
         let Self {
             rel,
             storage,
@@ -99,15 +98,11 @@ impl<'a> ManagedTableCreation<'a> {
         // Register cleanup before the first metadata write. A later catalog
         // failure therefore removes the newly-created root on transaction abort.
         register_table_dir_created(table_location.clone(), storage.file_io().clone());
-        let table = BootstrapWriter::new(storage.into_file_io())
-            .write_initial_metadata(
+        Ok(
+            BootstrapWriter::new(storage.into_file_io()).write_initial_metadata(
                 IcebergTableId::for_relation(rel.oid()),
                 creation,
-            )?;
-        let metadata_location = table
-            .metadata_location()
-            .map(str::to_owned)
-            .ok_or(ManagedTableError::MetadataLocationNull)?;
-        Ok(metadata_location)
+            )?,
+        )
     }
 }

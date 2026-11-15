@@ -151,10 +151,6 @@ impl LoadedTableMetadata {
         Ok((rows, bytes))
     }
 
-    pub(crate) fn is_partitioned(&self) -> bool {
-        !self.metadata.default_partition_spec().is_unpartitioned()
-    }
-
     /// Whether the captured snapshot may contain row-level delete files.
     ///
     /// A false result is exact and allows the manifest `total-records` value to

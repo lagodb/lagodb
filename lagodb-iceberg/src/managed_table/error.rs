@@ -87,6 +87,9 @@ pub(crate) enum ManagedTableError {
     #[error("metadata location is null")]
     MetadataLocationNull,
 
+    #[error("\"{relation}\" is not a managed Iceberg table")]
+    NotManagedTable { relation: String },
+
     #[error("invalid managed Iceberg partition definition: {0}")]
     InvalidPartitionDefinition(Cow<'static, str>),
 
@@ -127,6 +130,7 @@ impl SqlStateError for ManagedTableError {
             Self::NamespaceNull | Self::MetadataLocationNull => {
                 PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT
             }
+            Self::NotManagedTable { .. } => PgSqlErrorCode::ERRCODE_WRONG_OBJECT_TYPE,
             Self::InvalidPartitionDefinition(_) => {
                 PgSqlErrorCode::ERRCODE_INVALID_OBJECT_DEFINITION
             }
