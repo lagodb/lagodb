@@ -12,15 +12,13 @@ use lagodb_core::table_maintenance::{
 use lagodb_core::table_provider::LagodbTableProvider;
 use pgrx::prelude::*;
 
-use crate::error::IcebergError;
-
 use super::access::index::IcebergIndexFetch;
 use super::access::mutation::{IcebergModifyQueryState, IcebergModifyState};
 use super::access::scan::IcebergScan;
 use super::catalog::IcebergAccessMethod;
 use super::constants::ICEBERG_AM_NAME;
 use super::hooks::table_ddl::PartitionedInheritance;
-use super::maintenance::{IcebergTableMaintenance, MaintenanceExecution};
+use super::maintenance::IcebergTableMaintenance;
 
 /// Get the cached Iceberg `TableAmRoutine` pointer.
 #[inline]
@@ -77,16 +75,7 @@ impl LagodbTableProvider for IcebergTableProvider {
     fn execute_maintenance(
         request: TableMaintenanceRequest<'_>,
     ) -> Result<TableMaintenanceReport, TableMaintenanceError> {
-        match IcebergTableMaintenance::execute(request, None)
-            .map_err(TableMaintenanceError::from)?
-        {
-            MaintenanceExecution::Executed(report) => Ok(report),
-            MaintenanceExecution::StaleCandidate => Err(TableMaintenanceError::from(
-                IcebergError::InvariantViolated(
-                    "explicit Iceberg maintenance cannot have a stale scheduler candidate",
-                ),
-            )),
-        }
+        IcebergTableMaintenance::execute(request).map_err(TableMaintenanceError::from)
     }
 
     fn inspect_maintenance(

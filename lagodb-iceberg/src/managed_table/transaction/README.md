@@ -1,9 +1,11 @@
-# Catalog metadata tracker notes
+# Managed transaction notes
 
-This document records the design context for `metadata_tracker.rs`, especially
-the transaction-local Iceberg overlay used to avoid statement-time metadata
-materialization. It is intended as background for future refactors, not as API
-documentation.
+This document records the design context for `ManagedTransaction`
+(`managed_table/transaction`), especially the transaction-local Iceberg overlay
+used to avoid statement-time metadata materialization. The provider-independent
+action log and savepoint history it drives live in `write::transaction`, which
+`foreign_table::transaction` shares. It is intended as background for future
+refactors, not as API documentation.
 
 ## Required semantics
 
@@ -24,7 +26,7 @@ concurrent committed rows that became visible between statements.
 
 The Iceberg AM supports PostgreSQL `READ COMMITTED` metadata visibility.
 `READ UNCOMMITTED` is normalized to `READ COMMITTED`, matching PostgreSQL.
-`REPEATABLE READ` is rejected because the tracker intentionally does not pin a
+`REPEATABLE READ` is rejected because the transaction intentionally does not pin a
 transaction-wide Iceberg snapshot.
 
 PostgreSQL `SERIALIZABLE` currently strengthens the command-specific Iceberg
@@ -42,23 +44,31 @@ them. The default is `serializable`. At `READ COMMITTED`, the table property is
 preserved; PostgreSQL `SERIALIZABLE` always raises the effective Iceberg policy
 to `Serializable`.
 
-## Current `metadata_tracker.rs` behavior
+## Current `ManagedTransaction` behavior
 
-`metadata_tracker.rs` keeps a transaction-local action log per modified Iceberg
-table. The log preserves the order of prepared schema updates and data epochs;
-data epochs contain `SnapshotDelta` file operations such as added data files,
-position delete files, and removed data files. These actions are not written to
-Iceberg metadata during statement execution.
+`ManagedTransaction` keeps a transaction-local action log
+(`write::transaction::TxTableActionLog`) per modified Iceberg table. The log
+preserves the order of prepared schema updates, table-property updates, data
+epochs, TRUNCATE, DROP, and the provider's exclusive VACUUM action. A data epoch
+holds immutable `TxWriteBatch`es, each the complete `SnapshotDelta` (added data
+files and position delete files) and conflict validation of one executor or
+COPY command, tagged with that command's CID. None of these actions are written
+to Iceberg metadata during statement execution.
 
-The read path for scans and planner statistics is:
+Planning and maintenance read the current definition:
 
 ```text
 current_table_metadata
   -> IcebergMetadata::get(relid)                    // latest committed catalog pointer
   -> TableMetadata::read_from(file_io, &location)   // committed Iceberg metadata
-  -> replay staged schema actions
+  -> replay staged schema/property actions
   -> attach combined Arc<SnapshotDelta> if this transaction has staged file changes
 ```
+
+Executor reads use `table_metadata_at`, which chooses the committed metadata
+pointer visible to the executor's PostgreSQL snapshot and attaches only the
+batches whose CID that snapshot can see (`TxTableActionLog::visible_delta`). The
+read schema always follows the current definition.
 
 The scan path then plans files from the committed metadata plus the attached
 overlay. Because the committed metadata is read fresh for each statement, a
@@ -70,30 +80,29 @@ The write setup path adds idempotent registration in front:
 
 ```text
 begin_table_modify
-  -> register_table(relid)                          // tracker state only
+  -> register_table(relid)                          // transaction state only
   -> current_table_metadata(relid, file_io)          // latest committed metadata + action overlay
 ```
 
-Statement write staging records logical file operations in the current data
+A finished write session publishes its output as one batch in the current data
 epoch:
 
 ```text
-stage_data_files
-  -> SnapshotDelta::add_data_file(...)
-
-stage_position_delete_file
-  -> SnapshotDelta::add_position_delete_file(...)
-
-stage_remove_data_file
-  -> SnapshotDelta::remove_data_file(...)
+stage_batch(relid, TxWriteBatch)
+  -> TableTransactionState::record_batch
+       -> TxTableActionLog::record_batch             // appended to the current data epoch
 ```
 
-Each mutation inside a savepoint stores a lightweight action-log marker: the
-action length plus the current data epoch's `SnapshotDeltaMarker` and validation
-length, when the last action is a data epoch. `ROLLBACK TO SAVEPOINT` truncates
+DDL stages its actions through `stage_schema_update`,
+`stage_table_property_update`, `stage_truncate`, and `stage_drop`; VACUUM stages
+one exclusive action through `stage_vacuum`.
+
+Each mutation inside a savepoint stores a lightweight
+`TxTableActionLogMarker` history frame: the action length plus the current data
+epoch's batch marker, when the last action is a data epoch. `ROLLBACK TO SAVEPOINT` truncates
 the action log back to that marker, then truncates the current data epoch if it
 existed. Top-level mutations do not need history frames because top-level abort
-drops the whole tracker.
+drops the whole transaction state.
 
 The top-level pre-commit path is the only place that writes Iceberg metadata:
 
@@ -102,10 +111,10 @@ on_pre_commit
   -> commit_all
        -> IcebergMetadata::get(relid)                         // latest committed base
        -> TableMetadata::read_from(file_io, &latest_location)
-       -> apply staged schema/data actions in log order
+       -> apply staged actions in log order (TxTableCommitPlan)
        -> Transaction::commit(&StagedCatalog)                 // writes manifests/metadata
        -> IcebergMetadata::cas_update(expected = latest_location)
-       -> on conflict: read latest base and retry
+       -> on conflict: read latest base and retry, up to the configured limit
 ```
 
 `StagedCatalog` is a storage-only catalog wrapper. It writes standard Iceberg
@@ -115,13 +124,14 @@ update the PostgreSQL catalog row. The catalog-visible update happens only when
 from the base location to the newly written metadata location.
 
 This design deliberately uses one materialization path for append-only and mixed
-append/delete/remove transactions. `AddData` is part of the overlay model, so
-INSERT and future DELETE/UPDATE staging share the same read and commit
-semantics.
+append/delete transactions. INSERT, COPY, DELETE, and UPDATE all stage
+`TxWriteBatch`es, so they share the same read and commit semantics. DELETE and
+UPDATE stage position deletes; equality deletes are intentionally not staged
+(see `ManagedTransaction::stage_batch`).
 
 ## Why this is the current shape
 
-The tracker now satisfies the required PostgreSQL-style Read Committed behavior
+The transaction now satisfies the required PostgreSQL-style Read Committed behavior
 without statement-time Iceberg metadata files:
 
 - Each statement reads the latest committed Iceberg metadata pointer from the
@@ -343,7 +353,7 @@ Guardrails for future refactors:
 - Keep iceberg-lite changes additive where possible; this repository regularly
   merges iceberg-lite from upstream iceberg-rust.
 - Keep append-only and mixed append/delete/remove materialization on the same
-  `SnapshotDeltaAction` path for the tracker. Splitting INSERT back to a separate
+  `SnapshotDeltaAction` path. Splitting INSERT back to a separate
   fast append path would reintroduce read/commit semantic drift.
 - Do not introduce a pg_lake-style heap file catalog as an incremental
   optimization. Revisit it only if a concrete requirement cannot be satisfied by

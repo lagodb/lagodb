@@ -31,7 +31,8 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 
 use self::cursor::AnalyzeBatchCursor;
-use crate::error::{IcebergError, IcebergResult};
+use crate::error::IcebergError;
+use crate::managed_table::ManagedResult;
 use crate::managed_table::gucs::analyze_max_data_files;
 use crate::scan::AnalyzeScanInput;
 
@@ -44,7 +45,7 @@ pub(crate) struct AnalyzePreparation {
     virtual_blocks: u64,
 }
 impl AnalyzePreparation {
-    pub(crate) fn try_new(input: AnalyzeScanInput) -> IcebergResult<Self> {
+    pub(crate) fn try_new(input: AnalyzeScanInput) -> ManagedResult<Self> {
         let AnalyzeScanInput {
             scan,
             tasks,
@@ -58,7 +59,8 @@ impl AnalyzePreparation {
         if population.physical_rows != 0 && virtual_blocks == 0 {
             return Err(IcebergError::InvariantViolated(
                 "non-empty Iceberg population has zero virtual ANALYZE blocks",
-            ));
+            )
+            .into());
         }
         Ok(Self {
             scan,

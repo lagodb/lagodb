@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::Instant;
 
+use iceberg_lite::io::FileIO;
 use iceberg_lite::spec::TableMetadata;
 use iceberg_lite::table::Table;
 use lagodb_core::handles::RelationHandle;
@@ -9,15 +11,15 @@ use lagodb_core::table_maintenance::{
     TableMaintenanceStats,
 };
 
-use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::catalog::bridge::IcebergTableId;
 use crate::managed_table::catalog::metadata_table::{
     IcebergMetadata, MaintenanceCandidate, MaintenanceCompletionToken,
 };
-use crate::managed_table::catalog::metadata_tracker::TxMetadata;
 use crate::managed_table::catalog::table_location::ManagedTableLocation;
 use crate::managed_table::options::IcebergTableOptions;
 use crate::managed_table::storage::StorageContext;
+use crate::managed_table::transaction::{LoadedTableMetadata, ManagedTransaction};
+use crate::managed_table::{ManagedResult, ManagedTableError};
 
 use super::error::IcebergVacuumError;
 use super::planner::VacuumPlanner;
@@ -28,30 +30,25 @@ use super::types::{
 };
 use super::writer::RewriteGroupWriter;
 
+/// Outcome of one scheduler-selected maintenance run.
 pub(crate) enum MaintenanceExecution {
-    Executed(TableMaintenanceReport),
+    Executed,
     StaleCandidate,
 }
 
-/// Iceberg maintenance execution and storage statistics shared by the provider
-/// and the automatic maintenance worker.
-pub(crate) struct IcebergTableMaintenance;
+/// Relation state loaded for one maintenance run before any work is planned.
+struct MaintenanceTarget {
+    expected_table_location: String,
+    file_io: FileIO,
+    tracker: Rc<ManagedTransaction>,
+    loaded: LoadedTableMetadata,
+    completion_token: MaintenanceCompletionToken,
+}
 
-impl IcebergTableMaintenance {
-    fn checked_count(value: usize, description: &'static str) -> IcebergResult<u64> {
-        u64::try_from(value).map_err(|_| IcebergError::Vacuum {
-            source: IcebergVacuumError::ResourceLimit(format!(
-                "{description} does not fit u64"
-            )),
-        })
-    }
-
-    pub(crate) fn execute(
-        request: TableMaintenanceRequest<'_>,
-        expected_candidate: Option<&MaintenanceCandidate>,
-    ) -> IcebergResult<MaintenanceExecution> {
+impl MaintenanceTarget {
+    fn load(request: &TableMaintenanceRequest<'_>) -> ManagedResult<Self> {
         if request.relation.toast_relation_oid().is_some() {
-            return Err(IcebergError::Vacuum {
+            return Err(ManagedTableError::Vacuum {
                 source: IcebergVacuumError::UnexpectedToastRelation {
                     relid: request.relation.oid(),
                 },
@@ -62,17 +59,67 @@ impl IcebergTableMaintenance {
             ManagedTableLocation::for_relation(request.relation)?.into_string();
         let storage = StorageContext::for_write(request.relation)?;
         let file_io = storage.into_file_io();
-        let tracker = TxMetadata::current();
+        let tracker = ManagedTransaction::current();
         let loaded = tracker.begin_table_modify(request.relation.oid(), &file_io)?;
         let completion_token = MaintenanceCompletionToken {
             metadata_location: loaded.location.clone(),
             maintenance_due_at: loaded.maintenance_due_at,
         };
-        if expected_candidate
-            .is_some_and(|candidate| !candidate.matches(&completion_token))
-        {
+        Ok(Self {
+            expected_table_location,
+            file_io,
+            tracker,
+            loaded,
+            completion_token,
+        })
+    }
+}
+
+/// Iceberg maintenance execution and storage statistics shared by the provider
+/// and the automatic maintenance worker.
+pub(crate) struct IcebergTableMaintenance;
+
+impl IcebergTableMaintenance {
+    fn checked_count(value: usize, description: &'static str) -> ManagedResult<u64> {
+        u64::try_from(value).map_err(|_| ManagedTableError::Vacuum {
+            source: IcebergVacuumError::ResourceLimit(format!(
+                "{description} does not fit u64"
+            )),
+        })
+    }
+
+    /// Explicit VACUUM of one relation.
+    pub(crate) fn execute(
+        request: TableMaintenanceRequest<'_>,
+    ) -> ManagedResult<TableMaintenanceReport> {
+        let target = MaintenanceTarget::load(&request)?;
+        Self::run(request, target)
+    }
+
+    /// Scheduler-selected maintenance runs only while the catalog still holds
+    /// the metadata location and deadline the scheduler selected.
+    pub(crate) fn execute_scheduled(
+        request: TableMaintenanceRequest<'_>,
+        candidate: &MaintenanceCandidate,
+    ) -> ManagedResult<MaintenanceExecution> {
+        let target = MaintenanceTarget::load(&request)?;
+        if !candidate.matches(&target.completion_token) {
             return Ok(MaintenanceExecution::StaleCandidate);
         }
+        Self::run(request, target).map(|_| MaintenanceExecution::Executed)
+    }
+
+    fn run(
+        request: TableMaintenanceRequest<'_>,
+        target: MaintenanceTarget,
+    ) -> ManagedResult<TableMaintenanceReport> {
+        let MaintenanceTarget {
+            expected_table_location,
+            file_io,
+            tracker,
+            loaded,
+            completion_token,
+        } = target;
         let owned_table_root = ManagedTableRoot::new(
             expected_table_location,
             loaded.metadata.location(),
@@ -93,7 +140,7 @@ impl IcebergTableMaintenance {
         let planning_started = Instant::now();
         let plan = VacuumPlanner::plan(&table, policy, &owned_table_root)?;
         let planning_ms = u64::try_from(planning_started.elapsed().as_millis())
-            .map_err(|_| IcebergError::Vacuum {
+            .map_err(|_| ManagedTableError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(
                     "VACUUM planning duration does not fit u64 milliseconds"
                         .to_owned(),
@@ -135,7 +182,7 @@ impl IcebergTableMaintenance {
                 report.groups_rewritten = report
                     .groups_rewritten
                     .checked_add(1)
-                    .ok_or_else(|| IcebergError::Vacuum {
+                    .ok_or_else(|| ManagedTableError::Vacuum {
                         source: IcebergVacuumError::ResourceLimit(
                             "rewrite group count overflow".to_owned(),
                         ),
@@ -143,13 +190,13 @@ impl IcebergTableMaintenance {
                 report.input_objects = report
                     .input_objects
                     .checked_add(u64::try_from(group.inputs.len()).map_err(|_| {
-                        IcebergError::Vacuum {
+                        ManagedTableError::Vacuum {
                             source: IcebergVacuumError::ResourceLimit(
                                 "input file count does not fit u64".to_owned(),
                             ),
                         }
                     })?)
-                    .ok_or_else(|| IcebergError::Vacuum {
+                    .ok_or_else(|| ManagedTableError::Vacuum {
                         source: IcebergVacuumError::ResourceLimit(
                             "input file count overflow".to_owned(),
                         ),
@@ -157,7 +204,7 @@ impl IcebergTableMaintenance {
                 report.input_bytes = report
                     .input_bytes
                     .checked_add(group.input_bytes)
-                    .ok_or_else(|| IcebergError::Vacuum {
+                    .ok_or_else(|| ManagedTableError::Vacuum {
                         source: IcebergVacuumError::ResourceLimit(
                             "input byte count overflow".to_owned(),
                         ),
@@ -165,13 +212,13 @@ impl IcebergTableMaintenance {
                 report.output_objects = report
                     .output_objects
                     .checked_add(u64::try_from(outputs.len()).map_err(|_| {
-                        IcebergError::Vacuum {
+                        ManagedTableError::Vacuum {
                             source: IcebergVacuumError::ResourceLimit(
                                 "output file count does not fit u64".to_owned(),
                             ),
                         }
                     })?)
-                    .ok_or_else(|| IcebergError::Vacuum {
+                    .ok_or_else(|| ManagedTableError::Vacuum {
                         source: IcebergVacuumError::ResourceLimit(
                             "output file count overflow".to_owned(),
                         ),
@@ -181,7 +228,7 @@ impl IcebergTableMaintenance {
                     .try_fold(0_u64, |bytes, file| {
                         bytes.checked_add(file.file_size_in_bytes())
                     })
-                    .ok_or_else(|| IcebergError::Vacuum {
+                    .ok_or_else(|| ManagedTableError::Vacuum {
                         source: IcebergVacuumError::ResourceLimit(
                             "output byte count overflow".to_owned(),
                         ),
@@ -191,14 +238,14 @@ impl IcebergTableMaintenance {
                     .try_fold(0_u64, |rows, file| {
                         rows.checked_add(file.record_count())
                     })
-                    .ok_or_else(|| IcebergError::Vacuum {
+                    .ok_or_else(|| ManagedTableError::Vacuum {
                         source: IcebergVacuumError::ResourceLimit(
                             "rewritten row count overflow".to_owned(),
                         ),
                     })?;
                 rewritten_rows =
                     rewritten_rows.checked_add(output_rows).ok_or_else(|| {
-                        IcebergError::Vacuum {
+                        ManagedTableError::Vacuum {
                             source: IcebergVacuumError::ResourceLimit(
                                 "rewritten row count overflow".to_owned(),
                             ),
@@ -207,7 +254,7 @@ impl IcebergTableMaintenance {
                 report.output_bytes = report
                     .output_bytes
                     .checked_add(output_bytes)
-                    .ok_or_else(|| IcebergError::Vacuum {
+                    .ok_or_else(|| ManagedTableError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "output byte count overflow".to_owned(),
                     ),
@@ -225,7 +272,7 @@ impl IcebergTableMaintenance {
             &mut report,
             c"rewrite_ms",
             u64::try_from(rewrite_started.elapsed().as_millis()).map_err(|_| {
-                IcebergError::Vacuum {
+                ManagedTableError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "VACUUM rewrite duration does not fit u64 milliseconds"
                             .to_owned(),
@@ -252,7 +299,7 @@ impl IcebergTableMaintenance {
                     .command_time
                     .unix_epoch_ms()
                     .checked_sub(policy.orphan_retention_ms)
-                    .ok_or_else(|| IcebergError::Vacuum {
+                    .ok_or_else(|| ManagedTableError::Vacuum {
                         source: IcebergVacuumError::ResourceLimit(
                             "orphan retention cutoff underflow".to_owned(),
                         ),
@@ -266,7 +313,7 @@ impl IcebergTableMaintenance {
                 &mut report,
                 c"orphan_cutoff_ms",
                 u64::try_from(orphan_cleanup.older_than_ms).map_err(|_| {
-                    IcebergError::Vacuum {
+                    ManagedTableError::Vacuum {
                         source: IcebergVacuumError::InvalidPolicy(
                             "orphan cutoff predates the Unix epoch".to_owned(),
                         ),
@@ -299,23 +346,16 @@ impl IcebergTableMaintenance {
             },
             &file_io,
         )?;
-        Ok(MaintenanceExecution::Executed(report))
-    }
-
-    pub(crate) fn execute_scheduled(
-        request: TableMaintenanceRequest<'_>,
-        candidate: &MaintenanceCandidate,
-    ) -> IcebergResult<MaintenanceExecution> {
-        Self::execute(request, Some(candidate))
+        Ok(report)
     }
 
     pub(crate) fn inspect(
         relation: &RelationHandle<'_>,
-    ) -> IcebergResult<TableMaintenanceStats> {
+    ) -> ManagedResult<TableMaintenanceStats> {
         let storage = StorageContext::for_read(relation)?;
         let location = IcebergMetadata::get(relation.oid())?
             .metadata_location
-            .ok_or(IcebergError::MetadataLocationNull)?;
+            .ok_or(ManagedTableError::MetadataLocationNull)?;
         let metadata = TableMetadata::read_from(storage.file_io(), &location)?;
         let table = Table::builder()
             .metadata_location(location)
@@ -332,7 +372,7 @@ impl IcebergTableMaintenance {
         for task in &tasks {
             current_data_bytes = current_data_bytes
                 .checked_add(task.file_size_in_bytes)
-                .ok_or_else(|| IcebergError::Vacuum {
+                .ok_or_else(|| ManagedTableError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "current data byte count overflow".to_owned(),
                     ),
@@ -341,7 +381,7 @@ impl IcebergTableMaintenance {
                 if delete_paths.insert(delete.file_path()) {
                     current_content_bytes = current_content_bytes
                         .checked_add(delete.file_size_in_bytes())
-                        .ok_or_else(|| IcebergError::Vacuum {
+                        .ok_or_else(|| ManagedTableError::Vacuum {
                             source: IcebergVacuumError::ResourceLimit(
                                 "current content byte count overflow".to_owned(),
                             ),
@@ -351,7 +391,7 @@ impl IcebergTableMaintenance {
         }
         current_content_bytes = current_content_bytes
             .checked_add(current_data_bytes)
-            .ok_or_else(|| IcebergError::Vacuum {
+            .ok_or_else(|| ManagedTableError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(
                     "current content byte count overflow".to_owned(),
                 ),
@@ -384,7 +424,7 @@ impl IcebergTableMaintenance {
         let retained_content_bytes = retained
             .values()
             .try_fold(0_u64, |total, (_, bytes)| total.checked_add(*bytes))
-            .ok_or_else(|| IcebergError::Vacuum {
+            .ok_or_else(|| ManagedTableError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(
                     "retained content byte count overflow".to_owned(),
                 ),
@@ -393,7 +433,7 @@ impl IcebergTableMaintenance {
             .values()
             .filter(|(data, _)| *data)
             .try_fold(0_u64, |total, (_, bytes)| total.checked_add(*bytes))
-            .ok_or_else(|| IcebergError::Vacuum {
+            .ok_or_else(|| ManagedTableError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(
                     "retained data byte count overflow".to_owned(),
                 ),
@@ -407,7 +447,7 @@ impl IcebergTableMaintenance {
             )?,
             current_content_objects: Self::checked_count(
                 tasks.len().checked_add(delete_paths.len()).ok_or_else(|| {
-                    IcebergError::Vacuum {
+                    ManagedTableError::Vacuum {
                         source: IcebergVacuumError::ResourceLimit(
                             "current content object count overflow".to_owned(),
                         ),

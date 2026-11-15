@@ -5,7 +5,8 @@
 //! flushes every representable delete before primary unlink begins. Object
 //! storage and WAL-free local storage proceed directly to deletion; remote
 //! deletes still run under PostgreSQL's interrupt hold, so they go through
-//! [`FileIoCleanup`].
+//! [`FileIO::delete_cleanup`], which waits under a deadline without
+//! reconnecting.
 
 use std::fmt;
 
@@ -16,7 +17,7 @@ use lagodb_core::transaction::cleanup::{
 };
 use lagodb_core::wal::flush_wal;
 
-use super::{FileIoCleanup, LocalStorage};
+use super::LocalStorage;
 use crate::storage::local_file_wal::record::{
     delete_file_fits_wal, log_delete_files,
 };

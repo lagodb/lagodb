@@ -7,13 +7,12 @@ use lagodb_core::handles::{RelationHandle, SnapshotHandle};
 use lagodb_core::table_am::ModifyScanBinding;
 use pgrx::pg_sys;
 
-use crate::error::IcebergResult;
-use crate::managed_table::ManagedTableReadView;
 use crate::managed_table::access::mutation::{
     IcebergModifyQueryState, IcebergModifyScanContext, ManagedMutationScan,
     PreparedManagedMutationScan,
 };
-use crate::predicate::{BoundIcebergPredicate, IcebergFilterError};
+use crate::managed_table::{ManagedResult, ManagedTableReadView};
+use crate::predicate::BoundIcebergPredicate;
 use crate::scan::{
     PreparedRowScan, ReaderPredicate, ScanPredicates, StablePruningPredicate,
 };
@@ -36,7 +35,7 @@ impl PreparedModifySeqScan {
         snapshot: &SnapshotHandle<'_>,
         filters: BoundFilterSet<'_, BoundIcebergPredicate>,
         needed_columns: NeededColumns<'_>,
-    ) -> Result<Self, IcebergFilterError> {
+    ) -> ManagedResult<Self> {
         let relation = ScanRelation::from_relation(relation)?;
         let snapshot = ManagedTableReadView::for_snapshot(relation.oid, snapshot)?
             .into_read_snapshot()?;
@@ -107,7 +106,7 @@ impl PreparedModifySeqScan {
     pub(crate) fn open(
         self,
         binding: ModifyScanBinding<IcebergModifyQueryState>,
-    ) -> IcebergResult<IcebergScan> {
+    ) -> ManagedResult<IcebergScan> {
         Ok(IcebergScan {
             state: IcebergScanState::Mutation(ManagedMutationScan::new(
                 self.prepared,

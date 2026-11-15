@@ -13,7 +13,6 @@ use iceberg_lite::transaction::Transaction;
 use lagodb_core::diag;
 use pgrx::pg_sys;
 
-use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::catalog::bridge::{IcebergTableId, StagedCatalog};
 use crate::managed_table::catalog::error::MetadataCatalogError;
 use crate::managed_table::catalog::metadata_table::{
@@ -23,12 +22,13 @@ use crate::managed_table::gucs;
 use crate::managed_table::maintenance::{
     PreparedVacuum, VacuumAttemptResult, VacuumCommitAttempt,
 };
+use crate::managed_table::{ManagedResult, ManagedTableError};
 use crate::storage::transaction_resources::{
     MetadataMaterializationAttempt, register_canceled_files_for_commit,
 };
 use crate::write::TxTableCommitPlan;
 
-use super::{TableCommitInput, TxMetadata};
+use super::{ManagedTransaction, TableCommitInput};
 
 /// Catalog-accepted result of one materialization attempt.
 struct PublishedAttempt<'a> {
@@ -70,7 +70,7 @@ impl<'a> TableCommitCoordinator<'a> {
         }
     }
 
-    fn commit(self) -> IcebergResult<bool> {
+    fn commit(self) -> ManagedResult<bool> {
         let max_retries = gucs::max_commit_retries();
         let max_retry_count = u32::try_from(max_retries)
             .expect("max_commit_retries is constrained to non-negative values");
@@ -80,7 +80,7 @@ impl<'a> TableCommitCoordinator<'a> {
             }
             diag::report_notice("Concurrent Iceberg update detected, rebasing...");
         }
-        Err(IcebergError::MetadataCommitConflict {
+        Err(ManagedTableError::MetadataCommitConflict {
             relid: self.relid,
             max_retries,
         })
@@ -92,10 +92,10 @@ impl<'a> TableCommitCoordinator<'a> {
     fn attempt(
         &self,
         retry_count: u32,
-    ) -> IcebergResult<Option<PublishedAttempt<'a>>> {
+    ) -> ManagedResult<Option<PublishedAttempt<'a>>> {
         let latest_location = IcebergMetadata::get(self.relid)?
             .metadata_location
-            .ok_or(IcebergError::MetadataLocationNull)?;
+            .ok_or(ManagedTableError::MetadataLocationNull)?;
         let schedule = match self.plan.exclusive_action {
             Some(vacuum) => vacuum
                 .completion_token
@@ -107,7 +107,9 @@ impl<'a> TableCommitCoordinator<'a> {
             .truncate_guard
             .is_some_and(|expected| expected.as_str() != latest_location.as_str())
         {
-            return Err(IcebergError::TruncateCommitConflict { relid: self.relid });
+            return Err(ManagedTableError::TruncateCommitConflict {
+                relid: self.relid,
+            });
         }
         let base_table = self.base_table(&latest_location)?;
 
@@ -135,7 +137,7 @@ impl<'a> TableCommitCoordinator<'a> {
             .commit(&catalog)?;
         let new_location = updated_table
             .metadata_location()
-            .ok_or(IcebergError::MetadataLocationNull)?;
+            .ok_or(ManagedTableError::MetadataLocationNull)?;
         let vacuum = vacuum_attempt
             .map(|attempt| attempt.finish(&updated_table))
             .transpose()?;
@@ -159,7 +161,7 @@ impl<'a> TableCommitCoordinator<'a> {
         )
     }
 
-    fn base_table(&self, metadata_location: &str) -> IcebergResult<Table> {
+    fn base_table(&self, metadata_location: &str) -> ManagedResult<Table> {
         let metadata = TableMetadata::read_from(&self.file_io, metadata_location)?;
         Ok(Table::builder()
             .metadata_location(metadata_location)
@@ -176,7 +178,7 @@ impl<'a> TableCommitCoordinator<'a> {
         &self,
         latest_location: &str,
         schedule: MaintenanceScheduleUpdate,
-    ) -> IcebergResult<Option<bool>> {
+    ) -> ManagedResult<Option<bool>> {
         if self.plan.exclusive_action.is_none() {
             return Ok(Some(false));
         }
@@ -186,9 +188,9 @@ impl<'a> TableCommitCoordinator<'a> {
             schedule,
         ) {
             Ok(()) => Ok(Some(false)),
-            Err(IcebergError::MetadataCatalog(MetadataCatalogError::Conflict)) => {
-                Ok(None)
-            }
+            Err(ManagedTableError::MetadataCatalog(
+                MetadataCatalogError::Conflict,
+            )) => Ok(None),
             Err(error) => Err(error),
         }
     }
@@ -202,7 +204,7 @@ impl<'a> TableCommitCoordinator<'a> {
         latest_location: &str,
         new_location: &str,
         schedule: MaintenanceScheduleUpdate,
-    ) -> IcebergResult<Option<bool>> {
+    ) -> ManagedResult<Option<bool>> {
         match IcebergMetadata::cas_update(
             self.relid,
             Some(latest_location),
@@ -216,7 +218,9 @@ impl<'a> TableCommitCoordinator<'a> {
                 metadata_attempt.promote()?;
                 Ok(Some(maintenance_deadline_advanced))
             }
-            Err(IcebergError::MetadataCatalog(MetadataCatalogError::Conflict)) => {
+            Err(ManagedTableError::MetadataCatalog(
+                MetadataCatalogError::Conflict,
+            )) => {
                 metadata_attempt.discard()?;
                 Ok(None)
             }
@@ -225,7 +229,7 @@ impl<'a> TableCommitCoordinator<'a> {
     }
 
     /// Post-publication work for the accepted attempt.
-    fn complete(self, published: PublishedAttempt<'a>) -> IcebergResult<bool> {
+    fn complete(self, published: PublishedAttempt<'a>) -> ManagedResult<bool> {
         if let Some(vacuum) = published.vacuum {
             vacuum.complete(self.relid, &self.file_io, self.commit_started)?;
         }
@@ -237,10 +241,10 @@ impl<'a> TableCommitCoordinator<'a> {
     }
 }
 
-impl TxMetadata {
+impl ManagedTransaction {
     /// Detach one immutable action snapshot at a time, then hand all I/O,
     /// optimistic retry, artifact and cleanup work to the table coordinator.
-    pub(super) fn commit_all(&self) -> IcebergResult<bool> {
+    pub(super) fn commit_all(&self) -> ManagedResult<bool> {
         let mut table_oids: Vec<pg_sys::Oid> =
             self.inner.borrow().tables.keys().copied().collect();
         table_oids.sort_unstable_by_key(|oid| u32::from(*oid));

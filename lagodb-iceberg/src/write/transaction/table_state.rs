@@ -70,7 +70,7 @@ where
         &mut self,
         nest_level: i32,
         mutation: F,
-    ) -> IcebergResult<()>
+    ) -> Result<(), E::Error>
     where
         F: FnOnce(&mut TxTableActionLog<E, G>) -> IcebergResult<()>,
     {
@@ -83,7 +83,7 @@ where
             if should_record_history {
                 self.level_history.pop();
             }
-            return Err(err);
+            return Err(err.into());
         }
 
         Ok(())
@@ -93,7 +93,7 @@ where
         &mut self,
         nest_level: i32,
         batch: TxWriteBatch,
-    ) -> IcebergResult<()> {
+    ) -> Result<(), E::Error> {
         if batch.is_empty() {
             return Ok(());
         }
@@ -107,7 +107,7 @@ where
         &mut self,
         nest_level: i32,
         update: PreparedSchemaUpdate,
-    ) -> IcebergResult<()> {
+    ) -> Result<(), E::Error> {
         if update.is_empty() {
             return Ok(());
         }
@@ -125,7 +125,7 @@ where
         &mut self,
         nest_level: i32,
         update: PreparedTablePropertyUpdate,
-    ) -> IcebergResult<()> {
+    ) -> Result<(), E::Error> {
         self.record_action_mutation(nest_level, |actions| {
             actions.stage_properties(update);
             Ok(())
@@ -136,7 +136,7 @@ where
         &mut self,
         nest_level: i32,
         action: E,
-    ) -> IcebergResult<()> {
+    ) -> Result<(), E::Error> {
         let (marker, should_record_history) = self.record_history(nest_level);
         if let Err(error) = Rc::make_mut(&mut self.actions).stage_exclusive(action) {
             Rc::make_mut(&mut self.actions).truncate(marker);
@@ -152,7 +152,7 @@ where
         &mut self,
         nest_level: i32,
         guard: G,
-    ) -> IcebergResult<()> {
+    ) -> Result<(), E::Error> {
         self.record_action_mutation(nest_level, |actions| {
             // SAFETY: TRUNCATE is staged synchronously by its utility command.
             let command_id = unsafe { pg_sys::GetCurrentCommandId(true) };
@@ -161,7 +161,7 @@ where
         })
     }
 
-    pub(crate) fn record_drop(&mut self, nest_level: i32) -> IcebergResult<()> {
+    pub(crate) fn record_drop(&mut self, nest_level: i32) -> Result<(), E::Error> {
         self.record_action_mutation(nest_level, |actions| {
             actions.stage_drop();
             Ok(())

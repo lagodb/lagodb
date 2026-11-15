@@ -7,9 +7,9 @@ use lagodb_core::handles::{RelFileLocator, RelationHandle};
 use super::bridge::{BootstrapWriter, IcebergTableId};
 use super::local_storage::LocalTableRoot;
 use super::metadata_table::IcebergMetadata;
-use super::metadata_tracker::TxMetadata;
-use crate::error::IcebergResult;
+use crate::managed_table::ManagedResult;
 use crate::managed_table::storage::StorageContext;
+use crate::managed_table::transaction::ManagedTransaction;
 use crate::storage::transaction_resources::register_table_dir_created;
 
 pub(crate) struct ManagedTableTruncate;
@@ -18,15 +18,15 @@ impl ManagedTableTruncate {
     pub(crate) fn execute(
         rel: &RelationHandle<'_>,
         new_locator: Option<RelFileLocator>,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         let storage = StorageContext::for_write(rel)?;
         if storage.object_tablespace().is_some() {
-            return TxMetadata::current()
+            return ManagedTransaction::current()
                 .stage_truncate(rel.oid(), storage.file_io());
         }
         let local_storage = storage.local_storage().expect("local storage selected");
 
-        let tracker = TxMetadata::current();
+        let tracker = ManagedTransaction::current();
         tracker.prepare_local_rebuild(rel.oid())?;
         let metadata =
             tracker.begin_table_definition_change(rel.oid(), storage.file_io())?;

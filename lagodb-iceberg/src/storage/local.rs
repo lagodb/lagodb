@@ -246,6 +246,16 @@ impl Storage for LocalStorage {
         Ok(())
     }
 
+    /// Local filesystem deletion has no remote wait to bound.
+    fn delete_cleanup(&self, path: &str) -> Result<()> {
+        self.delete(path)
+    }
+
+    /// Local filesystem removal has no remote wait to bound.
+    fn remove_dir_all_cleanup(&self, path: &str) -> Result<()> {
+        self.remove_dir_all(path)
+    }
+
     fn status(&self, path: &str) -> Result<Option<FileMetadata>> {
         match fs::metadata(path) {
             Ok(metadata) => Ok(Some(FileMetadata {

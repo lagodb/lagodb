@@ -54,17 +54,16 @@
 //! ## Error boundary invariant
 //!
 //! Table-AM trait methods are PostgreSQL callback boundaries, so they return
-//! [`AmResult<T>`], whose error type owns a PostgreSQL [`ErrorReport`]. This is
-//! a deliberate API boundary: framework errors such as "callback not supported"
-//! are reported here, and AM-specific domain errors should convert into
-//! `ErrorReport` at this edge.
+//! [`AmResult<T>`], whose error type is [`PgReportError`]. The `callbacks`
+//! adapters report it once at the FFI edge; nothing below raises directly.
 //!
 //! Do not reintroduce a generic AM error parameter such as `E: AmError`.
-//! Concrete AM implementations should keep their internal business logic on
-//! their own domain result type, implement `From<DomainError> for ErrorReport`,
-//! and use normal `?` propagation from callback methods. This preserves natural
-//! Rust error flow inside the AM while keeping the public callback API aligned
-//! with PostgreSQL.
+//! Concrete AM implementations keep their internal logic on their own domain
+//! result type, implement [`SqlStateError`] for it, and use normal `?`
+//! propagation from callback methods. The conversion goes through
+//! [`PgReportError::from_domain_error`], which keeps a PostgreSQL report
+//! captured below the domain error (DETAIL/HINT included) via
+//! [`SqlStateError::try_into_pg_report`].
 //!
 //! # Module layout
 //!
@@ -87,7 +86,6 @@ mod scan_ops;
 use std::fmt::{Display, Formatter};
 
 use pgrx::pg_sys;
-use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use pgrx::{AllocatedByPostgres, PgBox};
 
@@ -114,15 +112,8 @@ use crate::diag::{PgReportError, SqlStateError};
 pub type TableAmRoutine<A = AllocatedByPostgres> = PgBox<pg_sys::TableAmRoutine, A>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AmFrameworkError {
+enum AmFrameworkError {
     NotImplemented(&'static str),
-}
-
-impl AmFrameworkError {
-    #[inline]
-    pub fn not_implemented(method: &'static str) -> Self {
-        Self::NotImplemented(method)
-    }
 }
 
 impl Display for AmFrameworkError {
@@ -143,29 +134,18 @@ impl SqlStateError for AmFrameworkError {
     }
 }
 
-impl From<AmFrameworkError> for ErrorReport {
-    fn from(value: AmFrameworkError) -> Self {
-        ErrorReport::new(
-            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            value.to_string(),
-            "",
-        )
-    }
-}
-
 /// Result type for table-AM callbacks.
 ///
 /// This is intentionally fixed to a small PostgreSQL error handle. Code below
-/// this API boundary may use richer domain errors, but callbacks should expose
-/// PostgreSQL errors directly and rely on `From<DomainError> for ErrorReport`
-/// plus `?` for conversion.
+/// this API boundary may use richer domain errors; any [`SqlStateError`]
+/// converts with `?` through [`PgReportError::from_domain_error`].
 pub type AmError = PgReportError;
 pub type AmResult<T> = Result<T, AmError>;
 
 /// Return PostgreSQL `FEATURE_NOT_SUPPORTED` for a table-AM callback that the
 /// implementing AM explicitly does not support.
 pub fn unsupported_callback<T>(method: &'static str) -> AmResult<T> {
-    Err(AmFrameworkError::not_implemented(method).into())
+    Err(AmFrameworkError::NotImplemented(method).into())
 }
 
 /// Root trait identifying a Postgres table access method implementation.

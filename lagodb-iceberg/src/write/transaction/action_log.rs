@@ -2,6 +2,7 @@
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashSet;
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use iceberg_lite::overlay::SnapshotDelta;
@@ -22,10 +23,21 @@ use pgrx::pg_sys;
 /// The shared tracker controls ordering and savepoint lifetime, while the
 /// provider retains the operation's policy and exact error contract.
 pub(crate) trait ExclusiveTransactionAction: Clone + std::fmt::Debug {
-    const NOT_EXCLUSIVE_INVARIANT: &'static str;
-    const MISPLACED_INVARIANT: &'static str;
+    /// Provider error returned by recording methods. Shared action-log
+    /// failures convert into it unchanged.
+    type Error: From<IcebergError>;
 
-    fn conflict_error(&self) -> IcebergError;
+    fn conflict_error(&self) -> Self::Error;
+}
+
+/// A provider without an exclusive action: no value exists, so its action
+/// log can never hold one.
+impl ExclusiveTransactionAction for Infallible {
+    type Error = IcebergError;
+
+    fn conflict_error(&self) -> IcebergError {
+        match *self {}
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -172,7 +184,7 @@ where
     E: ExclusiveTransactionAction,
     G: Clone + std::fmt::Debug,
 {
-    pub(crate) fn exclusive_conflict_error(&self) -> Option<IcebergError> {
+    pub(crate) fn exclusive_conflict_error(&self) -> Option<E::Error> {
         self.actions.iter().find_map(|action| match action {
             TxTableAction::Exclusive(exclusive) => Some(exclusive.conflict_error()),
             _ => None,
@@ -204,7 +216,7 @@ where
         if let Some(TxTableAction::Exclusive(exclusive)) = self.actions.first() {
             if self.actions.len() != 1 {
                 return Err(IcebergError::InvariantViolated(
-                    E::NOT_EXCLUSIVE_INVARIANT,
+                    "exclusive transaction action shares its action log",
                 ));
             }
             return Ok(TxTableCommitPlan {
@@ -254,7 +266,7 @@ where
                 TxTableAction::Truncate(_) => {}
                 TxTableAction::Exclusive(_) => {
                     return Err(IcebergError::InvariantViolated(
-                        E::MISPLACED_INVARIANT,
+                        "exclusive transaction action follows other actions",
                     ));
                 }
                 TxTableAction::Drop => {
@@ -321,7 +333,7 @@ where
         self.actions.push(TxTableAction::Properties(update));
     }
 
-    pub(crate) fn stage_exclusive(&mut self, action: E) -> IcebergResult<()> {
+    pub(crate) fn stage_exclusive(&mut self, action: E) -> Result<(), E::Error> {
         if !self.actions.is_empty() {
             return Err(action.conflict_error());
         }

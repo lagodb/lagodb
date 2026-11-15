@@ -28,7 +28,7 @@ pgrx = { workspace = true }
 lagodb-core = { path = "../lagodb-core", default-features = false }
 lagodb-storage = { workspace = true }
 lagodb-arrow = { path = "../lagodb-arrow", default-features = false }
-iceberg-lite = { git = "https://github.com/lagodb/iceberg-lite.git", rev = "0f47f9171e2eebff5a82f7578989106f2b2cc1e3" }
+iceberg-lite = { git = "https://github.com/lagodb/iceberg-lite.git", rev = "8bcda96a92d82dd617c66888ab4858a544141b79" }
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_cbor = "0.11"

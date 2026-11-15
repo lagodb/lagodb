@@ -12,7 +12,8 @@ use lagodb_core::prelude::*;
 
 use super::returned::ReturnedRows;
 use super::sampling::SampledPosition;
-use crate::error::{IcebergError, IcebergResult};
+use crate::error::IcebergError;
+use crate::managed_table::ManagedResult;
 use crate::scan::batch::InterruptibleArrowBatches;
 
 const TUPLES_PER_SYNTHETIC_BLOCK: u32 = 2048;
@@ -38,7 +39,7 @@ impl AnalyzeReadPlan {
         self,
         scan: &TableScan,
         decoder: ArrowColumnDecoder,
-    ) -> IcebergResult<(ReturnedRows, ExpectedCursor)> {
+    ) -> ManagedResult<(ReturnedRows, ExpectedCursor)> {
         let (batches, files) = match self {
             Self::Selected { requests, files } => {
                 (scan.to_arrow_with_selected_rows(requests)?, files)

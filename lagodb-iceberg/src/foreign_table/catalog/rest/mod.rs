@@ -5,4 +5,3 @@ mod http;
 mod storage;
 
 pub use builder::PgRestCatalogBuilder;
-pub(crate) use storage::CatalogStorage;

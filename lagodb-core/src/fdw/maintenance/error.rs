@@ -67,10 +67,13 @@ impl ForeignTableMaintenanceError {
     where
         E: SqlStateError + StdError + Send + Sync + 'static,
     {
-        Self::new(ForeignTableMaintenanceErrorKind::Provider {
-            sqlerrcode: source.sql_error_code(),
-            source: Box::new(source),
-        })
+        match source.try_into_pg_report() {
+            Ok(report) => report.into(),
+            Err(source) => Self::new(ForeignTableMaintenanceErrorKind::Provider {
+                sqlerrcode: source.sql_error_code(),
+                source: Box::new(source),
+            }),
+        }
     }
 
     pub fn unsupported(message: impl Display) -> Self {

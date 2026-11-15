@@ -45,9 +45,9 @@ impl PlannedMutationTasks {
         path: &str,
     ) -> IcebergResult<Vec<&FileScanTask>> {
         let task_indices = self.tasks_by_path.get(path).ok_or_else(|| {
-            IcebergError::MetadataTracker(format!(
-                "cannot find Iceberg scan task metadata for deletion target {path}"
-            ))
+            IcebergError::MutationTaskNotFound {
+                path: path.to_owned(),
+            }
         })?;
         let mut tasks = Vec::with_capacity(task_indices.len());
         for task_index in task_indices {
@@ -89,10 +89,8 @@ impl PlannedMutationTasks {
             .tasks_by_path
             .get(path)
             .and_then(|indices| indices.first())
-            .ok_or_else(|| {
-                IcebergError::MetadataTracker(format!(
-                    "cannot find Iceberg scan task metadata for deletion target {path}"
-                ))
+            .ok_or_else(|| IcebergError::MutationTaskNotFound {
+                path: path.to_owned(),
             })?;
         let task =
             self.tasks

@@ -5,11 +5,10 @@ use lagodb_core::plan_data::{PlanDataError, PlanDataReader, PlanDataWriter};
 use pgrx::pg_sys;
 
 use crate::foreign_table::{
-    ForeignSchemaBinding, ForeignTableIdentity, ForeignTransaction, IcebergFdwError,
-    PlanSourceIdentity, ResolvedForeignTableBinding,
+    ForeignSchemaBinding, ForeignTableIdentity, PlanSourceIdentity,
+    ResolvedForeignTableBinding,
 };
 use crate::managed_table::ManagedTableReadView;
-use crate::scan::IcebergReadSnapshot;
 use crate::scan::columnar::BoundScan as BoundQueryScan;
 use crate::scan::parallel::TaskGroupingConfig;
 use crate::schema::relation::RelationLayout;
@@ -81,30 +80,13 @@ impl ForeignScanPlan {
             effective_user_oid,
             executor,
         )?;
-        if resolved.identity() != &self.identity {
-            return Err(IcebergFdwError::PlanIdentityChanged.into());
-        }
-        // Parallel workers can reopen only catalog-published foreign state.
-        // Bind this execution's transaction state before consuming `resolved`;
-        // cached plans must not retain planner-time worker eligibility.
-        // INSERT can add local batches between executions of the same generic
-        // plan without invalidating that plan.
-        let worker_reconstructible =
-            !ForeignTransaction::has_local_actions(resolved.key());
-        let view = ForeignTransaction::scan_view(
-            resolved.into_catalog_table(),
+        resolved.ensure_planned_identity(&self.identity)?;
+        let read = resolved.into_execution_read(
             executor.snapshot().command_id(),
+            self.source.as_ref(),
         )?;
-        let generation = PlanSourceIdentity::from_metadata(view.metadata());
-        if self
-            .source
-            .as_ref()
-            .is_some_and(|planned| planned != &generation)
-        {
-            return Err(IcebergFdwError::PlanSourceChanged.into());
-        }
         let task_grouping =
-            TaskGroupingConfig::from_properties(view.metadata().properties());
+            TaskGroupingConfig::from_properties(read.metadata().properties());
         let relation = RelationGuard::open_table(
             self.relation_oid,
             pg_sys::NoLock as pg_sys::LOCKMODE,
@@ -115,13 +97,13 @@ impl ForeignScanPlan {
             PlanProjection::Columns(attnos) => attnos.as_ref(),
         };
         binding.validate_read(
-            view.metadata(),
+            read.metadata(),
             &self.identity,
             columns.iter().copied(),
         )?;
         let layout = binding.into_relation_layout();
-        let (_key, table, delta) = view.into_parts();
-        let snapshot = IcebergReadSnapshot::new(table, delta);
+        let worker_reconstructible = read.worker_reconstructible();
+        let (snapshot, generation) = read.into_parts();
         let scan = self.projection.bind_with_layout(snapshot, &layout)?;
         Ok(BoundScan {
             scan: BoundQueryScan::new(scan, task_grouping),

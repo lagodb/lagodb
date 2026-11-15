@@ -3,7 +3,6 @@ pub mod bridge;
 pub mod error;
 pub(crate) mod local_storage;
 pub mod metadata_table;
-pub mod metadata_tracker;
 pub(crate) mod schema_evolution;
 mod sql_api;
 pub(crate) mod table_creation;

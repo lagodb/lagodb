@@ -48,6 +48,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use iceberg_lite::io::FileIO;
+use lagodb_core::diag::report_warning;
 use lagodb_core::storage::service::BackendStorageService;
 use lagodb_storage::ObjectLocation;
 
@@ -104,7 +105,7 @@ impl Drop for MetadataMaterializationAttempt {
             return;
         }
         if let Err(error) = self.resource.discard_metadata_attempt(self.id) {
-            lagodb_core::diag::report_warning(format_args!(
+            report_warning(format_args!(
                 "failed to discard unresolved metadata resource attempt: {}",
                 error
             ));

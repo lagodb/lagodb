@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use iceberg_lite::spec::{ManifestContentType, Snapshot, TableMetadata};
 use iceberg_lite::table::Table;
 
-use crate::error::IcebergResult;
+use crate::error::IcebergError;
+use crate::managed_table::{ManagedResult, ManagedTableError};
 use crate::storage::{LocalStorage, ObjectStorage};
 
 use super::error::IcebergVacuumError;
@@ -59,7 +60,7 @@ impl IcebergReachabilityPlanner {
         after: &Table,
         orphan_older_than_ms: Option<i64>,
         owned_table_root: &ManagedTableRoot,
-    ) -> IcebergResult<(ReachabilityDeletionCandidates, HashSet<String>)> {
+    ) -> ManagedResult<(ReachabilityDeletionCandidates, HashSet<String>)> {
         let retained_ids: HashSet<i64> = after
             .metadata()
             .snapshots()
@@ -188,13 +189,14 @@ impl IcebergReachabilityPlanner {
                 CandidateKind::Statistics => &mut result.statistics,
                 CandidateKind::Metadata => &mut result.metadata,
             };
-            *counter = counter.checked_add(1).ok_or_else(|| {
-                crate::error::IcebergError::Vacuum {
-                    source: IcebergVacuumError::ResourceLimit(
-                        "reachability candidate count overflow".to_owned(),
-                    ),
-                }
-            })?;
+            *counter =
+                counter
+                    .checked_add(1)
+                    .ok_or_else(|| ManagedTableError::Vacuum {
+                        source: IcebergVacuumError::ResourceLimit(
+                            "reachability candidate count overflow".to_owned(),
+                        ),
+                    })?;
         }
         result.paths = candidates.into_keys().collect();
         orphan_candidates.retain(|path| !result.paths.contains(path));
@@ -224,7 +226,7 @@ impl IcebergReachabilityPlanner {
         &self,
         table: &Table,
         older_than_ms: i64,
-    ) -> IcebergResult<HashSet<String>> {
+    ) -> ManagedResult<HashSet<String>> {
         let storage = table.file_io().storage();
         let candidates = if let Some(local) =
             storage.as_any().downcast_ref::<LocalStorage>()
@@ -234,9 +236,10 @@ impl IcebergReachabilityPlanner {
         {
             object.list_older_than(table.metadata().location(), older_than_ms)?
         } else {
-            return Err(crate::error::IcebergError::InvariantViolated(
+            return Err(IcebergError::InvariantViolated(
                 "orphan cleanup requires a known local or object storage backend",
-            ));
+            )
+            .into());
         };
         Ok(candidates)
     }
@@ -244,7 +247,7 @@ impl IcebergReachabilityPlanner {
     fn validate_owned_candidates<'a>(
         owned_table_root: &ManagedTableRoot,
         candidates: impl IntoIterator<Item = &'a String>,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         for path in candidates {
             owned_table_root.ensure_path(path)?;
         }
@@ -256,7 +259,7 @@ impl IcebergReachabilityPlanner {
         table: &Table,
         snapshot: &Snapshot,
         candidates: &mut HashMap<String, CandidateKind>,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         candidates
             .entry(snapshot.manifest_list().to_owned())
             .or_insert(CandidateKind::ManifestList);
@@ -300,7 +303,7 @@ impl IcebergReachabilityPlanner {
         table: &Table,
         snapshot: &Snapshot,
         mut visit: impl FnMut(&str),
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         visit(snapshot.manifest_list());
         if !self
             .visited_manifest_lists

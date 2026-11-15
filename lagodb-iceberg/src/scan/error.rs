@@ -2,7 +2,7 @@
 
 use bincode::Error as BinaryCodecError;
 use iceberg_lite::Error as IcebergLiteError;
-use lagodb_core::diag::SqlStateError;
+use lagodb_core::diag::{PgReportError, SqlStateError};
 use lagodb_core::parallel_scan::ParallelScanError;
 use lagodb_core::runtime_api::RuntimePredicateCodecError;
 use pgrx::prelude::PgSqlErrorCode;
@@ -45,6 +45,21 @@ impl SqlStateError for ScanError {
             }
             Self::WorkerPayload(_) => PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
             Self::ParallelCoordinator(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+        }
+    }
+
+    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
+        match self {
+            Self::Iceberg(error) => error
+                .try_into_pg_report()
+                .map(|report| {
+                    report.contextualize(
+                        "failed to bind or plan Iceberg table scan",
+                        None,
+                    )
+                })
+                .map_err(Self::Iceberg),
+            error => Err(error),
         }
     }
 }

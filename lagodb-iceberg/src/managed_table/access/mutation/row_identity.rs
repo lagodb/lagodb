@@ -7,7 +7,7 @@ use iceberg_lite::expr::Predicate;
 use lagodb_core::prelude::{AmModifyQueryState, AmResult, ItemPointer};
 use pgrx::pg_sys;
 
-use crate::managed_table::catalog::metadata_tracker::TxMetadata;
+use crate::managed_table::transaction::ManagedTransaction;
 use crate::write::{
     IcebergFileId, IcebergRowIdentity, PlannedMutationTasks, RelationRowRegistry,
 };
@@ -73,7 +73,7 @@ impl IcebergModifyQueryState {
         if let Some(registry) = self.relations.get(&relation_oid) {
             return Ok(registry.clone());
         }
-        let registry = TxMetadata::current().row_registry(relation_oid)?;
+        let registry = ManagedTransaction::current().row_registry(relation_oid)?;
         self.relations.insert(relation_oid, registry.clone());
         Ok(registry)
     }

@@ -162,9 +162,7 @@ impl ReopenPlan {
                     *relation_oid,
                     *effective_user_oid,
                 )?;
-                if resolved.identity() != identity {
-                    return Err(IcebergFdwError::PlanIdentityChanged.into());
-                }
+                resolved.ensure_planned_identity(identity)?;
                 let table = resolved.table();
                 if &PlanSourceIdentity::from_metadata(table.metadata()) != generation
                 {

@@ -22,8 +22,6 @@
 //! https://github.com/apache/iceberg-rust/issues/2801
 //! https://github.com/apache/iceberg-rust/pull/2802
 
-use std::sync::OnceLock;
-
 mod analyze;
 pub mod catalog;
 mod ddl;
@@ -51,14 +49,14 @@ pub(crate) use schema::ForeignSchemaBinding;
 pub(crate) use source_identity::PlanSourceIdentity;
 pub(crate) use transaction::ForeignTransaction;
 
-static RUSTLS_CRYPTO_PROVIDER: OnceLock<()> = OnceLock::new();
-
+/// Install the process-wide rustls provider used by REST catalog TLS.
+///
+/// Called only from `_PG_init`, which PostgreSQL runs once per process that
+/// loads this library.
 pub(crate) fn initialize_crypto_provider() {
-    RUSTLS_CRYPTO_PROVIDER.get_or_init(|| {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .expect("the rustls crypto provider must be installed only once")
-    });
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("the rustls crypto provider must be installed only once");
 }
 
 pub(crate) fn register() {

@@ -26,8 +26,9 @@ use lagodb_core::handles::HeapTupleGuard;
 use pgrx::prelude::TimestampWithTimeZone;
 use pgrx::{FromDatum, IntoDatum, pg_sys};
 
-use crate::error::{IcebergError, IcebergResult};
+use crate::error::IcebergError;
 use crate::managed_table::constants::ICEBERG_SCHEMA;
+use crate::managed_table::{ManagedResult, ManagedTableError};
 
 use super::error::{MetadataCatalogError, MetadataCatalogOperation as CatalogOp};
 
@@ -53,7 +54,7 @@ mod column {
 // Error-mapping ergonomics
 // ---------------------------------------------------------------------------
 
-/// Adapt a [`PgError`]-returning catalog call to [`IcebergResult`] by tagging
+/// Adapt a [`PgError`]-returning catalog call to [`ManagedResult`] by tagging
 /// it with a [`CatalogOp`].
 ///
 /// This is the single point where `PgError -> MetadataCatalogError::Operation`
@@ -61,12 +62,12 @@ mod column {
 /// inside meaningful Iceberg object methods"). Every catalog call uses
 /// `.map_catalog_err(CatalogOp::*)?` instead of an inline closure.
 trait CatalogResultExt<T> {
-    fn map_catalog_err(self, op: CatalogOp) -> IcebergResult<T>;
+    fn map_catalog_err(self, op: CatalogOp) -> ManagedResult<T>;
 }
 
 impl<T> CatalogResultExt<T> for Result<T, PgError> {
     #[inline]
-    fn map_catalog_err(self, op: CatalogOp) -> IcebergResult<T> {
+    fn map_catalog_err(self, op: CatalogOp) -> ManagedResult<T> {
         self.map_err(|source| {
             MetadataCatalogError::Operation {
                 operation: op,
@@ -85,7 +86,7 @@ impl<T> CatalogResultExt<T> for Result<T, PgError> {
 ///
 /// Deliberately avoid a backend-lifetime cache so a long-lived backend recovers
 /// after `DROP EXTENSION lagodb_iceberg; CREATE EXTENSION lagodb_iceberg`.
-fn iceberg_relation_oid(name: &CStr) -> IcebergResult<pg_sys::Oid> {
+fn iceberg_relation_oid(name: &CStr) -> ManagedResult<pg_sys::Oid> {
     let schema = get_namespace_oid(ICEBERG_SCHEMA, false)
         .map_catalog_err(CatalogOp::Access)?;
     Ok(get_relation_oid(name, schema))
@@ -133,13 +134,13 @@ unsafe fn get_attr_required<T: FromDatum>(
     tup_desc: pg_sys::TupleDesc,
     attno: i16,
     field_name: &'static str,
-) -> IcebergResult<T> {
+) -> ManagedResult<T> {
     // SAFETY: this function has the same caller requirements as `get_attr` and
     // forwards the tuple, descriptor, attribute number, and target type unchanged.
     unsafe { get_attr::<T>(tuple, tup_desc, attno) }.ok_or_else(|| {
-        IcebergError::MetadataCatalog(MetadataCatalogError::InvalidRecord(format!(
-            "{field_name} (attno {attno}) is null or undecodable"
-        )))
+        ManagedTableError::MetadataCatalog(MetadataCatalogError::InvalidRecord(
+            format!("{field_name} (attno {attno}) is null or undecodable"),
+        ))
     })
 }
 
@@ -339,15 +340,15 @@ impl IcebergMetadata {
 
     // -- catalog OID accessors ------------------------------------------------
 
-    fn table_oid() -> IcebergResult<pg_sys::Oid> {
+    fn table_oid() -> ManagedResult<pg_sys::Oid> {
         iceberg_relation_oid(ICEBERG_METADATA_TABLE)
     }
 
-    fn pkey_oid() -> IcebergResult<pg_sys::Oid> {
+    fn pkey_oid() -> ManagedResult<pg_sys::Oid> {
         iceberg_relation_oid(ICEBERG_METADATA_PKEY)
     }
 
-    fn maintenance_due_index_oid() -> IcebergResult<pg_sys::Oid> {
+    fn maintenance_due_index_oid() -> ManagedResult<pg_sys::Oid> {
         iceberg_relation_oid(ICEBERG_METADATA_MAINTENANCE_DUE_IDX)
     }
 
@@ -355,7 +356,7 @@ impl IcebergMetadata {
 
     /// Insert this record. Errors if a row with the same `relid` already
     /// exists.
-    pub fn insert(&self) -> IcebergResult<()> {
+    pub fn insert(&self) -> ManagedResult<()> {
         let table_guard =
             CatalogRelation::open(Self::table_oid()?, pg_sys::RowExclusiveLock as _)
                 .map_catalog_err(CatalogOp::Insert)?;
@@ -392,10 +393,10 @@ impl IcebergMetadata {
 
     // -- CRUD: Read -----------------------------------------------------------
 
-    pub(super) fn find_with_snapshot(
+    pub(in crate::managed_table) fn find_with_snapshot(
         relid: pg_sys::Oid,
         snapshot: CatalogSnapshot<'_>,
-    ) -> IcebergResult<Option<Self>> {
+    ) -> ManagedResult<Option<Self>> {
         let table_guard =
             CatalogRelation::open(Self::table_oid()?, pg_sys::AccessShareLock as _)
                 .map_catalog_err(CatalogOp::Read)?;
@@ -422,7 +423,7 @@ impl IcebergMetadata {
     }
 
     /// Look up by relid; returns [`MetadataCatalogError::NotFound`] when absent.
-    pub fn get(relid: pg_sys::Oid) -> IcebergResult<Self> {
+    pub fn get(relid: pg_sys::Oid) -> ManagedResult<Self> {
         Self::get_with_snapshot(relid, CatalogSnapshot::Default)
     }
 
@@ -430,16 +431,16 @@ impl IcebergMetadata {
     pub(super) fn get_with_snapshot(
         relid: pg_sys::Oid,
         snapshot: CatalogSnapshot<'_>,
-    ) -> IcebergResult<Self> {
+    ) -> ManagedResult<Self> {
         Self::find_with_snapshot(relid, snapshot)?.ok_or(
-            IcebergError::MetadataCatalog(MetadataCatalogError::NotFound(relid)),
+            ManagedTableError::MetadataCatalog(MetadataCatalogError::NotFound(relid)),
         )
     }
 
     pub(crate) fn maintenance_candidates(
         limit: usize,
         now: pg_sys::TimestampTz,
-    ) -> IcebergResult<Vec<MaintenanceCandidate>> {
+    ) -> ManagedResult<Vec<MaintenanceCandidate>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -494,7 +495,7 @@ impl IcebergMetadata {
     }
 
     pub(crate) fn next_maintenance_due_at()
-    -> IcebergResult<Option<pg_sys::TimestampTz>> {
+    -> ManagedResult<Option<pg_sys::TimestampTz>> {
         let table_guard =
             CatalogRelation::open(Self::table_oid()?, pg_sys::AccessShareLock as _)
                 .map_catalog_err(CatalogOp::Read)?;
@@ -523,7 +524,7 @@ impl IcebergMetadata {
     pub(crate) fn defer_maintenance(
         candidate: &MaintenanceCandidate,
         retry_at: pg_sys::TimestampTz,
-    ) -> IcebergResult<bool> {
+    ) -> ManagedResult<bool> {
         let table_guard =
             CatalogRelation::open(Self::table_oid()?, pg_sys::RowExclusiveLock as _)
                 .map_catalog_err(CatalogOp::Update)?;
@@ -577,7 +578,7 @@ impl IcebergMetadata {
         relid: pg_sys::Oid,
         expected_location: &str,
         schedule: MaintenanceScheduleUpdate,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         let table_guard =
             CatalogRelation::open(Self::table_oid()?, pg_sys::RowExclusiveLock as _)
                 .map_catalog_err(CatalogOp::Update)?;
@@ -627,7 +628,8 @@ impl IcebergMetadata {
             MaintenanceScheduleUpdate::ScheduleNoLaterThan(_) => {
                 return Err(IcebergError::InvariantViolated(
                     "maintenance completion cannot schedule new maintenance work",
-                ));
+                )
+                .into());
             }
         }
         // SAFETY: the replacement and `old_tuple` use the same live descriptor.
@@ -660,7 +662,7 @@ impl IcebergMetadata {
         relid: pg_sys::Oid,
         expected_previous_location: Option<&str>,
         new: CasUpdate<'_>,
-    ) -> IcebergResult<bool> {
+    ) -> ManagedResult<bool> {
         let table_guard =
             CatalogRelation::open(Self::table_oid()?, pg_sys::RowExclusiveLock as _)
                 .map_catalog_err(CatalogOp::Update)?;
@@ -755,7 +757,7 @@ impl IcebergMetadata {
     // -- CRUD: Delete ---------------------------------------------------------
 
     /// Delete the row for `relid` if present; success when absent.
-    pub fn delete_if_exists(relid: pg_sys::Oid) -> IcebergResult<()> {
+    pub fn delete_if_exists(relid: pg_sys::Oid) -> ManagedResult<()> {
         let table_guard =
             CatalogRelation::open(Self::table_oid()?, pg_sys::RowExclusiveLock as _)
                 .map_catalog_err(CatalogOp::Delete)?;
@@ -791,7 +793,7 @@ impl IcebergMetadata {
     unsafe fn from_tuple(
         tup_desc: pg_sys::TupleDesc,
         tuple: pg_sys::HeapTuple,
-    ) -> IcebergResult<Self> {
+    ) -> ManagedResult<Self> {
         // SAFETY: the caller guarantees that the tuple and descriptor match.
         // Each attribute number names the documented catalog column, and each
         // target Rust type matches that column's PostgreSQL type.

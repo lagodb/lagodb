@@ -8,11 +8,12 @@ use lagodb_core::table_maintenance::{
     TableMaintenanceMode, TableMaintenanceReport,
 };
 
-use crate::error::{IcebergError, IcebergResult};
+use crate::error::IcebergError;
 use crate::managed_table::catalog::metadata_table::MaintenanceCompletionToken;
 use crate::managed_table::gucs::{
     vacuum_compact_data_files, vacuum_orphan_retention_ms,
 };
+use crate::managed_table::{ManagedResult, ManagedTableError};
 use crate::write::ExclusiveTransactionAction;
 
 use super::error::IcebergVacuumError;
@@ -24,13 +25,13 @@ pub(crate) struct ManagedTableRoot {
 }
 
 impl ManagedTableRoot {
-    pub(crate) fn new(expected: String, actual: &str) -> IcebergResult<Self> {
+    pub(crate) fn new(expected: String, actual: &str) -> ManagedResult<Self> {
         let root = expected.trim_end_matches('/').to_owned();
         if root.is_empty()
             || root.split('/').any(|segment| segment == "..")
             || actual.trim_end_matches('/') != root
         {
-            return Err(IcebergError::Vacuum {
+            return Err(ManagedTableError::Vacuum {
                 source: IcebergVacuumError::UnsafePath(actual.to_owned()),
             });
         }
@@ -38,20 +39,20 @@ impl ManagedTableRoot {
         Ok(Self { root, child_prefix })
     }
 
-    pub(crate) fn ensure_table_location(&self, location: &str) -> IcebergResult<()> {
+    pub(crate) fn ensure_table_location(&self, location: &str) -> ManagedResult<()> {
         if location.trim_end_matches('/') != self.root {
-            return Err(IcebergError::Vacuum {
+            return Err(ManagedTableError::Vacuum {
                 source: IcebergVacuumError::UnsafePath(location.to_owned()),
             });
         }
         Ok(())
     }
 
-    pub(crate) fn ensure_path(&self, path: &str) -> IcebergResult<()> {
+    pub(crate) fn ensure_path(&self, path: &str) -> ManagedResult<()> {
         if path.split('/').any(|segment| segment == "..")
             || !path.starts_with(&self.child_prefix)
         {
-            return Err(IcebergError::Vacuum {
+            return Err(ManagedTableError::Vacuum {
                 source: IcebergVacuumError::UnsafePath(path.to_owned()),
             });
         }
@@ -126,13 +127,14 @@ pub(crate) fn record_metric(
     report: &mut TableMaintenanceReport,
     name: &'static CStr,
     value: u64,
-) -> IcebergResult<()> {
+) -> ManagedResult<()> {
     report
         .record_provider_metric(TableMaintenanceMetric { name, value })
         .map_err(|_| {
             IcebergError::InvariantViolated(
                 "Iceberg VACUUM exceeded its statically bounded provider metrics",
             )
+            .into()
         })
 }
 
@@ -174,13 +176,10 @@ pub(crate) struct PreparedVacuum {
 }
 
 impl ExclusiveTransactionAction for PreparedVacuum {
-    const NOT_EXCLUSIVE_INVARIANT: &'static str =
-        "VACUUM action is not exclusive in metadata tracker";
-    const MISPLACED_INVARIANT: &'static str =
-        "non-exclusive VACUUM reached commit planning";
+    type Error = ManagedTableError;
 
-    fn conflict_error(&self) -> IcebergError {
-        IcebergError::Vacuum {
+    fn conflict_error(&self) -> ManagedTableError {
+        ManagedTableError::Vacuum {
             source: IcebergVacuumError::ActionConflict,
         }
     }

@@ -21,7 +21,8 @@ use lagodb_core::customscan::provider::{
 };
 use lagodb_core::expr::RuntimeValueBindings;
 use lagodb_core::expr::pushdown::{
-    BoundFilterSet, FilterBindResult, FilterPlanningContext, FilterPushdown,
+    BoundFilterSet, FilterBindResult, FilterPlan, FilterPlanningContext,
+    FilterPushdown, FilterPushdownPlanner, PredicateFragment,
 };
 use lagodb_core::handles::{RelationHandle, SnapshotHandle};
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
@@ -37,10 +38,10 @@ use crate::managed_table::access::mutation::{
 };
 use crate::managed_table::access::scan::{IcebergScan, PreparedModifySeqScan};
 use crate::managed_table::catalog::IcebergAccessMethod;
-use crate::managed_table::catalog::metadata_tracker::TxMetadata;
+use crate::managed_table::transaction::ManagedTransaction;
+use crate::managed_table::{ManagedResult, ManagedTableError};
 use crate::predicate::{
-    BoundIcebergPredicate, IcebergFilterError, IcebergFilterPlanner,
-    PlannedIcebergPredicate,
+    BoundIcebergPredicate, IcebergFilterPlanner, PlannedIcebergPredicate,
 };
 use crate::scan::{ReaderScanCost, ScanVolume};
 
@@ -49,22 +50,50 @@ use scan_state::IcebergScanState;
 /// Zero-sized marker for the Iceberg [`LagodbCustomScanProvider`].
 pub(crate) struct IcebergCustomScanProvider;
 
-impl FilterPushdown for IcebergCustomScanProvider {
-    type Planner = IcebergFilterPlanner;
-    type PlannedPredicate = PlannedIcebergPredicate;
-    type BoundPredicate = BoundIcebergPredicate;
-    type Error = IcebergFilterError;
+/// Shared Iceberg filter planner bound to a managed table's current read view.
+///
+/// Loading the view can fail with managed catalog errors, which the shared
+/// [`IcebergFilterPlanner`] error type does not carry.
+pub(crate) struct ManagedFilterPlanner(IcebergFilterPlanner);
 
-    fn begin_filter_planning(
-        context: &FilterPlanningContext,
-    ) -> Result<Self::Planner, Self::Error> {
+impl ManagedFilterPlanner {
+    fn load(context: &FilterPlanningContext) -> ManagedResult<Self> {
         let view = ManagedTableReadView::load(context.relation_oid())?;
-        IcebergFilterPlanner::new(
+        Ok(Self(IcebergFilterPlanner::new(
             context,
             view.schema(),
             view.metadata(),
             Some(view.pruning_units()?),
-        )
+        )?))
+    }
+}
+
+impl FilterPushdownPlanner for ManagedFilterPlanner {
+    type PlannedPredicate = PlannedIcebergPredicate;
+    type Error = ManagedTableError;
+
+    fn try_plan_filter(
+        &mut self,
+        fragment: &PredicateFragment,
+    ) -> Result<FilterPlan<Self::PlannedPredicate>, Self::Error> {
+        Ok(self.0.try_plan_filter(fragment)?)
+    }
+
+    fn pruning_units(&self) -> Option<f64> {
+        self.0.pruning_units()
+    }
+}
+
+impl FilterPushdown for IcebergCustomScanProvider {
+    type Planner = ManagedFilterPlanner;
+    type PlannedPredicate = PlannedIcebergPredicate;
+    type BoundPredicate = BoundIcebergPredicate;
+    type Error = ManagedTableError;
+
+    fn begin_filter_planning(
+        context: &FilterPlanningContext,
+    ) -> Result<Self::Planner, Self::Error> {
+        ManagedFilterPlanner::load(context)
     }
 
     fn encode_planned(
@@ -79,19 +108,25 @@ impl FilterPushdown for IcebergCustomScanProvider {
         reader: &mut PlanDataReader<'_>,
         binding_count: usize,
     ) -> Result<Self::PlannedPredicate, Self::Error> {
-        PlannedIcebergPredicate::decode(reader, binding_count)
+        Ok(PlannedIcebergPredicate::decode(reader, binding_count)?)
     }
 
     fn bind_filter(
         predicate: &Self::PlannedPredicate,
         values: RuntimeValueBindings<'_>,
     ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
-        predicate.bind(values)
+        Ok(predicate.bind(values)?)
     }
 }
 
 impl From<IcebergError> for CustomScanError {
     fn from(err: IcebergError) -> Self {
+        CustomScanError::provider(err)
+    }
+}
+
+impl From<ManagedTableError> for CustomScanError {
+    fn from(err: ManagedTableError) -> Self {
         CustomScanError::provider(err)
     }
 }
@@ -129,7 +164,8 @@ impl LagodbCustomScanProvider for IcebergCustomScanProvider {
         let reader =
             ReaderScanCost::new(volume, ctx.baserel_tuples(), &variant.filters);
 
-        let worker_reconstructible = !TxMetadata::has_local_actions(ctx.rel_oid());
+        let worker_reconstructible =
+            !ManagedTransaction::has_local_actions(ctx.rel_oid());
         let builder = builder
             .scanned_pages(ctx.baserel_pages() * volume.fraction())
             .provider_run_cost(reader.run)

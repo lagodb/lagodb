@@ -13,7 +13,8 @@ use iceberg_lite::transaction::{ApplyTransactionAction, Transaction};
 use lagodb_core::table_maintenance::TableMaintenanceReport;
 use pgrx::pg_sys;
 
-use crate::error::{IcebergError, IcebergResult};
+use crate::error::IcebergError;
+use crate::managed_table::{ManagedResult, ManagedTableError};
 
 use super::error::IcebergVacuumError;
 use super::{
@@ -35,7 +36,7 @@ impl VacuumAttemptResult<'_> {
         relid: pg_sys::Oid,
         file_io: &FileIO,
         commit_started: Instant,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         let Self {
             vacuum,
             mut report,
@@ -43,7 +44,7 @@ impl VacuumAttemptResult<'_> {
         } = self;
         report.objects_scheduled_for_deletion =
             u64::try_from(cleanup_candidates.len()).map_err(|_| {
-                IcebergError::Vacuum {
+                ManagedTableError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "cleanup candidate count does not fit u64".to_owned(),
                     ),
@@ -55,7 +56,7 @@ impl VacuumAttemptResult<'_> {
             &mut report,
             c"commit_ms",
             u64::try_from(commit_started.elapsed().as_millis()).map_err(|_| {
-                IcebergError::Vacuum {
+                ManagedTableError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "VACUUM commit duration does not fit u64 milliseconds"
                             .to_owned(),
@@ -95,7 +96,7 @@ impl<'v, 'a> VacuumCommitAttempt<'v, 'a> {
     pub(crate) fn apply_actions(
         &self,
         mut transaction: Transaction,
-    ) -> IcebergResult<Transaction> {
+    ) -> ManagedResult<Transaction> {
         self.vacuum
             .owned_table_root
             .ensure_table_location(self.base_table.metadata().location())?;
@@ -136,10 +137,10 @@ impl<'v, 'a> VacuumCommitAttempt<'v, 'a> {
     pub(crate) fn finish(
         &self,
         updated_table: &Table,
-    ) -> IcebergResult<VacuumAttemptResult<'v>> {
+    ) -> ManagedResult<VacuumAttemptResult<'v>> {
         let new_metadata_location = updated_table
             .metadata_location()
-            .ok_or(IcebergError::MetadataLocationNull)?;
+            .ok_or(ManagedTableError::MetadataLocationNull)?;
         self.vacuum
             .owned_table_root
             .ensure_table_location(updated_table.metadata().location())?;
@@ -191,7 +192,7 @@ impl<'v, 'a> VacuumCommitAttempt<'v, 'a> {
         &self,
         updated_table: &Table,
         report: &mut TableMaintenanceReport,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         let base_snapshot_ids: HashSet<i64> = self
             .base_table
             .metadata()
@@ -211,7 +212,7 @@ impl<'v, 'a> VacuumCommitAttempt<'v, 'a> {
             .count();
         report.snapshots_expired =
             u64::try_from(expired_snapshot_count).map_err(|_| {
-                IcebergError::Vacuum {
+                ManagedTableError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "expired snapshot count does not fit u64".to_owned(),
                     ),
@@ -228,7 +229,7 @@ impl<'v, 'a> VacuumCommitAttempt<'v, 'a> {
         record_metric(
             report,
             c"expired_refs",
-            u64::try_from(expired_refs).map_err(|_| IcebergError::Vacuum {
+            u64::try_from(expired_refs).map_err(|_| ManagedTableError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(
                     "expired reference count does not fit u64".to_owned(),
                 ),
@@ -261,7 +262,7 @@ impl<'v, 'a> VacuumCommitAttempt<'v, 'a> {
                 })
                 .count();
             report.manifests_rewritten =
-                u64::try_from(rewritten).map_err(|_| IcebergError::Vacuum {
+                u64::try_from(rewritten).map_err(|_| ManagedTableError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "rewritten manifest count does not fit u64".to_owned(),
                     ),
@@ -276,12 +277,12 @@ impl<'v, 'a> VacuumCommitAttempt<'v, 'a> {
         expiration: &ReachabilityDeletionCandidates,
         orphan_count: Option<usize>,
         started: Instant,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         record_metric(
             report,
             c"expiration_unreachable_objects",
             u64::try_from(expiration.paths.len()).map_err(|_| {
-                IcebergError::Vacuum {
+                ManagedTableError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "expiration cleanup count does not fit u64".to_owned(),
                     ),
@@ -302,10 +303,12 @@ impl<'v, 'a> VacuumCommitAttempt<'v, 'a> {
             record_metric(
                 report,
                 c"orphan_candidates",
-                u64::try_from(orphan_count).map_err(|_| IcebergError::Vacuum {
-                    source: IcebergVacuumError::ResourceLimit(
-                        "orphan candidate count does not fit u64".to_owned(),
-                    ),
+                u64::try_from(orphan_count).map_err(|_| {
+                    ManagedTableError::Vacuum {
+                        source: IcebergVacuumError::ResourceLimit(
+                            "orphan candidate count does not fit u64".to_owned(),
+                        ),
+                    }
                 })?,
             )?;
         }
@@ -313,7 +316,7 @@ impl<'v, 'a> VacuumCommitAttempt<'v, 'a> {
             report,
             c"cleanup_planning_ms",
             u64::try_from(started.elapsed().as_millis()).map_err(|_| {
-                IcebergError::Vacuum {
+                ManagedTableError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "cleanup planning duration does not fit u64 milliseconds"
                             .to_owned(),

@@ -47,10 +47,13 @@ impl TableMaintenanceError {
     where
         E: SqlStateError + std::error::Error + Send + Sync + 'static,
     {
-        Self::new(TableMaintenanceErrorKind::Provider {
-            sqlerrcode: source.sql_error_code(),
-            source: Box::new(source),
-        })
+        match source.try_into_pg_report() {
+            Ok(report) => report.into(),
+            Err(source) => Self::new(TableMaintenanceErrorKind::Provider {
+                sqlerrcode: source.sql_error_code(),
+                source: Box::new(source),
+            }),
+        }
     }
 
     pub fn framework(message: impl Into<String>) -> Self {

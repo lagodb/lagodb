@@ -8,10 +8,10 @@ use lagodb_core::options::TableOptions;
 
 use super::local_storage::LocalTableRoot;
 use super::metadata_table::IcebergMetadata;
-use super::metadata_tracker::TxMetadata;
 use super::table_location::ManagedTableLocation;
-use crate::error::IcebergResult;
+use crate::managed_table::ManagedResult;
 use crate::managed_table::storage::StorageContext;
+use crate::managed_table::transaction::ManagedTransaction;
 
 enum TableRootCleanup {
     Local {
@@ -22,7 +22,7 @@ enum TableRootCleanup {
 }
 
 impl TableRootCleanup {
-    fn resolve(rel: &RelationHandle<'_>) -> IcebergResult<Self> {
+    fn resolve(rel: &RelationHandle<'_>) -> ManagedResult<Self> {
         let location = ManagedTableLocation::for_relation(rel)?;
         match location {
             ManagedTableLocation::Remote { cleanup_target, .. } => {
@@ -42,15 +42,15 @@ pub(crate) struct IcebergTableDrop<'a> {
 }
 
 impl<'a> IcebergTableDrop<'a> {
-    pub(crate) fn for_relation(rel: &'a RelationHandle<'a>) -> IcebergResult<Self> {
+    pub(crate) fn for_relation(rel: &'a RelationHandle<'a>) -> ManagedResult<Self> {
         Ok(Self {
             rel,
             cleanup: TableRootCleanup::resolve(rel)?,
         })
     }
 
-    pub(crate) fn stage(self) -> IcebergResult<()> {
-        TxMetadata::stage_drop(self.rel.oid())?;
+    pub(crate) fn stage(self) -> ManagedResult<()> {
+        ManagedTransaction::stage_drop(self.rel.oid())?;
 
         match self.cleanup {
             TableRootCleanup::Local { root, context } => {

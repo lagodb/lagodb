@@ -6,7 +6,8 @@ use iceberg_lite::spec::{DataFile, TableProperties};
 use iceberg_lite::table::Table;
 use lagodb_core::table_maintenance::TableMaintenanceMode;
 
-use crate::error::{IcebergError, IcebergResult};
+use crate::error::IcebergError;
+use crate::managed_table::{ManagedResult, ManagedTableError};
 
 use super::error::IcebergVacuumError;
 use super::types::{
@@ -29,8 +30,8 @@ struct RewriteCandidate {
 pub(crate) struct VacuumPlanner;
 
 impl VacuumPlanner {
-    fn count(value: usize, description: &'static str) -> IcebergResult<u64> {
-        u64::try_from(value).map_err(|_| IcebergError::Vacuum {
+    fn count(value: usize, description: &'static str) -> ManagedResult<u64> {
+        u64::try_from(value).map_err(|_| ManagedTableError::Vacuum {
             source: IcebergVacuumError::ResourceLimit(format!(
                 "{description} does not fit u64"
             )),
@@ -64,11 +65,11 @@ impl VacuumPlanner {
         table: &Table,
         policy: VacuumPolicy,
         owned_table_root: &ManagedTableRoot,
-    ) -> IcebergResult<VacuumPlan> {
+    ) -> ManagedResult<VacuumPlan> {
         Self::validate_budget(policy)?;
         let properties = table.metadata().table_properties();
         if !properties.gc_enabled()? {
-            return Err(IcebergError::Vacuum {
+            return Err(ManagedTableError::Vacuum {
                 source: IcebergVacuumError::GcDisabled,
             });
         }
@@ -79,7 +80,7 @@ impl VacuumPlanner {
             "write.metadata.path",
         ] {
             if table.metadata().properties().contains_key(property) {
-                return Err(IcebergError::Vacuum {
+                return Err(ManagedTableError::Vacuum {
                     source: IcebergVacuumError::InvalidPolicy(format!(
                         "managed Iceberg tables cannot override {property}"
                     )),
@@ -110,7 +111,7 @@ impl VacuumPlanner {
         }
 
         let target_bytes = u64::try_from(target_file_size_bytes).map_err(|_| {
-            IcebergError::Vacuum {
+            ManagedTableError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(
                     "write.target-file-size-bytes does not fit u64".to_owned(),
                 ),
@@ -150,12 +151,14 @@ impl VacuumPlanner {
             if task.data_file_path() != file.file_path() {
                 return Err(IcebergError::InvariantViolated(
                     "Iceberg scan task path differs from its source data file",
-                ));
+                )
+                .into());
             }
             if !planned_paths.insert(file.file_path().to_owned()) {
                 return Err(IcebergError::InvariantViolated(
                     "Iceberg scan planned duplicate live data-file paths",
-                ));
+                )
+                .into());
             }
             let delete_heavy = Self::is_delete_heavy(&file, &task.deletes)?;
             let size = file.file_size_in_bytes();
@@ -179,7 +182,7 @@ impl VacuumPlanner {
             .try_fold(0_u64, |total, candidate| {
                 total.checked_add(candidate.file.file_size_in_bytes())
             })
-            .ok_or_else(|| IcebergError::Vacuum {
+            .ok_or_else(|| ManagedTableError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(
                     "eligible input byte count overflow".to_owned(),
                 ),
@@ -209,20 +212,20 @@ impl VacuumPlanner {
         metrics.selected_files = groups.iter().try_fold(0_u64, |total, group| {
             total
                 .checked_add(Self::count(group.inputs.len(), "selected file count")?)
-                .ok_or_else(|| IcebergError::Vacuum {
+                .ok_or_else(|| ManagedTableError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "selected file count overflow".to_owned(),
                     ),
                 })
         })?;
         metrics.selected_bytes = groups.iter().try_fold(0_u64, |total, group| {
-            total
-                .checked_add(group.input_bytes)
-                .ok_or_else(|| IcebergError::Vacuum {
+            total.checked_add(group.input_bytes).ok_or_else(|| {
+                ManagedTableError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "selected input byte count overflow".to_owned(),
                     ),
-                })
+                }
+            })
         })?;
 
         let materialized_delete_identities = Self::materialized_delete_files(&groups);
@@ -236,8 +239,8 @@ impl VacuumPlanner {
         })
     }
 
-    fn validate_properties(properties: TableProperties<'_>) -> IcebergResult<usize> {
-        let invalid = |message: &'static str| IcebergError::Vacuum {
+    fn validate_properties(properties: TableProperties<'_>) -> ManagedResult<usize> {
+        let invalid = |message: &'static str| ManagedTableError::Vacuum {
             source: IcebergVacuumError::InvalidPolicy(message.to_owned()),
         };
         let target_file_size_bytes = properties.write_target_file_size_bytes()?;
@@ -279,13 +282,13 @@ impl VacuumPlanner {
         Ok(target_file_size_bytes)
     }
 
-    fn validate_budget(policy: VacuumPolicy) -> IcebergResult<()> {
+    fn validate_budget(policy: VacuumPolicy) -> ManagedResult<()> {
         if policy.budget.max_group_objects == 0
             || policy.budget.max_group_bytes == 0
             || policy.budget.max_input_objects == 0
             || policy.budget.max_input_bytes == 0
         {
-            return Err(IcebergError::Vacuum {
+            return Err(ManagedTableError::Vacuum {
                 source: IcebergVacuumError::InvalidPolicy(
                     "VACUUM object and byte budgets must be greater than zero"
                         .to_owned(),
@@ -298,7 +301,7 @@ impl VacuumPlanner {
     fn is_delete_heavy(
         file: &DataFile,
         deletes: &[iceberg_lite::scan::FileScanTaskDeleteFile],
-    ) -> IcebergResult<bool> {
+    ) -> ManagedResult<bool> {
         if file.record_count() == 0 {
             return Ok(false);
         }
@@ -309,7 +312,7 @@ impl VacuumPlanner {
             })
             .try_fold(0_u64, |total, delete| {
                 total.checked_add(delete.record_count()).ok_or_else(|| {
-                    IcebergError::Vacuum {
+                    ManagedTableError::Vacuum {
                         source: IcebergVacuumError::ResourceLimit(
                             "file-scoped deleted-row count overflow".to_owned(),
                         ),
@@ -324,7 +327,7 @@ impl VacuumPlanner {
         mut candidates: Vec<RewriteCandidate>,
         target_bytes: u64,
         policy: VacuumPolicy,
-    ) -> IcebergResult<Vec<RewriteGroup>> {
+    ) -> ManagedResult<Vec<RewriteGroup>> {
         candidates.sort_by(|left, right| {
             right
                 .file
@@ -346,7 +349,7 @@ impl VacuumPlanner {
 
         let mut accepted = Vec::new();
         let max_group_objects = usize::try_from(policy.budget.max_group_objects)
-            .map_err(|_| IcebergError::Vacuum {
+            .map_err(|_| ManagedTableError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(
                     "vacuum_max_group_objects does not fit backend usize".to_owned(),
                 ),
@@ -361,7 +364,7 @@ impl VacuumPlanner {
                 } = candidate;
                 let file_bytes = file.file_size_in_bytes();
                 if file_bytes > policy.budget.max_group_bytes {
-                    return Err(IcebergError::Vacuum {
+                    return Err(ManagedTableError::Vacuum {
                         source: IcebergVacuumError::ResourceLimit(format!(
                             "eligible input {} is {} bytes, above vacuum_max_group_mb",
                             file.file_path(),
@@ -379,7 +382,7 @@ impl VacuumPlanner {
                     group.input_bytes = group
                         .input_bytes
                         .checked_add(file_bytes)
-                        .ok_or_else(|| IcebergError::Vacuum {
+                        .ok_or_else(|| ManagedTableError::Vacuum {
                             source: IcebergVacuumError::ResourceLimit(
                                 "rewrite group byte count overflow".to_owned(),
                             ),
@@ -401,7 +404,7 @@ impl VacuumPlanner {
                     group.input_bytes.div_ceil(target_bytes).max(1);
                 let input_count =
                     u64::try_from(group.inputs.len()).map_err(|_| {
-                        IcebergError::Vacuum {
+                        ManagedTableError::Vacuum {
                             source: IcebergVacuumError::ResourceLimit(
                                 "rewrite group input count does not fit u64"
                                     .to_owned(),
@@ -432,7 +435,7 @@ impl VacuumPlanner {
     fn apply_command_budget(
         groups: &mut Vec<RewriteGroup>,
         policy: VacuumPolicy,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         if policy.mode == TableMaintenanceMode::Full {
             return Ok(());
         }
@@ -441,7 +444,7 @@ impl VacuumPlanner {
         let mut keep = 0_usize;
         for group in groups.iter() {
             let objects = u64::try_from(group.inputs.len()).map_err(|_| {
-                IcebergError::Vacuum {
+                ManagedTableError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "rewrite group input count does not fit u64".to_owned(),
                     ),
@@ -456,12 +459,13 @@ impl VacuumPlanner {
             if would_exceed && keep > 0 {
                 break;
             }
-            selected_objects = next_objects.ok_or_else(|| IcebergError::Vacuum {
-                source: IcebergVacuumError::ResourceLimit(
-                    "selected input object count overflow".to_owned(),
-                ),
-            })?;
-            selected_bytes = next_bytes.ok_or_else(|| IcebergError::Vacuum {
+            selected_objects =
+                next_objects.ok_or_else(|| ManagedTableError::Vacuum {
+                    source: IcebergVacuumError::ResourceLimit(
+                        "selected input object count overflow".to_owned(),
+                    ),
+                })?;
+            selected_bytes = next_bytes.ok_or_else(|| ManagedTableError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(
                     "selected input byte count overflow".to_owned(),
                 ),

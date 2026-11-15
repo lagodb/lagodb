@@ -6,7 +6,6 @@ mod planning;
 pub(in crate::managed_table) use self::inheritance::PartitionedInheritance;
 
 use crate::create_command::CreateCommandStack;
-use crate::error::IcebergError;
 use crate::managed_table::catalog::schema_evolution::SchemaEvolutionUpdate;
 use crate::managed_table::catalog::table_creation::ManagedTableCreation;
 use crate::managed_table::catalog::table_properties::ManagedTablePropertyUpdate;
@@ -107,8 +106,7 @@ impl UtilityHook for IcebergTableHook {
         if partition_spec.is_some() {
             PartitionedInheritance::validate_created(&rel)?;
         }
-        ManagedTableCreation::execute(&rel, table_options, partition_spec)
-            .map_err(IcebergError::into_hook_error)?;
+        ManagedTableCreation::execute(&rel, table_options, partition_spec)?;
         Ok(())
     }
 }

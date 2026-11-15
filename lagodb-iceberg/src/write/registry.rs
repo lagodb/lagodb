@@ -151,8 +151,8 @@ impl RelationRowRegistry {
             return Ok(file_id);
         }
         let raw_id = u32::try_from(inner.files.len()).map_err(|_| {
-            IcebergError::MetadataTracker(
-                "Iceberg file ID cannot be represented as u32".to_owned(),
+            IcebergError::InvariantViolated(
+                "Iceberg file ID cannot be represented as u32",
             )
         })?;
         let file_id = IcebergFileId::try_from_raw(raw_id)?;
@@ -176,11 +176,8 @@ impl RelationRowRegistry {
             .files
             .get(file_id.index())
             .map(|file| Rc::clone(&file.path))
-            .ok_or_else(|| {
-                IcebergError::MetadataTracker(format!(
-                    "unknown Iceberg file ID {}",
-                    file_id.raw()
-                ))
+            .ok_or(IcebergError::UnknownFileId {
+                file_id: file_id.raw(),
             })
     }
 
@@ -192,12 +189,12 @@ impl RelationRowRegistry {
             )
         })?;
         let id = ModifyStateId(inner.next_modify_state_id);
-        inner.next_modify_state_id =
-            inner.next_modify_state_id.checked_add(1).ok_or_else(|| {
-                IcebergError::MetadataTracker(
-                    "Iceberg ModifyState ID space was exhausted".to_owned(),
-                )
-            })?;
+        inner.next_modify_state_id = inner
+            .next_modify_state_id
+            .checked_add(1)
+            .ok_or(IcebergError::InvariantViolated(
+                "Iceberg ModifyState ID space was exhausted",
+            ))?;
         Ok(id)
     }
 
@@ -250,12 +247,11 @@ impl RelationRowRegistry {
                 "transaction row registry is already borrowed",
             )
         })?;
-        let file = inner.files.get_mut(file_id.index()).ok_or_else(|| {
-            IcebergError::MetadataTracker(format!(
-                "unknown Iceberg file ID {}",
-                file_id.raw()
-            ))
-        })?;
+        let file = inner.files.get_mut(file_id.index()).ok_or(
+            IcebergError::UnknownFileId {
+                file_id: file_id.raw(),
+            },
+        )?;
 
         // TODO(row-claim-index): this probes every other ModifyState bitmap for
         // each row, making repeated cross-node mutations O(owner count). Keep a

@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::diag::{PgError, SqlStateError};
+use crate::diag::{PgError, PgReportError, SqlStateError};
 use pgrx::prelude::PgSqlErrorCode;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,6 +82,18 @@ impl SqlStateError for ObjectCleanupError {
             Self::InvalidRecord(_) | Self::WorkerNotification(_) => {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
             }
+        }
+    }
+
+    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
+        match self {
+            Self::Catalog { operation, source } => {
+                Ok(PgReportError::from_pg_error(source).contextualize(
+                    format_args!("failed to {operation} maintenance queue catalog"),
+                    None,
+                ))
+            }
+            error => Err(error),
         }
     }
 }

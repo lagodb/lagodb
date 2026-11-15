@@ -1,7 +1,7 @@
 //! Query-offload provider failures before the runtime callback boundary.
 
 use bincode::Error as BinaryCodecError;
-use lagodb_core::diag::{PgError, SqlStateError};
+use lagodb_core::diag::{PgError, PgReportError, SqlStateError};
 use lagodb_core::expr::ExpressionCodecError;
 use lagodb_core::plan_data::PlanDataError;
 use lagodb_core::query_contract::ScanCostError;
@@ -10,6 +10,7 @@ use pgrx::prelude::PgSqlErrorCode;
 
 use crate::error::IcebergError;
 use crate::foreign_table::IcebergFdwError;
+use crate::managed_table::ManagedTableError;
 use crate::predicate::IcebergFilterError;
 use crate::scan::ScanError;
 
@@ -23,6 +24,8 @@ pub(super) enum Error {
     Cost(#[from] ScanCostError),
     #[error("failed to bind or plan Iceberg table scan: {0}")]
     Iceberg(#[from] IcebergError),
+    #[error("failed to bind or plan Iceberg table scan: {0}")]
+    Managed(#[source] Box<ManagedTableError>),
     #[error("failed to plan or bind foreign Iceberg table scan: {0}")]
     Foreign(#[source] Box<IcebergFdwError>),
     #[error("failed to plan or bind Iceberg pruning predicate: {0}")]
@@ -35,6 +38,12 @@ pub(super) enum Error {
     RuntimePredicate(#[from] RuntimePredicateCodecError),
     #[error("table scan batch row limit {value} exceeds this platform")]
     BatchRowLimit { value: u64 },
+}
+
+impl From<ManagedTableError> for Error {
+    fn from(error: ManagedTableError) -> Self {
+        Self::Managed(Box::new(error))
+    }
 }
 
 impl From<IcebergFdwError> for Error {
@@ -65,6 +74,7 @@ impl SqlStateError for Error {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
             Self::Iceberg(error) => error.sql_error_code(),
+            Self::Managed(error) => error.sql_error_code(),
             Self::Foreign(error) => error.sql_error_code(),
             Self::Filter(error) => error.sql_error_code(),
             Self::Scan(error) => error.sql_error_code(),
@@ -75,6 +85,45 @@ impl SqlStateError for Error {
             | Self::Cost(_)
             | Self::Expression(_)
             | Self::RuntimePredicate(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+        }
+    }
+
+    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
+        const BIND_OR_PLAN: &str = "failed to bind or plan Iceberg table scan";
+        match self {
+            Self::Iceberg(error) => error
+                .try_into_pg_report()
+                .map(|report| report.contextualize(BIND_OR_PLAN, None))
+                .map_err(Self::Iceberg),
+            Self::Managed(error) => (*error)
+                .try_into_pg_report()
+                .map(|report| report.contextualize(BIND_OR_PLAN, None))
+                .map_err(|error| Self::Managed(Box::new(error))),
+            Self::Foreign(error) => (*error)
+                .try_into_pg_report()
+                .map(|report| {
+                    report.contextualize(
+                        "failed to plan or bind foreign Iceberg table scan",
+                        None,
+                    )
+                })
+                .map_err(|error| Self::Foreign(Box::new(error))),
+            Self::Filter(error) => error
+                .try_into_pg_report()
+                .map(|report| {
+                    report.contextualize(
+                        "failed to plan or bind Iceberg pruning predicate",
+                        None,
+                    )
+                })
+                .map_err(Self::Filter),
+            Self::Scan(error) => error
+                .try_into_pg_report()
+                .map(|report| {
+                    report.contextualize("Iceberg scan data plane failed", None)
+                })
+                .map_err(Self::Scan),
+            error => Err(error),
         }
     }
 }

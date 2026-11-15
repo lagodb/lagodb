@@ -253,7 +253,7 @@ impl Catalog for StagedCatalog {
         // Note: this adapter is single-shot. After `update_table` returns,
         // `self.base` no longer reflects the latest metadata. Reusing this
         // value for a second commit would silently rebase against stale
-        // state. Callers (currently `metadata_tracker::commit_all`) honor
+        // state. Callers (currently `ManagedTransaction::commit_all`) honor
         // this by constructing a fresh `StagedCatalog` per commit attempt.
         let staged_table = commit.apply(self.base.clone())?;
 

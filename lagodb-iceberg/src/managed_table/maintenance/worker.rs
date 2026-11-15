@@ -15,7 +15,7 @@ use pgrx::datum::Internal;
 use pgrx::prelude::*;
 
 use super::operations::{IcebergTableMaintenance, MaintenanceExecution};
-use crate::error::IcebergError;
+use crate::managed_table::ManagedTableError;
 use crate::managed_table::catalog::IcebergRelationExt;
 use crate::managed_table::catalog::metadata_table::{
     IcebergMetadata, MaintenanceCandidate, MaintenanceScheduleUpdate,
@@ -65,7 +65,7 @@ fn maintain_relation(
     let metadata_location = candidate
         .metadata_location
         .as_deref()
-        .ok_or(IcebergError::MetadataLocationNull)
+        .ok_or(ManagedTableError::MetadataLocationNull)
         .map_err(PgReportError::from_domain_error)?;
     let locked = unsafe {
         pg_sys::ConditionalLockRelationOid(
@@ -102,7 +102,7 @@ fn maintain_relation(
     )
     .map_err(PgReportError::from_domain_error)?
     {
-        MaintenanceExecution::Executed(_) => Ok(MaintenanceAttempt::Completed),
+        MaintenanceExecution::Executed => Ok(MaintenanceAttempt::Completed),
         MaintenanceExecution::StaleCandidate => {
             Ok(MaintenanceAttempt::StaleCandidate)
         }

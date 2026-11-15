@@ -9,7 +9,7 @@ use rand::Rng;
 
 use super::cursor::{AnalyzeReadPlan, ExpectedFile, ExpectedPositions};
 use super::sampling::AnalyzeSampler;
-use crate::error::IcebergResult;
+use crate::managed_table::ManagedResult;
 
 /// Immutable whole-snapshot population captured before sampling begins.
 pub(crate) struct AnalyzePopulation {
@@ -26,7 +26,7 @@ struct AnalyzeFile {
 impl AnalyzePopulation {
     /// `tasks` come from iceberg-lite's `plan_files()`, which builds one
     /// whole-file task per live data file with its manifest record count.
-    pub(super) fn try_new(tasks: Vec<FileScanTask>) -> IcebergResult<Self> {
+    pub(super) fn try_new(tasks: Vec<FileScanTask>) -> ManagedResult<Self> {
         // The reader maps batches back to planned files by path.
         let has_duplicate_path = {
             let mut paths = HashSet::with_capacity(tasks.len());
@@ -75,7 +75,7 @@ impl AnalyzePopulation {
         requested_candidates: u64,
         max_data_files: usize,
         rng: &mut R,
-    ) -> IcebergResult<AnalyzePlannedSample> {
+    ) -> ManagedResult<AnalyzePlannedSample> {
         let file_count = self.files.len() + self.zero_row_files.len();
         let (read_plan, candidate_count) = if requested_candidates
             >= self.physical_rows
@@ -99,7 +99,7 @@ impl AnalyzePopulation {
         requested_candidates: u64,
         max_data_files: usize,
         rng: &mut R,
-    ) -> IcebergResult<(AnalyzeReadPlan, u64)> {
+    ) -> ManagedResult<(AnalyzeReadPlan, u64)> {
         let record_counts = self
             .files
             .iter()

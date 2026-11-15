@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use lagodb_core::datum::{
     DatumConversionError, DecimalCodecError, JsonValueError, Utf8ServerEncodingError,
 };
-use lagodb_core::diag::{PgError, SqlStateError};
+use lagodb_core::diag::{PgError, PgReportError, SqlStateError};
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
@@ -127,6 +127,22 @@ impl SqlStateError for ArrowConversionError {
                     PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH
                 }
             },
+        }
+    }
+
+    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
+        match self {
+            Self::JsonValue(error) => error
+                .try_into_pg_report()
+                .map(|report| report.contextualize("JSONB conversion error", None))
+                .map_err(Self::JsonValue),
+            Self::DatumConversion(error) => error
+                .try_into_pg_report()
+                .map(|report| report.contextualize("datum conversion error", None))
+                .map_err(Self::DatumConversion),
+            Self::Postgres(error) => Ok(PgReportError::from_pg_error(error)
+                .contextualize("PostgreSQL error", None)),
+            error => Err(error),
         }
     }
 }

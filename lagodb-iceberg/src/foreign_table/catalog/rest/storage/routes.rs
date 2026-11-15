@@ -4,7 +4,6 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use iceberg_lite::io::{
     FileMetadata, FileWrite, OpenedFile, Storage, StorageCredential,
@@ -13,19 +12,14 @@ use iceberg_lite::{Error, ErrorKind, Result};
 use lagodb_core::storage::profile::{
     ObjectScheme, ObjectUri, ObjectUriPrefix, StorageProfiles,
 };
-use lagodb_core::storage::service::{BackendStorageService, StorageEndpoint};
-use lagodb_storage::{StagingPathResolver, StorageErrorKind, StoreConfig};
+use lagodb_core::storage::service::StorageEndpoint;
+use lagodb_storage::{StagingPathResolver, StoreConfig};
 use pgrx::pg_sys;
 
 use super::binding::{RouteBinding, RouteContext};
 use super::cache::{ConfiguredStorageCache, ConfiguredStorageRouteId};
 use crate::foreign_table::catalog::CatalogAccessIdentity;
-use crate::storage::transaction_resources::{
-    ensure_object_file_staged, mark_object_file_uploaded, register_object_file_staged,
-};
-use crate::storage::{
-    ObjectReader, ObjectWriter, StorageWaitEvent, StorageWaitGuard, storage_err,
-};
+use crate::storage::{ObjectBucket, storage_err};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum ObjectProvider {
@@ -44,10 +38,9 @@ impl From<ObjectScheme> for ObjectProvider {
     }
 }
 
+/// One configured bucket a REST credential route resolved to.
 pub(super) struct CatalogRoute {
-    bucket: Arc<str>,
-    service: BackendStorageService,
-    staging_resolver: StagingPathResolver,
+    bucket: ObjectBucket,
 }
 
 impl CatalogRoute {
@@ -88,94 +81,22 @@ impl CatalogRoute {
             ConfiguredStorageCache::acquire(route_id, endpoint, store_config)
                 .map_err(storage_err)?;
         Ok(Self {
-            bucket: Arc::from(object.bucket()),
-            service,
-            staging_resolver: staging_resolver.clone(),
+            bucket: ObjectBucket::new(
+                object.bucket(),
+                service,
+                staging_resolver.clone(),
+            ),
         })
     }
 
-    fn delete(&self, key: &str) -> Result<()> {
-        self.service
-            .delete(self.bucket.as_ref(), key)
-            .map_err(storage_err)
-    }
-
-    fn delete_cleanup(&self, key: &str) -> Result<()> {
-        self.service
-            .delete_cleanup(self.bucket.as_ref(), key)
-            .map_err(storage_err)
-    }
-
-    fn delete_prefix(&self, key: &str) -> Result<()> {
-        self.service
-            .delete_prefix(self.bucket.as_ref(), key)
-            .map(|_| ())
-            .map_err(storage_err)
-    }
-
-    fn status(&self, key: &str) -> Result<Option<FileMetadata>> {
-        match self.service.head(self.bucket.as_ref(), key) {
-            Ok(info) => Ok(Some(FileMetadata { size: info.size })),
-            Err(error) if error.kind() == StorageErrorKind::NotFound => Ok(None),
-            Err(error) => Err(storage_err(error)),
-        }
-    }
-
-    fn open_reader(&self, key: &str) -> Result<OpenedFile> {
-        let file = self
-            .service
-            .open(self.bucket.as_ref(), key)
-            .map_err(storage_err)?;
-        let metadata = FileMetadata { size: file.size() };
-        Ok(OpenedFile {
-            metadata,
-            reader: Box::new(ObjectReader::new(
-                self.service.clone(),
-                Arc::clone(&self.bucket),
-                Arc::from(key),
-                file,
-            )),
-        })
-    }
-
-    fn writer(&self, key: &str) -> Result<Box<dyn FileWrite>> {
-        let staging = self
-            .service
-            .create_staging_file(&self.staging_resolver, self.bucket.as_ref(), key)
-            .map_err(storage_err)?;
-        let location = self
-            .service
-            .object_location(self.bucket.as_ref(), key)
-            .map_err(storage_err)?;
-        register_object_file_staged(
-            location,
-            staging.path().to_path_buf(),
-            self.service.clone(),
-        );
-        Ok(Box::new(ObjectWriter::new(staging)))
-    }
-
-    fn finalize_write(&self, key: &str) -> Result<()> {
-        let location = self
-            .service
-            .object_location(self.bucket.as_ref(), key)
-            .map_err(storage_err)?;
-        ensure_object_file_staged(&location)
-            .map_err(|message| Error::new(ErrorKind::Unexpected, message))?;
-        {
-            let _wait = StorageWaitGuard::start(StorageWaitEvent::ObjectUpload);
-            self.service
-                .upload(self.bucket.as_ref(), key)
-                .map_err(storage_err)?;
-        }
-        mark_object_file_uploaded(&location)
-            .map_err(|message| Error::new(ErrorKind::Unexpected, message))
+    fn bucket(&self) -> &ObjectBucket {
+        &self.bucket
     }
 }
 
 /// Storage router that binds only selected REST/local configurations and
 /// retains each service for subsequent file operations.
-pub(crate) struct CatalogStorage {
+pub(super) struct CatalogStorage {
     scheme: String,
     default_location: ObjectUriPrefix,
     default_binding: RouteBinding,
@@ -243,14 +164,6 @@ impl CatalogStorage {
             .unwrap_or(&self.default_binding)
     }
 
-    /// `FileIO::delete` from a transaction-end callback, through the same
-    /// credential route an ordinary delete selects; see
-    /// [`BackendStorageService::delete_cleanup`].
-    pub(crate) fn delete_cleanup(&self, path: &str) -> Result<()> {
-        let (route, key) = self.resolve(path)?;
-        route.delete_cleanup(&key)
-    }
-
     fn resolve<'a>(&self, path: &'a str) -> Result<(Rc<CatalogRoute>, Cow<'a, str>)> {
         if !path.contains("://") {
             let key = path.trim_start_matches('/');
@@ -297,27 +210,32 @@ impl Storage for CatalogStorage {
 
     fn delete(&self, path: &str) -> Result<()> {
         let (route, key) = self.resolve(path)?;
-        route.delete(&key)
+        route.bucket().delete(&key)
     }
 
     fn remove_dir_all(&self, path: &str) -> Result<()> {
         let (route, key) = self.resolve(path)?;
-        route.delete_prefix(&key)
+        route.bucket().delete_prefix(&key)
     }
 
     fn status(&self, path: &str) -> Result<Option<FileMetadata>> {
         let (route, key) = self.resolve(path)?;
-        route.status(&key)
+        route.bucket().status(&key)
     }
 
     fn open_reader(&self, path: &str) -> Result<OpenedFile> {
         let (route, key) = self.resolve(path)?;
-        route.open_reader(&key)
+        route.bucket().open_reader(&key)
     }
 
     fn writer(&self, path: &str) -> Result<Box<dyn FileWrite>> {
         let (route, key) = self.resolve(path)?;
-        route.writer(&key)
+        route.bucket().writer(&key)
+    }
+
+    fn delete_cleanup(&self, path: &str) -> Result<()> {
+        let (route, key) = self.resolve(path)?;
+        route.bucket().delete_cleanup(&key)
     }
 
     fn initialize(&mut self, _props: HashMap<String, String>) -> Result<()> {
@@ -334,6 +252,6 @@ impl Storage for CatalogStorage {
 
     fn finalize_write(&self, path: &str) -> Result<()> {
         let (route, key) = self.resolve(path)?;
-        route.finalize_write(&key)
+        route.bucket().finalize_write(&key)
     }
 }

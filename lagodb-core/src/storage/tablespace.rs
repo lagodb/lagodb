@@ -34,6 +34,13 @@ impl SqlStateError for TablespaceStorageError {
             Self::InvalidResponse(_) => PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
         }
     }
+
+    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
+        match self {
+            Self::Lookup(error) => Ok(error),
+            error => Err(error),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

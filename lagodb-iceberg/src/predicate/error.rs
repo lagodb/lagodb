@@ -1,7 +1,7 @@
 //! Errors owned by the Iceberg planned-filter facet.
 
 use lagodb_core::datum::DecimalCodecError;
-use lagodb_core::diag::SqlStateError;
+use lagodb_core::diag::{PgReportError, SqlStateError};
 use lagodb_core::plan_data::PlanDataError;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
@@ -65,6 +65,13 @@ impl SqlStateError for IcebergFilterError {
             | Self::SchemaMismatch { .. }
             | Self::DatumDecode { .. }
             | Self::DecimalCodec(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+        }
+    }
+
+    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
+        match self {
+            Self::Iceberg(error) => error.try_into_pg_report().map_err(Self::Iceberg),
+            error => Err(error),
         }
     }
 }

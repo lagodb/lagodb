@@ -486,15 +486,46 @@ impl SqlStateError for ConnectorError {
             Self::Postgres(error) => error.sql_error_code(),
         }
     }
+
+    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
+        match self {
+            Self::Postgres(error) => Ok(error),
+            Self::Copy(error) => error.try_into_pg_report().map_err(Self::Copy),
+            Self::StorageProfile(error) => {
+                error.try_into_pg_report().map_err(Self::StorageProfile)
+            }
+            Self::StorageAcquire(error) => (*error)
+                .try_into_pg_report()
+                .map_err(|error| Self::StorageAcquire(Box::new(error))),
+            Self::ArrowConversion(error) => error
+                .try_into_pg_report()
+                .map(|report| {
+                    report.contextualize(
+                        "Parquet/PostgreSQL column conversion failed",
+                        None,
+                    )
+                })
+                .map_err(Self::ArrowConversion),
+            Self::DatumConversion(error) => error
+                .try_into_pg_report()
+                .map(|report| {
+                    report.contextualize("PostgreSQL datum conversion failed", None)
+                })
+                .map_err(Self::DatumConversion),
+            Self::JsonDatum(error) => error
+                .try_into_pg_report()
+                .map(|report| {
+                    report.contextualize("PostgreSQL JSON conversion failed", None)
+                })
+                .map_err(Self::JsonDatum),
+            error => Err(error),
+        }
+    }
 }
 
 impl From<ConnectorError> for ForeignScanError {
     fn from(error: ConnectorError) -> Self {
-        match error {
-            ConnectorError::Postgres(error) => error.into(),
-            ConnectorError::Copy(CopyError::Postgres(error)) => error.into(),
-            error => ForeignScanError::provider(error),
-        }
+        Self::provider(error)
     }
 }
 
@@ -509,17 +540,13 @@ impl From<CopyError> for ConnectorError {
 
 impl From<ConnectorError> for ForeignTableMaintenanceError {
     fn from(error: ConnectorError) -> Self {
-        match error {
-            ConnectorError::Postgres(error) => error.into(),
-            error => ForeignTableMaintenanceError::provider(error),
-        }
+        Self::provider(error)
     }
 }
 
 impl From<ConnectorError> for CopyError {
     fn from(error: ConnectorError) -> Self {
         match error {
-            ConnectorError::Postgres(error) => Self::Postgres(error),
             ConnectorError::Copy(error) => error,
             error => Self::provider(error),
         }
@@ -528,18 +555,12 @@ impl From<ConnectorError> for CopyError {
 
 impl From<ConnectorError> for ForeignModifyError {
     fn from(error: ConnectorError) -> Self {
-        match error {
-            ConnectorError::Postgres(error) => error.into(),
-            error => ForeignModifyError::provider(error),
-        }
+        Self::provider(error)
     }
 }
 
 impl From<ConnectorError> for ForeignValidationError {
     fn from(error: ConnectorError) -> Self {
-        match error {
-            ConnectorError::Postgres(error) => error.into(),
-            error => ForeignValidationError::provider(error),
-        }
+        Self::provider(error)
     }
 }

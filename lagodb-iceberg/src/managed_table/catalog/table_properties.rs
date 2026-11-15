@@ -2,10 +2,10 @@
 
 use lagodb_core::handles::RelationHandle;
 
-use crate::error::IcebergResult;
-use crate::managed_table::catalog::metadata_tracker::TxMetadata;
+use crate::managed_table::ManagedResult;
 use crate::managed_table::options::ResolvedIcebergOptions;
 use crate::managed_table::storage::StorageContext;
+use crate::managed_table::transaction::ManagedTransaction;
 use crate::write::PreparedTablePropertyUpdate;
 
 pub(crate) struct ManagedTablePropertyUpdate {
@@ -30,10 +30,10 @@ impl ManagedTablePropertyUpdate {
     pub(crate) fn stage_for_relation(
         self,
         rel: &RelationHandle<'_>,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         let ctx = StorageContext::for_write(rel)?;
         let file_io = ctx.into_file_io();
-        let tracker = TxMetadata::current();
+        let tracker = ManagedTransaction::current();
         let loaded = tracker.begin_table_modify(rel.oid(), &file_io)?;
         self.update.validate_base_metadata(&loaded.metadata)?;
         tracker.stage_table_property_update(rel.oid(), self.update, &file_io)

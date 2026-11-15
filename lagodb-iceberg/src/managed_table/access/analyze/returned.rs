@@ -5,7 +5,8 @@ use lagodb_arrow::{ArrowColumnDecoder, BoundBatch};
 use lagodb_core::prelude::*;
 
 use super::cursor::RowIdentity;
-use crate::error::{IcebergError, IcebergResult};
+use crate::error::IcebergError;
+use crate::managed_table::ManagedResult;
 use crate::scan::batch::{
     InterruptibleArrowBatches, RowLocationLayout, position_unchecked,
 };
@@ -119,7 +120,7 @@ impl ReturnedRows {
 
     /// Map a batch to its planned file. The search starts at the current
     /// file, so consecutive batches of one file cost a single comparison.
-    fn seek_file(&mut self, path: &str) -> IcebergResult<()> {
+    fn seek_file(&mut self, path: &str) -> ManagedResult<()> {
         let offset = self.planned_paths[self.file_index..]
             .iter()
             .position(|planned| planned.as_ref() == path)

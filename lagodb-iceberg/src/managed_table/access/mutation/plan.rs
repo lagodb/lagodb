@@ -6,7 +6,8 @@ use iceberg_lite::transaction::{IsolationLevel, RowLevelCommand};
 use pgrx::pg_sys;
 
 use super::row_identity::IcebergModifyScanContext;
-use crate::error::{IcebergError, IcebergResult};
+use crate::error::IcebergError;
+use crate::managed_table::ManagedResult;
 use crate::write::PgTransactionIsolation;
 
 #[derive(Debug)]
@@ -41,7 +42,7 @@ pub(super) enum ModifyCommand {
 }
 
 impl ModifyCommand {
-    pub(super) fn from_pg(cmd_type: pg_sys::CmdType::Type) -> IcebergResult<Self> {
+    pub(super) fn from_pg(cmd_type: pg_sys::CmdType::Type) -> ManagedResult<Self> {
         match cmd_type {
             pg_sys::CmdType::CMD_INSERT => Ok(Self::Insert),
             pg_sys::CmdType::CMD_DELETE => Ok(Self::Delete),
@@ -49,7 +50,8 @@ impl ModifyCommand {
             pg_sys::CmdType::CMD_MERGE => Ok(Self::Merge),
             _ => Err(IcebergError::NotImplemented(
                 "unsupported PostgreSQL mutation command for Iceberg table",
-            )),
+            )
+            .into()),
         }
     }
 
@@ -65,7 +67,7 @@ impl ModifyCommand {
     pub(super) fn table_isolation_level(
         self,
         table_properties: TableProperties<'_>,
-    ) -> IcebergResult<Option<IsolationLevel>> {
+    ) -> ManagedResult<Option<IsolationLevel>> {
         Ok(match self {
             Self::Insert => None,
             Self::Delete => Some(table_properties.write_delete_isolation_level()?),
@@ -78,7 +80,7 @@ impl ModifyCommand {
         self,
         table_properties: TableProperties<'_>,
         transaction_isolation: PgTransactionIsolation,
-    ) -> IcebergResult<Option<IsolationLevel>> {
+    ) -> ManagedResult<Option<IsolationLevel>> {
         Ok(self
             .table_isolation_level(table_properties)?
             .map(|table_isolation| {
@@ -102,12 +104,13 @@ impl TargetDependency {
         })
     }
 
-    pub(super) fn required_snapshot(self) -> IcebergResult<Option<i64>> {
+    pub(super) fn required_snapshot(self) -> ManagedResult<Option<i64>> {
         match self {
             Self::ReadRequired(snapshot_id) => Ok(snapshot_id),
             Self::Independent => Err(IcebergError::InvariantViolated(
                 "independent mutation has no target snapshot",
-            )),
+            )
+            .into()),
         }
     }
 }
@@ -128,7 +131,7 @@ impl ValidationPlan {
         table_properties: TableProperties<'_>,
         transaction_isolation: PgTransactionIsolation,
         scan_context: Option<&IcebergModifyScanContext>,
-    ) -> IcebergResult<Self> {
+    ) -> ManagedResult<Self> {
         let isolation_level = command
             .effective_isolation_level(table_properties, transaction_isolation)?;
         let conflict_scope = if command.validation_command().is_some() {

@@ -2,7 +2,7 @@
 
 use std::fmt::{Display, Formatter};
 
-use lagodb_core::diag::{PgError, SqlStateError};
+use lagodb_core::diag::{PgError, PgReportError, SqlStateError};
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
@@ -40,9 +40,6 @@ pub enum MetadataCatalogError {
     #[error("metadata catalog record not found for relid: {0}")]
     NotFound(pg_sys::Oid),
 
-    #[error("metadata catalog record already exists for relid: {0}")]
-    AlreadyExists(pg_sys::Oid),
-
     #[error("invalid metadata catalog record: {0}")]
     InvalidRecord(String),
 
@@ -55,9 +52,22 @@ impl SqlStateError for MetadataCatalogError {
         match self {
             Self::Operation { source, .. } => source.sql_error_code(),
             Self::NotFound(_) => PgSqlErrorCode::ERRCODE_NO_DATA_FOUND,
-            Self::AlreadyExists(_) => PgSqlErrorCode::ERRCODE_UNIQUE_VIOLATION,
             Self::InvalidRecord(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
             Self::Conflict => PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE,
+        }
+    }
+
+    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
+        match self {
+            Self::Operation { operation, source } => {
+                Ok(PgReportError::from_pg_error(source).contextualize(
+                    format_args!(
+                        "failed to {operation} iceberg.iceberg_metadata catalog"
+                    ),
+                    None,
+                ))
+            }
+            error => Err(error),
         }
     }
 }

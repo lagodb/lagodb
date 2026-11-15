@@ -8,7 +8,8 @@ use lagodb_core::datum::PgType;
 use lagodb_core::handles::RelationHandle;
 
 use super::super::schema_builder::column_type_to_iceberg_type;
-use crate::error::{IcebergError, IcebergResult};
+use crate::error::IcebergError;
+use crate::managed_table::ManagedResult;
 
 #[derive(Debug, Clone)]
 enum SchemaEvolutionOp {
@@ -65,7 +66,7 @@ impl SchemaEvolutionUpdate {
             .push(SchemaEvolutionOp::DropNotNull { name: name.into() });
     }
 
-    pub(super) fn preflight(&self, table: &Table) -> IcebergResult<()> {
+    pub(super) fn preflight(&self, table: &Table) -> ManagedResult<()> {
         if !self.requires_existing_schema_preflight() {
             return Ok(());
         }
@@ -92,7 +93,7 @@ impl SchemaEvolutionUpdate {
         &self,
         relation: &RelationHandle<'_>,
         table: &Table,
-    ) -> IcebergResult<PreparedSchemaUpdate> {
+    ) -> ManagedResult<PreparedSchemaUpdate> {
         let columns = self
             .has_add_column()
             .then(|| RelationColumns::capture(relation))
@@ -164,7 +165,7 @@ struct RelationColumns {
 }
 
 impl RelationColumns {
-    fn capture(relation: &RelationHandle<'_>) -> IcebergResult<Self> {
+    fn capture(relation: &RelationHandle<'_>) -> ManagedResult<Self> {
         let mut by_name = HashMap::new();
         for column in relation.live_columns().iter() {
             let name = column.name().to_str().map_err(|_| {
@@ -181,10 +182,10 @@ impl RelationColumns {
         Ok(Self { by_name })
     }
 
-    fn column_type(&self, name: &str) -> IcebergResult<PgType> {
+    fn column_type(&self, name: &str) -> ManagedResult<PgType> {
         self.by_name
             .get(name)
             .copied()
-            .ok_or_else(|| IcebergError::ColumnNotFound(name.to_owned()))
+            .ok_or_else(|| IcebergError::ColumnNotFound(name.to_owned()).into())
     }
 }

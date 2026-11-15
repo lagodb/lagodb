@@ -28,7 +28,8 @@ use lagodb_core::object_cleanup::{
 use lagodb_core::table_maintenance::TableMaintenanceReport;
 use pgrx::pg_sys;
 
-use crate::error::{IcebergError, IcebergResult};
+use crate::error::IcebergError;
+use crate::managed_table::{ManagedResult, ManagedTableError};
 use crate::storage::local_file_wal::record::{
     MAX_DELETE_FILES_PAYLOAD_BYTES, MAX_DELETE_FILES_PER_RECORD, delete_file_fits_wal,
 };
@@ -51,7 +52,7 @@ impl VacuumCleanupRegistration {
     pub(crate) fn record(
         self,
         report: &mut TableMaintenanceReport,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         record_metric(report, c"local_pending_paths", self.local_pending_paths)?;
         record_metric(report, c"local_wal_batches", self.local_wal_batches)?;
         record_metric(report, c"remote_queue_rows", self.remote_queue_rows)?;
@@ -66,14 +67,14 @@ impl VacuumCleanupRegistration {
 pub(crate) struct VacuumCleanup;
 
 impl VacuumCleanup {
-    fn local_wal_batch_count(paths: &[String]) -> IcebergResult<u64> {
+    fn local_wal_batch_count(paths: &[String]) -> ManagedResult<u64> {
         let mut batches = 0_u64;
         let mut batch_paths = 0_usize;
         let mut payload_bytes = 0_usize;
         for path in paths.iter().filter(|path| delete_file_fits_wal(path)) {
             let encoded = std::mem::size_of::<u32>()
                 .checked_add(path.len())
-                .ok_or_else(|| IcebergError::Vacuum {
+                .ok_or_else(|| ManagedTableError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "DELETE_FILES WAL payload size overflow".to_owned(),
                     ),
@@ -84,18 +85,19 @@ impl VacuumCleanup {
                         .checked_add(encoded)
                         .is_none_or(|value| value > MAX_DELETE_FILES_PAYLOAD_BYTES))
             {
-                batches =
-                    batches.checked_add(1).ok_or_else(|| IcebergError::Vacuum {
+                batches = batches.checked_add(1).ok_or_else(|| {
+                    ManagedTableError::Vacuum {
                         source: IcebergVacuumError::ResourceLimit(
                             "DELETE_FILES WAL batch count overflow".to_owned(),
                         ),
-                    })?;
+                    }
+                })?;
                 batch_paths = 0;
                 payload_bytes = 0;
             }
             batch_paths += 1;
             payload_bytes = payload_bytes.checked_add(encoded).ok_or_else(|| {
-                IcebergError::Vacuum {
+                ManagedTableError::Vacuum {
                     source: IcebergVacuumError::ResourceLimit(
                         "DELETE_FILES WAL payload size overflow".to_owned(),
                     ),
@@ -103,11 +105,14 @@ impl VacuumCleanup {
             })?;
         }
         if batch_paths > 0 {
-            batches = batches.checked_add(1).ok_or_else(|| IcebergError::Vacuum {
-                source: IcebergVacuumError::ResourceLimit(
-                    "DELETE_FILES WAL batch count overflow".to_owned(),
-                ),
-            })?;
+            batches =
+                batches
+                    .checked_add(1)
+                    .ok_or_else(|| ManagedTableError::Vacuum {
+                        source: IcebergVacuumError::ResourceLimit(
+                            "DELETE_FILES WAL batch count overflow".to_owned(),
+                        ),
+                    })?;
         }
         Ok(batches)
     }
@@ -116,16 +121,17 @@ impl VacuumCleanup {
         relid: pg_sys::Oid,
         file_io: &FileIO,
         candidates: HashSet<String>,
-    ) -> IcebergResult<VacuumCleanupRegistration> {
+    ) -> ManagedResult<VacuumCleanupRegistration> {
         if candidates.is_empty() {
             return Ok(VacuumCleanupRegistration::default());
         }
-        let count =
-            u64::try_from(candidates.len()).map_err(|_| IcebergError::Vacuum {
+        let count = u64::try_from(candidates.len()).map_err(|_| {
+            ManagedTableError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(
                     "cleanup candidate count does not fit u64".to_owned(),
                 ),
-            })?;
+            }
+        })?;
         if let Some(local) = file_io.storage().as_any().downcast_ref::<LocalStorage>()
         {
             let mut paths: Vec<String> = candidates.into_iter().collect();
@@ -194,6 +200,7 @@ impl VacuumCleanup {
         }
         Err(IcebergError::InvariantViolated(
             "VACUUM FileIO uses an unknown storage implementation",
-        ))
+        )
+        .into())
     }
 }

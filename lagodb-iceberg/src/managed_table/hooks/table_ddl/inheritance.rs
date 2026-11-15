@@ -15,9 +15,9 @@ use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
 use crate::create_command::CreateCommandStack;
-use crate::error::IcebergResult;
-use crate::managed_table::catalog::metadata_tracker::TxMetadata;
+use crate::managed_table::ManagedResult;
 use crate::managed_table::storage::StorageContext;
+use crate::managed_table::transaction::ManagedTransaction;
 
 pub(in crate::managed_table) struct PartitionedInheritance;
 
@@ -64,12 +64,12 @@ impl PartitionedInheritance {
     /// cannot honor. A relation mid-CREATE has no metadata yet: the pre-hook
     /// rejected PARTITION BY with INHERITS, and validate_created() covers the
     /// edges added afterwards.
-    fn is_partitioned(relation: &RelationHandle<'_>) -> IcebergResult<bool> {
+    fn is_partitioned(relation: &RelationHandle<'_>) -> ManagedResult<bool> {
         if CreateCommandStack::is_creating(relation.oid()) {
             return Ok(false);
         }
         let context = StorageContext::for_read(relation)?;
-        let loaded = TxMetadata::current()
+        let loaded = ManagedTransaction::current()
             .current_table_metadata(relation.oid(), context.file_io())?;
         Ok(loaded.is_partitioned())
     }

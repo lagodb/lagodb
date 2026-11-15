@@ -1,35 +1,24 @@
-use iceberg_lite::io::{FileMetadata, FileRead, FileWrite, OpenedFile, Storage};
+//! Managed tablespace object storage bound to one effective base URI.
+
+use std::any::Any;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::sync::Arc;
+
+use iceberg_lite::io::{FileMetadata, FileWrite, OpenedFile, Storage};
 use iceberg_lite::{Error, ErrorKind, Result};
 use lagodb_core::object_cleanup::ObjectTarget;
 use lagodb_core::storage::service::BackendStorageService;
 use lagodb_core::storage::volume::StorageVolumeId;
-use lagodb_storage::{StagingFile, StagingPathResolver, StorageError, StorageFile};
-use std::any::Any;
-use std::collections::HashMap;
-use std::fmt;
-use std::io::SeekFrom;
-use std::marker::PhantomData;
-use std::ops::Range;
-use std::rc::Rc;
-use std::sync::Arc;
+use lagodb_storage::{StagingPathResolver, StorageError, StorageErrorKind};
 
-use super::injection_points::StorageInjectionPoints;
+use super::object_bucket::ObjectBucket;
 use super::object_uri::resolve_object_uri;
-use super::transaction_resources::{
-    ensure_object_file_staged, mark_object_file_uploaded, register_object_file_staged,
-};
-use super::wait_event::{StorageWaitEvent, StorageWaitGuard};
-
-// The storage wire protocol accepts a u32 read length per request, and the
-// service clamps each response to its configured max_read_size. Keep the
-// adapter chunk size aligned with the default service clamp so large Iceberg
-// `read_range` calls do not turn into multi-GB direct-I/O allocations.
-const OBJECT_READ_CHUNK_LEN: u32 = lagodb_storage::DEFAULT_MAX_READ_SIZE;
 
 pub(crate) fn storage_err(e: StorageError) -> Error {
     let kind = match e.kind() {
-        lagodb_storage::StorageErrorKind::NotFound => ErrorKind::DataInvalid,
-        lagodb_storage::StorageErrorKind::InvalidPath => ErrorKind::DataInvalid,
+        StorageErrorKind::NotFound => ErrorKind::DataInvalid,
+        StorageErrorKind::InvalidPath => ErrorKind::DataInvalid,
         _ => ErrorKind::IoError,
     };
     Error::new(kind, format!("{e}")).with_source(e)
@@ -39,9 +28,7 @@ pub(crate) fn storage_err(e: StorageError) -> Error {
 pub(crate) struct ObjectStorage {
     effective_base_uri: Arc<str>,
     volume_id: StorageVolumeId,
-    bucket: Arc<str>,
-    service: BackendStorageService,
-    staging_resolver: StagingPathResolver,
+    bucket: ObjectBucket,
 }
 
 // SAFETY: `ObjectStorage` is the private adapter that satisfies
@@ -58,7 +45,7 @@ impl fmt::Debug for ObjectStorage {
         f.debug_struct("ObjectStorage")
             .field("scheme", &self.scheme())
             .field("volume_id", &self.volume_id)
-            .field("bucket", &self.bucket)
+            .field("bucket", &self.bucket.name())
             .finish()
     }
 }
@@ -67,18 +54,15 @@ impl ObjectStorage {
     pub(crate) fn new(
         effective_base_uri: impl Into<String>,
         volume_id: StorageVolumeId,
-        bucket: impl Into<String>,
+        bucket: &str,
         service: BackendStorageService,
         staging_resolver: StagingPathResolver,
     ) -> Self {
         let effective_base_uri = effective_base_uri.into();
-        let bucket = bucket.into();
         Self {
             effective_base_uri: Arc::from(effective_base_uri.into_boxed_str()),
             volume_id,
-            bucket: Arc::from(bucket.into_boxed_str()),
-            service,
-            staging_resolver,
+            bucket: ObjectBucket::new(bucket, service, staging_resolver),
         }
     }
 
@@ -88,7 +72,7 @@ impl ObjectStorage {
     ) -> Result<ObjectTarget> {
         let relative_path_pos = resolve_object_uri(&self.effective_base_uri, &uri)?;
         let path = uri.split_off(relative_path_pos);
-        ObjectTarget::new(self.volume_id, self.bucket.as_ref(), path)
+        ObjectTarget::new(self.volume_id, self.bucket.name(), path)
             .map_err(storage_err)
     }
 
@@ -96,16 +80,13 @@ impl ObjectStorage {
         &self,
         table_location: &str,
         cutoff_ms: i64,
-    ) -> Result<std::collections::HashSet<String>> {
+    ) -> Result<HashSet<String>> {
         let relative = resolve_object_uri(&self.effective_base_uri, table_location)?;
         let prefix = format!("{}/", table_location[relative..].trim_end_matches('/'));
         let uses_absolute_uris = table_location.contains("://");
         let scheme = self.scheme();
-        let mut paths = std::collections::HashSet::new();
-        let mut listing = self
-            .service
-            .list_session(self.bucket.as_ref(), Some(&prefix), 0)
-            .map_err(storage_err)?;
+        let mut paths = HashSet::new();
+        let mut listing = self.bucket.list(&prefix, 0)?;
         loop {
             let Some(entries) = listing.next_page().map_err(storage_err)? else {
                 break;
@@ -118,7 +99,9 @@ impl ObjectStorage {
                     if uses_absolute_uris {
                         paths.insert(format!(
                             "{}://{}/{}",
-                            scheme, self.bucket, entry.key
+                            scheme,
+                            self.bucket.name(),
+                            entry.key
                         ));
                     } else {
                         paths.insert(entry.key);
@@ -132,32 +115,10 @@ impl ObjectStorage {
         Ok(paths)
     }
 
-    /// `FileIO::delete` from a transaction-end callback; see
-    /// [`BackendStorageService::delete_cleanup`].
-    pub(crate) fn delete_cleanup(&self, uri: &str) -> Result<()> {
-        let relative = resolve_object_uri(&self.effective_base_uri, uri)?;
-        self.service
-            .delete_cleanup(self.bucket.as_ref(), &uri[relative..])
-            .map_err(storage_err)
-    }
-
-    /// `FileIO::remove_dir_all` from a transaction-end callback; see
-    /// [`BackendStorageService::delete_prefix_cleanup`].
-    pub(crate) fn remove_dir_all_cleanup(&self, uri: &str) -> Result<()> {
-        let relative = resolve_object_uri(&self.effective_base_uri, uri)?;
-        self.service
-            .delete_prefix_cleanup(self.bucket.as_ref(), &uri[relative..])
-            .map(|_| ())
-            .map_err(storage_err)
-    }
-
     pub(crate) fn location_is_empty(&self, location: &str) -> Result<bool> {
         let relative = resolve_object_uri(&self.effective_base_uri, location)?;
         let prefix = format!("{}/", location[relative..].trim_end_matches('/'));
-        let mut listing = self
-            .service
-            .list_session(self.bucket.as_ref(), Some(&prefix), 1)
-            .map_err(storage_err)?;
+        let mut listing = self.bucket.list(&prefix, 1)?;
         loop {
             match listing.next_page().map_err(storage_err)? {
                 Some(entries) if !entries.is_empty() => return Ok(false),
@@ -175,90 +136,35 @@ impl Storage for ObjectStorage {
     }
 
     fn delete(&self, path: &str) -> Result<()> {
-        self.service
-            .delete(self.bucket.as_ref(), path)
-            .map_err(storage_err)
+        self.bucket.delete(path)
     }
 
     fn remove_dir_all(&self, path: &str) -> Result<()> {
-        self.service
-            .delete_prefix(self.bucket.as_ref(), path)
-            .map(|_| ())
-            .map_err(storage_err)
+        self.bucket.delete_prefix(path)
     }
 
     fn status(&self, path: &str) -> Result<Option<FileMetadata>> {
-        match self.service.head(self.bucket.as_ref(), path) {
-            Ok(info) => Ok(Some(FileMetadata { size: info.size })),
-            Err(e) if e.kind() == lagodb_storage::StorageErrorKind::NotFound => {
-                Ok(None)
-            }
-            Err(e) => Err(storage_err(e)),
-        }
+        self.bucket.status(path)
     }
 
     fn open_reader(&self, path: &str) -> Result<OpenedFile> {
-        let file = self
-            .service
-            .open(self.bucket.as_ref(), path)
-            .map_err(storage_err)?;
-        let metadata = FileMetadata { size: file.size() };
-        Ok(OpenedFile {
-            metadata,
-            reader: Box::new(ObjectReader::new(
-                self.service.clone(),
-                Arc::clone(&self.bucket),
-                Arc::from(path),
-                file,
-            )),
-        })
+        self.bucket.open_reader(path)
     }
 
     fn writer(&self, path: &str) -> Result<Box<dyn FileWrite>> {
-        let staging = self
-            .service
-            .create_staging_file(&self.staging_resolver, self.bucket.as_ref(), path)
-            .map_err(storage_err)?;
-
-        let location = self
-            .service
-            .object_location(self.bucket.as_ref(), path)
-            .map_err(storage_err)?;
-        register_object_file_staged(
-            location,
-            staging.path().to_path_buf(),
-            self.service.clone(),
-        );
-
-        Ok(Box::new(ObjectWriter::new(staging)))
+        self.bucket.writer(path)
     }
 
     fn finalize_write(&self, path: &str) -> Result<()> {
-        let location = self
-            .service
-            .object_location(self.bucket.as_ref(), path)
-            .map_err(storage_err)?;
+        self.bucket.finalize_write(path)
+    }
 
-        // 1. Pre-check: staged entry MUST exist before we attempt upload.
-        ensure_object_file_staged(&location)
-            .map_err(|msg| Error::new(ErrorKind::Unexpected, msg))?;
+    fn delete_cleanup(&self, path: &str) -> Result<()> {
+        self.bucket.delete_cleanup(path)
+    }
 
-        // 2. Upload the staging file to object storage.
-        //    On failure the registry stays Staged; abort will only unlink
-        //    the local staging file without touching the remote store.
-        {
-            let _wait = StorageWaitGuard::start(StorageWaitEvent::ObjectUpload);
-            self.service
-                .upload(self.bucket.as_ref(), path)
-                .map_err(storage_err)?;
-        }
-
-        // 3. Transition Staged → Uploaded so commit cleans staging and
-        //    abort knows to delete the remote object.
-        mark_object_file_uploaded(&location)
-            .map_err(|msg| Error::new(ErrorKind::Unexpected, msg))?;
-
-        Ok(())
+    fn remove_dir_all_cleanup(&self, path: &str) -> Result<()> {
+        self.bucket.delete_prefix_cleanup(path)
     }
 
     fn initialize(&mut self, _props: HashMap<String, String>) -> Result<()> {
@@ -274,241 +180,5 @@ impl Storage for ObjectStorage {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-pub(crate) struct ObjectReader {
-    service: BackendStorageService,
-    bucket: Arc<str>,
-    key: Arc<str>,
-    file: StorageFile,
-}
-
-// SAFETY: `ObjectReader` is the private adapter for
-// `iceberg_lite::io::FileRead`. PostgreSQL constructs, uses, clones, and drops
-// every reader on one backend thread; the serial iterator never transfers or
-// concurrently invokes it. The contained `StorageFile` remains naturally
-// `!Send + !Sync`.
-unsafe impl Send for ObjectReader {}
-unsafe impl Sync for ObjectReader {}
-
-impl ObjectReader {
-    pub(crate) fn new(
-        service: BackendStorageService,
-        bucket: Arc<str>,
-        key: Arc<str>,
-        file: StorageFile,
-    ) -> Self {
-        Self {
-            service,
-            bucket,
-            key,
-            file,
-        }
-    }
-
-    fn validate_read_range(&self, range: &Range<u64>) -> Result<usize> {
-        if range.start > range.end {
-            return Err(Error::new(
-                ErrorKind::DataInvalid,
-                format!(
-                    "invalid read range: start {} > end {}",
-                    range.start, range.end
-                ),
-            ));
-        }
-
-        let size = self.file.size();
-        if range.end > size {
-            return Err(Error::new(
-                ErrorKind::DataInvalid,
-                format!(
-                    "read range end {} exceeds object size {} for '{}'",
-                    range.end, size, &*self.key
-                ),
-            ));
-        }
-
-        usize::try_from(range.end - range.start).map_err(|_| {
-            Error::new(
-                ErrorKind::DataInvalid,
-                format!(
-                    "read range length {} exceeds addressable memory on this platform",
-                    range.end - range.start
-                ),
-            )
-        })
-    }
-
-    fn read_range_chunked(&self, range: Range<u64>) -> Result<bytes::Bytes> {
-        let len = self.validate_read_range(&range)?;
-        if len == 0 {
-            return Ok(bytes::Bytes::new());
-        }
-
-        // `FileRead` returns one Bytes value, so the full logical range still
-        // must fit in backend memory. Chunking keeps the storage protocol's
-        // u32 request length as a per-read detail instead of a file/range cap.
-        let mut data = Vec::new();
-        data.try_reserve_exact(len).map_err(|err| {
-            Error::new(
-                ErrorKind::Unexpected,
-                format!(
-                    "failed to reserve {} bytes for object read '{}': {}",
-                    len, &*self.key, err
-                ),
-            )
-        })?;
-        // Keep the buffer initialized: `read_at_into` accepts `&mut [u8]`,
-        // not a MaybeUninit-backed spare capacity slice.
-        data.resize(len, 0);
-
-        let mut offset = range.start;
-        let mut remaining = len;
-        let mut written = 0;
-
-        let _wait = StorageWaitGuard::start(StorageWaitEvent::ObjectRead);
-        while remaining > 0 {
-            let request_len =
-                std::cmp::min(remaining, OBJECT_READ_CHUNK_LEN as usize);
-            let bytes_read = self
-                .file
-                .read_at_into(offset, &mut data[written..written + request_len])
-                .map_err(storage_err)?;
-
-            if bytes_read == 0 {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
-                    format!(
-                        "object read for '{}' returned 0 bytes before range {}..{} completed",
-                        &*self.key, range.start, range.end
-                    ),
-                ));
-            }
-            if bytes_read > request_len {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
-                    format!(
-                        "object read for '{}' returned {} bytes into a {} byte buffer",
-                        &*self.key, bytes_read, request_len
-                    ),
-                ));
-            }
-
-            offset += bytes_read as u64;
-            written += bytes_read;
-            remaining -= bytes_read;
-        }
-
-        Ok(bytes::Bytes::from(data))
-    }
-}
-
-impl Drop for ObjectReader {
-    fn drop(&mut self) {
-        StorageInjectionPoints::OBJECT_READER_BEFORE_DROP.run();
-    }
-}
-
-impl std::io::Read for ObjectReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let _wait = StorageWaitGuard::start(StorageWaitEvent::ObjectRead);
-        self.file.read_into(buf).map_err(std::io::Error::other)
-    }
-}
-
-impl std::io::Seek for ObjectReader {
-    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        let seek_pos = match pos {
-            SeekFrom::Start(offset) => lagodb_storage::SeekFrom::Start(offset),
-            SeekFrom::End(offset) => lagodb_storage::SeekFrom::End(offset),
-            SeekFrom::Current(offset) => lagodb_storage::SeekFrom::Current(offset),
-        };
-        Ok(self.file.seek(seek_pos))
-    }
-}
-
-impl FileRead for ObjectReader {
-    fn read_range(&self, range: Range<u64>) -> Result<bytes::Bytes> {
-        self.read_range_chunked(range)
-    }
-
-    fn read_all(&self) -> Result<bytes::Bytes> {
-        self.read_range_chunked(0..self.file.size())
-    }
-
-    fn try_clone(&self) -> std::io::Result<Box<dyn FileRead>> {
-        let pos = self.file.position();
-        let mut new_file = self
-            .service
-            .open(self.bucket.as_ref(), self.key.as_ref())
-            .map_err(std::io::Error::other)?;
-        new_file.seek(lagodb_storage::SeekFrom::Start(pos));
-        Ok(Box::new(ObjectReader::new(
-            self.service.clone(),
-            Arc::clone(&self.bucket),
-            Arc::clone(&self.key),
-            new_file,
-        )))
-    }
-}
-
-pub(crate) struct ObjectWriter {
-    staging: Option<StagingFile>,
-    bytes_written: u64,
-    backend_thread: PhantomData<Rc<()>>,
-}
-
-// SAFETY: this private adapter implements iceberg-lite `FileWrite`, which
-// requires `Send + Sync`. Its PostgreSQL wait-event reporting and external-FD
-// lease remain inside the owning backend's serial mutation lifecycle.
-unsafe impl Send for ObjectWriter {}
-// SAFETY: the writer is uniquely driven until close and is never concurrently
-// accessed by the extension executor.
-unsafe impl Sync for ObjectWriter {}
-
-impl ObjectWriter {
-    pub(crate) fn new(staging: StagingFile) -> Self {
-        Self {
-            staging: Some(staging),
-            bytes_written: 0,
-            backend_thread: PhantomData,
-        }
-    }
-}
-
-impl std::io::Write for ObjectWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let staging = self
-            .staging
-            .as_mut()
-            .ok_or_else(|| std::io::Error::other("writer already closed"))?;
-        let _wait = StorageWaitGuard::start(StorageWaitEvent::StagingFileWrite);
-        staging.write(buf).map_err(std::io::Error::other)?;
-        self.bytes_written += buf.len() as u64;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        if let Some(staging) = &self.staging {
-            let _wait = StorageWaitGuard::start(StorageWaitEvent::StagingFileSync);
-            staging.sync().map_err(std::io::Error::other)?;
-        }
-        Ok(())
-    }
-}
-
-impl FileWrite for ObjectWriter {
-    fn close(&mut self) -> Result<FileMetadata> {
-        // Intentionally do not call `flush()` here. Object writes stage bytes in
-        // a local file that `Storage::finalize_write` uploads in the same
-        // statement path; a crash before upload aborts the transaction and leaves
-        // only cleanup work. Callers that need durable staged bytes before upload
-        // can call `flush()` explicitly, but making close fsync every object file
-        // would add latency without improving the committed object-store state.
-        self.staging.take();
-        Ok(FileMetadata {
-            size: self.bytes_written,
-        })
     }
 }

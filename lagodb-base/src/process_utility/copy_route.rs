@@ -55,7 +55,7 @@ pub(super) unsafe fn unclaimed_uri_error(
 pub(super) unsafe fn try_route(args: ProcessUtilityArgs) -> Result<bool, HookError> {
     // SAFETY: the caller supplies the live COPY invocation.
     unsafe { route_from(args) }.map_err(|error| {
-        HookError::from_copy_error(error).with_utility_context(
+        HookError::from(error).with_utility_context(
             "CopyFromRouter",
             UtilityHookPhase::Consume,
             pg_sys::NodeTag::T_CopyStmt,

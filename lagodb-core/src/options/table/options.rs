@@ -4,7 +4,7 @@
 //! schema, and persisted in `lagodb.table_options` for later rd_amcache load.
 
 use crate::catalog::{self, CatalogRelation, CatalogScanKey, CatalogSnapshot};
-use crate::diag::{PgError, SqlStateError, domain_error_report};
+use crate::diag::{PgError, PgReportError, SqlStateError, domain_error_report};
 use crate::options::schema::{self, OptionAccess, OptionDef, OptionSchemaError};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
@@ -66,6 +66,18 @@ impl SqlStateError for TableOptionError {
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
             }
         }
+    }
+
+    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
+        let (operation, source) = match self {
+            Self::PersistFailed(source) => {
+                ("failed to persist table options", source)
+            }
+            Self::LoadFailed(source) => ("failed to load table options", source),
+            Self::DeleteFailed(source) => ("failed to delete table options", source),
+            error => return Err(error),
+        };
+        Ok(PgReportError::from_pg_error(source).contextualize(operation, None))
     }
 }
 

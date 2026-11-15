@@ -4,7 +4,7 @@ use iceberg_lite::spec::{Schema, UnboundPartitionSpec};
 use lagodb_core::handles::{PartitionKey, RelationHandle};
 use pgrx::pg_sys;
 
-use crate::error::IcebergResult;
+use crate::managed_table::ManagedResult;
 
 use super::partition_lowering::PgPartitionSpecAdapter;
 use super::schema_builder::tuple_desc_to_schema;
@@ -19,7 +19,7 @@ impl ManagedTableDefinition {
     pub(crate) fn build(
         rel: &RelationHandle<'_>,
         partition_spec: Option<&pg_sys::PartitionSpec>,
-    ) -> IcebergResult<Self> {
+    ) -> ManagedResult<Self> {
         let schema = tuple_desc_to_schema(rel)?;
         let partition_spec = match partition_spec {
             Some(spec) => PartitionKey::analyze(rel, spec, |key| {

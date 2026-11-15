@@ -8,13 +8,13 @@ use iceberg_lite::table::Table;
 use lagodb_core::handles::{RelationGuard, SnapshotHandle};
 use pgrx::pg_sys;
 
-use crate::error::IcebergResult;
+use crate::managed_table::ManagedResult;
 use crate::managed_table::catalog::bridge::IcebergTableId;
 use crate::managed_table::catalog::local_storage::LocalTableRoot;
-use crate::managed_table::catalog::metadata_tracker::{
-    LoadedTableMetadata, LoadedTableRead, TxMetadata,
-};
 use crate::managed_table::storage::StorageContext;
+use crate::managed_table::transaction::{
+    LoadedTableMetadata, LoadedTableRead, ManagedTransaction,
+};
 use crate::scan::IcebergReadSnapshot;
 use crate::write::PgTransactionIsolation;
 
@@ -31,7 +31,7 @@ pub(crate) struct ManagedTableReadView {
 
 impl ManagedTableReadView {
     /// Current definition for planner and maintenance callers.
-    pub(crate) fn load(relation_oid: pg_sys::Oid) -> IcebergResult<Self> {
+    pub(crate) fn load(relation_oid: pg_sys::Oid) -> ManagedResult<Self> {
         Self::load_visible(relation_oid, None)
     }
 
@@ -43,7 +43,7 @@ impl ManagedTableReadView {
     pub(crate) fn for_snapshot(
         relation_oid: pg_sys::Oid,
         snapshot: &SnapshotHandle<'_>,
-    ) -> IcebergResult<Self> {
+    ) -> ManagedResult<Self> {
         Self::load_visible(relation_oid, Some(snapshot))
     }
 
@@ -55,7 +55,7 @@ impl ManagedTableReadView {
     /// inputs on one population while writers commit concurrently.
     pub(crate) fn for_active_snapshot(
         relation_oid: pg_sys::Oid,
-    ) -> IcebergResult<Self> {
+    ) -> ManagedResult<Self> {
         SnapshotHandle::with_active(|snapshot| {
             Self::load_visible(relation_oid, snapshot)
         })
@@ -64,7 +64,7 @@ impl ManagedTableReadView {
     fn load_visible(
         relation_oid: pg_sys::Oid,
         snapshot: Option<&SnapshotHandle<'_>>,
-    ) -> IcebergResult<Self> {
+    ) -> ManagedResult<Self> {
         PgTransactionIsolation::current()?;
         // Every caller is inside planning or execution with PostgreSQL's
         // relation lock already held. Acquire only the relcache reference
@@ -74,7 +74,7 @@ impl ManagedTableReadView {
             pg_sys::NoLock as pg_sys::LOCKMODE,
         )?;
         let context = StorageContext::for_read(&relation.as_handle())?;
-        let tracker = TxMetadata::current();
+        let tracker = ManagedTransaction::current();
         let read = match snapshot {
             Some(snapshot) => {
                 let local_root = context
@@ -112,15 +112,15 @@ impl ManagedTableReadView {
         &self.read.loaded.metadata
     }
 
-    pub(crate) fn storage_bytes(&self) -> IcebergResult<u64> {
+    pub(crate) fn storage_bytes(&self) -> ManagedResult<u64> {
         self.read.storage_bytes(self.context.file_io())
     }
 
-    pub(crate) fn pruning_units(&self) -> IcebergResult<f64> {
+    pub(crate) fn pruning_units(&self) -> ManagedResult<f64> {
         self.read.pruning_units()
     }
 
-    pub(crate) fn into_read_snapshot(self) -> IcebergResult<IcebergReadSnapshot> {
+    pub(crate) fn into_read_snapshot(self) -> ManagedResult<IcebergReadSnapshot> {
         let Self {
             relation_oid,
             context,

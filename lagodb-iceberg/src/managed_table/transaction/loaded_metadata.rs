@@ -11,7 +11,7 @@ use iceberg_lite::spec::{
 use iceberg_lite::{Error, ErrorKind};
 use pgrx::pg_sys;
 
-use crate::error::IcebergResult;
+use crate::managed_table::ManagedResult;
 use crate::managed_table::options::MANAGED_ROW_GROUP_MAX_ROWS;
 
 const TOTAL_RECORDS: &str = "total-records";
@@ -23,8 +23,8 @@ const TOTAL_DELETE_FILES: &str = "total-delete-files";
 ///
 /// Pairs the resolved metadata location with the parsed `TableMetadata` so
 /// callers do not have to perform the same `read_from` against `FileIO`
-/// twice. Returned by [`super::TxMetadata::current_table_metadata`] and
-/// [`super::TxMetadata::begin_table_modify`].
+/// twice. Returned by [`super::ManagedTransaction::current_table_metadata`] and
+/// [`super::ManagedTransaction::begin_table_modify`].
 #[derive(Debug)]
 pub struct LoadedTableMetadata {
     pub location: String,
@@ -55,7 +55,7 @@ impl LoadedTableRead {
 
     /// Storage bytes this read observes. Without a committed baseline, the
     /// snapshot summary in `loaded` describes rows outside this read.
-    pub(crate) fn storage_bytes(&self, file_io: &FileIO) -> IcebergResult<u64> {
+    pub(crate) fn storage_bytes(&self, file_io: &FileIO) -> ManagedResult<u64> {
         let committed = match self.snapshot_id {
             Some(_) => self.loaded.committed_stats()?,
             None => (0, 0),
@@ -66,7 +66,7 @@ impl LoadedTableRead {
     /// Estimated units that file and row-group statistics keep or skip
     /// whole: every data file holds at least one row group of at most
     /// [`MANAGED_ROW_GROUP_MAX_ROWS`] rows.
-    pub(crate) fn pruning_units(&self) -> IcebergResult<f64> {
+    pub(crate) fn pruning_units(&self) -> ManagedResult<f64> {
         let (mut rows, mut files) = match self.snapshot_id {
             Some(_) => self.loaded.committed_layout()?,
             None => (0, 0),
@@ -101,19 +101,19 @@ impl LoadedTableMetadata {
     pub(crate) fn relation_stats(
         &self,
         file_io: &FileIO,
-    ) -> IcebergResult<(u64, u64)> {
+    ) -> ManagedResult<(u64, u64)> {
         self.stats_with_delta(self.committed_stats()?, file_io)
     }
 
     /// Committed rows and data files.
-    fn committed_layout(&self) -> IcebergResult<(u64, u64)> {
+    fn committed_layout(&self) -> ManagedResult<(u64, u64)> {
         Ok((
             self.summary_total(TOTAL_RECORDS)?,
             self.summary_total(TOTAL_DATA_FILES)?,
         ))
     }
 
-    fn committed_stats(&self) -> IcebergResult<(u64, u64)> {
+    fn committed_stats(&self) -> ManagedResult<(u64, u64)> {
         Ok((
             self.summary_total(TOTAL_RECORDS)?,
             self.summary_total(TOTAL_FILES_SIZE)?,
@@ -124,7 +124,7 @@ impl LoadedTableMetadata {
         &self,
         (mut rows, mut bytes): (u64, u64),
         file_io: &FileIO,
-    ) -> IcebergResult<(u64, u64)> {
+    ) -> ManagedResult<(u64, u64)> {
         let Some(delta) = self.delta.as_ref() else {
             return Ok((rows, bytes));
         };
@@ -161,7 +161,7 @@ impl LoadedTableMetadata {
     /// serve as the live-row estimate. A true result is deliberately
     /// conservative when transaction-local removal of the last committed
     /// delete file cannot be proven from summary counters alone.
-    pub(crate) fn may_have_row_deletes(&self) -> IcebergResult<bool> {
+    pub(crate) fn may_have_row_deletes(&self) -> ManagedResult<bool> {
         let delta_stats = self.delta.as_ref().map(|delta| delta.stats());
         let base_was_replaced = delta_stats
             .as_ref()
@@ -180,7 +180,7 @@ impl LoadedTableMetadata {
     /// total only when the previous snapshot lacks it or its arithmetic
     /// underflows, so a missing or malformed total means the metadata is
     /// inconsistent or was changed outside LagoDB.
-    fn summary_total(&self, key: &str) -> IcebergResult<u64> {
+    fn summary_total(&self, key: &str) -> ManagedResult<u64> {
         let Some(snapshot) = self.metadata.current_snapshot() else {
             return Ok(0);
         };
@@ -204,7 +204,7 @@ impl LoadedTableMetadata {
         removed_paths: &[String],
         rows: &mut u64,
         bytes: &mut u64,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         if removed_paths.is_empty() {
             return Ok(());
         }

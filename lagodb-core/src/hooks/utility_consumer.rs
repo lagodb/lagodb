@@ -147,7 +147,7 @@ unsafe extern "C-unwind" fn copy_consumer_matches(
             CopyRoute::Consumed => UTILITY_ROUTE_CONSUMED,
         })
         .map_err(|error| {
-            HookError::from_copy_error(error).with_utility_context(
+            HookError::from(error).with_utility_context(
                 context.consumer.name(),
                 UtilityHookPhase::Consume,
                 pg_sys::NodeTag::T_CopyStmt,
@@ -194,7 +194,7 @@ unsafe extern "C-unwind" fn invoke_copy_consumer(
             UTILITY_ROUTE_CONSUMED
         })
         .map_err(|error| {
-            HookError::from_copy_error(error).with_utility_context(
+            HookError::from(error).with_utility_context(
                 context.consumer.name(),
                 UtilityHookPhase::Consume,
                 pg_sys::NodeTag::T_CopyStmt,

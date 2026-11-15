@@ -12,10 +12,11 @@ use pgrx::pg_sys;
 use super::plan::{ModifyCommand, TargetDependency, ValidationPlan};
 use super::row_identity::{IcebergModifyQueryState, IcebergModifyScanContext};
 use crate::config::mutation_buffer_flush_bytes;
-use crate::error::{IcebergError, IcebergResult};
-use crate::managed_table::catalog::metadata_tracker::TxMetadata;
+use crate::error::IcebergError;
+use crate::managed_table::ManagedResult;
 use crate::managed_table::options::IcebergTableOptions;
 use crate::managed_table::storage::StorageContext;
+use crate::managed_table::transaction::ManagedTransaction;
 use crate::schema::relation::RelationLayout;
 use crate::write::PgTransactionIsolation;
 use crate::write::{
@@ -39,7 +40,7 @@ impl StatementOutcome {
 
     fn row_delta_validation(
         &self,
-    ) -> IcebergResult<Option<(RowLevelCommand, Option<i64>)>> {
+    ) -> ManagedResult<Option<(RowLevelCommand, Option<i64>)>> {
         if !self.has_delta() {
             return Ok(None);
         }
@@ -216,7 +217,8 @@ impl IcebergModifyState {
 
         // Registers the relation with the per-transaction tracker, rebases
         // pending changes, and returns the base metadata in one step.
-        let loaded = TxMetadata::current().begin_table_modify(rel_oid, &file_io)?;
+        let loaded =
+            ManagedTransaction::current().begin_table_modify(rel_oid, &file_io)?;
         let writes_position_deletes =
             actions.writes_position_deletes() && scan_context.is_some();
         if writes_position_deletes
@@ -291,11 +293,12 @@ impl IcebergModifyState {
         command: RowLevelCommand,
         starting_snapshot_id: Option<i64>,
         referenced_data_files: BTreeSet<String>,
-    ) -> IcebergResult<RowDeltaValidation> {
+    ) -> ManagedResult<RowDeltaValidation> {
         let Some(isolation_level) = self.validation.isolation_level else {
             return Err(IcebergError::InvariantViolated(
                 "row-level mutation validation has no effective isolation level",
-            ));
+            )
+            .into());
         };
         let conflict_filter = self
             .validation
@@ -312,7 +315,7 @@ impl IcebergModifyState {
         Ok(validation)
     }
 
-    fn finish_statement(&mut self) -> IcebergResult<StatementOutcome> {
+    fn finish_statement(&mut self) -> ManagedResult<StatementOutcome> {
         let new_data_files = self.sinks.finish_data_files()?;
         let referenced_data_files = self.sinks.referenced_data_files()?;
         let row_delete_files = self.sinks.finish_position_deletes()?;
@@ -325,7 +328,7 @@ impl IcebergModifyState {
         })
     }
 
-    fn stage_statement(&mut self, outcome: StatementOutcome) -> IcebergResult<()> {
+    fn stage_statement(&mut self, outcome: StatementOutcome) -> ManagedResult<()> {
         let validation = match outcome.row_delta_validation()? {
             Some((command, starting_snapshot_id)) => Some(self.build_validation(
                 command,
@@ -340,6 +343,6 @@ impl IcebergModifyState {
             outcome.row_delete_files,
             validation,
         )?;
-        TxMetadata::current().stage_batch(self.rel_oid, batch, &self.file_io)
+        ManagedTransaction::current().stage_batch(self.rel_oid, batch, &self.file_io)
     }
 }

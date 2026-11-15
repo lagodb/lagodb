@@ -103,10 +103,13 @@ impl ForeignModifyError {
     where
         E: SqlStateError + StdError + Send + Sync + 'static,
     {
-        Self::new(ForeignModifyErrorKind::Provider {
-            sqlerrcode: error.sql_error_code(),
-            source: Box::new(error),
-        })
+        match error.try_into_pg_report() {
+            Ok(report) => report.into(),
+            Err(error) => Self::new(ForeignModifyErrorKind::Provider {
+                sqlerrcode: error.sql_error_code(),
+                source: Box::new(error),
+            }),
+        }
     }
 
     pub(crate) fn framework(message: impl Display) -> Self {

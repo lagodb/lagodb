@@ -26,11 +26,12 @@ struct PlannedDataFile {
 impl PlannedDataFile {
     fn from_scan_tasks(path: &str, tasks: &[&FileScanTask]) -> IcebergResult<Self> {
         let mut tasks = tasks.iter().copied();
-        let first = tasks.next().ok_or_else(|| {
-            IcebergError::MetadataTracker(format!(
-                "cannot find Iceberg scan task metadata for deletion target {path}"
-            ))
-        })?;
+        let first =
+            tasks
+                .next()
+                .ok_or_else(|| IcebergError::MutationTaskNotFound {
+                    path: path.to_owned(),
+                })?;
         let target = Self::target_from_task(first)?;
         if target.file_path() != path {
             return Err(IcebergError::InvariantViolated(

@@ -10,7 +10,7 @@ use lagodb_core::storage::service::{BackendStorageService, StorageEndpoint};
 use lagodb_core::storage::tablespace::{TablespaceStorage, TablespaceStorageBinding};
 use lagodb_storage::StagingPathResolver;
 
-use crate::error::{IcebergError, IcebergResult};
+use crate::managed_table::{ManagedResult, ManagedTableError};
 use crate::storage::{LocalStorage, ObjectStorage};
 
 /// Storage context for an AM relation and its PostgreSQL tablespace policy.
@@ -61,19 +61,19 @@ enum ManagedStorageBackend {
 
 impl StorageContext {
     /// Resolve storage placement for a read-only operation.
-    pub(crate) fn for_read(rel: &RelationHandle<'_>) -> IcebergResult<Self> {
+    pub(crate) fn for_read(rel: &RelationHandle<'_>) -> ManagedResult<Self> {
         Self::for_relation(rel, false)
     }
 
     /// Resolve storage placement and WAL policy for a write operation.
-    pub(crate) fn for_write(rel: &RelationHandle<'_>) -> IcebergResult<Self> {
+    pub(crate) fn for_write(rel: &RelationHandle<'_>) -> ManagedResult<Self> {
         Self::for_relation(rel, rel.needs_wal())
     }
 
     fn for_relation(
         rel: &RelationHandle<'_>,
         relation_needs_wal: bool,
-    ) -> IcebergResult<Self> {
+    ) -> ManagedResult<Self> {
         let Some(opts) = TablespaceStorage::resolve(rel.tablespace().resolved_oid())?
         else {
             return Self::local(relation_needs_wal);
@@ -112,7 +112,7 @@ impl StorageContext {
     pub(crate) fn ensure_location_is_empty(
         &self,
         location: &str,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         let empty = match &self.backend {
             ManagedStorageBackend::Local(storage) => {
                 storage.location_is_empty(location)?
@@ -125,7 +125,7 @@ impl StorageContext {
         if empty {
             Ok(())
         } else {
-            Err(IcebergError::ManagedTableLocationNotEmpty {
+            Err(ManagedTableError::ManagedTableLocationNotEmpty {
                 location: location.to_owned(),
             })
         }
@@ -135,7 +135,7 @@ impl StorageContext {
         opts: Rc<TablespaceStorageBinding>,
         storage_service: BackendStorageService,
         staging_resolver: StagingPathResolver,
-    ) -> IcebergResult<Self> {
+    ) -> ManagedResult<Self> {
         let storage = Arc::new(ObjectStorage::new(
             opts.effective_base_uri(),
             opts.volume_id(),
@@ -154,7 +154,7 @@ impl StorageContext {
         })
     }
 
-    fn local(relation_needs_wal: bool) -> IcebergResult<Self> {
+    fn local(relation_needs_wal: bool) -> ManagedResult<Self> {
         let storage = Arc::new(LocalStorage::with_wal(relation_needs_wal));
         Ok(Self {
             file_io: FileIO::new(storage.clone()),

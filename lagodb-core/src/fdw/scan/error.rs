@@ -109,10 +109,13 @@ impl ForeignScanError {
     where
         E: SqlStateError + StdError + Send + Sync + 'static,
     {
-        Self::new(ForeignScanErrorKind::Provider {
-            sqlerrcode: error.sql_error_code(),
-            source: Box::new(error),
-        })
+        match error.try_into_pg_report() {
+            Ok(report) => report.into(),
+            Err(error) => Self::new(ForeignScanErrorKind::Provider {
+                sqlerrcode: error.sql_error_code(),
+                source: Box::new(error),
+            }),
+        }
     }
 
     /// Plan, private-data, layout, or slot invariant failure.

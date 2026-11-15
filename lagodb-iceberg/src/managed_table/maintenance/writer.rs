@@ -20,7 +20,8 @@ use iceberg_lite::writer::file_writer::rolling_writer::RollingFileWriterBuilder;
 use iceberg_lite::writer::{IcebergWriter, IcebergWriterBuilder};
 use parquet::file::properties::WriterProperties;
 
-use crate::error::{IcebergError, IcebergResult};
+use crate::error::IcebergError;
+use crate::managed_table::{ManagedResult, ManagedTableError};
 
 use super::error::IcebergVacuumError;
 use super::types::RewriteGroup;
@@ -38,7 +39,7 @@ impl RewriteGroupWriter {
         table: &Table,
         group: &RewriteGroup,
         writer_properties: &WriterProperties,
-    ) -> IcebergResult<Vec<DataFile>> {
+    ) -> ManagedResult<Vec<DataFile>> {
         let (scan_schema, projection) = Self::rewrite_projection(table.metadata())?;
         let scan = table
             .scan()
@@ -66,7 +67,7 @@ impl RewriteGroupWriter {
 
     fn rewrite_projection(
         metadata: &TableMetadata,
-    ) -> IcebergResult<(SchemaRef, Vec<i32>)> {
+    ) -> ManagedResult<(SchemaRef, Vec<i32>)> {
         let current = metadata.current_schema();
         let mut fields = current.as_struct().fields().to_vec();
         let mut projection: Vec<i32> = fields.iter().map(|field| field.id).collect();
@@ -89,7 +90,7 @@ impl RewriteGroupWriter {
         group: &RewriteGroup,
         schema: SchemaRef,
         writer_properties: &WriterProperties,
-    ) -> IcebergResult<VacuumDataWriter> {
+    ) -> ManagedResult<VacuumDataWriter> {
         let first = group.inputs.first().ok_or_else(|| {
             IcebergError::InvariantViolated("rewrite group has no input files")
         })?;
@@ -97,7 +98,7 @@ impl RewriteGroupWriter {
             .metadata()
             .partition_spec_by_id(first.file.partition_spec_id())
             .cloned()
-            .ok_or_else(|| IcebergError::Vacuum {
+            .ok_or_else(|| ManagedTableError::Vacuum {
                 source: IcebergVacuumError::ResourceLimit(format!(
                     "partition spec {} no longer exists",
                     first.file.partition_spec_id()

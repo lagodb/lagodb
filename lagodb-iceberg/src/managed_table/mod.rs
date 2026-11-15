@@ -9,6 +9,7 @@ mod access;
 pub(crate) mod catalog;
 mod constants;
 mod customscan;
+mod error;
 mod gucs;
 mod hooks;
 pub(crate) mod maintenance;
@@ -16,8 +17,10 @@ mod options;
 mod provider;
 mod read_view;
 pub(crate) mod storage;
+mod transaction;
 
 pub(crate) use constants::ICEBERG_AM_NAME;
+pub(crate) use error::{ManagedResult, ManagedTableError};
 pub(crate) use read_view::ManagedTableReadView;
 pub(crate) use storage::StorageContext;
 

@@ -7,18 +7,18 @@ use lagodb_core::catalog::{
 use pgrx::pg_sys;
 
 use super::{CatalogOp, CatalogResultExt, IcebergMetadata, TupleReplacement, column};
-use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::catalog::error::MetadataCatalogError;
 use crate::managed_table::gucs;
+use crate::managed_table::{ManagedResult, ManagedTableError};
 
 impl IcebergMetadata {
     pub(crate) fn publish_rebuilt_table(
         relid: pg_sys::Oid,
         table: &Table,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         let location = table
             .metadata_location()
-            .ok_or(IcebergError::MetadataLocationNull)?;
+            .ok_or(ManagedTableError::MetadataLocationNull)?;
         let catalog =
             CatalogRelation::open(Self::table_oid()?, pg_sys::RowExclusiveLock as _)
                 .map_catalog_err(CatalogOp::Update)?;
@@ -39,7 +39,9 @@ impl IcebergMetadata {
                 )
                 .map_catalog_err(CatalogOp::Update)?;
             let tuple = scan.get_next().map_catalog_err(CatalogOp::Update)?.ok_or(
-                IcebergError::MetadataCatalog(MetadataCatalogError::NotFound(relid)),
+                ManagedTableError::MetadataCatalog(MetadataCatalogError::NotFound(
+                    relid,
+                )),
             )?;
             // SAFETY: the descriptor and scanned tuple belong to this open catalog.
             let mut replacement = unsafe { TupleReplacement::new(descriptor) };
@@ -56,6 +58,6 @@ impl IcebergMetadata {
                 CatalogUpdateResult::Conflict => continue,
             }
         }
-        Err(IcebergError::MetadataCommitConflict { relid, max_retries })
+        Err(ManagedTableError::MetadataCommitConflict { relid, max_retries })
     }
 }

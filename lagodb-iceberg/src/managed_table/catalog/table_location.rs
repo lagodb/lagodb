@@ -7,8 +7,8 @@ use lagodb_core::options::TableOptions;
 use lagodb_core::storage::tablespace::{TablespaceStorage, TablespaceStorageBinding};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 
-use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::storage::StorageContext;
+use crate::managed_table::{ManagedResult, ManagedTableError};
 use crate::storage::object_uri::resolve_object_uri;
 
 use super::local_storage::LocalTableRoot;
@@ -33,11 +33,11 @@ impl ManagedTableLocation {
     pub(crate) fn for_create(
         rel: &RelationHandle<'_>,
         storage: &StorageContext,
-    ) -> IcebergResult<Self> {
+    ) -> ManagedResult<Self> {
         match storage.object_tablespace() {
             Some(tablespace) => {
                 let schema = get_namespace_name_bytes(rel.namespace_oid())
-                    .ok_or(IcebergError::NamespaceNull)?;
+                    .ok_or(ManagedTableError::NamespaceNull)?;
                 let encoded_schema = Self::encode_name(&schema);
                 let encoded_table = Self::encode_name(rel.relation_name().as_bytes());
                 let relation_oid = u32::from(rel.oid());
@@ -59,19 +59,20 @@ impl ManagedTableLocation {
     }
 
     /// Resolve the authoritative root for an existing relation.
-    pub(crate) fn for_relation(rel: &RelationHandle<'_>) -> IcebergResult<Self> {
+    pub(crate) fn for_relation(rel: &RelationHandle<'_>) -> ManagedResult<Self> {
         let Some(tablespace) =
             TablespaceStorage::resolve(rel.tablespace().resolved_oid())?
         else {
             return Ok(Self::Local(LocalTableRoot::for_relation(rel)));
         };
-        let options = TableOptions::load_from_catalog(rel.oid())?
-            .ok_or(IcebergError::ManagedTableLocationMissing { relid: rel.oid() })?;
-        let value = options
-            .get_value(&LOCATION_OPTION_DEF)
-            .ok_or(IcebergError::ManagedTableLocationMissing { relid: rel.oid() })?;
+        let options = TableOptions::load_from_catalog(rel.oid())?.ok_or(
+            ManagedTableError::ManagedTableLocationMissing { relid: rel.oid() },
+        )?;
+        let value = options.get_value(&LOCATION_OPTION_DEF).ok_or(
+            ManagedTableError::ManagedTableLocationMissing { relid: rel.oid() },
+        )?;
         if value.is_empty() {
-            return Err(IcebergError::InvalidManagedTableLocation {
+            return Err(ManagedTableError::InvalidManagedTableLocation {
                 location: String::new(),
                 reason: "persisted location must not be empty".to_owned(),
             });
@@ -81,7 +82,7 @@ impl ManagedTableLocation {
         if value.rsplit_once('/').is_none_or(|(_, relation_oid)| {
             relation_oid.parse::<u32>() != Ok(u32::from(rel.oid()))
         }) {
-            return Err(IcebergError::InvalidManagedTableLocation {
+            return Err(ManagedTableError::InvalidManagedTableLocation {
                 location: value.to_owned(),
                 reason: format!(
                     "object-backed location must end in relation OID {}",
@@ -98,7 +99,7 @@ impl ManagedTableLocation {
     pub(crate) fn persist_option(
         &self,
         options: &mut TableOptions,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         if let Self::Remote { location, .. } = self {
             options.insert_access_method_value(
                 &LOCATION_OPTION_DEF,
@@ -145,10 +146,10 @@ impl ManagedTableLocation {
     fn build_remote_cleanup_target(
         tablespace: &TablespaceStorageBinding,
         location: &str,
-    ) -> IcebergResult<ObjectTreeTarget> {
+    ) -> ManagedResult<ObjectTreeTarget> {
         let object_key_offset =
             resolve_object_uri(tablespace.effective_base_uri(), location).map_err(
-                |error| IcebergError::InvalidManagedTableLocation {
+                |error| ManagedTableError::InvalidManagedTableLocation {
                     location: location.to_owned(),
                     reason: error.to_string(),
                 },
@@ -158,7 +159,7 @@ impl ManagedTableLocation {
             tablespace.object_namespace(),
             &location[object_key_offset..],
         )
-        .map_err(|error| IcebergError::InvalidManagedTableLocation {
+        .map_err(|error| ManagedTableError::InvalidManagedTableLocation {
             location: location.to_owned(),
             reason: error.to_string(),
         })

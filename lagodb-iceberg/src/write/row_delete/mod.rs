@@ -25,14 +25,8 @@ pub(crate) struct RowDeleteOutput {
 }
 
 enum RowDeleteBackend {
-    Position {
-        sink: Box<position::PositionDeleteSink>,
-        scan_tasks: Rc<PlannedMutationTasks>,
-    },
-    DeletionVector {
-        sink: Box<deletion_vector::DeletionVectorSink>,
-        scan_tasks: Rc<PlannedMutationTasks>,
-    },
+    Position(Box<position::PositionDeleteSink>),
+    DeletionVector(Box<deletion_vector::DeletionVectorSink>),
 }
 
 impl RowDeleteBackend {
@@ -41,27 +35,21 @@ impl RowDeleteBackend {
         file_io: &FileIO,
         table_metadata: &TableMetadata,
         writer_properties: &WriterProperties,
-        scan_tasks: Rc<PlannedMutationTasks>,
     ) -> IcebergResult<Self> {
         match format_version {
             FormatVersion::V1 => Err(IcebergError::NotImplemented(
                 "row deletes require Iceberg format v2 or later",
             )),
-            FormatVersion::V2 => Ok(Self::Position {
-                sink: Box::new(position::PositionDeleteSink::new(
+            FormatVersion::V2 => {
+                Ok(Self::Position(Box::new(position::PositionDeleteSink::new(
                     file_io,
                     table_metadata,
                     writer_properties,
-                )?),
-                scan_tasks,
-            }),
-            FormatVersion::V3 => Ok(Self::DeletionVector {
-                sink: Box::new(deletion_vector::DeletionVectorSink::new(
-                    file_io,
-                    table_metadata,
-                )?),
-                scan_tasks,
-            }),
+                )?)))
+            }
+            FormatVersion::V3 => Ok(Self::DeletionVector(Box::new(
+                deletion_vector::DeletionVectorSink::new(file_io, table_metadata)?,
+            ))),
         }
     }
 
@@ -69,12 +57,13 @@ impl RowDeleteBackend {
         &self,
         deletes: &PositionDeleteAccumulator,
         row_registry: &RelationRowRegistry,
+        scan_tasks: &PlannedMutationTasks,
     ) -> IcebergResult<Vec<RowDeleteOutput>> {
         match self {
-            Self::Position { sink, scan_tasks } => {
+            Self::Position(sink) => {
                 sink.write_files(deletes, row_registry, scan_tasks)
             }
-            Self::DeletionVector { sink, scan_tasks } => {
+            Self::DeletionVector(sink) => {
                 sink.write_files(deletes, row_registry, scan_tasks)
             }
         }
@@ -86,6 +75,7 @@ pub(crate) struct RowDeleteState {
     modify_state_id: ModifyStateId,
     position_deletes: PositionDeleteAccumulator,
     backend: RowDeleteBackend,
+    scan_tasks: Rc<PlannedMutationTasks>,
 }
 
 impl RowDeleteState {
@@ -102,7 +92,6 @@ impl RowDeleteState {
             file_io,
             table_metadata,
             writer_properties,
-            scan_tasks,
         )?;
         let modify_state_id = row_registry.begin_modify_state()?;
         Ok(Self {
@@ -110,6 +99,7 @@ impl RowDeleteState {
             modify_state_id,
             position_deletes: PositionDeleteAccumulator::default(),
             backend,
+            scan_tasks,
         })
     }
 
@@ -144,8 +134,11 @@ impl RowDeleteState {
         if self.position_deletes.is_empty() {
             return Ok(Vec::new());
         }
-        self.backend
-            .write_files(&self.position_deletes, &self.row_registry)
+        self.backend.write_files(
+            &self.position_deletes,
+            &self.row_registry,
+            &self.scan_tasks,
+        )
     }
 
     pub(crate) fn referenced_data_files(&self) -> IcebergResult<BTreeSet<String>> {

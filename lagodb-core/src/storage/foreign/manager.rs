@@ -6,7 +6,7 @@ use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
-use crate::diag::SqlStateError;
+use crate::diag::{PgReportError, SqlStateError};
 use crate::storage::service::{BackendStorageService, StorageEndpoint};
 
 use super::access::{ObjectAccess, ObjectPrefixAccess};
@@ -48,6 +48,19 @@ where
         match self {
             Self::Provider(error) => error.sql_error_code(),
             Self::Storage(error) => error.sql_error_code(),
+        }
+    }
+
+    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
+        match self {
+            Self::Provider(error) => error
+                .try_into_pg_report()
+                .map(|report| {
+                    report
+                        .contextualize("storage provider configuration failed", None)
+                })
+                .map_err(Self::Provider),
+            error => Err(error),
         }
     }
 }

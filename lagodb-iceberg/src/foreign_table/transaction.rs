@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::error::Error as StdError;
 use std::mem;
 use std::rc::Rc;
@@ -23,10 +24,7 @@ use super::error::IcebergFdwError;
 use super::source_identity::PlanSourceIdentity;
 use crate::error::{IcebergError, IcebergResult};
 use crate::storage::transaction_resources::register_canceled_files_for_commit;
-use crate::write::{
-    ExclusiveTransactionAction, RelationRowRegistry, TableTransactionState,
-    TxWriteBatch,
-};
+use crate::write::{RelationRowRegistry, TableTransactionState, TxWriteBatch};
 
 mod catalog_state;
 mod create;
@@ -37,21 +35,8 @@ use catalog_state::CatalogTransactionState;
 pub(crate) use read::ForeignTableReadView;
 use state::ForeignTableState;
 
-type ForeignTableTransaction = TableTransactionState<NoExclusiveAction, ()>;
-
-#[derive(Debug, Clone)]
-struct NoExclusiveAction;
-
-impl ExclusiveTransactionAction for NoExclusiveAction {
-    const NOT_EXCLUSIVE_INVARIANT: &'static str =
-        "writable foreign table has a non-exclusive action conflict";
-    const MISPLACED_INVARIANT: &'static str =
-        "writable foreign table has an unexpected exclusive action";
-
-    fn conflict_error(&self) -> IcebergError {
-        IcebergError::InvariantViolated(Self::MISPLACED_INVARIANT)
-    }
-}
+/// Foreign tables stage no exclusive action.
+type ForeignTableTransaction = TableTransactionState<Infallible, ()>;
 
 #[derive(Debug, Default)]
 struct ForeignTransactionInner {

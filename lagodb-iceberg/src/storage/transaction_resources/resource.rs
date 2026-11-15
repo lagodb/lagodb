@@ -1,10 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use iceberg_lite::io::FileIO;
+use lagodb_core::diag::report_warning;
 use lagodb_core::storage::service::BackendStorageService;
 use lagodb_storage::{ObjectLocation, StorageErrorKind};
-
-use crate::storage::FileIoCleanup;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ObjectFileState {
@@ -81,7 +80,7 @@ impl StorageResource {
                 state: ObjectFileState::Staged,
                 ..
             } => {
-                lagodb_core::diag::report_warning(format_args!(
+                report_warning(format_args!(
                     "committing staged object file '{}' before upload completed; removing staging file '{}'",
                     location,
                     staging_path.display()
@@ -105,7 +104,7 @@ impl StorageResource {
                 match removed {
                     Ok(()) => true,
                     Err(error) => {
-                        lagodb_core::diag::report_warning(format_args!(
+                        report_warning(format_args!(
                             "failed to delete table directory '{}': {}",
                             location, error
                         ));
@@ -133,7 +132,7 @@ impl StorageResource {
                             true
                         }
                         Err(error) => {
-                            lagodb_core::diag::report_warning(format_args!(
+                            report_warning(format_args!(
                                 "failed to delete uploaded object '{}': {}",
                                 location, error
                             ));
@@ -155,7 +154,7 @@ impl StorageResource {
             Ok(()) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
             Err(error) => {
-                lagodb_core::diag::report_warning(format_args!(
+                report_warning(format_args!(
                     "failed to unlink '{}': {}",
                     path.display(),
                     error

@@ -11,9 +11,9 @@ use iceberg_lite::table::Table;
 use lagodb_core::handles::RelationHandle;
 
 use super::bridge::IcebergTableId;
-use super::metadata_tracker::{LoadedTableMetadata, TxMetadata};
-use crate::error::IcebergResult;
+use crate::managed_table::ManagedResult;
 use crate::managed_table::storage::StorageContext;
+use crate::managed_table::transaction::{LoadedTableMetadata, ManagedTransaction};
 
 /// Loads managed catalog state and stages a schema-evolution plan for
 /// one PostgreSQL relation.
@@ -31,13 +31,13 @@ impl<'borrow, 'relation> ManagedSchemaEvolution<'borrow, 'relation> {
     pub(in crate::managed_table) fn preflight(
         &self,
         update: &SchemaEvolutionUpdate,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         if !update.requires_existing_schema_preflight() {
             return Ok(());
         }
         let context = StorageContext::for_write(self.relation)?;
         let file_io = context.into_file_io();
-        let loaded = TxMetadata::current()
+        let loaded = ManagedTransaction::current()
             .current_table_metadata(self.relation.oid(), &file_io)?;
         update.preflight(&self.table(file_io, loaded)?)
     }
@@ -45,13 +45,13 @@ impl<'borrow, 'relation> ManagedSchemaEvolution<'borrow, 'relation> {
     pub(in crate::managed_table) fn stage(
         &self,
         update: &SchemaEvolutionUpdate,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         if update.is_empty() {
             return Ok(());
         }
         let context = StorageContext::for_write(self.relation)?;
         let file_io = context.into_file_io();
-        let tracker = TxMetadata::current();
+        let tracker = ManagedTransaction::current();
         let loaded = tracker.begin_table_modify(self.relation.oid(), &file_io)?;
         let table = self.table(file_io.clone(), loaded)?;
         let prepared = update.prepare_for_relation(self.relation, &table)?;
@@ -62,7 +62,7 @@ impl<'borrow, 'relation> ManagedSchemaEvolution<'borrow, 'relation> {
         &self,
         file_io: FileIO,
         loaded: LoadedTableMetadata,
-    ) -> IcebergResult<Table> {
+    ) -> ManagedResult<Table> {
         Ok(Table::builder()
             .metadata_location(loaded.location)
             .metadata(Arc::new(loaded.metadata))

@@ -2,6 +2,7 @@
 
 use std::rc::Rc;
 
+use iceberg_lite::spec::TableMetadata;
 use iceberg_lite::table::Table;
 use lagodb_core::handles::ExecutorHandle;
 use pgrx::pg_sys;
@@ -10,7 +11,9 @@ use super::catalog::{BoundCatalogTable, CatalogSessionRequest, RemoteTableKey};
 use super::error::IcebergFdwError;
 use super::executor_cache::ExecutorForeignTableCache;
 use super::options::ForeignTableIdentity;
-use super::transaction::ForeignTransaction;
+use super::source_identity::PlanSourceIdentity;
+use super::transaction::{ForeignTableReadView, ForeignTransaction};
+use crate::scan::IcebergReadSnapshot;
 
 mod target;
 
@@ -131,5 +134,68 @@ impl ResolvedForeignTableBinding {
 
     pub(crate) fn into_catalog_table(self) -> BoundCatalogTable {
         self.catalog_table
+    }
+
+    /// Reject an execution whose foreign-table options no longer name the
+    /// table the plan was built for.
+    pub(crate) fn ensure_planned_identity(
+        &self,
+        planned: &ForeignTableIdentity,
+    ) -> Result<(), IcebergFdwError> {
+        if &self.identity != planned {
+            return Err(IcebergFdwError::PlanIdentityChanged);
+        }
+        Ok(())
+    }
+
+    /// Bind one execution of a planned scan to its transaction-visible read.
+    ///
+    /// Parallel workers can reopen only catalog-published foreign state, and a
+    /// cached plan must not retain planner-time worker eligibility: INSERT can
+    /// add local batches between executions of one generic plan without
+    /// invalidating it. Eligibility is therefore captured here, per execution.
+    /// Projection and required-column schema validation stay with the caller.
+    pub(crate) fn into_execution_read(
+        self,
+        read_command_id: Option<pg_sys::CommandId>,
+        planned_source: Option<&PlanSourceIdentity>,
+    ) -> Result<ForeignExecutionRead, IcebergFdwError> {
+        let worker_reconstructible =
+            !ForeignTransaction::has_local_actions(self.key());
+        let view =
+            ForeignTransaction::scan_view(self.catalog_table, read_command_id)?;
+        let generation = PlanSourceIdentity::from_metadata(view.metadata());
+        if planned_source.is_some_and(|planned| planned != &generation) {
+            return Err(IcebergFdwError::PlanSourceChanged);
+        }
+        Ok(ForeignExecutionRead {
+            view,
+            generation,
+            worker_reconstructible,
+        })
+    }
+}
+
+/// A planned foreign read bound to one execution: the transaction-visible
+/// view, the source generation it was checked against, and whether a parallel
+/// worker can reconstruct it from published catalog state.
+pub(crate) struct ForeignExecutionRead {
+    view: ForeignTableReadView,
+    generation: PlanSourceIdentity,
+    worker_reconstructible: bool,
+}
+
+impl ForeignExecutionRead {
+    pub(crate) fn metadata(&self) -> &TableMetadata {
+        self.view.metadata()
+    }
+
+    pub(crate) fn worker_reconstructible(&self) -> bool {
+        self.worker_reconstructible
+    }
+
+    pub(crate) fn into_parts(self) -> (IcebergReadSnapshot, PlanSourceIdentity) {
+        let (_key, table, delta) = self.view.into_parts();
+        (IcebergReadSnapshot::new(table, delta), self.generation)
     }
 }

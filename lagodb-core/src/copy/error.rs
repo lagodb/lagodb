@@ -55,9 +55,12 @@ impl CopyError {
     where
         E: SqlStateError + StdError + Send + Sync + 'static,
     {
-        Self::Provider {
-            sqlerrcode: error.sql_error_code(),
-            source: Box::new(error),
+        match error.try_into_pg_report() {
+            Ok(report) => report.into(),
+            Err(error) => Self::Provider {
+                sqlerrcode: error.sql_error_code(),
+                source: Box::new(error),
+            },
         }
     }
 
@@ -101,6 +104,13 @@ impl SqlStateError for CopyError {
             Self::Runtime(_) => {
                 PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
             }
+        }
+    }
+
+    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
+        match self {
+            Self::Postgres(error) => Ok(error),
+            error => Err(error),
         }
     }
 }

@@ -2,7 +2,7 @@
 
 use lagodb_core::extension_worker::{WorkerLocator, WorkerNotifier};
 
-use crate::error::{IcebergError, IcebergResult};
+use crate::managed_table::{ManagedResult, ManagedTableError};
 
 pub(crate) struct AutomaticMaintenanceNotifier;
 
@@ -12,9 +12,9 @@ impl AutomaticMaintenanceNotifier {
         c"iceberg_maintenance",
     ));
 
-    pub(crate) fn stage_wakeup() -> IcebergResult<()> {
+    pub(crate) fn stage_wakeup() -> ManagedResult<()> {
         Self::NOTIFIER.stage_wakeup().map_err(|source| {
-            IcebergError::AutomaticMaintenanceNotification { source }
+            ManagedTableError::AutomaticMaintenanceNotification { source }
         })
     }
 }

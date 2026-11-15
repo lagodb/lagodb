@@ -9,12 +9,12 @@ use pgrx::pg_sys;
 
 use super::bridge::{BootstrapWriter, IcebergTableId};
 use super::metadata_table::IcebergMetadata;
-use super::metadata_tracker::TxMetadata;
 use super::table_definition::ManagedTableDefinition;
 use super::table_location::ManagedTableLocation;
-use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::options::ResolvedIcebergOptions;
 use crate::managed_table::storage::StorageContext;
+use crate::managed_table::transaction::ManagedTransaction;
+use crate::managed_table::{ManagedResult, ManagedTableError};
 use crate::storage::transaction_resources::register_table_dir_created;
 
 /// Owns the complete CREATE operation after PostgreSQL has created the
@@ -33,7 +33,7 @@ impl<'a> ManagedTableCreation<'a> {
         rel: &'a RelationHandle<'a>,
         table_options: Option<TableOptions>,
         partition_spec: Option<&pg_sys::PartitionSpec>,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         let mut table_options = table_options.unwrap_or_default();
         let resolved_options =
             ResolvedIcebergOptions::from_table_options(Some(&table_options))?;
@@ -51,18 +51,18 @@ impl<'a> ManagedTableCreation<'a> {
             .with_metadata_location(metadata_location)
             .insert()?;
         if let Some(file_io) = local_file_io {
-            TxMetadata::current().record_local_rebuild(rel.oid(), &file_io);
+            ManagedTransaction::current().record_local_rebuild(rel.oid(), &file_io);
         }
         Ok(())
     }
 
-    fn prepare(rel: &'a RelationHandle<'a>) -> IcebergResult<Self> {
+    fn prepare(rel: &'a RelationHandle<'a>) -> ManagedResult<Self> {
         let storage = StorageContext::for_write(rel)?;
         let location = ManagedTableLocation::for_create(rel, &storage)?;
         if let Some(target) = location.remote_cleanup_target()
             && ObjectCleanupQueue::has_tree_target(target)?
         {
-            return Err(IcebergError::ManagedTableLocationCleanupPending {
+            return Err(ManagedTableError::ManagedTableLocationCleanupPending {
                 location: location.as_str().to_owned(),
             });
         }
@@ -78,7 +78,7 @@ impl<'a> ManagedTableCreation<'a> {
         self,
         table_options: ResolvedIcebergOptions,
         definition: ManagedTableDefinition,
-    ) -> IcebergResult<String> {
+    ) -> ManagedResult<String> {
         let Self {
             rel,
             storage,
@@ -107,7 +107,7 @@ impl<'a> ManagedTableCreation<'a> {
         let metadata_location = table
             .metadata_location()
             .map(str::to_owned)
-            .ok_or(IcebergError::MetadataLocationNull)?;
+            .ok_or(ManagedTableError::MetadataLocationNull)?;
         Ok(metadata_location)
     }
 }

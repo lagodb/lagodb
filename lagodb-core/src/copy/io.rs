@@ -178,10 +178,7 @@ impl Drop for DestinationGuard<'_> {
 }
 
 pub(super) fn report(error: CopyError) -> ! {
-    match error {
-        CopyError::Postgres(error) => error.report(),
-        error => PgReportError::from_domain_error(error).report(),
-    }
+    PgReportError::from_domain_error(error).report()
 }
 
 #[pg_guard]

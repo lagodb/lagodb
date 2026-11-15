@@ -2,7 +2,7 @@ use lagodb_storage::StorageError;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
-use crate::diag::SqlStateError;
+use crate::diag::{PgError, PgReportError, SqlStateError};
 
 /// Errors produced while parsing or selecting a PostgreSQL storage profile.
 #[derive(Debug, Error)]
@@ -17,7 +17,7 @@ pub enum StorageProfileError {
     InvalidObjectUri { reason: &'static str },
 
     #[error("storage profile catalog access failed: {0}")]
-    Catalog(#[from] crate::diag::PgError),
+    Catalog(#[from] PgError),
 
     #[error(transparent)]
     Storage(#[from] StorageError),
@@ -91,6 +91,14 @@ impl SqlStateError for StorageProfileError {
             Self::ServerUsageDenied { .. } | Self::ServerOutsideScope { .. } => {
                 PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE
             }
+        }
+    }
+
+    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
+        match self {
+            Self::Catalog(error) => Ok(PgReportError::from_pg_error(error)
+                .contextualize("storage profile catalog access failed", None)),
+            error => Err(error),
         }
     }
 }

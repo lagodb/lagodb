@@ -10,13 +10,13 @@ use lagodb_core::handles::SnapshotHandle;
 use pgrx::pg_sys;
 
 use super::{
-    LoadedTableMetadata, LoadedTableRead, ManagedTableActionLog, TxMetadata,
+    LoadedTableMetadata, LoadedTableRead, ManagedTableActionLog, ManagedTransaction,
 };
-use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::catalog::local_storage::LocalTableRoot;
 use crate::managed_table::catalog::metadata_table::IcebergMetadata;
+use crate::managed_table::{ManagedResult, ManagedTableError};
 
-impl TxMetadata {
+impl ManagedTransaction {
     /// Current-definition entry point for planning and maintenance.
     ///
     /// Reads the latest committed metadata location every time, then attaches
@@ -27,7 +27,7 @@ impl TxMetadata {
         &self,
         relid: pg_sys::Oid,
         file_io: &FileIO,
-    ) -> IcebergResult<LoadedTableMetadata> {
+    ) -> ManagedResult<LoadedTableMetadata> {
         TableMetadataView::load(self, relid, file_io)?.into_read_metadata()
     }
 
@@ -40,11 +40,11 @@ impl TxMetadata {
         file_io: &FileIO,
         snapshot: &SnapshotHandle<'_>,
         local_root: Option<&LocalTableRoot>,
-    ) -> IcebergResult<LoadedTableRead> {
+    ) -> ManagedResult<LoadedTableRead> {
         let current = IcebergMetadata::get(relid)?;
         let current_location = current
             .metadata_location
-            .ok_or(IcebergError::MetadataLocationNull)?;
+            .ok_or(ManagedTableError::MetadataLocationNull)?;
         // Local CREATE/TRUNCATE bootstrap an empty generation. Repeated
         // TRUNCATE can clear and reuse its directory, so directory equality
         // alone cannot make an earlier JSON valid. The existing rebuild state
@@ -72,7 +72,7 @@ impl TxMetadata {
             Some(data) => {
                 let location = data
                     .metadata_location
-                    .ok_or(IcebergError::MetadataLocationNull)?;
+                    .ok_or(ManagedTableError::MetadataLocationNull)?;
                 if local_root.is_none_or(|root| root.contains_path(&location)) {
                     (location, data.maintenance_due_at, true)
                 } else {
@@ -134,7 +134,7 @@ impl TxMetadata {
         &self,
         relid: pg_sys::Oid,
         file_io: &FileIO,
-    ) -> IcebergResult<LoadedTableMetadata> {
+    ) -> ManagedResult<LoadedTableMetadata> {
         self.register_table(relid);
         self.current_table_metadata(relid, file_io)
     }
@@ -148,7 +148,7 @@ impl TxMetadata {
         &self,
         relid: pg_sys::Oid,
         file_io: &FileIO,
-    ) -> IcebergResult<TableMetadata> {
+    ) -> ManagedResult<TableMetadata> {
         self.register_table(relid);
         let view = TableMetadataView::load(self, relid, file_io)?;
         Ok(view.metadata)
@@ -166,7 +166,7 @@ struct TableMetadataView {
 
 impl TableMetadataView {
     fn actions(
-        tracker: &TxMetadata,
+        tracker: &ManagedTransaction,
         relid: pg_sys::Oid,
         file_io: &FileIO,
     ) -> Option<Rc<ManagedTableActionLog>> {
@@ -180,16 +180,16 @@ impl TableMetadataView {
     }
 
     fn load(
-        tracker: &TxMetadata,
+        tracker: &ManagedTransaction,
         relid: pg_sys::Oid,
         file_io: &FileIO,
-    ) -> IcebergResult<Self> {
+    ) -> ManagedResult<Self> {
         let actions = Self::actions(tracker, relid, file_io);
 
         let catalog_metadata = IcebergMetadata::get(relid)?;
         let location = catalog_metadata
             .metadata_location
-            .ok_or(IcebergError::MetadataLocationNull)?;
+            .ok_or(ManagedTableError::MetadataLocationNull)?;
         let mut metadata = TableMetadata::read_from(file_io, &location)?;
         if let Some(actions) = &actions {
             metadata = actions.overlay_metadata(metadata)?;
@@ -202,7 +202,7 @@ impl TableMetadataView {
         })
     }
 
-    fn into_read_metadata(self) -> IcebergResult<LoadedTableMetadata> {
+    fn into_read_metadata(self) -> ManagedResult<LoadedTableMetadata> {
         let delta = match self.actions {
             Some(actions) => actions.combined_delta()?,
             None => None,

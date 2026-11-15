@@ -10,8 +10,8 @@ use super::mutation::PreparedMutationScan;
 use super::{IcebergFdwScanState, ScanExecutionState};
 use crate::foreign_table::scan::ForeignMutationScan;
 use crate::foreign_table::{
-    ForeignSchemaBinding, ForeignTransaction, IcebergFdwError, LagodbIceberg,
-    PlanSourceIdentity, ResolvedForeignTableBinding,
+    ForeignSchemaBinding, ForeignTransaction, LagodbIceberg,
+    ResolvedForeignTableBinding,
 };
 use crate::predicate::BoundIcebergPredicate;
 use crate::scan::{
@@ -32,9 +32,7 @@ impl IcebergFdwScanState {
             context.effective_user_id(),
             &executor,
         )?;
-        if resolved.identity() != context.private_data.identity() {
-            return Err(IcebergFdwError::PlanIdentityChanged.into());
-        }
+        resolved.ensure_planned_identity(context.private_data.identity())?;
         let execution = match context.row_identity_requirement {
             ForeignRowIdentityRequirement::ItemPointer => {
                 Self::begin_mutation(&context, resolved)?
@@ -50,23 +48,14 @@ impl IcebergFdwScanState {
         context: &BeginForeignScanContext<'_, LagodbIceberg>,
         resolved: ResolvedForeignTableBinding,
     ) -> Result<ScanExecutionState, ForeignScanError> {
-        // A cached partial plan can outlive its planner-time eligibility.
-        // Capture this execution's state before consuming the resolved table.
-        let workers_allowed = context.parallel_aware
-            && !ForeignTransaction::has_local_actions(resolved.key());
-        let view = ForeignTransaction::scan_view(
-            resolved.into_catalog_table(),
+        let read = resolved.into_execution_read(
             context.snapshot.command_id(),
+            context.private_data.source(),
         )?;
-        if context.private_data.source().is_some_and(|planned| {
-            planned != &PlanSourceIdentity::from_metadata(view.metadata())
-        }) {
-            return Err(IcebergFdwError::PlanSourceChanged.into());
-        }
         let binding = ForeignSchemaBinding::new(&context.relation)?;
         if context.required_columns.needs_all_columns() {
             binding.validate_read(
-                view.metadata(),
+                read.metadata(),
                 context.private_data.identity(),
                 binding
                     .layout()
@@ -76,18 +65,15 @@ impl IcebergFdwScanState {
             )?;
         } else {
             binding.validate_read(
-                view.metadata(),
+                read.metadata(),
                 context.private_data.identity(),
                 context.required_columns.user_columns(),
             )?;
         }
         let layout = binding.into_relation_layout();
-        let (_, table, delta) = view.into_parts();
-        let prepared = Self::prepare_rows(
-            context,
-            IcebergReadSnapshot::new(table, delta),
-            &layout,
-        )?;
+        let workers_allowed = read.worker_reconstructible();
+        let (snapshot, _generation) = read.into_parts();
+        let prepared = Self::prepare_rows(context, snapshot, &layout)?;
         Ok(if context.parallel_aware {
             ScanExecutionState::PostgresParallelScan(PostgresParallelScan::new(
                 prepared,

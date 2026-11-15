@@ -10,7 +10,7 @@ use pgrx::pg_sys;
 use super::{
     IcebergModifyQueryState, IcebergModifyScanContext, ManagedMutationCursor,
 };
-use crate::error::IcebergResult;
+use crate::managed_table::ManagedResult;
 use crate::scan::{PreparedRowScan, ReaderPredicate};
 use crate::write::PlannedMutationTasks;
 
@@ -29,7 +29,7 @@ impl PreparedManagedMutationScan {
     pub(crate) fn prepare(
         prepared: PreparedRowScan,
         conflict_filter: Predicate,
-    ) -> IcebergResult<Self> {
+    ) -> ManagedResult<Self> {
         let tasks = Rc::new(PlannedMutationTasks::new(
             prepared.plan_row_location_tasks()?,
         ));
@@ -56,7 +56,7 @@ impl PreparedManagedMutationScan {
         &self,
         binding: ModifyScanBinding<IcebergModifyQueryState>,
         table_oid: pg_sys::Oid,
-    ) -> IcebergResult<ManagedMutationCursor> {
+    ) -> ManagedResult<ManagedMutationCursor> {
         let input = self
             .prepared
             .open_row_location_scan(self.tasks.shared_tasks())?;
@@ -80,7 +80,7 @@ impl ManagedMutationScan {
         prepared: PreparedManagedMutationScan,
         binding: ModifyScanBinding<IcebergModifyQueryState>,
         relation_oid: pg_sys::Oid,
-    ) -> IcebergResult<Self> {
+    ) -> ManagedResult<Self> {
         let cursor = prepared.open_cursor(binding.clone(), relation_oid)?;
         Ok(Self {
             cursor,
@@ -93,7 +93,7 @@ impl ManagedMutationScan {
     pub(crate) fn rescan(
         &mut self,
         replacement: Option<ReaderPredicate>,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         if let Some(predicate) = replacement {
             self.prepared.rebind_reader_filter(predicate);
         }

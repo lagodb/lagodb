@@ -42,10 +42,13 @@ impl ForeignImportError {
     where
         E: SqlStateError + StdError + Send + Sync + 'static,
     {
-        Self::new(ForeignImportErrorKind::Provider {
-            sqlerrcode: source.sql_error_code(),
-            source: Box::new(source),
-        })
+        match source.try_into_pg_report() {
+            Ok(report) => report.into(),
+            Err(source) => Self::new(ForeignImportErrorKind::Provider {
+                sqlerrcode: source.sql_error_code(),
+                source: Box::new(source),
+            }),
+        }
     }
 
     pub(crate) fn with_callback<P: ForeignDataWrapper>(self) -> Self {

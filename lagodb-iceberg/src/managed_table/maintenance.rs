@@ -12,7 +12,7 @@ mod writer;
 
 pub(crate) use types::{PreparedVacuum, record_metric};
 
-pub(super) use operations::{IcebergTableMaintenance, MaintenanceExecution};
+pub(super) use operations::IcebergTableMaintenance;
 
 pub(crate) use cleanup::VacuumCleanup;
 pub(crate) use commit_attempt::{VacuumAttemptResult, VacuumCommitAttempt};

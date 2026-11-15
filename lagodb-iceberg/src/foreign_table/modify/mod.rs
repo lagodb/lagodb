@@ -133,8 +133,8 @@ impl LagodbIceberg {
                 ResolvedForeignTableBinding::resolve(relation.oid(), effective_user)?
             }
         };
-        if planned.is_some_and(|private| private.identity() != resolved.identity()) {
-            return Err(super::error::IcebergFdwError::PlanIdentityChanged.into());
+        if let Some(private) = planned {
+            resolved.ensure_planned_identity(private.identity())?;
         }
         let view = ForeignTransaction::begin_write(
             resolved.into_catalog_table(),

@@ -49,17 +49,24 @@ impl PgReportError {
             .execute()
     }
 
-    /// Build from a domain error with a single SQLSTATE and full `source` chain in DETAIL.
-    #[inline]
+    /// Build from a domain error. A PostgreSQL report captured below `err`
+    /// keeps its structured fields; any other error uses its SQLSTATE, its
+    /// Display as the message, and its full `source` chain in DETAIL.
     pub fn from_domain_error<E>(err: E) -> Self
     where
         E: SqlStateError + std::error::Error + std::fmt::Display,
     {
-        let sqlerrcode = err.sql_error_code();
-        Self {
-            sqlerrcode,
-            report: Box::new(domain_error_report(err)),
-        }
+        err.try_into_pg_report().unwrap_or_else(|err| {
+            let sqlerrcode = err.sql_error_code();
+            let mut report = ErrorReport::new(sqlerrcode, format!("{err}"), "");
+            if let Some(detail) = error_source_chain_detail(&err) {
+                report = report.set_detail(detail);
+            }
+            Self {
+                sqlerrcode,
+                report: Box::new(report),
+            }
+        })
     }
 
     /// Build from a primary message only (no DETAIL).
@@ -130,7 +137,7 @@ impl PgReportError {
     /// the structured SQLSTATE, DETAIL, or HINT captured at an inner boundary.
     pub fn contextualize(
         self,
-        operation: &'static str,
+        operation: impl Display,
         cleanup_detail: Option<String>,
     ) -> Self {
         let sqlerrcode = self.sql_error_code();
@@ -311,16 +318,13 @@ pub fn join_error_details(
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
-/// Build a PostgreSQL [`ErrorReport`] from a domain error and its `source` chain.
+/// Build a PostgreSQL [`ErrorReport`] from a domain error, as
+/// [`PgReportError::from_domain_error`] does.
 pub fn domain_error_report<E>(err: E) -> ErrorReport
 where
     E: SqlStateError + std::error::Error + std::fmt::Display,
 {
-    let mut report = ErrorReport::new(err.sql_error_code(), format!("{err}"), "");
-    if let Some(detail) = error_source_chain_detail(&err) {
-        report = report.set_detail(detail);
-    }
-    report
+    PgReportError::from_domain_error(err).into_report()
 }
 
 /// Shared PostgreSQL-boundary reporting behavior for domain errors.
@@ -372,6 +376,23 @@ pub(crate) trait PgReportableError: SqlStateError + Display {
 pub trait SqlStateError: std::error::Error + Send + Sync + 'static {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+    }
+
+    /// Hand back a PostgreSQL report captured below this error, or return the
+    /// error unchanged.
+    ///
+    /// Every core boundary conversion asks this first, so a captured report
+    /// keeps its SQLSTATE, message, DETAIL and HINT as structured fields. Any
+    /// other error keeps its framework context and `source` chain. Implement
+    /// it only on variants that carry such a report: a transparent variant
+    /// returns the inner report, and a variant with its own message prefix
+    /// returns it through [`PgReportError::contextualize`]. A variant may
+    /// extract only when its SQLSTATE is the inner report's.
+    fn try_into_pg_report(self) -> Result<PgReportError, Self>
+    where
+        Self: Sized,
+    {
+        Err(self)
     }
 }
 

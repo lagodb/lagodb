@@ -1,9 +1,8 @@
 use super::analyze::AnalyzeBlockDomain;
-use crate::error::IcebergResult;
-use crate::managed_table::catalog::metadata_tracker::TxMetadata;
 use crate::managed_table::storage::StorageContext;
+use crate::managed_table::transaction::ManagedTransaction;
 use crate::managed_table::{
-    IcebergTableAm, IcebergTableProvider, ManagedTableReadView,
+    IcebergTableAm, IcebergTableProvider, ManagedResult, ManagedTableReadView,
 };
 use lagodb_core::diag::PgReportError;
 use lagodb_core::prelude::*;
@@ -81,10 +80,10 @@ impl RelationStats {
     /// Like heap's `table_block_relation_estimate_size()`, whose
     /// `RelationGetNumberOfBlocks()` raises storage errors, size estimation
     /// reports metadata failures instead of planning with defaults.
-    fn load(rel: &RelationHandle) -> IcebergResult<Self> {
+    fn load(rel: &RelationHandle) -> ManagedResult<Self> {
         let ctx = StorageContext::for_read(rel)?;
-        let loaded =
-            TxMetadata::current().current_table_metadata(rel.oid(), ctx.file_io())?;
+        let loaded = ManagedTransaction::current()
+            .current_table_metadata(rel.oid(), ctx.file_io())?;
         let (rows, bytes) = loaded.relation_stats(ctx.file_io())?;
         let may_have_row_deletes = loaded.may_have_row_deletes()?;
 

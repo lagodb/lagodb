@@ -1,6 +1,6 @@
 //! Iceberg FDW domain errors and framework-boundary conversions.
 
-use lagodb_core::diag::SqlStateError;
+use lagodb_core::diag::{PgReportError, SqlStateError};
 use lagodb_core::fdw::{
     ForeignImportError, ForeignModifyError, ForeignScanError,
     ForeignTableMaintenanceError, ForeignValidationError,
@@ -175,6 +175,14 @@ impl SqlStateError for IcebergFdwError {
             Self::Filter(error) => error.sql_error_code(),
         }
     }
+
+    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
+        match self {
+            Self::Iceberg(error) => error.try_into_pg_report().map_err(Self::Iceberg),
+            Self::Filter(error) => error.try_into_pg_report().map_err(Self::Filter),
+            error => Err(error),
+        }
+    }
 }
 
 impl From<iceberg_lite::Error> for IcebergFdwError {
@@ -185,10 +193,7 @@ impl From<iceberg_lite::Error> for IcebergFdwError {
 
 impl From<IcebergFdwError> for ForeignValidationError {
     fn from(error: IcebergFdwError) -> Self {
-        match error {
-            IcebergFdwError::Iceberg(IcebergError::Postgres(error)) => error.into(),
-            error => Self::provider(error),
-        }
+        Self::provider(error)
     }
 }
 

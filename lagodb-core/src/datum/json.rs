@@ -15,7 +15,7 @@ use pgrx::varlena;
 use pgrx::{PgTryBuilder, fcinfo};
 use thiserror::Error;
 
-use crate::diag::{PgError, SqlStateError};
+use crate::diag::{PgError, PgReportError, SqlStateError};
 
 use super::encoding::Utf8ServerEncoding;
 use super::error::{DatumConversionError, Utf8ServerEncodingError};
@@ -108,6 +108,14 @@ impl SqlStateError for JsonValueError {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
             }
             Self::Utf8(_) => PgSqlErrorCode::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE,
+        }
+    }
+
+    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
+        match self {
+            Self::Postgres(error) => Ok(PgReportError::from_pg_error(error)
+                .contextualize("PostgreSQL JSON conversion failed", None)),
+            error => Err(error),
         }
     }
 }

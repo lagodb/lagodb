@@ -6,7 +6,7 @@ use std::fmt;
 use pgrx::pg_sys::Oid;
 use pgrx::prelude::PgSqlErrorCode;
 
-use crate::diag::{PgError, SqlStateError};
+use crate::diag::{PgError, PgReportError, SqlStateError};
 
 /// A conversion failure that is distinct from SQL NULL.
 #[derive(Debug)]
@@ -150,6 +150,13 @@ impl SqlStateError for DatumConversionError {
                 PgSqlErrorCode::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE
             }
             Self::Postgres(error) => error.sql_error_code(),
+        }
+    }
+
+    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
+        match self {
+            Self::Postgres(error) => Ok(PgReportError::from_pg_error(error)),
+            error => Err(error),
         }
     }
 }

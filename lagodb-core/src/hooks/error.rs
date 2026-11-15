@@ -1,4 +1,3 @@
-use crate::copy::CopyError;
 use crate::diag::{
     PgError, PgReportError, SqlStateError, error_source_chain_detail,
     join_error_details,
@@ -161,14 +160,6 @@ impl HookError {
         }))
     }
 
-    /// Preserve structured PostgreSQL diagnostics at a COPY utility boundary.
-    pub fn from_copy_error(error: CopyError) -> Self {
-        match error {
-            CopyError::Postgres(error) => error.into(),
-            error => Self::with_source(error.sql_error_code(), error),
-        }
-    }
-
     #[doc(hidden)]
     pub fn with_utility_context(
         mut self,
@@ -226,7 +217,10 @@ where
     E: SqlStateError,
 {
     fn from(value: E) -> Self {
-        Self::with_source(value.sql_error_code(), value)
+        match value.try_into_pg_report() {
+            Ok(report) => report.into(),
+            Err(value) => Self::with_source(value.sql_error_code(), value),
+        }
     }
 }
 

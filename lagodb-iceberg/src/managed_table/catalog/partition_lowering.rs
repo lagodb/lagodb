@@ -29,8 +29,8 @@ use lagodb_core::handles::{
 use pgrx::AnyElement;
 use pgrx::prelude::*;
 
-use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::constants::ICEBERG_SCHEMA;
+use crate::managed_table::{ManagedResult, ManagedTableError};
 
 use super::numeric_type::ManagedNumeric;
 
@@ -48,7 +48,7 @@ impl IcebergBucketFunction {
     const NAME: &'static CStr = c"bucket";
     const ARGUMENT_TYPES: [pg_sys::Oid; 2] = [pg_sys::INT4OID, pg_sys::ANYELEMENTOID];
 
-    fn oid() -> IcebergResult<pg_sys::Oid> {
+    fn oid() -> ManagedResult<pg_sys::Oid> {
         let schema = get_namespace_oid(ICEBERG_SCHEMA, false)?;
         // SAFETY: buildoidvector copies the live array, and these keys are
         // PROCNAMEARGSNSP's (proname, proargtypes, pronamespace).
@@ -73,7 +73,7 @@ impl IcebergBucketFunction {
     /// The bucket-count and source arguments when `function` is the marker.
     fn operands<'a>(
         function: PgFuncExpr<'a>,
-    ) -> IcebergResult<Option<(PgExprRef<'a>, PgExprRef<'a>)>> {
+    ) -> ManagedResult<Option<(PgExprRef<'a>, PgExprRef<'a>)>> {
         Ok(if function.function_oid() == Self::oid()? {
             function.argument(0).zip(function.argument(1))
         } else {
@@ -102,11 +102,11 @@ impl PartitionSource {
         }
     }
 
-    fn from_argument(argument: PgExprRef<'_>) -> IcebergResult<Self> {
+    fn from_argument(argument: PgExprRef<'_>) -> ManagedResult<Self> {
         let var = PgVar::try_from_expr(argument)
             .filter(|var| var.varattno() > 0)
             .ok_or_else(|| {
-                IcebergError::unsupported_partition(
+                ManagedTableError::unsupported_partition(
                     "a partition transform source must be a direct table column",
                 )
             })?;
@@ -118,7 +118,7 @@ impl PartitionSource {
         })
     }
 
-    fn validate_identity(&self) -> IcebergResult<()> {
+    fn validate_identity(&self) -> ManagedResult<()> {
         // UUID identity partitions are deliberately excluded until upstream
         // iceberg-rust and iceberg-lite agree on Iceberg's Avro fixed(16) UUID
         // representation for both manifest writing and reading. Their current
@@ -127,7 +127,7 @@ impl PartitionSource {
         self.validate_source("identity", pg_sys::BOOLOID)
     }
 
-    fn validate_bucket(&self) -> IcebergResult<()> {
+    fn validate_bucket(&self) -> ManagedResult<()> {
         // Iceberg defines no bucket hash for boolean or floating-point values.
         // A bucket partition value is an int, which avoids the UUID literal
         // problem described in `validate_identity`. The bucket count never
@@ -141,7 +141,7 @@ impl PartitionSource {
         &self,
         name: &str,
         transform_only_type: pg_sys::Oid,
-    ) -> IcebergResult<()> {
+    ) -> ManagedResult<()> {
         let supported = match self.type_oid {
             pg_sys::INT2OID
             | pg_sys::INT4OID
@@ -158,7 +158,7 @@ impl PartitionSource {
         };
         if !supported {
             let pg_type = PgType::new(self.type_oid, self.typmod).display_name();
-            return Err(IcebergError::unsupported_partition(format!(
+            return Err(ManagedTableError::unsupported_partition(format!(
                 "PostgreSQL type {pg_type} is not supported for an Iceberg {name} partition"
             )));
         }
@@ -166,7 +166,7 @@ impl PartitionSource {
             && self.collation != pg_sys::Oid::INVALID
             && !unsafe { pg_sys::get_collation_isdeterministic(self.collation) }
         {
-            return Err(IcebergError::unsupported_partition(format!(
+            return Err(ManagedTableError::unsupported_partition(format!(
                 "text and varchar {name} partitions require a deterministic collation"
             )));
         }
@@ -209,7 +209,7 @@ impl<'borrow, 'relation> PgPartitionSpecAdapter<'borrow, 'relation> {
         }
     }
 
-    pub(super) fn build(self) -> IcebergResult<UnboundPartitionSpec> {
+    pub(super) fn build(self) -> ManagedResult<UnboundPartitionSpec> {
         let attributes = self.relation.tuple_desc_handle().attributes();
         let mut builder = PartitionSpec::builder(self.schema.clone());
         for field in self.key.fields() {
@@ -231,8 +231,8 @@ impl<'borrow, 'relation> PgPartitionSpecAdapter<'borrow, 'relation> {
 
     /// A rejected spec is a bad definition, not the corrupted data `DataInvalid`
     /// means on `IcebergLiteError`. The spec builder's errors carry only a message.
-    fn invalid_spec(error: IcebergLiteError) -> IcebergError {
-        IcebergError::invalid_partition(error.message().to_owned())
+    fn invalid_spec(error: IcebergLiteError) -> ManagedTableError {
+        ManagedTableError::invalid_partition(error.message().to_owned())
     }
 
     /// PostgreSQL rejects generated columns for its own partitioned tables.
@@ -240,10 +240,10 @@ impl<'borrow, 'relation> PgPartitionSpecAdapter<'borrow, 'relation> {
     fn source_name(
         attributes: &[pg_sys::FormData_pg_attribute],
         attno: pg_sys::AttrNumber,
-    ) -> IcebergResult<String> {
+    ) -> ManagedResult<String> {
         let attribute = &attributes[(attno - 1) as usize];
         if attribute.attgenerated != 0 {
-            return Err(IcebergError::invalid_partition(
+            return Err(ManagedTableError::invalid_partition(
                 "cannot use generated column in partition key",
             ));
         }
@@ -256,7 +256,7 @@ impl<'borrow, 'relation> PgPartitionSpecAdapter<'borrow, 'relation> {
     fn lower_field(
         &self,
         field: &PartitionKeyField,
-    ) -> IcebergResult<LoweredPartitionField> {
+    ) -> ManagedResult<LoweredPartitionField> {
         match field.source() {
             PartitionKeySource::Column(attno) => {
                 self.lower_column(PartitionSource::from_column(attno, field))
@@ -270,7 +270,7 @@ impl<'borrow, 'relation> PgPartitionSpecAdapter<'borrow, 'relation> {
     fn lower_column(
         &self,
         source: PartitionSource,
-    ) -> IcebergResult<LoweredPartitionField> {
+    ) -> ManagedResult<LoweredPartitionField> {
         let transform = match self.key.strategy() {
             PartitionStrategy::List => {
                 source.validate_identity()?;
@@ -278,7 +278,7 @@ impl<'borrow, 'relation> PgPartitionSpecAdapter<'borrow, 'relation> {
             }
             PartitionStrategy::Range => {
                 if source.type_oid != pg_sys::DATEOID {
-                    return Err(IcebergError::unsupported_partition(
+                    return Err(ManagedTableError::unsupported_partition(
                         "a direct PARTITION BY RANGE key is supported only for date; timestamp keys must use date_trunc('year'|'month'|'day'|'hour', column)",
                     ));
                 }
@@ -288,7 +288,7 @@ impl<'borrow, 'relation> PgPartitionSpecAdapter<'borrow, 'relation> {
                 // PostgreSQL combines several HASH columns into one value, and
                 // Iceberg's bucket transform reads a single column.
                 if self.key.fields().len() != 1 {
-                    return Err(IcebergError::unsupported_partition(
+                    return Err(ManagedTableError::unsupported_partition(
                         "PARTITION BY HASH accepts a bare column only as its sole key; write iceberg.bucket(N, column) for each column",
                     ));
                 }
@@ -301,10 +301,10 @@ impl<'borrow, 'relation> PgPartitionSpecAdapter<'borrow, 'relation> {
 
     fn lower_expression(
         expression: PgExprRef<'_>,
-    ) -> IcebergResult<LoweredPartitionField> {
+    ) -> ManagedResult<LoweredPartitionField> {
         let function = PgFuncExpr::try_from_expr(expression.without_relabels())
             .ok_or_else(|| {
-                IcebergError::unsupported_partition(
+                ManagedTableError::unsupported_partition(
                     "a partition key expression must be an iceberg.bucket or built-in date_trunc call",
                 )
             })?;
@@ -317,13 +317,13 @@ impl<'borrow, 'relation> PgPartitionSpecAdapter<'borrow, 'relation> {
     fn lower_bucket(
         count: PgExprRef<'_>,
         value: PgExprRef<'_>,
-    ) -> IcebergResult<LoweredPartitionField> {
+    ) -> ManagedResult<LoweredPartitionField> {
         let count = PgConst::try_from_expr(count.without_relabels())
             .and_then(PgConst::int4_value)
             .and_then(|count| u32::try_from(count).ok())
             .filter(|count| *count > 0)
             .ok_or_else(|| {
-                IcebergError::invalid_partition(
+                ManagedTableError::invalid_partition(
                     "iceberg.bucket requires a positive integer constant bucket count",
                 )
             })?;
@@ -337,17 +337,17 @@ impl<'borrow, 'relation> PgPartitionSpecAdapter<'borrow, 'relation> {
 
     fn lower_date_trunc(
         function: PgFuncExpr<'_>,
-    ) -> IcebergResult<LoweredPartitionField> {
+    ) -> ManagedResult<LoweredPartitionField> {
         let has_timezone = match u32::from(function.function_oid()) {
             pg_sys::F_DATE_TRUNC_TEXT_TIMESTAMP => false,
             pg_sys::F_DATE_TRUNC_TEXT_TIMESTAMPTZ_TEXT => true,
             pg_sys::F_DATE_TRUNC_TEXT_TIMESTAMPTZ => {
-                return Err(IcebergError::unsupported_partition(
+                return Err(ManagedTableError::unsupported_partition(
                     "date_trunc(text, timestamptz) is STABLE and timezone-dependent; use date_trunc(unit, column, 'UTC')",
                 ));
             }
             _ => {
-                return Err(IcebergError::unsupported_partition(
+                return Err(ManagedTableError::unsupported_partition(
                     "a partition key expression must be an iceberg.bucket or built-in date_trunc call",
                 ));
             }
@@ -358,14 +358,14 @@ impl<'borrow, 'relation> PgPartitionSpecAdapter<'borrow, 'relation> {
             .and_then(|argument| PgConst::try_from_expr(argument.without_relabels()))
             .and_then(PgConst::text_bytes)
             .ok_or_else(|| {
-                IcebergError::unsupported_partition(
+                ManagedTableError::unsupported_partition(
                     "date_trunc partition unit must be a text constant",
                 )
             })?;
         let transform = Self::temporal_transform(&unit)?;
 
         let value = function.argument(1).ok_or_else(|| {
-            IcebergError::invalid_partition(
+            ManagedTableError::invalid_partition(
                 "date_trunc partition expression has no source column",
             )
         })?;
@@ -379,12 +379,12 @@ impl<'borrow, 'relation> PgPartitionSpecAdapter<'borrow, 'relation> {
                 })
                 .and_then(PgConst::text_bytes)
                 .ok_or_else(|| {
-                    IcebergError::unsupported_partition(
+                    ManagedTableError::unsupported_partition(
                         "timestamptz partition timezone must be the text constant 'UTC'",
                     )
                 })?;
             if !timezone.eq_ignore_ascii_case(b"UTC") {
-                return Err(IcebergError::unsupported_partition(
+                return Err(ManagedTableError::unsupported_partition(
                     "Iceberg timestamptz partition transforms require the explicit timezone 'UTC'",
                 ));
             }
@@ -393,7 +393,7 @@ impl<'borrow, 'relation> PgPartitionSpecAdapter<'borrow, 'relation> {
         Ok(LoweredPartitionField { source, transform })
     }
 
-    fn temporal_transform(unit: &[u8]) -> IcebergResult<Transform> {
+    fn temporal_transform(unit: &[u8]) -> ManagedResult<Transform> {
         if unit.eq_ignore_ascii_case(b"year") {
             Ok(Transform::Year)
         } else if unit.eq_ignore_ascii_case(b"month") {
@@ -403,7 +403,7 @@ impl<'borrow, 'relation> PgPartitionSpecAdapter<'borrow, 'relation> {
         } else if unit.eq_ignore_ascii_case(b"hour") {
             Ok(Transform::Hour)
         } else {
-            Err(IcebergError::unsupported_partition(
+            Err(ManagedTableError::unsupported_partition(
                 "date_trunc partition unit must be year, month, day, or hour",
             ))
         }
@@ -421,7 +421,7 @@ mod iceberg {
     #[pg_extern(volatile)]
     fn bucket(num_buckets: Option<i32>, value: Option<AnyElement>) -> i32 {
         let _ = (num_buckets, value);
-        PgReportError::from_domain_error(IcebergError::unsupported_partition(
+        PgReportError::from_domain_error(ManagedTableError::unsupported_partition(
             "iceberg.bucket only names a transform in PARTITION BY of a USING iceberg table and cannot be executed",
         ))
         .report()

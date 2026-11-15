@@ -112,10 +112,13 @@ impl CustomScanError {
     where
         E: SqlStateError + std::error::Error + Send + Sync + 'static,
     {
-        Self::new(CustomScanErrorKind::Provider {
-            sqlerrcode: err.sql_error_code(),
-            source: Box::new(err),
-        })
+        match err.try_into_pg_report() {
+            Ok(report) => report.into(),
+            Err(err) => Self::new(CustomScanErrorKind::Provider {
+                sqlerrcode: err.sql_error_code(),
+                source: Box::new(err),
+            }),
+        }
     }
 
     /// Framework or provider invariant (always `INTERNAL_ERROR`).
