@@ -24,7 +24,10 @@ pub use boolean::BooleanTestKind;
 pub use codec::{
     ExpressionCodecError, ExpressionPlanDataDecode, ExpressionPlanDataEncode,
 };
-pub use comparison::{PgComparisonKind, PgComparisonSignature, PgNanComparison};
+pub use comparison::{
+    PgComparisonKind, PgComparisonSignature, PgDateComparisonOutcome,
+    PgDateTimestampComparison, PgNanComparison,
+};
 pub use contract::{
     ParamKey, PgComparisonIdentity, PgComparisonOp, PushdownContract, PushdownCosting,
 };

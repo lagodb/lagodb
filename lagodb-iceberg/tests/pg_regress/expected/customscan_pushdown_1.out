@@ -1817,6 +1817,63 @@ SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+
   4 | Fri Jan 10 23:59:59 2025 UTC
 (2 rows)
 
+-- A date column against a folded date + interval bound is pushed as the date
+-- comparison PostgreSQL performs at the date's midnight.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, d FROM rq_temporal
+WHERE d >= DATE '2023-01-01' + INTERVAL '1 year' ORDER BY id;
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on rq_temporal
+         Filter: (d >= 'Mon Jan 01 00:00:00 2024'::timestamp without time zone)
+         Pushed Filter: (d >= 'Mon Jan 01 00:00:00 2024'::timestamp without time zone)
+(5 rows)
+
+SELECT id, d FROM rq_temporal
+WHERE d >= DATE '2023-01-01' + INTERVAL '1 year' ORDER BY id;
+ id |     d      
+----+------------
+  3 | 06-15-2024
+  4 | 01-10-2025
+(2 rows)
+
+-- A bound within a day rounds by operator, with the timestamp on either side.
+EXPLAIN (COSTS OFF)
+SELECT id, d FROM rq_temporal
+WHERE TIMESTAMP '2024-06-15 12:00:00' > d ORDER BY id;
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on rq_temporal
+         Filter: ('Sat Jun 15 12:00:00 2024'::timestamp without time zone > d)
+         Pushed Filter: ('Sat Jun 15 12:00:00 2024'::timestamp without time zone > d)
+(5 rows)
+
+SELECT id, d FROM rq_temporal
+WHERE TIMESTAMP '2024-06-15 12:00:00' > d ORDER BY id;
+ id |     d      
+----+------------
+  1 | 03-15-2020
+  2 | 07-20-2021
+  3 | 06-15-2024
+(3 rows)
+
+-- date versus timestamptz depends on the session time zone and stays residual.
+EXPLAIN (COSTS OFF)
+SELECT id, d FROM rq_temporal
+WHERE d < TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on rq_temporal
+         Filter: (d < 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone)
+(4 rows)
+
 -- Default deterministic-collation text equality and inequality.
 CREATE TABLE rq_text (
     id integer,

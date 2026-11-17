@@ -143,6 +143,9 @@ impl ScalarSemantics {
         {
             return None;
         }
+        if !Self::has_exact_operand_coercion(left.type_oid, right.type_oid) {
+            return None;
+        }
         if left.type_oid == pg_sys::TEXTOID {
             unsafe {
                 PgTextComparisonSemantics::for_comparison(
@@ -156,6 +159,27 @@ impl ScalarSemantics {
                 && operator.inputcollid == pg_sys::InvalidOid)
                 .then_some(signature.kind())
         }
+    }
+
+    /// Whether DataFusion's implicit operand coercion preserves PostgreSQL's
+    /// comparison for this catalog operand pair.
+    ///
+    /// Integer and float widths widen losslessly, as in PostgreSQL's cross-type
+    /// operators. Every other cross-type pair must be normalized during
+    /// planning; for example, DataFusion compares date with timestamp as
+    /// nanosecond timestamps, which do not cover PostgreSQL's date range.
+    fn has_exact_operand_coercion(left: pg_sys::Oid, right: pg_sys::Oid) -> bool {
+        left == right
+            || matches!(
+                (left, right),
+                (
+                    pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID,
+                    pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID
+                ) | (
+                    pg_sys::FLOAT4OID | pg_sys::FLOAT8OID,
+                    pg_sys::FLOAT4OID | pg_sys::FLOAT8OID
+                )
+            )
     }
 
     /// Whether DataFusion's native hash grouping implements this PostgreSQL

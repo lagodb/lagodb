@@ -194,6 +194,13 @@ impl<'a> ExpressionNormalizer<'a> {
                     };
                 }
                 if let Some(predicate) = unsafe {
+                    self.normalize_date_timestamp_comparison(
+                        op, left, right, bindings,
+                    )
+                } {
+                    return Some(predicate);
+                }
+                if let Some(predicate) = unsafe {
                     self.normalize_nan_comparison(op, left, right, bindings)
                 } {
                     return Some(predicate);

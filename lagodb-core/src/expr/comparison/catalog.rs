@@ -107,12 +107,24 @@ mod operator_oid {
     pub const DATE_LE: u32 = 1096;
     pub const DATE_GT: u32 = 1097;
     pub const DATE_GE: u32 = 1098;
+    pub const DATE_TIMESTAMP_LT: u32 = 2345;
+    pub const DATE_TIMESTAMP_LE: u32 = 2346;
+    pub const DATE_TIMESTAMP_EQ: u32 = 2347;
+    pub const DATE_TIMESTAMP_GE: u32 = 2348;
+    pub const DATE_TIMESTAMP_GT: u32 = 2349;
+    pub const DATE_TIMESTAMP_NE: u32 = 2350;
     pub const TIMESTAMP_EQ: u32 = 2060;
     pub const TIMESTAMP_NE: u32 = 2061;
     pub const TIMESTAMP_LT: u32 = 2062;
     pub const TIMESTAMP_LE: u32 = 2063;
     pub const TIMESTAMP_GT: u32 = 2064;
     pub const TIMESTAMP_GE: u32 = 2065;
+    pub const TIMESTAMP_DATE_LT: u32 = 2371;
+    pub const TIMESTAMP_DATE_LE: u32 = 2372;
+    pub const TIMESTAMP_DATE_EQ: u32 = 2373;
+    pub const TIMESTAMP_DATE_GE: u32 = 2374;
+    pub const TIMESTAMP_DATE_GT: u32 = 2375;
+    pub const TIMESTAMP_DATE_NE: u32 = 2376;
     pub const TIMESTAMPTZ_EQ: u32 = 1320;
     pub const TIMESTAMPTZ_NE: u32 = 1321;
     pub const TIMESTAMPTZ_LT: u32 = 1322;
@@ -291,6 +303,22 @@ signatures! {
         (op::DATE_LE, pg_sys::F_DATE_LE, LessEqual),
         (op::DATE_GT, pg_sys::F_DATE_GT, Greater),
         (op::DATE_GE, pg_sys::F_DATE_GE, GreaterEqual),
+    }
+    (pg_sys::DATEOID, pg_sys::TIMESTAMPOID) {
+        (op::DATE_TIMESTAMP_EQ, pg_sys::F_DATE_EQ_TIMESTAMP, Equal),
+        (op::DATE_TIMESTAMP_NE, pg_sys::F_DATE_NE_TIMESTAMP, NotEqual),
+        (op::DATE_TIMESTAMP_LT, pg_sys::F_DATE_LT_TIMESTAMP, Less),
+        (op::DATE_TIMESTAMP_LE, pg_sys::F_DATE_LE_TIMESTAMP, LessEqual),
+        (op::DATE_TIMESTAMP_GT, pg_sys::F_DATE_GT_TIMESTAMP, Greater),
+        (op::DATE_TIMESTAMP_GE, pg_sys::F_DATE_GE_TIMESTAMP, GreaterEqual),
+    }
+    (pg_sys::TIMESTAMPOID, pg_sys::DATEOID) {
+        (op::TIMESTAMP_DATE_EQ, pg_sys::F_TIMESTAMP_EQ_DATE, Equal),
+        (op::TIMESTAMP_DATE_NE, pg_sys::F_TIMESTAMP_NE_DATE, NotEqual),
+        (op::TIMESTAMP_DATE_LT, pg_sys::F_TIMESTAMP_LT_DATE, Less),
+        (op::TIMESTAMP_DATE_LE, pg_sys::F_TIMESTAMP_LE_DATE, LessEqual),
+        (op::TIMESTAMP_DATE_GT, pg_sys::F_TIMESTAMP_GT_DATE, Greater),
+        (op::TIMESTAMP_DATE_GE, pg_sys::F_TIMESTAMP_GE_DATE, GreaterEqual),
     }
     (pg_sys::TIMESTAMPOID, pg_sys::TIMESTAMPOID) {
         (op::TIMESTAMP_EQ, pg_sys::F_TIMESTAMP_EQ, Equal),

@@ -1,6 +1,7 @@
 //! PostgreSQL built-in comparison signatures shared by query and providers.
 
 mod catalog;
+mod temporal;
 
 use pgrx::pg_sys;
 
@@ -17,6 +18,8 @@ pub enum PgComparisonKind {
     GreaterEqual,
 }
 
+pub use temporal::{PgDateComparisonOutcome, PgDateTimestampComparison};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PgNanComparison {
     IsNan,
@@ -26,6 +29,17 @@ pub enum PgNanComparison {
 }
 
 impl PgComparisonKind {
+    /// Return the equivalent comparison after exchanging its operands.
+    pub(crate) const fn commuted(self) -> Self {
+        match self {
+            Self::Equal | Self::NotEqual => self,
+            Self::Less => Self::Greater,
+            Self::LessEqual => Self::GreaterEqual,
+            Self::Greater => Self::Less,
+            Self::GreaterEqual => Self::LessEqual,
+        }
+    }
+
     /// Classify a PostgreSQL comparison with exactly one NaN operand.
     pub const fn with_nan_on(self, nan_on_left: bool) -> PgNanComparison {
         match (nan_on_left, self) {
@@ -100,6 +114,22 @@ impl PgComparisonSignature {
     #[inline]
     pub const fn kind(self) -> PgComparisonKind {
         self.kind
+    }
+
+    /// Build the operator of a comparison that LagoDB derives itself rather
+    /// than reads from a PostgreSQL expression.
+    ///
+    /// The signature carries no expression collation, so this is valid only
+    /// for non-collatable operand types such as boolean and date.
+    #[inline]
+    pub(crate) fn collationless_operator(self) -> PgComparisonOp {
+        PgComparisonOp {
+            opno: self.operator_oid(),
+            opfuncid: self.function_oid(),
+            opresulttype: pg_sys::BOOLOID,
+            opcollid: pg_sys::InvalidOid,
+            inputcollid: pg_sys::InvalidOid,
+        }
     }
 
     #[inline]

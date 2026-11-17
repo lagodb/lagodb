@@ -3,6 +3,7 @@
 use core::ffi::c_char;
 use std::ffi::CStr;
 
+use pgrx::datum::Timestamp;
 use pgrx::{FromDatum, pg_sys};
 
 use super::{PgConst, PgExprRef};
@@ -28,6 +29,44 @@ impl<'a> PgConst<'a> {
             }
             _ => false,
         }
+    }
+
+    /// Return the value of a non-NULL timestamp-without-time-zone constant.
+    ///
+    /// # Safety
+    ///
+    /// The Const and its Datum must remain live for this call.
+    pub(crate) unsafe fn timestamp(self) -> Option<Timestamp> {
+        let (type_oid, _, datum, is_null) = self.parts();
+        if type_oid != pg_sys::TIMESTAMPOID {
+            return None;
+        }
+        // SAFETY: TIMESTAMP is a pass-by-value int64 Datum.
+        unsafe { Timestamp::from_datum(datum, is_null) }
+    }
+
+    /// Materialize a non-NULL DATE constant derived from this constant.
+    ///
+    /// # Safety
+    ///
+    /// The current PostgreSQL memory context must be the one that owns this
+    /// Const; the returned Const is allocated there.
+    pub(crate) unsafe fn derived_date(self, date: pg_sys::DateADT) -> PgExprRef<'a> {
+        // SAFETY: every field follows PostgreSQL's built-in DATE type metadata,
+        // and makeConst allocates the node in the current memory context.
+        let constant = unsafe {
+            pg_sys::makeConst(
+                pg_sys::DATEOID,
+                -1,
+                pg_sys::InvalidOid,
+                4,
+                pg_sys::Datum::from(date),
+                false,
+                true,
+            )
+        };
+        // SAFETY: makeConst returned a live expression in that context.
+        unsafe { PgExprRef::from_raw(constant.cast()) }
     }
 
     /// Parse PostgreSQL's canonical LIKE pattern and materialize the literal

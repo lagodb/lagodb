@@ -282,6 +282,98 @@ ORDER BY name;
 (11 rows)
 
 DROP TABLE representation_cases, representation_results;
+-- A date column against a folded timestamp bound offloads as a date
+-- comparison.
+CREATE TABLE query_predicates.dates (d date) USING iceberg;
+INSERT INTO query_predicates.dates VALUES
+    (DATE '1994-12-31'), (DATE '1995-01-01'), (DATE '1995-01-02'), (NULL);
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM query_predicates.dates
+WHERE d < DATE '1994-01-01' + INTERVAL '1 year';
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on dates
+               Access Method: iceberg
+               Filter: (d < 'Sun Jan 01 00:00:00 1995'::timestamp without time zone)
+               Pushed Filter: (d < 'Sun Jan 01 00:00:00 1995'::timestamp without time zone)
+(8 rows)
+
+SELECT count(*) FROM query_predicates.dates
+WHERE d < DATE '1994-01-01' + INTERVAL '1 year';
+ count 
+-------
+     1
+(1 row)
+
+-- A bound within a day rounds to the next date, here with commuted operands.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM query_predicates.dates
+WHERE TIMESTAMP '1995-01-01 12:00' > d;
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on dates
+               Access Method: iceberg
+               Filter: ('Sun Jan 01 12:00:00 1995'::timestamp without time zone > d)
+               Pushed Filter: ('Sun Jan 01 12:00:00 1995'::timestamp without time zone > d)
+(8 rows)
+
+SELECT count(*) FROM query_predicates.dates
+WHERE TIMESTAMP '1995-01-01 12:00' > d;
+ count 
+-------
+     2
+(1 row)
+
+-- No date equals a bound within a day, but a NULL date stays unknown.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM query_predicates.dates
+WHERE d <> TIMESTAMP '1995-01-01 12:00';
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on dates
+               Access Method: iceberg
+               Filter: (d <> 'Sun Jan 01 12:00:00 1995'::timestamp without time zone)
+               Pushed Filter: (d <> 'Sun Jan 01 12:00:00 1995'::timestamp without time zone)
+(8 rows)
+
+SELECT count(*) FROM query_predicates.dates
+WHERE d <> TIMESTAMP '1995-01-01 12:00';
+ count 
+-------
+     3
+(1 row)
+
+-- An infinite bound has no Arrow date, so PostgreSQL evaluates it.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM query_predicates.dates
+WHERE d < TIMESTAMP 'infinity';
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Aggregate
+   ->  Seq Scan on dates
+         Filter: (d < 'infinity'::timestamp without time zone)
+(3 rows)
+
+SELECT count(*) FROM query_predicates.dates
+WHERE d < TIMESTAMP 'infinity';
+ count 
+-------
+     3
+(1 row)
+
+DROP TABLE query_predicates.dates;
 DROP FUNCTION pg_temp.predicate_query_json(text);
 DROP TABLE query_predicates.managed;
 SET client_min_messages = warning;

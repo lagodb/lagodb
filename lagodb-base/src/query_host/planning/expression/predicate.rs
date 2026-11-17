@@ -3,7 +3,8 @@
 use lagodb_core::datum::Utf8ServerEncoding;
 use lagodb_core::expr::pg::{PgConst, PgExprRef, PgNullTestKind, PgPredicateLeafRef};
 use lagodb_core::expr::{
-    ExprType, PgComparisonOp, PgNanComparison, PgTextComparisonSemantics,
+    ExprType, PgComparisonOp, PgDateComparisonOutcome, PgDateTimestampComparison,
+    PgNanComparison, PgTextComparisonSemantics,
 };
 use lagodb_query::plan::{ExecutionExpr, ScalarFunctionKind};
 use pgrx::pg_sys;
@@ -35,6 +36,13 @@ impl QueryExpressionPlanner {
             PgPredicateLeafRef::Comparison { op, left, right } => {
                 if op.opno == pg_sys::Oid::from(pg_sys::OID_TEXT_LIKE_OP) {
                     return unsafe { self.lower_like_prefix(op, left, right, scope) };
+                }
+                if let Some(result) = unsafe {
+                    self.lower_date_timestamp_comparison(
+                        op, left, right, scope, domain,
+                    )
+                } {
+                    return result;
                 }
                 if let Some(result) =
                     unsafe { self.lower_nan_comparison(op, left, right, scope) }
@@ -99,6 +107,62 @@ impl QueryExpressionPlanner {
                 self.lower_starts_with(value, prefix, input_collation, scope)
             },
         }
+    }
+
+    unsafe fn lower_date_timestamp_comparison(
+        &mut self,
+        operator: PgComparisonOp,
+        left: PgExprRef<'_>,
+        right: PgExprRef<'_>,
+        scope: ExpressionScope<'_>,
+        domain: PredicateDomain,
+    ) -> Option<ExpressionPlanResult<ExecutionExpr>> {
+        let normalized =
+            unsafe { PgDateTimestampComparison::normalize(operator, left, right) }?;
+        Some(unsafe {
+            self.lower_normalized_date_timestamp(normalized, scope, domain)
+        })
+    }
+
+    unsafe fn lower_normalized_date_timestamp(
+        &mut self,
+        normalized: PgDateTimestampComparison<'_>,
+        scope: ExpressionScope<'_>,
+        domain: PredicateDomain,
+    ) -> ExpressionPlanResult<ExecutionExpr> {
+        let column = normalized.column();
+        let column_type = unsafe { Self::predicate_type(column.as_ptr(), scope) };
+        if !domain.supports_type(column_type) {
+            return Err(ExpressionDecline::UnsupportedSemantics);
+        }
+        let column =
+            unsafe { self.lower(column.as_ptr().cast(), scope.as_scalar()) }?;
+        if !matches!(&column, ExecutionExpr::Column(_)) {
+            return Err(ExpressionDecline::UnsupportedSemantics);
+        }
+        let column = Box::new(column);
+        Ok(match normalized.outcome() {
+            PgDateComparisonOutcome::Compare { operator, bound } => {
+                let bound_type =
+                    unsafe { Self::predicate_type(bound.as_ptr(), scope) };
+                domain
+                    .comparison(operator, column_type, bound_type)
+                    .ok_or(ExpressionDecline::UnsupportedSemantics)?;
+                // A derived date Const always lowers to a runtime value; an
+                // infinite bound has no Arrow date and declines there.
+                let bound =
+                    unsafe { self.lower(bound.as_ptr().cast(), scope.as_scalar()) }?;
+                ExecutionExpr::Comparison {
+                    operator,
+                    left: column,
+                    right: Box::new(bound),
+                }
+            }
+            PgDateComparisonOutcome::StrictTrue => ExecutionExpr::StrictTrue(column),
+            PgDateComparisonOutcome::StrictFalse => {
+                ExecutionExpr::StrictFalse(column)
+            }
+        })
     }
 
     unsafe fn lower_starts_with(

@@ -1089,6 +1089,29 @@ SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+
 SET lagodb.customscan_mode = 'off';
 SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
 
+-- A date column against a folded date + interval bound is pushed as the date
+-- comparison PostgreSQL performs at the date's midnight.
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id, d FROM rq_temporal
+WHERE d >= DATE '2023-01-01' + INTERVAL '1 year' ORDER BY id;
+
+SELECT id, d FROM rq_temporal
+WHERE d >= DATE '2023-01-01' + INTERVAL '1 year' ORDER BY id;
+
+-- A bound within a day rounds by operator, with the timestamp on either side.
+EXPLAIN (COSTS OFF)
+SELECT id, d FROM rq_temporal
+WHERE TIMESTAMP '2024-06-15 12:00:00' > d ORDER BY id;
+
+SELECT id, d FROM rq_temporal
+WHERE TIMESTAMP '2024-06-15 12:00:00' > d ORDER BY id;
+
+-- date versus timestamptz depends on the session time zone and stays residual.
+EXPLAIN (COSTS OFF)
+SELECT id, d FROM rq_temporal
+WHERE d < TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
+
 -- Default deterministic-collation text equality and inequality.
 CREATE TABLE rq_text (
     id integer,

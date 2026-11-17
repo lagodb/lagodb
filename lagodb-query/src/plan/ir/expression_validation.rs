@@ -416,9 +416,11 @@ impl<'a> PlanExpressionValidator<'a> {
                     return Err(QueryPlanError::UnsupportedPredicate);
                 }
                 let value_type = self.expression_type(value, facts, allow_outputs)?;
+                // Exactly the planner's producers: NaN comparisons over floats
+                // and date/timestamp comparisons that no date can satisfy.
                 if !matches!(
                     value_type.type_oid,
-                    pg_sys::FLOAT4OID | pg_sys::FLOAT8OID
+                    pg_sys::FLOAT4OID | pg_sys::FLOAT8OID | pg_sys::DATEOID
                 ) || value_type.typmod != -1
                     || value_type.collation != pg_sys::InvalidOid
                 {

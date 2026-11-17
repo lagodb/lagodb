@@ -4,13 +4,56 @@ use pgrx::pg_sys;
 
 use crate::expr::pg::{PgConst, PgExprRef, PgScalarArrayOpExpr};
 use crate::expr::{
-    PgComparisonKind, PgComparisonOp, PgComparisonSignature, PgNanComparison,
-    PgTextComparisonSemantics, RuntimeValueExpr,
+    PgComparisonKind, PgComparisonOp, PgComparisonSignature, PgDateComparisonOutcome,
+    PgDateTimestampComparison, PgNanComparison, PgTextComparisonSemantics,
+    RuntimeValueExpr,
 };
 
 use super::{ExpressionNormalizer, ExpressionScope, PredicateExpr, ScalarExpr};
 
 impl ExpressionNormalizer<'_> {
+    pub(super) unsafe fn normalize_date_timestamp_comparison(
+        &self,
+        operator: PgComparisonOp,
+        left: PgExprRef<'_>,
+        right: PgExprRef<'_>,
+        bindings: &mut Vec<RuntimeValueExpr>,
+    ) -> Option<PredicateExpr> {
+        let normalized =
+            unsafe { PgDateTimestampComparison::normalize(operator, left, right) }?;
+        let checkpoint = bindings.len();
+        let predicate = self.adapt_date_timestamp_comparison(normalized, bindings);
+        if predicate.is_none() {
+            bindings.truncate(checkpoint);
+        }
+        predicate
+    }
+
+    fn adapt_date_timestamp_comparison(
+        &self,
+        normalized: PgDateTimestampComparison<'_>,
+        bindings: &mut Vec<RuntimeValueExpr>,
+    ) -> Option<PredicateExpr> {
+        let column = self.normalize_scalar(normalized.column(), bindings)?;
+        if !matches!(column, ScalarExpr::Column(_)) {
+            return None;
+        }
+        Some(match normalized.outcome() {
+            PgDateComparisonOutcome::Compare { operator, bound } => {
+                PredicateExpr::Comparison {
+                    operator,
+                    left: column,
+                    // A derived date Const always becomes a value slot.
+                    right: self.normalize_scalar(bound, bindings)?,
+                }
+            }
+            PgDateComparisonOutcome::StrictTrue => PredicateExpr::StrictTrue(column),
+            PgDateComparisonOutcome::StrictFalse => {
+                PredicateExpr::StrictFalse(column)
+            }
+        })
+    }
+
     /// Normalize `column op ANY (array)` with the array in one value slot.
     ///
     /// Query scope declines the leaf. PostgreSQL negotiation there only sets
@@ -52,20 +95,15 @@ impl ExpressionNormalizer<'_> {
             unsafe { PgExprRef::from_raw(constant.cast()) },
             bindings,
         )?;
-        let signature = PgComparisonSignature::for_types(
+        let operator = PgComparisonSignature::for_types(
             pg_sys::BOOLOID,
             pg_sys::BOOLOID,
             PgComparisonKind::Equal,
         )
-        .expect("built-in boolean equality is registered");
+        .expect("built-in boolean equality is registered")
+        .collationless_operator();
         Some(PredicateExpr::Comparison {
-            operator: PgComparisonOp {
-                opno: signature.operator_oid(),
-                opfuncid: signature.function_oid(),
-                opresulttype: pg_sys::BOOLOID,
-                opcollid: pg_sys::InvalidOid,
-                inputcollid: pg_sys::InvalidOid,
-            },
+            operator,
             left,
             right,
         })

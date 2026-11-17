@@ -136,6 +136,44 @@ FROM representation_cases JOIN representation_results USING (name)
 ORDER BY name;
 
 DROP TABLE representation_cases, representation_results;
+
+-- A date column against a folded timestamp bound offloads as a date
+-- comparison.
+CREATE TABLE query_predicates.dates (d date) USING iceberg;
+INSERT INTO query_predicates.dates VALUES
+    (DATE '1994-12-31'), (DATE '1995-01-01'), (DATE '1995-01-02'), (NULL);
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM query_predicates.dates
+WHERE d < DATE '1994-01-01' + INTERVAL '1 year';
+
+SELECT count(*) FROM query_predicates.dates
+WHERE d < DATE '1994-01-01' + INTERVAL '1 year';
+
+-- A bound within a day rounds to the next date, here with commuted operands.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM query_predicates.dates
+WHERE TIMESTAMP '1995-01-01 12:00' > d;
+
+SELECT count(*) FROM query_predicates.dates
+WHERE TIMESTAMP '1995-01-01 12:00' > d;
+
+-- No date equals a bound within a day, but a NULL date stays unknown.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM query_predicates.dates
+WHERE d <> TIMESTAMP '1995-01-01 12:00';
+
+SELECT count(*) FROM query_predicates.dates
+WHERE d <> TIMESTAMP '1995-01-01 12:00';
+
+-- An infinite bound has no Arrow date, so PostgreSQL evaluates it.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM query_predicates.dates
+WHERE d < TIMESTAMP 'infinity';
+
+SELECT count(*) FROM query_predicates.dates
+WHERE d < TIMESTAMP 'infinity';
+
+DROP TABLE query_predicates.dates;
 DROP FUNCTION pg_temp.predicate_query_json(text);
 DROP TABLE query_predicates.managed;
 SET client_min_messages = warning;
