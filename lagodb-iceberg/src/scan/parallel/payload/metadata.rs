@@ -6,8 +6,8 @@ use crate::scan::ScanError;
 /// Self-describing codec for Iceberg runtime metadata shared with workers.
 ///
 /// CBOR is used because Iceberg's serde implementations require
-/// `deserialize_any`, while its decimal, binary, fixed, and UUID literals
-/// require byte strings to remain distinct from sequences.
+/// `deserialize_any`, which rules out bincode, and because JSON cannot
+/// round-trip the non-finite float literals that pushed predicates may hold.
 pub(super) struct WorkerTaskMetadataCodec;
 
 impl WorkerTaskMetadataCodec {

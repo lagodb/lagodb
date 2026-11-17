@@ -33,16 +33,17 @@ $$;
 
 CREATE TABLE native_parallel_managed (
     id integer,
-    payload text
+    payload text,
+    qty numeric(15,2)
 ) USING iceberg;
 
 -- Require a two-worker partial path independently of this deliberately small
 -- lifecycle fixture.
 ALTER TABLE native_parallel_managed SET (parallel_workers = 2);
 
-INSERT INTO native_parallel_managed VALUES (1, 'one');
-INSERT INTO native_parallel_managed VALUES (2, 'two');
-INSERT INTO native_parallel_managed VALUES (3, 'three');
+INSERT INTO native_parallel_managed VALUES (1, 'one', 10.00);
+INSERT INTO native_parallel_managed VALUES (2, 'two', 24.50);
+INSERT INTO native_parallel_managed VALUES (3, 'three', -3.25);
 
 -- This projected read has no pushed predicate. With leader participation
 -- disabled, a launched worker must attach DSM and execute the CustomScan.
@@ -65,6 +66,12 @@ CROSS JOIN LATERAL jsonb_path_query_first(plan,
 SELECT id, payload
 FROM native_parallel_managed
 ORDER BY id;
+
+-- A pushed numeric literal is bound into the DSM task payload, which
+-- InitializeDSMCustomScan decodes even when no worker launches.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM native_parallel_managed WHERE qty < 24;
+SELECT count(*) FROM native_parallel_managed WHERE qty < 24;
 
 SET max_parallel_workers_per_gather = 0;
 SELECT id, payload

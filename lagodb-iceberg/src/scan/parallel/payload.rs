@@ -44,8 +44,7 @@ struct WorkerFileRecord {
 }
 
 // Iceberg metadata uses self-describing serde representations such as
-// `flatten`, `untagged`, and `deserialize_any`. Its codec must also preserve
-// byte strings because decimal, binary, fixed, and UUID literals use them.
+// `flatten`, `untagged`, and `deserialize_any`; see `WorkerTaskMetadataCodec`.
 #[derive(Serialize, Deserialize)]
 struct WorkerTaskMetadata {
     schema: IcebergSchemaRef,

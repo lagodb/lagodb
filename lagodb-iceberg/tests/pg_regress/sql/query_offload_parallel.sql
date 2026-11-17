@@ -19,7 +19,8 @@ CREATE TABLE query_offload_parallel_left (
     id integer,
     key integer,
     value integer,
-    label text
+    label text,
+    amount numeric(15,2)
 ) USING iceberg;
 
 CREATE TABLE query_offload_parallel_right (
@@ -41,14 +42,15 @@ CREATE TABLE query_offload_parallel_small (
 -- would put all rows through a single DML session.
 \set ECHO none
 SELECT format(
-    'INSERT INTO query_offload_parallel_left VALUES (%s, %s, %s, %L)',
+    'INSERT INTO query_offload_parallel_left VALUES (%s, %s, %s, %L, %s)',
     row_id,
     row_id % 4,
     CASE
         WHEN row_id % 5 = 0 THEN 'NULL'
         ELSE (row_id * 10)::text
     END,
-    'label-' || row_id
+    'label-' || row_id,
+    row_id + 0.5
 )
 FROM generate_series(1, 33) AS row_id
 \gexec
@@ -214,6 +216,19 @@ JOIN query_offload_parallel_right AS r USING (key)
 GROUP BY l.key
 HAVING count(*) > 60
 ORDER BY l.key;
+
+-- A pushed numeric comparison is bound into each planned task, so every
+-- worker decodes its decimal literal. All 33 files still qualify and keep
+-- at least two work groups.
+SET lagodb.query_offload_mode = 'force';
+SELECT ln FROM pg_temp.explain_analyze_text($$
+SELECT key, count(*) FROM query_offload_parallel_left
+WHERE amount < 34 GROUP BY key ORDER BY key
+$$) AS ln
+WHERE ln ~ 'Execution Mode|Launched Workers';
+
+SELECT key, count(*) FROM query_offload_parallel_left
+WHERE amount < 34 GROUP BY key ORDER BY key;
 
 DROP TABLE query_offload_parallel_small;
 DROP TABLE query_offload_parallel_right;

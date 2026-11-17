@@ -20,7 +20,8 @@ CREATE TABLE query_offload_parallel_left (
     id integer,
     key integer,
     value integer,
-    label text
+    label text,
+    amount numeric(15,2)
 ) USING iceberg;
 CREATE TABLE query_offload_parallel_right (
     id integer,
@@ -129,7 +130,7 @@ $$);
                Actual Input Rows: 33
                Scan Tasks: 33
                Data Files Selected: 33
-               Selected File Bytes: 53886
+               Selected File Bytes: 67119
 (14 rows)
 
 SET lagodb.query_offload_parallel_min_scan_rows = 0;
@@ -155,7 +156,7 @@ $$);
                Actual Input Rows: 33
                Scan Tasks: 33
                Data Files Selected: 33
-               Selected File Bytes: 53886
+               Selected File Bytes: 67119
 (14 rows)
 
 SET max_parallel_workers_per_gather = 2;
@@ -195,7 +196,7 @@ $$);
                      Actual Input Rows: 33
                      Scan Tasks: 33
                      Data Files Selected: 33
-                     Selected File Bytes: 53886
+                     Selected File Bytes: 67119
 (22 rows)
 
 -- With timing, a launched parallel run also reports its startup time.
@@ -256,7 +257,7 @@ $$);
                      Actual Input Rows: 33
                      Scan Tasks: 33
                      Data Files Selected: 33
-                     Selected File Bytes: 53886
+                     Selected File Bytes: 67119
 (20 rows)
 
 SELECT key,
@@ -341,7 +342,7 @@ $$, mask_local_memory => true);
                                        Actual Input Rows: 33
                                        Scan Tasks: 33
                                        Data Files Selected: 33
-                                       Selected File Bytes: 53886
+                                       Selected File Bytes: 67119
                                  ->  Table Scan on query_offload_parallel_right r
                                        Access Method: iceberg
                                        Actual Input Batches: 17
@@ -426,7 +427,7 @@ $$);
                                  Actual Input Rows: 33
                                  Scan Tasks: 33
                                  Data Files Selected: 33
-                                 Selected File Bytes: 53886
+                                 Selected File Bytes: 67119
                            ->  Table Scan on query_offload_parallel_right r
                                  Access Method: iceberg
                                  Actual Input Batches: 17
@@ -469,6 +470,31 @@ ORDER BY l.key;
    1 |          81 |           63 |          97200
    2 |          64 |           48 |          62400
    3 |          64 |           56 |          64800
+(4 rows)
+
+-- A pushed numeric comparison is bound into each planned task, so every
+-- worker decodes its decimal literal. All 33 files still qualify and keep
+-- at least two work groups.
+SET lagodb.query_offload_mode = 'force';
+SELECT ln FROM pg_temp.explain_analyze_text($$
+SELECT key, count(*) FROM query_offload_parallel_left
+WHERE amount < 34 GROUP BY key ORDER BY key
+$$) AS ln
+WHERE ln ~ 'Execution Mode|Launched Workers';
+              ln               
+-------------------------------
+   Execution Mode: Parallel
+   Maximum Launched Workers: 2
+(2 rows)
+
+SELECT key, count(*) FROM query_offload_parallel_left
+WHERE amount < 34 GROUP BY key ORDER BY key;
+ key | count 
+-----+-------
+   0 |     8
+   1 |     9
+   2 |     8
+   3 |     8
 (4 rows)
 
 DROP TABLE query_offload_parallel_small;
