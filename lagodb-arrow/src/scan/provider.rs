@@ -446,6 +446,13 @@ pub trait TableScanProvider: Send + Sync + 'static {
     /// requested through [`ScanTaskPlanningOptions::projection`]. This is a
     /// provider invariant; the query engine does not repeat
     /// PostgreSQL-to-Arrow type validation on the batch or row path.
+    ///
+    /// Values must also lie in the domain of each column's declared
+    /// PostgreSQL type and typmod. In particular, a provider exposes a
+    /// `character(n)` column only when every value is blank-padded to `n`
+    /// characters, as PostgreSQL's assignment coercion stores it. The provider
+    /// owns only this value domain: the query engine compares such values
+    /// bytewise only where it separately proves a deterministic collation.
     fn bound_schema(&self, bound: &Self::BoundScan) -> SchemaRef;
 
     /// Negotiate a concrete static or dynamic predicate against the immutable

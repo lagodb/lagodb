@@ -40,8 +40,11 @@ impl IcebergFilterBinder<'_> {
             let value = unsafe { RuntimeValue::from_raw(datum, false, element) };
             match unsafe { Self::decode_value(value_type, value) }? {
                 Some(BoundComparisonValue::Datum(literal)) => literals.push(literal),
-                // An integer outside the column's range matches no row.
-                Some(BoundComparisonValue::OutsideInteger(_)) => {}
+                // A value outside the column's domain matches no row.
+                Some(
+                    BoundComparisonValue::OutsideInteger(_)
+                    | BoundComparisonValue::OutsideWidth,
+                ) => {}
                 // One unrepresentable element leaves the set to the residual.
                 // The widest answer keeps the filter's other predicates bound;
                 // it is safe because Conservative plans are never negated.

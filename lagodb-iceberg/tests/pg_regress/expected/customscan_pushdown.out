@@ -2197,6 +2197,117 @@ ORDER BY id, label;
   2 | bravo
 (1 row)
 
+-- character(n) equality pads the comparison value to the column width, as
+-- PostgreSQL pads stored values, so = and <> are pushed exactly. Blanks beyond
+-- the width are clipped; a value with more non-blank characters matches no row
+-- under = and every non-NULL row under <>, and is omitted from an IN set.
+CREATE TABLE customscan_bpchar_t (
+    id integer,
+    code character(4),
+    raw bpchar
+) USING iceberg;
+INSERT INTO customscan_bpchar_t VALUES
+    (1, 'ab', 'ab'), (2, 'ab  ', 'ab  '), (3, 'abc', 'abc'), (4, NULL, NULL);
+SET lagodb.customscan_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT id FROM customscan_bpchar_t WHERE code = 'ab' ORDER BY id;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on customscan_bpchar_t
+         Pushed Filter: (code = 'ab'::bpchar)
+(4 rows)
+
+SELECT id FROM customscan_bpchar_t WHERE code = 'ab' ORDER BY id;
+ id 
+----
+  1
+  2
+(2 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM customscan_bpchar_t WHERE code <> 'ab' ORDER BY id;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on customscan_bpchar_t
+         Pushed Filter: (code <> 'ab'::bpchar)
+(4 rows)
+
+SELECT id FROM customscan_bpchar_t WHERE code <> 'ab' ORDER BY id;
+ id 
+----
+  3
+(1 row)
+
+SELECT id FROM customscan_bpchar_t WHERE code = 'ab    ' ORDER BY id;
+ id 
+----
+  1
+  2
+(2 rows)
+
+SELECT id FROM customscan_bpchar_t WHERE code = 'abcdef' ORDER BY id;
+ id 
+----
+(0 rows)
+
+SELECT id FROM customscan_bpchar_t WHERE code <> 'abcdef' ORDER BY id;
+ id 
+----
+  1
+  2
+  3
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM customscan_bpchar_t WHERE code IN ('ab', 'abcdef') ORDER BY id;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on customscan_bpchar_t
+         Filter: (code = ANY ('{ab,abcdef}'::bpchar[]))
+         Pushed Filter: (code = ANY ('{ab,abcdef}'::bpchar[]))
+(5 rows)
+
+SELECT id FROM customscan_bpchar_t WHERE code IN ('ab', 'abcdef') ORDER BY id;
+ id 
+----
+  1
+  2
+(2 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM customscan_bpchar_t WHERE code IS NULL ORDER BY id;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on customscan_bpchar_t
+         Pushed Filter: (code IS NULL)
+(4 rows)
+
+SELECT id FROM customscan_bpchar_t WHERE code IS NULL ORDER BY id;
+ id 
+----
+  4
+(1 row)
+
+-- Unconstrained bpchar keeps the blanks it was given and is not pushed.
+EXPLAIN (COSTS OFF)
+SELECT id FROM customscan_bpchar_t WHERE raw = 'ab' ORDER BY id;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Sort
+   Sort Key: id
+   ->  Custom Scan (lagodb-iceberg) on customscan_bpchar_t
+         Filter: (raw = 'ab'::bpchar)
+(4 rows)
+
+DROP TABLE customscan_bpchar_t;
 RESET lagodb.customscan_mode;
 RESET lagodb.query_offload_mode;
 DROP TABLE customscan_unsupported_only_t;

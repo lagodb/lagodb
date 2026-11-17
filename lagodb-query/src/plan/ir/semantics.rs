@@ -3,7 +3,8 @@
 use lagodb_core::datum::Utf8ServerEncoding;
 use lagodb_core::expr::ExprType;
 use lagodb_core::expr::{
-    PgComparisonOp, PgComparisonSignature, PgTextComparisonSemantics,
+    PgBpcharSemantics, PgComparisonOp, PgComparisonSignature,
+    PgTextComparisonSemantics,
 };
 use pgrx::pg_sys;
 
@@ -125,6 +126,29 @@ impl ScalarSemantics {
         Some((signature.kind(), decimal))
     }
 
+    /// Resolve a `bpchar` comparison between a `character(n)` column and a
+    /// value padded to the column width at execution
+    /// ([`ExecutionExpr::BpcharValue`](super::ExecutionExpr::BpcharValue)).
+    /// Only `=` / `<>` under a deterministic collation reduce to byte
+    /// equality over the padded values.
+    pub fn bpchar_comparison(
+        self,
+        operator: PgComparisonOp,
+        column: ExprType,
+        value: ExprType,
+    ) -> Option<(ComparisonKind, PgBpcharSemantics)> {
+        if self != Self::Exact
+            || value.type_oid != pg_sys::BPCHAROID
+            || Utf8ServerEncoding::resolve().is_err()
+        {
+            return None;
+        }
+        operator.builtin_signature()?;
+        let semantics = PgBpcharSemantics::for_type(column)?;
+        let kind = unsafe { semantics.comparison(operator.identity()) }?;
+        Some((kind, semantics))
+    }
+
     pub fn comparison(
         self,
         operator: PgComparisonOp,
@@ -186,12 +210,14 @@ impl ScalarSemantics {
     /// scalar domain.
     ///
     /// Deterministic PostgreSQL TEXT/VARCHAR equality uses the same UTF-8 bytes
-    /// stored in Arrow, independently of the collation's ordering. BPCHAR and
-    /// NAME retain PostgreSQL-specific value semantics that the provider-neutral
-    /// query contract does not prove. String ordering remains a separate,
-    /// stricter capability owned by Sort. Float group values fold -0 into +0
-    /// but keep NaN payloads apart, the accepted engine difference shared with
-    /// query DISTINCT.
+    /// stored in Arrow, independently of the collation's ordering. A positive
+    /// `character(n)` typmod proves the value is padded to its width, so
+    /// `bpchareq` is byte equality; unconstrained BPCHAR and NAME retain
+    /// PostgreSQL-specific value semantics that the provider-neutral query
+    /// contract does not prove. String ordering remains a separate, stricter
+    /// capability owned by Sort. Float group values fold -0 into +0 but keep
+    /// NaN payloads apart, the accepted engine difference shared with query
+    /// DISTINCT.
     pub fn supports_hash_group_key(self, value_type: ExprType) -> bool {
         if self != Self::Exact {
             return false;
@@ -201,10 +227,15 @@ impl ScalarSemantics {
             | pg_sys::INT8OID
             | pg_sys::FLOAT4OID
             | pg_sys::FLOAT8OID => self.supports_type(value_type),
-            pg_sys::TEXTOID | pg_sys::VARCHAROID => {
-                let typmod_is_normalized = value_type.typmod == -1
-                    || (value_type.type_oid == pg_sys::VARCHAROID
-                        && value_type.typmod >= pg_sys::VARHDRSZ as i32);
+            pg_sys::TEXTOID | pg_sys::VARCHAROID | pg_sys::BPCHAROID => {
+                let typmod_is_normalized = match value_type.type_oid {
+                    pg_sys::TEXTOID => value_type.typmod == -1,
+                    pg_sys::VARCHAROID => {
+                        value_type.typmod == -1
+                            || value_type.typmod >= pg_sys::VARHDRSZ as i32
+                    }
+                    _ => PgBpcharSemantics::for_type(value_type).is_some(),
+                };
                 typmod_is_normalized
                     && Utf8ServerEncoding::resolve().is_ok()
                     && unsafe {
@@ -217,6 +248,30 @@ impl ScalarSemantics {
             pg_sys::NUMERICOID => Decimal128Semantics::for_type(value_type).is_some(),
             _ => false,
         }
+    }
+
+    /// Whether Arrow byte equality implements PostgreSQL equality for a
+    /// text-family DISTINCT key or DISTINCT aggregate argument.
+    ///
+    /// Byte equality matches every deterministic collation. BPCHAR equality
+    /// and hashing ignore trailing blanks (`bpchareq`, `hashbpchar`), so its
+    /// bytes are canonical only under a declared `character(n)` length, to
+    /// which PostgreSQL pads every assigned value. Unconstrained `bpchar`
+    /// keeps the blanks it was given: `'a'` and `'a '` are one PostgreSQL
+    /// value but two byte strings.
+    pub fn supports_text_distinct_key(value_type: ExprType) -> bool {
+        let canonical_bytes = match value_type.type_oid {
+            pg_sys::TEXTOID | pg_sys::VARCHAROID | pg_sys::NAMEOID => true,
+            pg_sys::BPCHAROID => PgBpcharSemantics::for_type(value_type).is_some(),
+            _ => false,
+        };
+        canonical_bytes
+            && unsafe {
+                PgTextComparisonSemantics::for_equality_collation(
+                    value_type.collation,
+                )
+            }
+            .is_some()
     }
 
     /// Prove PostgreSQL GROUP BY equality against the engine's native hash

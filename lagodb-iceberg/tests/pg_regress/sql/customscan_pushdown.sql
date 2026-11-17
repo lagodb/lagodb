@@ -1245,6 +1245,47 @@ SELECT id, label FROM customscan_unsupported_only_t
 WHERE id = 2
 ORDER BY id, label;
 
+-- character(n) equality pads the comparison value to the column width, as
+-- PostgreSQL pads stored values, so = and <> are pushed exactly. Blanks beyond
+-- the width are clipped; a value with more non-blank characters matches no row
+-- under = and every non-NULL row under <>, and is omitted from an IN set.
+CREATE TABLE customscan_bpchar_t (
+    id integer,
+    code character(4),
+    raw bpchar
+) USING iceberg;
+INSERT INTO customscan_bpchar_t VALUES
+    (1, 'ab', 'ab'), (2, 'ab  ', 'ab  '), (3, 'abc', 'abc'), (4, NULL, NULL);
+SET lagodb.customscan_mode = 'force';
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM customscan_bpchar_t WHERE code = 'ab' ORDER BY id;
+SELECT id FROM customscan_bpchar_t WHERE code = 'ab' ORDER BY id;
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM customscan_bpchar_t WHERE code <> 'ab' ORDER BY id;
+SELECT id FROM customscan_bpchar_t WHERE code <> 'ab' ORDER BY id;
+
+SELECT id FROM customscan_bpchar_t WHERE code = 'ab    ' ORDER BY id;
+
+SELECT id FROM customscan_bpchar_t WHERE code = 'abcdef' ORDER BY id;
+
+SELECT id FROM customscan_bpchar_t WHERE code <> 'abcdef' ORDER BY id;
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM customscan_bpchar_t WHERE code IN ('ab', 'abcdef') ORDER BY id;
+SELECT id FROM customscan_bpchar_t WHERE code IN ('ab', 'abcdef') ORDER BY id;
+
+EXPLAIN (COSTS OFF)
+SELECT id FROM customscan_bpchar_t WHERE code IS NULL ORDER BY id;
+SELECT id FROM customscan_bpchar_t WHERE code IS NULL ORDER BY id;
+
+-- Unconstrained bpchar keeps the blanks it was given and is not pushed.
+EXPLAIN (COSTS OFF)
+SELECT id FROM customscan_bpchar_t WHERE raw = 'ab' ORDER BY id;
+
+DROP TABLE customscan_bpchar_t;
+
 RESET lagodb.customscan_mode;
 RESET lagodb.query_offload_mode;
 DROP TABLE customscan_unsupported_only_t;

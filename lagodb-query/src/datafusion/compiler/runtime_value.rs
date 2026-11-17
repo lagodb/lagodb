@@ -2,7 +2,10 @@
 
 use datafusion::common::ScalarValue;
 use lagodb_arrow::PgDatumArrayBuilder;
-use lagodb_core::expr::{RuntimeValue, RuntimeValueId, RuntimeValueSource};
+use lagodb_core::expr::{
+    PgBpcharSemantics, PgBpcharValue, RuntimeValue, RuntimeValueId,
+    RuntimeValueSource,
+};
 use pgrx::{AnyNumeric, FromDatum, pg_sys};
 
 use crate::plan::{Decimal128Semantics, ExecutionScalarRepr, LimitNode};
@@ -86,6 +89,32 @@ impl DataFusionExpressionCompiler<'_> {
             semantics.precision(),
             semantics.scale(),
         ))
+    }
+
+    /// Pad a validated constant to its `character(n)` column width, as the
+    /// column's stored values are.
+    pub(super) fn bpchar_runtime_value(
+        value: RuntimeValue,
+        semantics: PgBpcharSemantics,
+    ) -> Result<ScalarValue, DataFusionPlanError> {
+        if value.is_null() {
+            return Ok(ScalarValue::Utf8(None));
+        }
+        let invalid = || DataFusionPlanError::InvalidRuntimeValue {
+            oid: value.metadata().value_type.type_oid,
+        };
+        // SAFETY: RuntimeValueState evaluated this constant in the current
+        // executor context and retains the datum for plan compilation.
+        match unsafe { semantics.canonicalize(value.datum()) } {
+            // Planning proved UTF-8 server encoding for the comparison.
+            PgBpcharValue::Canonical(canonical) => {
+                unsafe { String::from_datum(canonical.as_datum(), false) }
+                    .map(|text| ScalarValue::Utf8(Some(text)))
+                    .ok_or_else(invalid)
+            }
+            // Planning folded every constant wider than the column.
+            PgBpcharValue::OutsideWidth => Err(invalid()),
+        }
     }
 }
 

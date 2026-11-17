@@ -268,6 +268,15 @@ impl IcebergFilterBinder<'_> {
                     Predicate::AlwaysFalse
                 }
             }
+            // The policy admits only `=` / `<>` for `character(n)`: no stored
+            // value equals one wider than the column.
+            BoundComparisonValue::OutsideWidth => {
+                if matches!(operator, PlannedComparisonOperator::NotEq) {
+                    Self::null_test(column, true)
+                } else {
+                    Predicate::AlwaysFalse
+                }
+            }
         };
         Ok(Some(predicate))
     }
@@ -311,6 +320,8 @@ enum BoundComparisonValue {
     Datum(Datum),
     OutsideFinite(Decimal128ComparisonValue),
     OutsideInteger(Int32OutOfRange),
+    /// A `bpchar` value with more non-blank characters than its column width.
+    OutsideWidth,
 }
 
 #[derive(Clone, Copy)]

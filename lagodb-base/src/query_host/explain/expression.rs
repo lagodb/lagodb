@@ -214,6 +214,19 @@ impl fmt::Display for ExpressionExplain<'_, '_, '_> {
                 semantics.precision(),
                 semantics.scale()
             ),
+            ExecutionExpr::BpcharValue { value, semantics }
+                if self.formatter.verbose =>
+            {
+                write!(
+                    output,
+                    "Runtime Binding {}::bpchar({})",
+                    value.index() + 1,
+                    semantics.width()
+                )
+            }
+            ExecutionExpr::BpcharValue { semantics, .. } => {
+                write!(output, "runtime value::bpchar({})", semantics.width())
+            }
             ExecutionExpr::Output(value) => self.formatter.write_output(
                 output,
                 self.output_source

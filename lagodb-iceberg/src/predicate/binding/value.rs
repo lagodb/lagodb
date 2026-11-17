@@ -3,7 +3,7 @@
 use iceberg_lite::spec::Datum;
 use lagodb_arrow::pg_epoch_days_to_unix_days;
 use lagodb_core::datum::{Decimal128ComparisonValue, DetoastedVarlena};
-use lagodb_core::expr::RuntimeValue;
+use lagodb_core::expr::{PgBpcharValue, RuntimeValue};
 use pgrx::{FromDatum, datum::Uuid as PgUuid};
 use uuid::Uuid;
 
@@ -141,6 +141,20 @@ impl IcebergFilterBinder<'_> {
                     unsafe { String::from_datum(datum, false) }
                         .ok_or(IcebergFilterError::DatumDecode { type_oid })?,
                 )))
+            }
+            PlannedValueType::Bpchar(semantics) => {
+                Some(match unsafe { semantics.canonicalize(datum) } {
+                    PgBpcharValue::Canonical(canonical) => {
+                        BoundComparisonValue::Datum(Datum::string(
+                            // As for String, the persisted plan proves UTF-8.
+                            unsafe {
+                                String::from_datum(canonical.as_datum(), false)
+                            }
+                            .ok_or(IcebergFilterError::DatumDecode { type_oid })?,
+                        ))
+                    }
+                    PgBpcharValue::OutsideWidth => BoundComparisonValue::OutsideWidth,
+                })
             }
             PlannedValueType::Decimal128(semantics) => Some(
                 match unsafe { semantics.codec().encode_comparison_datum(datum) }? {

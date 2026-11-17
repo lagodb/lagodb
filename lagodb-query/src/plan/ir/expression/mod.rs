@@ -17,7 +17,9 @@ pub use postgres_eval::{
 };
 pub use scalar_function::ScalarFunctionKind;
 
-use lagodb_core::expr::{ColumnRef, ExprType, PgComparisonOp, RuntimeValueId};
+use lagodb_core::expr::{
+    ColumnRef, ExprType, PgBpcharSemantics, PgComparisonOp, RuntimeValueId,
+};
 use lagodb_core::query_contract::OutputId;
 use pgrx::pg_sys;
 
@@ -54,6 +56,12 @@ pub enum ExecutionExpr {
     DecimalValue {
         value: RuntimeValueId,
         semantics: Decimal128Semantics,
+    },
+    /// A constant `bpchar` padded at execution to the width of the
+    /// `character(n)` column it is compared with.
+    BpcharValue {
+        value: RuntimeValueId,
+        semantics: PgBpcharSemantics,
     },
     Output(OutputId),
     Comparison {
@@ -122,6 +130,7 @@ impl ExecutionExpr {
             Self::Column(_)
             | Self::Value(_)
             | Self::DecimalValue { .. }
+            | Self::BpcharValue { .. }
             | Self::Output(_) => 0,
             Self::Comparison { left, right, .. } => {
                 1 + left.cost_units() + right.cost_units()
@@ -195,7 +204,7 @@ impl ExecutionExpr {
             | Self::Case { result_type, .. }
             | Self::Function { result_type, .. } => Some(*result_type),
             Self::Postgres(expression) => Some(expression.result_type()),
-            Self::Value(_) | Self::Output(_) => None,
+            Self::Value(_) | Self::BpcharValue { .. } | Self::Output(_) => None,
         }
     }
 
@@ -258,6 +267,7 @@ impl ExecutionExpr {
             Self::Column(_)
             | Self::Value(_)
             | Self::DecimalValue { .. }
+            | Self::BpcharValue { .. }
             | Self::Output(_) => 0,
         }
     }

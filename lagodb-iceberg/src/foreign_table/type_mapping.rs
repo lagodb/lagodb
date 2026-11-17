@@ -49,6 +49,9 @@ impl<'a> ForeignType<'a> {
                 PrimitiveType::Timestamptz | PrimitiveType::TimestamptzNs => {
                     PgType::new(pg_sys::TIMESTAMPTZOID, -1)
                 }
+                // Externally written strings carry no PostgreSQL padding, so
+                // they are never exposed as character(n), whose query equality
+                // relies on padded values (TableScanProvider::bound_schema).
                 PrimitiveType::String => PgType::new(pg_sys::TEXTOID, -1),
                 PrimitiveType::Uuid => PgType::new(pg_sys::UUIDOID, -1),
                 // Binary and fixed values use PostgreSQL bytea.

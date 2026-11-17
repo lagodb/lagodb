@@ -399,8 +399,17 @@ impl AggCall {
                         collation: pg_sys::InvalidOid,
                     }
             }
-            AggregateKind::ArrayAgg => Self::supports_array_agg_type(argument_type),
-            AggregateKind::StringAgg => argument_type.type_oid == pg_sys::TEXTOID,
+            // Representing a text-family element does not prove that its
+            // bytes decide PostgreSQL equality.
+            AggregateKind::ArrayAgg => {
+                Self::supports_array_agg_type(argument_type)
+                    && (!Self::supports_text_value(argument_type)
+                        || ScalarSemantics::supports_text_distinct_key(argument_type))
+            }
+            AggregateKind::StringAgg => {
+                argument_type.type_oid == pg_sys::TEXTOID
+                    && ScalarSemantics::supports_text_distinct_key(argument_type)
+            }
         }
     }
 
@@ -409,7 +418,7 @@ impl AggCall {
         // DataFusion admission. Keep valid microsecond timestamp support here.
         ScalarSemantics::Integer.supports_type(value_type)
             || Self::supports_float(value_type)
-            || Self::supports_text_distinct(value_type)
+            || ScalarSemantics::supports_text_distinct_key(value_type)
             || Self::bounded_numeric_input(value_type)
             || matches!(
                 value_type.type_oid,
@@ -432,7 +441,7 @@ impl AggCall {
     fn supports_array_agg_type(value_type: ExprType) -> bool {
         ScalarSemantics::Integer.supports_type(value_type)
             || Self::supports_float(value_type)
-            || Self::supports_text_distinct(value_type)
+            || Self::supports_text_value(value_type)
             || value_type
                 == ExprType {
                     type_oid: pg_sys::BOOLOID,
@@ -441,7 +450,8 @@ impl AggCall {
                 }
     }
 
-    fn supports_text_distinct(value_type: ExprType) -> bool {
+    /// Text-family values that `array_agg` collects without comparing them.
+    fn supports_text_value(value_type: ExprType) -> bool {
         matches!(
             value_type.type_oid,
             pg_sys::TEXTOID

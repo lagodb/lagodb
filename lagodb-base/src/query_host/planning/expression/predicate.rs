@@ -38,6 +38,11 @@ impl QueryExpressionPlanner {
                     return unsafe { self.lower_like_prefix(op, left, right, scope) };
                 }
                 if let Some(result) = unsafe {
+                    self.lower_bpchar_comparison(op, left, right, scope, domain)
+                } {
+                    return result;
+                }
+                if let Some(result) = unsafe {
                     self.lower_date_timestamp_comparison(
                         op, left, right, scope, domain,
                     )

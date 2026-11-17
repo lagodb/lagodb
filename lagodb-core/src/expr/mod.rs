@@ -2,6 +2,7 @@
 
 mod bindings;
 mod boolean;
+mod bpchar;
 mod codec;
 mod comparison;
 pub(crate) mod contract;
@@ -21,6 +22,7 @@ pub(crate) use planning::{inspect, relation};
 
 pub use bindings::{RuntimeValue, RuntimeValueBindings, RuntimeValueExpr};
 pub use boolean::BooleanTestKind;
+pub use bpchar::{PgBpcharSemantics, PgBpcharValue, PgCanonicalBpchar};
 pub use codec::{
     ExpressionCodecError, ExpressionPlanDataDecode, ExpressionPlanDataEncode,
 };

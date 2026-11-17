@@ -56,7 +56,9 @@ use std::{array, collections::HashSet};
 
 use lagodb_core::datum::Decimal128Semantics;
 use lagodb_core::expr::{ColumnRef, ExprType, RuntimeValueSource, RuntimeValueSpec};
-use lagodb_core::expr::{PgComparisonOp, PgTextComparisonSemantics};
+use lagodb_core::expr::{
+    PgComparisonOp, PgComparisonSignature, PgTextComparisonSemantics,
+};
 use lagodb_core::query_contract::ScanId;
 use pgrx::pg_sys;
 use pgrx::pg_sys::Oid;
@@ -459,6 +461,7 @@ fn null_tests_admit_supported_types_including_float() {
         pg_sys::TIMESTAMPTZOID,
         pg_sys::TEXTOID,
         pg_sys::VARCHAROID,
+        pg_sys::BPCHAROID,
         pg_sys::FLOAT4OID,
         pg_sys::FLOAT8OID,
     ] {
@@ -478,5 +481,45 @@ fn null_tests_reject_unsupported_types() {
             "null tests must be unsupported for type {}",
             u32::from(type_oid),
         );
+    }
+}
+
+#[test]
+fn bpchar_comparisons_admit_only_equality_classes() {
+    for kind in CLASS_BY_COLUMN {
+        let signature = PgComparisonSignature::for_types(
+            pg_sys::BPCHAROID,
+            pg_sys::BPCHAROID,
+            kind,
+        );
+        match kind {
+            ComparisonOpClass::Equal | ComparisonOpClass::NotEqual => {
+                let opno = signature
+                    .expect("bpchar equality family is registered")
+                    .operator_oid();
+                assert_eq!(op_class(opno), Some(kind));
+                let operator = triple(u32::from(opno));
+                assert_eq!(
+                    capability(
+                        pg_sys::BPCHAROID,
+                        operator,
+                        CollationSemantics::Deterministic
+                    ),
+                    Some(SupportedPredicateCapability::Exact),
+                );
+                assert_eq!(
+                    capability(
+                        pg_sys::BPCHAROID,
+                        operator,
+                        CollationSemantics::NonDeterministic
+                    ),
+                    None,
+                );
+            }
+            _ => assert!(
+                signature.is_none(),
+                "bpchar ordering compares trimmed values and stays unmapped",
+            ),
+        }
     }
 }

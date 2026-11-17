@@ -386,8 +386,76 @@ ORDER BY value_i4 NULLS LAST, id;
 (3 rows)
 
 -- ============================================================================
+-- Text-family DISTINCT runs natively only where byte equality is PostgreSQL
+-- equality. character(n) pads every value to n, so its bytes stay exact;
+-- unconstrained bpchar keeps the trailing blanks that bpchareq ignores.
+-- ============================================================================
+CREATE TABLE query_offload_distinct_text_keys (
+    value_bpchar bpchar,
+    value_char char(3)
+) USING iceberg;
+INSERT INTO query_offload_distinct_text_keys VALUES
+    ('a', 'ab'), ('a ', 'ab '), ('b', 'b'), (NULL, NULL);
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT value_char
+FROM query_offload_distinct_text_keys
+ORDER BY value_char NULLS LAST;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Sort
+   Sort Key: value_char
+   ->  Custom Scan (LagoDB Query Offload)
+         Engine: DataFusion
+         ->  Distinct
+               Distinct Key: value_char
+               ->  Table Scan on query_offload_distinct_text_keys
+                     Access Method: iceberg
+(8 rows)
+
+SELECT DISTINCT value_char
+FROM query_offload_distinct_text_keys
+ORDER BY value_char NULLS LAST;
+ value_char 
+------------
+ ab 
+ b  
+ 
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT value_char) AS char_values
+FROM query_offload_distinct_text_keys;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(DISTINCT value_char)
+         ->  Table Scan on query_offload_distinct_text_keys
+               Access Method: iceberg
+(6 rows)
+
+SELECT count(DISTINCT value_char) AS char_values
+FROM query_offload_distinct_text_keys;
+ char_values 
+-------------
+           2
+(1 row)
+
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT value_bpchar FROM query_offload_distinct_text_keys;
+                     QUERY PLAN                     
+----------------------------------------------------
+ HashAggregate
+   Group Key: value_bpchar
+   ->  Seq Scan on query_offload_distinct_text_keys
+(3 rows)
+
+-- ============================================================================
 -- Cleanup
 -- ============================================================================
+DROP TABLE query_offload_distinct_text_keys;
 DROP TABLE query_offload_distinct_basic;
 RESET timezone;
 RESET lagodb.query_batch_rows;

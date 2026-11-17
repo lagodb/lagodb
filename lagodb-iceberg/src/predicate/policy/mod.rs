@@ -160,7 +160,8 @@ impl PredicatePushdownPolicy {
             | (pg_sys::TIMESTAMPOID, pg_sys::TIMESTAMPOID)
             | (pg_sys::TIMESTAMPTZOID, pg_sys::TIMESTAMPTZOID)
             | (pg_sys::NUMERICOID, pg_sys::NUMERICOID)
-            | (pg_sys::TEXTOID, pg_sys::TEXTOID) => Some(signature.kind()),
+            | (pg_sys::TEXTOID, pg_sys::TEXTOID)
+            | (pg_sys::BPCHAROID, pg_sys::BPCHAROID) => Some(signature.kind()),
             _ => None,
         }
     }
@@ -236,31 +237,22 @@ impl PredicatePushdownPolicy {
                 }
             }
 
-            PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID) => {
+            // `character(n)` equality ignores trailing blanks (`bpchareq`).
+            // PostgreSQL's assignment coercion stores every value padded to
+            // the declared width, and binding pads the comparison value the
+            // same way (`PlannedValueType::Bpchar`), so the PostgreSQL adapter
+            // proves byte equality only for `=` / `<>` on a declared width
+            // under a deterministic collation. Ordering stays unsupported:
+            // `bpcharcmp` orders trimmed values, while padded bytes place a
+            // blank after every lower character such as a tab.
+            PgOid::BuiltIn(
+                PgBuiltInOids::TEXTOID
+                | PgBuiltInOids::VARCHAROID
+                | PgBuiltInOids::BPCHAROID,
+            ) => {
                 text_semantics?;
                 Self::comparison_capability(PredicateValueKind::String, class)
             }
-
-            // `char(n)` / `bpchar` comparison pushdown is gated off (falls
-            // through to `Unsupported` below, alongside every other type).
-            // `bpchar` maps to an Iceberg `String` column (see
-            // `schema_builder`), but unlike `text` / `varchar` its comparison
-            // semantics are *blank-padded*: PostgreSQL stores the value padded
-            // with trailing spaces to the declared length, while `bpchareq` /
-            // `bpcharlt` ignore trailing spaces. The only filter API this
-            // provider has is a byte-wise Iceberg/Arrow string comparison, so a
-            // stored `'ab   '` would not match a planned `col = 'ab'` even though
-            // PostgreSQL treats them as equal — a silent false negative (wrong
-            // results).
-            // This hazard is orthogonal to collation: it persists even under
-            // `C` / `POSIX`. `IS NULL` / `IS NOT NULL` on `bpchar` is unaffected
-            // (see `supports_null_test`): a null test inspects only the null
-            // bitmap, never a value, so the padding semantics do not apply.
-            //
-            // Re-enabling would require a trailing-space normalization invariant
-            // applied identically on the storage write path and the planned
-            // literal, after which the `text` collation gate above (deterministic
-            // for `=`, C/POSIX for ordered) could be reused for `bpchar`.
 
             // Every other comparison type is intentionally unsupported.
             _ => None,
@@ -312,9 +304,11 @@ impl PredicatePushdownPolicy {
             PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPTZOID) => {
                 Some(PredicateValueKind::Timestamptz)
             }
-            PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID) => {
-                Some(PredicateValueKind::String)
-            }
+            PgOid::BuiltIn(
+                PgBuiltInOids::TEXTOID
+                | PgBuiltInOids::VARCHAROID
+                | PgBuiltInOids::BPCHAROID,
+            ) => Some(PredicateValueKind::String),
             PgOid::BuiltIn(PgBuiltInOids::FLOAT4OID | PgBuiltInOids::FLOAT8OID) => {
                 Some(PredicateValueKind::Float)
             }

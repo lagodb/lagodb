@@ -1,5 +1,6 @@
 //! Statement-level exact-expression planning for query offload.
 
+mod bpchar;
 mod decimal;
 mod fallback;
 mod native;

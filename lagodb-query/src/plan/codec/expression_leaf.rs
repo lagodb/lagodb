@@ -51,22 +51,31 @@ impl ExecutionLeafCodec {
     ) -> Result<ExecutionExpr, QueryPlanDataError> {
         match reader.read_i32()? {
             COLUMN => Ok(ExecutionExpr::Column(Self::decode_column_payload(reader)?)),
-            VALUE => {
-                let index = reader.read_count()?;
-                if index >= runtime_value_count {
-                    return Err(ExpressionCodecError::RuntimeValueOutOfBounds {
-                        index,
-                        count: runtime_value_count,
-                    }
-                    .into());
-                }
-                Ok(ExecutionExpr::Value(RuntimeValueId::from_index(index)))
-            }
+            VALUE => Ok(ExecutionExpr::Value(Self::decode_runtime_value(
+                reader,
+                runtime_value_count,
+            )?)),
             OUTPUT => Ok(ExecutionExpr::Output(OutputId::from_index(
                 reader.read_count()?,
             ))),
             tag => Err(ExpressionCodecError::UnknownScalar(tag).into()),
         }
+    }
+
+    /// Decode a runtime-value reference bounded by the plan's value layout.
+    pub(super) fn decode_runtime_value(
+        reader: &mut PlanDataReader<'_>,
+        runtime_value_count: usize,
+    ) -> Result<RuntimeValueId, QueryPlanDataError> {
+        let index = reader.read_count()?;
+        if index >= runtime_value_count {
+            return Err(ExpressionCodecError::RuntimeValueOutOfBounds {
+                index,
+                count: runtime_value_count,
+            }
+            .into());
+        }
+        Ok(RuntimeValueId::from_index(index))
     }
 
     fn decode_column_payload(

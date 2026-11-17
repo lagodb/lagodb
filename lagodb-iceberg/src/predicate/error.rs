@@ -30,6 +30,9 @@ pub(crate) enum IcebergFilterError {
     #[error("Iceberg planned filter contains an invalid Decimal128 shape")]
     InvalidDecimalShape,
 
+    #[error("Iceberg planned filter contains an invalid character(n) typmod {0}")]
+    InvalidBpcharTypmod(i32),
+
     #[error("Iceberg planned filter contains an empty {kind} node")]
     EmptyLogicalNode { kind: &'static str },
 
@@ -60,6 +63,7 @@ impl SqlStateError for IcebergFilterError {
             | Self::UnknownOperatorTag(_)
             | Self::UnknownValueTypeTag(_)
             | Self::InvalidDecimalShape
+            | Self::InvalidBpcharTypmod(_)
             | Self::EmptyLogicalNode { .. }
             | Self::BindingSlotOutOfBounds { .. }
             | Self::SchemaMismatch { .. }

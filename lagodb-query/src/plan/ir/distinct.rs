@@ -6,6 +6,7 @@ use pgrx::pg_sys;
 
 use super::{
     Decimal128Semantics, ExecutionExpr, QueryNode, QueryPlanError, RowEstimate,
+    ScalarSemantics,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,10 +69,7 @@ impl DistinctExpr {
             | pg_sys::VARCHAROID
             | pg_sys::BPCHAROID
             | pg_sys::NAMEOID => {
-                value_type.collation != pg_sys::InvalidOid
-                    && unsafe {
-                        pg_sys::get_collation_isdeterministic(value_type.collation)
-                    }
+                ScalarSemantics::supports_text_distinct_key(value_type)
             }
             pg_sys::NUMERICOID => Decimal128Semantics::for_type(value_type).is_some(),
             _ => false,

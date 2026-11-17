@@ -2,7 +2,10 @@
 
 use std::mem;
 
-use lagodb_core::expr::{ColumnRef, ExprType, PgIntegerWidening, RuntimeValueLayout};
+use lagodb_core::expr::{
+    ColumnRef, ExprType, PgBpcharSemantics, PgComparisonOp, PgIntegerWidening,
+    RuntimeValueLayout,
+};
 use pgrx::pg_sys;
 
 use super::{
@@ -348,6 +351,22 @@ impl<'a> PlanExpressionValidator<'a> {
                 }
                 Ok(semantics.value_type())
             }
+            ExecutionExpr::BpcharValue { value, semantics } => {
+                let spec = self
+                    .runtime_values
+                    .values()
+                    .get(value.index())
+                    .ok_or(QueryPlanError::RuntimeValueOutOfBounds)?;
+                if spec.value_type.type_oid != pg_sys::BPCHAROID
+                    || !spec.source_kind.is_static()
+                {
+                    return Err(QueryPlanError::UnsupportedRuntimeValueType);
+                }
+                Ok(ExprType {
+                    typmod: semantics.typmod(),
+                    ..spec.value_type
+                })
+            }
             ExecutionExpr::Output(output) if allow_outputs => {
                 let fact = facts
                     .outputs
@@ -378,6 +397,15 @@ impl<'a> PlanExpressionValidator<'a> {
                 } else {
                     ScalarSemantics::Exact
                 };
+                if left.type_oid == pg_sys::BPCHAROID {
+                    Self::validate_bpchar_comparison(
+                        semantics,
+                        *operator,
+                        (left_expression, left),
+                        (right_expression, right),
+                    )?;
+                    return Ok(Self::boolean_type());
+                }
                 semantics
                     .comparison(*operator, left, right)
                     .ok_or(QueryPlanError::UnsupportedPredicate)?;
@@ -416,14 +444,20 @@ impl<'a> PlanExpressionValidator<'a> {
                     return Err(QueryPlanError::UnsupportedPredicate);
                 }
                 let value_type = self.expression_type(value, facts, allow_outputs)?;
-                // Exactly the planner's producers: NaN comparisons over floats
-                // and date/timestamp comparisons that no date can satisfy.
-                if !matches!(
-                    value_type.type_oid,
-                    pg_sys::FLOAT4OID | pg_sys::FLOAT8OID | pg_sys::DATEOID
-                ) || value_type.typmod != -1
-                    || value_type.collation != pg_sys::InvalidOid
-                {
+                // Exactly the planner's producers: NaN comparisons over floats,
+                // date/timestamp comparisons that no date can satisfy, and
+                // character(n) equality with a constant wider than the column.
+                let produced = match value_type.type_oid {
+                    pg_sys::FLOAT4OID | pg_sys::FLOAT8OID | pg_sys::DATEOID => {
+                        value_type.typmod == -1
+                            && value_type.collation == pg_sys::InvalidOid
+                    }
+                    pg_sys::BPCHAROID => {
+                        PgBpcharSemantics::for_type(value_type).is_some()
+                    }
+                    _ => false,
+                };
+                if !produced {
                     return Err(QueryPlanError::UnsupportedPredicate);
                 }
                 Ok(Self::boolean_type())
@@ -602,6 +636,31 @@ impl<'a> PlanExpressionValidator<'a> {
             type_oid: pg_sys::BOOLOID,
             typmod: -1,
             collation: pg_sys::InvalidOid,
+        }
+    }
+
+    /// A `bpchar` comparison holds only between a `character(n)` column and a
+    /// value padded to that column's width.
+    fn validate_bpchar_comparison(
+        semantics: ScalarSemantics,
+        operator: PgComparisonOp,
+        left: (&ExecutionExpr, ExprType),
+        right: (&ExecutionExpr, ExprType),
+    ) -> Result<(), QueryPlanError> {
+        let ((column, padded), value) = match (left.0, right.0) {
+            (
+                ExecutionExpr::Column(_),
+                ExecutionExpr::BpcharValue { semantics, .. },
+            ) => ((left.1, *semantics), right.1),
+            (
+                ExecutionExpr::BpcharValue { semantics, .. },
+                ExecutionExpr::Column(_),
+            ) => ((right.1, *semantics), left.1),
+            _ => return Err(QueryPlanError::UnsupportedPredicate),
+        };
+        match semantics.bpchar_comparison(operator, column, value) {
+            Some((_, proven)) if proven == padded => Ok(()),
+            _ => Err(QueryPlanError::UnsupportedPredicate),
         }
     }
 

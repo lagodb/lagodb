@@ -147,6 +147,7 @@ mod operator_oid {
 
     pub const NAME_EQ: u32 = 93;
     pub const BPCHAR_EQ: u32 = pg_sys::BpcharEqualOperator;
+    pub const BPCHAR_NE: u32 = 1057;
     pub const TEXT_EQ: u32 = pg_sys::TextEqualOperator;
     pub const TEXT_NE: u32 = 531;
     pub const TEXT_LT: u32 = pg_sys::TextLessOperator;
@@ -357,6 +358,7 @@ signatures! {
     }
     (pg_sys::BPCHAROID, pg_sys::BPCHAROID) {
         (op::BPCHAR_EQ, pg_sys::F_BPCHAREQ, Equal),
+        (op::BPCHAR_NE, pg_sys::F_BPCHARNE, NotEqual),
     }
     (pg_sys::TEXTOID, pg_sys::TEXTOID) {
         (op::TEXT_EQ, pg_sys::F_TEXTEQ, Equal),

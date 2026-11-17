@@ -2,8 +2,8 @@
 
 use lagodb_core::datum::{Decimal128Semantics, Utf8ServerEncoding};
 use lagodb_core::expr::{
-    ColumnRef, PgComparisonIdentity, PgIntegerWidening, PgTextComparisonSemantics,
-    RuntimeValueSpec,
+    ColumnRef, PgBpcharSemantics, PgComparisonIdentity, PgIntegerWidening,
+    PgTextComparisonSemantics, RuntimeValueSpec,
 };
 use pgrx::{PgBuiltInOids, PgOid, pg_sys};
 
@@ -29,13 +29,17 @@ impl PgPredicatePushdownPolicy {
         let value_type = Self::planned_value_type(column, value, utf8)?;
         let type_oid = column.value_type.type_oid;
         let operator = PredicatePushdownPolicy::op_class(op_key.opno)?;
-        let text_semantics = if matches!(
-            PgOid::from(type_oid),
-            PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID)
-        ) {
-            unsafe { PgTextComparisonSemantics::for_comparison(op_key, operator) }
-        } else {
-            None
+        let text_semantics = match value_type {
+            PlannedValueType::String => unsafe {
+                PgTextComparisonSemantics::for_comparison(op_key, operator)
+            },
+            // Binding pads the value to the column width, after which
+            // `bpchareq` is byte equality under a deterministic collation.
+            PlannedValueType::Bpchar(semantics) => {
+                unsafe { semantics.comparison(op_key) }
+                    .map(|_| PgTextComparisonSemantics::Equality)
+            }
+            _ => None,
         };
         let capability = PredicatePushdownPolicy::capability_for_class(
             type_oid,
@@ -86,6 +90,7 @@ impl PgPredicatePushdownPolicy {
                 | PlannedValueType::Int8ToInt
                 | PlannedValueType::Date
                 | PlannedValueType::String
+                | PlannedValueType::Bpchar(_)
                 | PlannedValueType::Uuid
         )
     }
@@ -120,7 +125,9 @@ impl PgPredicatePushdownPolicy {
             PlannedValueType::Date => PredicateValueKind::Date,
             PlannedValueType::Timestamp(_) => PredicateValueKind::Timestamp,
             PlannedValueType::Timestamptz(_) => PredicateValueKind::Timestamptz,
-            PlannedValueType::String => PredicateValueKind::String,
+            PlannedValueType::String | PlannedValueType::Bpchar(_) => {
+                PredicateValueKind::String
+            }
             PlannedValueType::Decimal128(_) => PredicateValueKind::Decimal,
             PlannedValueType::Int8ToInt => PredicateValueKind::Integer,
             PlannedValueType::Float
@@ -267,6 +274,13 @@ impl PgPredicatePushdownPolicy {
                 PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID),
                 PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID),
             ) => utf8.map(|_| PlannedValueType::String),
+            (
+                PgOid::BuiltIn(PgBuiltInOids::BPCHAROID),
+                PgOid::BuiltIn(PgBuiltInOids::BPCHAROID),
+                PgOid::BuiltIn(PgBuiltInOids::BPCHAROID),
+            ) => utf8
+                .and(PgBpcharSemantics::for_type(column.declared_type))
+                .map(PlannedValueType::Bpchar),
             _ => None,
         }
     }

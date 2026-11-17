@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use lagodb_core::expr::{
-    ColumnRef, ExprType, ExpressionCodecError, ExpressionPlanDataDecode,
-    ExpressionPlanDataEncode, PgComparisonOp, RuntimeValueId,
+    ColumnRef, ExprType, ExpressionPlanDataDecode, ExpressionPlanDataEncode,
+    PgBpcharSemantics, PgComparisonOp,
 };
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 
@@ -35,6 +35,7 @@ const IS_NAN: i32 = 16;
 const IS_NOT_NAN: i32 = 17;
 const WIDEN_INTEGER: i32 = 18;
 const STRICT_TRUE: i32 = 19;
+const BPCHAR_VALUE: i32 = 20;
 const IMMUTABLE: i32 = 1;
 const STABLE: i32 = 2;
 const VOLATILE: i32 = 3;
@@ -68,6 +69,12 @@ impl ExecutionExprCodec {
                     .append_count(value.index())
                     .append_i32(i32::from(semantics.precision()))
                     .append_i32(i32::from(semantics.scale()));
+            }
+            ExecutionExpr::BpcharValue { value, semantics } => {
+                writer
+                    .append_i32(BPCHAR_VALUE)
+                    .append_count(value.index())
+                    .append_i32(semantics.typmod());
             }
             ExecutionExpr::Output(output) => {
                 writer.append_i32(SCALAR);
@@ -343,24 +350,26 @@ impl ExecutionExprCodec {
                 }
             }
             DECIMAL_VALUE => {
-                let index = reader.read_count()?;
-                if index >= runtime_value_count {
-                    return Err(ExpressionCodecError::RuntimeValueOutOfBounds {
-                        index,
-                        count: runtime_value_count,
-                    }
-                    .into());
-                }
+                let value = ExecutionLeafCodec::decode_runtime_value(
+                    reader,
+                    runtime_value_count,
+                )?;
                 let precision = u8::try_from(reader.read_i32()?)
                     .map_err(|_| QueryPlanError::UnsupportedRuntimeValueType)?;
                 let scale = i8::try_from(reader.read_i32()?)
                     .map_err(|_| QueryPlanError::UnsupportedRuntimeValueType)?;
                 let semantics = Decimal128Semantics::new(precision, scale)
                     .ok_or(QueryPlanError::UnsupportedRuntimeValueType)?;
-                ExecutionExpr::DecimalValue {
-                    value: RuntimeValueId::from_index(index),
-                    semantics,
-                }
+                ExecutionExpr::DecimalValue { value, semantics }
+            }
+            BPCHAR_VALUE => {
+                let value = ExecutionLeafCodec::decode_runtime_value(
+                    reader,
+                    runtime_value_count,
+                )?;
+                let semantics = PgBpcharSemantics::for_typmod(reader.read_i32()?)
+                    .ok_or(QueryPlanError::UnsupportedRuntimeValueType)?;
+                ExecutionExpr::BpcharValue { value, semantics }
             }
             FUNCTION => {
                 let raw_kind = reader.read_i32()?;

@@ -328,9 +328,11 @@ GROUP BY a.label_c, a.label_varchar_c,
          a.label, a.label_varchar
 ORDER BY a.label_c, a.label_varchar_c;
 
--- BPCHAR and NAME have PostgreSQL-specific equality semantics that are not part
--- of the provider-neutral hash-grouping contract. The joins may still offload,
--- but PostgreSQL must retain each Aggregate node.
+-- A declared character(n) column stores values padded to its width, so
+-- bpchar equality is byte equality: 'shared' and 'shared ' form one group,
+-- and a constant is padded to the width before it is compared. NAME retains
+-- PostgreSQL-specific equality semantics outside the hash-grouping contract;
+-- PostgreSQL must keep its Aggregate node.
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT a.label_bpchar, count(*) AS rows
@@ -338,6 +340,57 @@ FROM query_offload_comp_left AS l
 JOIN query_offload_comp_right AS r USING (key)
 JOIN query_offload_comp_aux AS a USING (key)
 GROUP BY a.label_bpchar;
+
+SELECT a.label_bpchar, count(*) AS rows
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r USING (key)
+JOIN query_offload_comp_aux AS a USING (key)
+GROUP BY a.label_bpchar;
+
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS rows
+FROM query_offload_comp_aux
+WHERE label_bpchar = 'shared';
+
+SELECT count(*) AS rows
+FROM query_offload_comp_aux
+WHERE label_bpchar = 'shared';
+
+-- A constant wider than the column folds: no stored value equals it.
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS rows
+FROM query_offload_comp_aux
+WHERE label_bpchar = 'shared-and-more';
+
+SELECT count(*) AS rows
+FROM query_offload_comp_aux
+WHERE label_bpchar = 'shared-and-more';
+
+-- A computed character(n) value keeps the width its typmod proves, and a
+-- folded <> stays UNKNOWN for a NULL operand.
+CREATE TABLE query_offload_comp_bpchar (
+    code character(4),
+    alt character(4)
+) USING iceberg;
+INSERT INTO query_offload_comp_bpchar VALUES ('ab', NULL), (NULL, 'ab  ');
+
+EXPLAIN (COSTS OFF)
+SELECT coalesce(code, alt) AS code_or_alt, count(*) AS rows
+FROM query_offload_comp_bpchar
+GROUP BY 1;
+
+SELECT coalesce(code, alt) AS code_or_alt, count(*) AS rows
+FROM query_offload_comp_bpchar
+GROUP BY 1;
+
+EXPLAIN (COSTS OFF)
+SELECT count(*) FILTER (WHERE (code <> 'abcdef') IS UNKNOWN) AS unknown_rows
+FROM query_offload_comp_bpchar;
+
+SELECT count(*) FILTER (WHERE (code <> 'abcdef') IS UNKNOWN) AS unknown_rows
+FROM query_offload_comp_bpchar;
+
+DROP TABLE query_offload_comp_bpchar;
 
 EXPLAIN (COSTS OFF)
 SELECT a.label_name, count(*) AS rows

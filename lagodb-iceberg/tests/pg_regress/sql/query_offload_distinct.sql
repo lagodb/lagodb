@@ -275,9 +275,44 @@ FROM query_offload_distinct_basic
 ORDER BY value_i4 NULLS LAST, id;
 
 -- ============================================================================
+-- Text-family DISTINCT runs natively only where byte equality is PostgreSQL
+-- equality. character(n) pads every value to n, so its bytes stay exact;
+-- unconstrained bpchar keeps the trailing blanks that bpchareq ignores.
+-- ============================================================================
+
+CREATE TABLE query_offload_distinct_text_keys (
+    value_bpchar bpchar,
+    value_char char(3)
+) USING iceberg;
+
+INSERT INTO query_offload_distinct_text_keys VALUES
+    ('a', 'ab'), ('a ', 'ab '), ('b', 'b'), (NULL, NULL);
+
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT value_char
+FROM query_offload_distinct_text_keys
+ORDER BY value_char NULLS LAST;
+
+SELECT DISTINCT value_char
+FROM query_offload_distinct_text_keys
+ORDER BY value_char NULLS LAST;
+
+EXPLAIN (COSTS OFF)
+SELECT count(DISTINCT value_char) AS char_values
+FROM query_offload_distinct_text_keys;
+
+SELECT count(DISTINCT value_char) AS char_values
+FROM query_offload_distinct_text_keys;
+
+EXPLAIN (COSTS OFF)
+SELECT DISTINCT value_bpchar FROM query_offload_distinct_text_keys;
+
+-- ============================================================================
 -- Cleanup
 -- ============================================================================
 
+DROP TABLE query_offload_distinct_text_keys;
 DROP TABLE query_offload_distinct_basic;
 
 RESET timezone;

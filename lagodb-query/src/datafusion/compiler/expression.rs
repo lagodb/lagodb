@@ -119,6 +119,19 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                     }
                 }
             }
+            ExecutionExpr::BpcharValue { value, semantics } => match &self.bindings {
+                ExpressionBindings::Execution { values, .. } => values
+                    .get(value.index())
+                    .copied()
+                    .ok_or(DataFusionPlanError::MissingRuntimeValue {
+                        index: value.index(),
+                    })
+                    .and_then(|value| Self::bpchar_runtime_value(value, *semantics))
+                    .map(|value| Expr::Literal(value, None)),
+                ExpressionBindings::Planning { .. } => {
+                    Ok(Self::typed_value(ExecutionScalarRepr::Utf8.data_type()))
+                }
+            },
             ExecutionExpr::Output(output) => Ok(col(Self::output_name(*output))),
             ExecutionExpr::Comparison {
                 operator,

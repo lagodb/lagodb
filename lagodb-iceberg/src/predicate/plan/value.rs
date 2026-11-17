@@ -2,6 +2,7 @@
 
 use iceberg_lite::spec::{PrimitiveType, Type};
 use lagodb_core::datum::Decimal128Semantics;
+use lagodb_core::expr::PgBpcharSemantics;
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 
 use super::super::error::IcebergFilterError;
@@ -29,6 +30,7 @@ const VALUE_FLOAT: i32 = 17;
 const VALUE_DOUBLE: i32 = 18;
 const VALUE_FLOAT_TO_DOUBLE: i32 = 19;
 const VALUE_DOUBLE_TO_FLOAT: i32 = 20;
+const VALUE_BPCHAR: i32 = 21;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlannedValueType {
@@ -45,6 +47,8 @@ pub(crate) enum PlannedValueType {
     Timestamp(TimestampPrecision),
     Timestamptz(TimestampPrecision),
     String,
+    /// A `bpchar` value padded at bind time to a `character(n)` column width.
+    Bpchar(PgBpcharSemantics),
     Decimal128(Decimal128Semantics),
     Int8ToInt,
     Float,
@@ -122,6 +126,9 @@ impl PlannedValueType {
                 writer.append_i32(VALUE_TIMESTAMPTZ_NS)
             }
             Self::String => writer.append_i32(VALUE_STRING),
+            Self::Bpchar(semantics) => writer
+                .append_i32(VALUE_BPCHAR)
+                .append_i32(semantics.typmod()),
             Self::Decimal128(semantics) => writer
                 .append_i32(VALUE_DECIMAL128)
                 .append_i32(i32::from(semantics.precision()))
@@ -159,6 +166,12 @@ impl PlannedValueType {
                 Ok(Self::Timestamptz(TimestampPrecision::Nanoseconds))
             }
             VALUE_STRING => Ok(Self::String),
+            VALUE_BPCHAR => {
+                let typmod = reader.read_i32()?;
+                PgBpcharSemantics::for_typmod(typmod)
+                    .map(Self::Bpchar)
+                    .ok_or(IcebergFilterError::InvalidBpcharTypmod(typmod))
+            }
             VALUE_DECIMAL128 => {
                 let encoded_precision = reader.read_i32()?;
                 let encoded_scale = reader.read_i32()?;
