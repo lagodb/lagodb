@@ -106,7 +106,7 @@ impl DataFusionExpressionCompiler<'_> {
         // SAFETY: RuntimeValueState evaluated this constant in the current
         // executor context and retains the datum for plan compilation.
         match unsafe { semantics.canonicalize(value.datum()) } {
-            // Planning proved UTF-8 server encoding for the comparison.
+            // Admission requires a UTF-8 server encoding for Arrow strings.
             PgBpcharValue::Canonical(canonical) => {
                 unsafe { String::from_datum(canonical.as_datum(), false) }
                     .map(|text| ScalarValue::Utf8(Some(text)))

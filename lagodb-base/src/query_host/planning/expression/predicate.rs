@@ -1,6 +1,5 @@
 //! Exact lowering for PostgreSQL predicate leaves.
 
-use lagodb_core::datum::Utf8ServerEncoding;
 use lagodb_core::expr::pg::{PgConst, PgExprRef, PgNullTestKind, PgPredicateLeafRef};
 use lagodb_core::expr::{
     ExprType, PgComparisonOp, PgDateComparisonOutcome, PgDateTimestampComparison,
@@ -177,11 +176,10 @@ impl QueryExpressionPlanner {
         input_collation: pg_sys::Oid,
         scope: ExpressionScope<'_>,
     ) -> ExpressionPlanResult<ExecutionExpr> {
-        if Utf8ServerEncoding::resolve().is_err()
-            || unsafe {
-                PgTextComparisonSemantics::for_equality_collation(input_collation)
-            }
-            .is_none()
+        if unsafe {
+            PgTextComparisonSemantics::for_equality_collation(input_collation)
+        }
+        .is_none()
         {
             return Err(ExpressionDecline::UnsupportedSemantics);
         }

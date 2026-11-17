@@ -1,6 +1,5 @@
 //! PostgreSQL-semantic join nodes for provider-neutral query plans.
 
-use lagodb_core::datum::Utf8ServerEncoding;
 use lagodb_core::expr::{ColumnRef, ExprType, PgComparisonKind, PgComparisonOp};
 use lagodb_core::expr::{PgComparisonSignature, PgTextComparisonSemantics};
 use pgrx::pg_sys;
@@ -169,7 +168,6 @@ impl JoinKey {
             }
             pg_sys::TEXTOID => {
                 value_type.typmod == -1
-                    && Utf8ServerEncoding::resolve().is_ok()
                     && value_type.collation != pg_sys::InvalidOid
                     // Hash keys use the stored UTF-8 bytes. Decline
                     // nondeterministic collations: PostgreSQL's texteq uses

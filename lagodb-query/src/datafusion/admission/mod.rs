@@ -42,6 +42,8 @@ enum AdmissionDeclineReason {
     NanosecondComparison,
     #[error("timestamp promotion to nanoseconds narrows the PG value range")]
     NanosecondPromotion,
+    #[error("Arrow strings do not represent PG text outside a UTF-8 server encoding")]
+    NonUtf8String,
 }
 
 /// Admits a validated query using the projected schemas returned by scan
@@ -80,6 +82,6 @@ impl<'a> DataFusionPlanAdmission<'a> {
         let plan = TypeCoercion::new()
             .analyze(plan, &ConfigOptions::new())
             .map_err(AdmissionDeclineReason::TypeCoercion)?;
-        RepresentationSemantics::check_plan(&plan)
+        RepresentationSemantics::for_server_encoding().check_plan(&plan)
     }
 }

@@ -1,6 +1,5 @@
 //! Scalar domains admitted by query planning and lowering.
 
-use lagodb_core::datum::Utf8ServerEncoding;
 use lagodb_core::expr::ExprType;
 use lagodb_core::expr::{
     PgBpcharSemantics, PgComparisonOp, PgComparisonSignature,
@@ -78,7 +77,6 @@ impl ScalarSemantics {
             }
             pg_sys::TEXTOID => {
                 matches!(self, Self::Exact)
-                    && Utf8ServerEncoding::resolve().is_ok()
                     && unsafe {
                         PgTextComparisonSemantics::for_equality_collation(
                             value_type.collation,
@@ -137,10 +135,7 @@ impl ScalarSemantics {
         column: ExprType,
         value: ExprType,
     ) -> Option<(ComparisonKind, PgBpcharSemantics)> {
-        if self != Self::Exact
-            || value.type_oid != pg_sys::BPCHAROID
-            || Utf8ServerEncoding::resolve().is_err()
-        {
+        if self != Self::Exact || value.type_oid != pg_sys::BPCHAROID {
             return None;
         }
         operator.builtin_signature()?;
@@ -237,7 +232,6 @@ impl ScalarSemantics {
                     _ => PgBpcharSemantics::for_type(value_type).is_some(),
                 };
                 typmod_is_normalized
-                    && Utf8ServerEncoding::resolve().is_ok()
                     && unsafe {
                         PgTextComparisonSemantics::for_equality_collation(
                             value_type.collation,
