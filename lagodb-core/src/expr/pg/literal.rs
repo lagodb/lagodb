@@ -7,6 +7,7 @@ use pgrx::datum::Timestamp;
 use pgrx::{FromDatum, pg_sys};
 
 use super::{PgConst, PgExprRef};
+use crate::datum::ArrayDatumLayout;
 
 impl<'a> PgConst<'a> {
     /// Return whether this is a non-NULL built-in floating-point NaN.
@@ -67,6 +68,55 @@ impl<'a> PgConst<'a> {
         };
         // SAFETY: makeConst returned a live expression in that context.
         unsafe { PgExprRef::from_raw(constant.cast()) }
+    }
+
+    /// Materialize the elements of a non-NULL array constant as scalar Consts
+    /// in physical order across every dimension, as PostgreSQL's partition
+    /// pruning expands a `ScalarArrayOpExpr` array (`partprune.c`). Each
+    /// Const takes the array's collation and typmod -1; NULL elements remain
+    /// NULL Consts.
+    ///
+    /// # Safety
+    ///
+    /// The Const and its Datum must remain live in the current PostgreSQL
+    /// memory context. The returned Consts and their values are allocated in
+    /// that context.
+    pub unsafe fn array_elements(self) -> Option<Vec<PgExprRef<'a>>> {
+        let (type_oid, collation, datum, is_null) = self.parts();
+        let element_oid = unsafe { pg_sys::get_element_type(type_oid) };
+        if is_null || element_oid == pg_sys::InvalidOid {
+            return None;
+        }
+        let layout = ArrayDatumLayout::bind(element_oid);
+        let len = i32::from(layout.len);
+        // SAFETY: a non-NULL array Const owns a live array of this element
+        // type. By-reference elements borrow the iterator's detoasted array,
+        // so datumCopy moves each into the current context before the
+        // iterator ends; makeConst does not copy a flat value.
+        let elements = unsafe { layout.values(datum) }
+            .map(|value| {
+                let constant = match value {
+                    None => unsafe {
+                        pg_sys::makeNullConst(element_oid, -1, collation)
+                    },
+                    Some(value) => unsafe {
+                        pg_sys::makeConst(
+                            element_oid,
+                            -1,
+                            collation,
+                            len,
+                            pg_sys::datumCopy(value, layout.by_value, len),
+                            false,
+                            layout.by_value,
+                        )
+                    },
+                };
+                // SAFETY: makeConst/makeNullConst returned a live expression
+                // in the current context.
+                unsafe { PgExprRef::from_raw(constant.cast()) }
+            })
+            .collect();
+        Some(elements)
     }
 
     /// Parse PostgreSQL's canonical LIKE pattern and materialize the literal

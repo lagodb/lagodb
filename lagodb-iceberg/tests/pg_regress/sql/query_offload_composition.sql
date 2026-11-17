@@ -370,9 +370,11 @@ WHERE label_bpchar = 'shared-and-more';
 -- folded <> stays UNKNOWN for a NULL operand.
 CREATE TABLE query_offload_comp_bpchar (
     code character(4),
-    alt character(4)
+    alt character(4),
+    raw bpchar
 ) USING iceberg;
-INSERT INTO query_offload_comp_bpchar VALUES ('ab', NULL), (NULL, 'ab  ');
+INSERT INTO query_offload_comp_bpchar VALUES
+    ('ab', NULL, 'a'), (NULL, 'ab  ', 'a ');
 
 EXPLAIN (COSTS OFF)
 SELECT coalesce(code, alt) AS code_or_alt, count(*) AS rows
@@ -388,6 +390,26 @@ SELECT count(*) FILTER (WHERE (code <> 'abcdef') IS UNKNOWN) AS unknown_rows
 FROM query_offload_comp_bpchar;
 
 SELECT count(*) FILTER (WHERE (code <> 'abcdef') IS UNKNOWN) AS unknown_rows
+FROM query_offload_comp_bpchar;
+
+-- The bpchar-to-text cast strips trailing blanks, so the unconstrained
+-- bpchar values 'a' and 'a ' form one text group.
+EXPLAIN (COSTS OFF)
+SELECT raw::text AS raw_text, count(*) AS rows
+FROM query_offload_comp_bpchar
+GROUP BY 1;
+
+SELECT raw::text AS raw_text, count(*) AS rows
+FROM query_offload_comp_bpchar
+GROUP BY 1;
+
+-- A constant IN list arrives as one array; an element wider than the
+-- column equals no stored value and is dropped.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FILTER (WHERE code IN ('ab', 'abcdef')) AS in_rows
+FROM query_offload_comp_bpchar;
+
+SELECT count(*) FILTER (WHERE code IN ('ab', 'abcdef')) AS in_rows
 FROM query_offload_comp_bpchar;
 
 DROP TABLE query_offload_comp_bpchar;

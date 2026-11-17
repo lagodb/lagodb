@@ -182,6 +182,16 @@ impl FunctionSignature {
                     pg_sys::TEXTOID,
                     CollationPolicy::Ignored,
                 ),
+                pg_sys::F_TEXT_BPCHAR => (
+                    // The bpchar-to-text cast is `rtrim1`, which strips only
+                    // trailing U+0020 bytes; DataFusion's one-argument rtrim
+                    // trims the same single ASCII byte. Its varchar-cast use
+                    // has a VARCHAR result and is rejected by the result type.
+                    ScalarFunctionKind::Rtrim,
+                    &[pg_sys::BPCHAROID][..],
+                    pg_sys::TEXTOID,
+                    CollationPolicy::Ignored,
+                ),
                 REVERSE_TEXT_FUNCTION_OID => (
                     ScalarFunctionKind::Reverse,
                     &[pg_sys::TEXTOID][..],

@@ -184,16 +184,15 @@ SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
        sum(abs(value_i8)) AS abs_i8_sum,
        sum(abs(value_f8)) AS abs_f8_sum
 FROM query_offload_expression_basic;
-                                                                                                                                                                                                                                             QUERY PLAN                                                                                                                                                                                                                                             
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                            QUERY PLAN                                                                                                                                                                                                                                                            
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
-   PostgreSQL Expression Fallbacks: 1
    ->  Aggregate
-         Aggregates: COUNT(*) FILTER (WHERE (value_bool IS NOT FALSE)), COUNT(*) FILTER (WHERE CASE WHEN (id <= runtime value) THEN runtime value ELSE runtime value END), SUM(coalesce(value_i4, runtime value)), COUNT(*) FILTER (WHERE (nullif(id, runtime value) IS NOT NULL)), COUNT(*) FILTER (WHERE PostgreSQL expression), COUNT(*) FILTER (WHERE starts_with(value_text, runtime value)), COUNT(replace(value_text, runtime value, runtime value)), SUM(abs(value_i8)), SUM(abs(value_f8))
+         Aggregates: COUNT(*) FILTER (WHERE (value_bool IS NOT FALSE)), COUNT(*) FILTER (WHERE CASE WHEN (id <= runtime value) THEN runtime value ELSE runtime value END), SUM(coalesce(value_i4, runtime value)), COUNT(*) FILTER (WHERE (nullif(id, runtime value) IS NOT NULL)), COUNT(*) FILTER (WHERE id IN (runtime value, runtime value, runtime value)), COUNT(*) FILTER (WHERE starts_with(value_text, runtime value)), COUNT(replace(value_text, runtime value, runtime value)), SUM(abs(value_i8)), SUM(abs(value_f8))
          ->  Table Scan on query_offload_expression_basic
                Access Method: iceberg
-(7 rows)
+(6 rows)
 
 SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
        count(*) FILTER (

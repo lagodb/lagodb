@@ -277,7 +277,7 @@ impl<'a> DataFusionExpressionCompiler<'a> {
         };
         use datafusion::functions::math::expr_fn::{abs, ceil, floor};
         use datafusion::functions::string::expr_fn::{
-            ascii, repeat, replace, starts_with,
+            ascii, repeat, replace, rtrim, starts_with,
         };
         use datafusion::functions::unicode::expr_fn::{
             character_length, reverse, substr, substring,
@@ -351,6 +351,9 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                 arguments.next().ok_or_else(missing)?,
                 arguments.next().ok_or_else(missing)?,
             ),
+            ScalarFunctionKind::Rtrim => {
+                rtrim(vec![arguments.next().ok_or_else(missing)?])
+            }
         })
     }
 

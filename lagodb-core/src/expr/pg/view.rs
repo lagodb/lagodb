@@ -6,7 +6,7 @@ use core::ptr::NonNull;
 use pgrx::{FromDatum, pg_sys};
 
 use crate::expr::contract::{ParamKey, PgComparisonOp};
-use crate::expr::{BooleanTestKind, PgIntegerWidening};
+use crate::expr::{BooleanTestKind, PgComparisonKind, PgIntegerWidening};
 
 #[derive(Clone, Copy)]
 pub struct PgExprRef<'a> {
@@ -376,6 +376,17 @@ impl<'a> PgScalarArrayOpExpr<'a> {
             opresulttype: pg_sys::BOOLOID,
             opcollid: pg_sys::InvalidOid,
             inputcollid: node.inputcollid,
+        }
+    }
+
+    /// Whether `kind` makes this node set membership: `= ANY` is IN and
+    /// `<> ALL` is NOT IN. Returns whether the membership is negated.
+    #[inline]
+    pub fn membership_negation(self, kind: PgComparisonKind) -> Option<bool> {
+        match (self.use_or(), kind) {
+            (true, PgComparisonKind::Equal) => Some(false),
+            (false, PgComparisonKind::NotEqual) => Some(true),
+            _ => None,
         }
     }
 

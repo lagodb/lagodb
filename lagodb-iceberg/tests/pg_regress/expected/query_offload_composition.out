@@ -647,9 +647,11 @@ WHERE label_bpchar = 'shared-and-more';
 -- folded <> stays UNKNOWN for a NULL operand.
 CREATE TABLE query_offload_comp_bpchar (
     code character(4),
-    alt character(4)
+    alt character(4),
+    raw bpchar
 ) USING iceberg;
-INSERT INTO query_offload_comp_bpchar VALUES ('ab', NULL), (NULL, 'ab  ');
+INSERT INTO query_offload_comp_bpchar VALUES
+    ('ab', NULL, 'a'), (NULL, 'ab  ', 'a ');
 EXPLAIN (COSTS OFF)
 SELECT coalesce(code, alt) AS code_or_alt, count(*) AS rows
 FROM query_offload_comp_bpchar
@@ -691,6 +693,53 @@ FROM query_offload_comp_bpchar;
  unknown_rows 
 --------------
             1
+(1 row)
+
+-- The bpchar-to-text cast strips trailing blanks, so the unconstrained
+-- bpchar values 'a' and 'a ' form one text group.
+EXPLAIN (COSTS OFF)
+SELECT raw::text AS raw_text, count(*) AS rows
+FROM query_offload_comp_bpchar
+GROUP BY 1;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Group Key: rtrim(raw)
+         Aggregates: COUNT(*)
+         ->  Table Scan on query_offload_comp_bpchar
+               Access Method: iceberg
+(7 rows)
+
+SELECT raw::text AS raw_text, count(*) AS rows
+FROM query_offload_comp_bpchar
+GROUP BY 1;
+ raw_text | rows 
+----------+------
+ a        |    2
+(1 row)
+
+-- A constant IN list arrives as one array; an element wider than the
+-- column equals no stored value and is dropped.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FILTER (WHERE code IN ('ab', 'abcdef')) AS in_rows
+FROM query_offload_comp_bpchar;
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*) FILTER (WHERE code IN (runtime value::bpchar(4)))
+         ->  Table Scan on query_offload_comp_bpchar
+               Access Method: iceberg
+(6 rows)
+
+SELECT count(*) FILTER (WHERE code IN ('ab', 'abcdef')) AS in_rows
+FROM query_offload_comp_bpchar;
+ in_rows 
+---------
+       1
 (1 row)
 
 DROP TABLE query_offload_comp_bpchar;

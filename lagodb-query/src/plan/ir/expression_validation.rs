@@ -4,7 +4,7 @@ use std::mem;
 
 use lagodb_core::expr::{
     ColumnRef, ExprType, PgBpcharSemantics, PgComparisonOp, PgIntegerWidening,
-    RuntimeValueLayout,
+    PgTextComparisonSemantics, RuntimeValueLayout,
 };
 use pgrx::pg_sys;
 
@@ -540,6 +540,13 @@ impl<'a> PlanExpressionValidator<'a> {
                     return Err(QueryPlanError::UnsupportedPredicate);
                 }
                 let value_type = self.expression_type(value, facts, allow_outputs)?;
+                if value_type.type_oid == pg_sys::BPCHAROID {
+                    for item in list {
+                        self.expression_type(item, facts, allow_outputs)?;
+                    }
+                    Self::validate_bpchar_in_list((value, value_type), list)?;
+                    return Ok(Self::boolean_type());
+                }
                 if !ScalarSemantics::Exact.supports_type(value_type) {
                     return Err(QueryPlanError::UnsupportedPredicate);
                 }
@@ -661,6 +668,35 @@ impl<'a> PlanExpressionValidator<'a> {
         match semantics.bpchar_comparison(operator, column, value) {
             Some((_, proven)) if proven == padded => Ok(()),
             _ => Err(QueryPlanError::UnsupportedPredicate),
+        }
+    }
+
+    /// A `bpchar` membership holds only between a `character(n)` column under
+    /// a deterministic collation and values padded to that column's width.
+    fn validate_bpchar_in_list(
+        (value, value_type): (&ExecutionExpr, ExprType),
+        list: &[ExecutionExpr],
+    ) -> Result<(), QueryPlanError> {
+        let column = PgBpcharSemantics::for_type(value_type)
+            .filter(|_| {
+                matches!(value, ExecutionExpr::Column(_))
+                    && unsafe {
+                        PgTextComparisonSemantics::for_equality_collation(
+                            value_type.collation,
+                        )
+                    }
+                    .is_some()
+            })
+            .ok_or(QueryPlanError::UnsupportedPredicate)?;
+        if list.iter().all(|item| {
+            matches!(
+                item,
+                ExecutionExpr::BpcharValue { semantics, .. } if *semantics == column
+            )
+        }) {
+            Ok(())
+        } else {
+            Err(QueryPlanError::UnsupportedPredicate)
         }
     }
 

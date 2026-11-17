@@ -1,6 +1,6 @@
 //! Native lowering for PostgreSQL expression shapes beyond scalar functions.
 
-use lagodb_core::expr::pg::{PgBooleanTest, PgExprRef};
+use lagodb_core::expr::pg::{PgBooleanTest, PgConst, PgExprRef, PgScalarArrayOpExpr};
 use lagodb_core::expr::{ExprType, PgComparisonKind, PgComparisonOp};
 use lagodb_query::plan::{
     CaseWhen, Decimal128Semantics, ExecutionExpr, ScalarFunctionKind,
@@ -190,88 +190,70 @@ impl QueryExpressionPlanner {
 
     unsafe fn lower_scalar_array(
         &mut self,
-        expression: *mut pg_sys::ScalarArrayOpExpr,
+        expression: *mut pg_sys::Expr,
         scope: ExpressionScope<'_>,
         domain: PredicateDomain,
     ) -> ExpressionPlanResult<ExecutionExpr> {
-        let args = unsafe { Self::list_nodes((*expression).args) };
-        if args.len() != 2
-            || unsafe { (*args[1]).type_ } != pg_sys::NodeTag::T_ArrayExpr
-        {
-            return Err(ExpressionDecline::InvalidShape);
+        let expression = unsafe { PgExprRef::from_raw(expression) };
+        let membership = PgScalarArrayOpExpr::try_from_expr(expression)
+            .ok_or(ExpressionDecline::InvalidShape)?;
+        let (value, array) = membership.operands();
+        let value_type = unsafe { Self::predicate_type(value.as_ptr(), scope) };
+        if value_type.type_oid == pg_sys::BPCHAROID {
+            return unsafe { self.lower_bpchar_in_list(membership, scope, domain) };
         }
-        let array = args[1].cast::<pg_sys::ArrayExpr>();
-        if unsafe { (*array).multidims } {
-            return Err(ExpressionDecline::UnsupportedSemantics);
-        }
-        let elements = unsafe { Self::list_nodes((*array).elements) };
-        if elements.is_empty() {
-            return Err(ExpressionDecline::InvalidShape);
-        }
-        let value_type = unsafe { Self::predicate_type(args[0].cast(), scope) };
+        // Prove the operator over the value and the array's element type
+        // before materializing any element.
         if !domain.supports_type(value_type)
             || !PredicateDomain::Exact.supports_type(value_type)
+            || unsafe { pg_sys::get_element_type(array.type_oid()) }
+                != value_type.type_oid
         {
             return Err(ExpressionDecline::UnsupportedSemantics);
         }
-        let operator = PgComparisonOp {
-            opno: unsafe { (*expression).opno },
-            opfuncid: unsafe { (*expression).opfuncid },
-            opresulttype: pg_sys::BOOLOID,
-            opcollid: pg_sys::InvalidOid,
-            inputcollid: unsafe { (*expression).inputcollid },
-        };
+        let operator = membership.comparison_op();
         let decimal = Decimal128Semantics::for_type(value_type);
-        let comparison = if let Some(decimal) = decimal {
-            let first_type = Self::expr_type(elements[0].cast());
-            let Some((comparison, resolved)) =
-                domain.decimal_comparison(operator, value_type, first_type)
-            else {
-                return Err(ExpressionDecline::UnsupportedSemantics);
-            };
-            if resolved != decimal
-                || elements[1..].iter().any(|element| {
-                    domain.decimal_comparison(
-                        operator,
-                        value_type,
-                        Self::expr_type((*element).cast()),
-                    ) != Some((comparison, decimal))
-                })
-            {
+        let comparison = if decimal.is_some() {
+            domain
+                .decimal_comparison(operator, value_type, value_type)
+                .map(|(comparison, _)| comparison)
+        } else {
+            domain.comparison(operator, value_type, value_type)
+        }
+        .ok_or(ExpressionDecline::UnsupportedSemantics)?;
+        let negated = membership
+            .membership_negation(comparison)
+            .ok_or(ExpressionDecline::UnsupportedSemantics)?;
+        let elements = unsafe { Self::scalar_array_elements(array) }?;
+        let mut element_types = elements
+            .iter()
+            .map(|element| Self::expr_type((*element).cast()));
+        if let Some(decimal) = decimal {
+            // A Const element carries no typmod; each must be exactly
+            // encodable in the column's representation.
+            if element_types.any(|element_type| {
+                domain.decimal_comparison(operator, value_type, element_type)
+                    != Some((comparison, decimal))
+            }) {
                 return Err(ExpressionDecline::UnsupportedSemantics);
             }
-            comparison
-        } else {
+        } else if element_types.any(|element_type| {
             // ScalarArrayOpExpr carries the resolved comparison collation in
             // inputcollid; its text elements can retain their original
             // expression collations while sharing the same Utf8 representation.
-            if elements
-                .iter()
-                .map(|element| Self::expr_type((*element).cast()))
-                .any(|element_type| {
-                    element_type != value_type
-                        && !(value_type.type_oid == pg_sys::TEXTOID
-                            && element_type.type_oid == pg_sys::TEXTOID
-                            && element_type.typmod == value_type.typmod)
-                })
-            {
-                return Err(ExpressionDecline::UnsupportedSemantics);
-            }
-            domain
-                .comparison(operator, value_type, value_type)
-                .ok_or(ExpressionDecline::UnsupportedSemantics)?
-        };
-        let negated = match (unsafe { (*expression).useOr }, comparison) {
-            (true, PgComparisonKind::Equal) => false,
-            (false, PgComparisonKind::NotEqual) => true,
-            _ => return Err(ExpressionDecline::UnsupportedSemantics),
-        };
+            element_type != value_type
+                && !(value_type.type_oid == pg_sys::TEXTOID
+                    && element_type.type_oid == pg_sys::TEXTOID
+                    && element_type.typmod == value_type.typmod)
+        }) {
+            return Err(ExpressionDecline::UnsupportedSemantics);
+        }
         let value = if let Some(decimal) = decimal {
             unsafe {
-                self.lower_decimal_operand(args[0].cast(), scope.as_scalar(), decimal)
+                self.lower_decimal_operand(value.as_ptr(), scope.as_scalar(), decimal)
             }?
         } else {
-            unsafe { self.lower(args[0], scope.as_scalar()) }?
+            unsafe { self.lower(value.as_ptr().cast(), scope.as_scalar()) }?
         };
         let list = if let Some(decimal) = decimal {
             elements
@@ -295,6 +277,37 @@ impl QueryExpressionPlanner {
             list: list.into_boxed_slice(),
             negated,
         })
+    }
+
+    /// The elements of a scalar-array operand. PostgreSQL folds an
+    /// all-constant IN list or ARRAY[...] into one array Const; ANY/ALL visit
+    /// every physical element whatever the dimensions, so its flattened
+    /// elements are the same list. An empty array is declined: PostgreSQL
+    /// answers FALSE (ANY) or TRUE (ALL) even for a NULL operand, which no
+    /// strict fold represents.
+    pub(super) unsafe fn scalar_array_elements(
+        array: PgExprRef<'_>,
+    ) -> ExpressionPlanResult<Vec<*mut pg_sys::Node>> {
+        let elements = match array.node_tag() {
+            pg_sys::NodeTag::T_ArrayExpr => {
+                let array = array.as_ptr().cast::<pg_sys::ArrayExpr>();
+                if unsafe { (*array).multidims } {
+                    return Err(ExpressionDecline::UnsupportedSemantics);
+                }
+                unsafe { Self::list_nodes((*array).elements) }
+            }
+            pg_sys::NodeTag::T_Const => PgConst::try_from_expr(array)
+                .and_then(|array| unsafe { array.array_elements() })
+                .ok_or(ExpressionDecline::UnsupportedSemantics)?
+                .into_iter()
+                .map(|element| element.as_ptr().cast())
+                .collect(),
+            _ => return Err(ExpressionDecline::InvalidShape),
+        };
+        if elements.is_empty() {
+            return Err(ExpressionDecline::InvalidShape);
+        }
+        Ok(elements)
     }
 
     unsafe fn lower_arguments(

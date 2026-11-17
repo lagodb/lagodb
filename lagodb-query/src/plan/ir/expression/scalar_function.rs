@@ -21,6 +21,7 @@ pub enum ScalarFunctionKind {
     Least,
     Coalesce,
     NullIf,
+    Rtrim,
 }
 
 impl ScalarFunctionKind {
@@ -44,6 +45,7 @@ impl ScalarFunctionKind {
             12 => Self::Least,
             13 => Self::Coalesce,
             14 => Self::NullIf,
+            15 => Self::Rtrim,
             _ => return None,
         })
     }
@@ -100,6 +102,9 @@ impl ScalarFunctionKind {
                     && text_result()
             }
             Self::Reverse => has_oids(&[pg_sys::TEXTOID]) && text_result(),
+            // PostgreSQL's `text(bpchar)` cast strips trailing blanks from any
+            // character(n) or unconstrained bpchar value.
+            Self::Rtrim => has_oids(&[pg_sys::BPCHAROID]) && text_result(),
             Self::Abs => {
                 arguments.len() == 1
                     && matches!(
@@ -171,6 +176,7 @@ impl fmt::Display for ScalarFunctionKind {
             Self::Least => "least",
             Self::Coalesce => "coalesce",
             Self::NullIf => "nullif",
+            Self::Rtrim => "rtrim",
         })
     }
 }

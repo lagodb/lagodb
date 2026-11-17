@@ -33,8 +33,8 @@ unsafe extern "C-unwind" {
 #[derive(Debug, Clone, Copy)]
 pub struct ArrayDatumLayout {
     pub element_oid: pg_sys::Oid,
-    len: i16,
-    by_value: bool,
+    pub(crate) len: i16,
+    pub(crate) by_value: bool,
     align: c_char,
 }
 
