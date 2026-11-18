@@ -53,6 +53,13 @@ impl QueryExpressionPlanner {
                 {
                     return result;
                 }
+                if let Some(comparison) = unsafe {
+                    self.lower_decimal_bound_comparison(
+                        op, left, right, scope, domain,
+                    )
+                } {
+                    return Ok(comparison);
+                }
                 let left_type = unsafe { Self::predicate_type(left.as_ptr(), scope) };
                 let right_type =
                     unsafe { Self::predicate_type(right.as_ptr(), scope) };

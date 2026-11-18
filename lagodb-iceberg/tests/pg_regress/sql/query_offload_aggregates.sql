@@ -711,6 +711,27 @@ ORDER BY group_id;
 
 DROP TABLE query_offload_int8_sum;
 
+-- avg(numeric) keeps the input scale plus 4 digits and truncates: group 1
+-- averages to 1.666666, where PostgreSQL returns 1.6666666666666667, so the
+-- offloaded HAVING drops it.
+CREATE TABLE query_offload_numeric_avg (group_id integer, value numeric(15, 2)) USING iceberg;
+INSERT INTO query_offload_numeric_avg VALUES
+    (1, 1.00), (1, 2.00), (1, 2.00), (2, 3.00), (2, NULL), (3, NULL);
+EXPLAIN (COSTS OFF)
+SELECT group_id, avg(value) AS average
+FROM query_offload_numeric_avg
+GROUP BY group_id
+HAVING avg(value) > 1.666666
+ORDER BY group_id;
+
+SELECT group_id, avg(value) AS average
+FROM query_offload_numeric_avg
+GROUP BY group_id
+HAVING avg(value) > 1.666666
+ORDER BY group_id;
+
+DROP TABLE query_offload_numeric_avg;
+
 -- ============================================================================
 -- PARAM_EXTERN is bound when each query-offload execution begins.
 -- Separate prepared statements prevent a cached generic plan from crossing

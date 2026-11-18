@@ -13,8 +13,10 @@ use datafusion::logical_expr::expr_fn::cast;
 use datafusion::logical_expr::{Expr, ScalarUDF, lit};
 use pgrx::pg_sys;
 
-use crate::datafusion::{numeric_aggregate, postgres_string_agg, real_sum};
-use crate::plan::{AggCall, AggregateKind, SortDirection};
+use crate::datafusion::{postgres_string_agg, real_sum};
+use crate::plan::{
+    AggCall, AggregateKind, ExecutionExpr, FixedDecimalType, SortDirection,
+};
 
 use super::DataFusionPlanError;
 use super::expression::DataFusionExpressionCompiler;
@@ -53,8 +55,9 @@ impl DataFusionLogicalPlanCompiler<'_> {
             (AggregateKind::Max, Some(argument)) => max(argument),
             // Keep integer-input SUM/AVG on DataFusion's optimized native
             // AggregateExec path. SUM(int8) is widened to its exact decimal
-            // first because native Int64 SUM wraps; integer AVG inherits the
-            // Float64 precision documented by AggCall::supports_having_result.
+            // first because native Int64 SUM wraps; integer AVG returns
+            // Float64, an accepted difference recorded in
+            // docs/query-offload-semantics.md.
             (AggregateKind::Sum, Some(argument)) => {
                 match aggregate.int8_sum_decimal() {
                     Some(decimal) => sum(cast(
@@ -65,12 +68,22 @@ impl DataFusionLogicalPlanCompiler<'_> {
                 }
             }
             (AggregateKind::Average, Some(argument)) => avg(argument),
-            (AggregateKind::NumericSum, Some(argument)) => {
-                numeric_aggregate::sum().call(vec![argument])
-            }
-            (AggregateKind::NumericAverage, Some(argument)) => {
-                numeric_aggregate::avg().call(vec![argument])
-            }
+            // NUMERIC SUM/AVG also stay native: widening the input gives the
+            // planned result type and a wrapping accumulator that holds it.
+            (AggregateKind::NumericSum, Some(argument)) => sum(cast(
+                argument,
+                Self::native_decimal_input(
+                    aggregate,
+                    FixedDecimalType::native_sum_input,
+                )?,
+            )),
+            (AggregateKind::NumericAverage, Some(argument)) => avg(cast(
+                argument,
+                Self::native_decimal_input(
+                    aggregate,
+                    FixedDecimalType::native_average_input,
+                )?,
+            )),
             // Native variance/stddev coerces integer input to Float64 before
             // accumulation, then the output codec constructs the declared PG
             // NUMERIC result. Values beyond exact Float64 integer precision do
@@ -103,6 +116,18 @@ impl DataFusionLogicalPlanCompiler<'_> {
         Ok(expression.alias(DataFusionExpressionCompiler::output_name(
             aggregate.output(),
         )))
+    }
+
+    /// The widened operand type of a native NUMERIC aggregate.
+    fn native_decimal_input(
+        aggregate: &AggCall,
+        input: fn(FixedDecimalType) -> Option<DataType>,
+    ) -> Result<DataType, DataFusionPlanError> {
+        aggregate
+            .argument()
+            .and_then(ExecutionExpr::decimal_type)
+            .and_then(input)
+            .ok_or(DataFusionPlanError::UntypedDecimalOperand)
     }
 
     fn apply_aggregate_modifiers(

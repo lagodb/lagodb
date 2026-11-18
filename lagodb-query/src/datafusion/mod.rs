@@ -12,7 +12,6 @@ mod integer_abs;
 mod join_planning;
 mod memory;
 mod metrics;
-mod numeric_aggregate;
 mod parallel;
 mod physical_plan;
 mod postgres_eval;
@@ -25,8 +24,6 @@ mod table_scan;
 
 pub(in crate::datafusion) fn udaf_by_name(name: &str) -> Option<Arc<AggregateUDF>> {
     match name {
-        numeric_aggregate::SUM_NAME => Some(numeric_aggregate::sum()),
-        numeric_aggregate::AVG_NAME => Some(numeric_aggregate::avg()),
         postgres_string_agg::NAME => Some(postgres_string_agg::udaf()),
         _ => None,
     }

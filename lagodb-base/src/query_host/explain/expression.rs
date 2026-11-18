@@ -3,10 +3,10 @@
 use std::ffi::CStr;
 use std::fmt::{self, Write};
 
-use lagodb_core::expr::{ColumnRef, PgComparisonSignature};
+use lagodb_core::expr::{ColumnRef, PgComparisonSignature, RuntimeValueId};
 use lagodb_query::plan::{
     AggCall, AggregateArguments, AggregateKind, ComparisonKind, ExecutionExpr,
-    OutputId, PostgresExprVolatility, QueryNode, SortDirection,
+    FixedDecimalType, OutputId, PostgresExprVolatility, QueryNode, SortDirection,
 };
 use pgrx::pg_sys;
 
@@ -197,23 +197,39 @@ impl fmt::Display for ExpressionExplain<'_, '_, '_> {
                 write!(output, "Runtime Binding {}", value.index() + 1)
             }
             ExecutionExpr::Value(_) => output.write_str("runtime value"),
-            ExecutionExpr::DecimalValue { value, semantics }
-                if self.formatter.verbose =>
-            {
-                write!(
-                    output,
-                    "Runtime Binding {}::decimal({}, {})",
-                    value.index() + 1,
-                    semantics.precision(),
-                    semantics.scale()
-                )
-            }
-            ExecutionExpr::DecimalValue { semantics, .. } => write!(
+            ExecutionExpr::DecimalValue {
+                value,
+                decimal_type,
+            } => self.write_decimal_value(output, *value, *decimal_type),
+            ExecutionExpr::DecimalArithmetic {
+                operator,
+                left,
+                right,
+                ..
+            } => write!(
                 output,
-                "runtime value::decimal({}, {})",
-                semantics.precision(),
-                semantics.scale()
+                "({} {} {})",
+                nested(left),
+                operator.symbol(),
+                nested(right)
             ),
+            ExecutionExpr::IntegerToDecimal { value, result_type } => write!(
+                output,
+                "({})::decimal({}, {})",
+                nested(value),
+                result_type.precision(),
+                result_type.scale()
+            ),
+            ExecutionExpr::DecimalBoundComparison {
+                kind,
+                operand,
+                bound,
+                operand_type,
+            } => {
+                write!(output, "({} {} ", nested(operand), Self::symbol(*kind))?;
+                self.write_decimal_value(output, *bound, *operand_type)?;
+                output.write_char(')')
+            }
             ExecutionExpr::BpcharValue { value, semantics }
                 if self.formatter.verbose =>
             {
@@ -242,15 +258,13 @@ impl fmt::Display for ExpressionExplain<'_, '_, '_> {
                     .expect(
                         "validated comparison has a supported PostgreSQL operator",
                     );
-                let symbol = match signature.kind() {
-                    ComparisonKind::Equal => "=",
-                    ComparisonKind::NotEqual => "<>",
-                    ComparisonKind::Less => "<",
-                    ComparisonKind::LessEqual => "<=",
-                    ComparisonKind::Greater => ">",
-                    ComparisonKind::GreaterEqual => ">=",
-                };
-                write!(output, "({} {symbol} {})", nested(left), nested(right))
+                write!(
+                    output,
+                    "({} {} {})",
+                    nested(left),
+                    Self::symbol(signature.kind()),
+                    nested(right)
+                )
             }
             ExecutionExpr::IsNull(value) => {
                 write!(output, "({} IS NULL)", nested(value))
@@ -359,6 +373,36 @@ impl fmt::Display for ExpressionExplain<'_, '_, '_> {
 }
 
 impl ExpressionExplain<'_, '_, '_> {
+    const fn symbol(kind: ComparisonKind) -> &'static str {
+        match kind {
+            ComparisonKind::Equal => "=",
+            ComparisonKind::NotEqual => "<>",
+            ComparisonKind::Less => "<",
+            ComparisonKind::LessEqual => "<=",
+            ComparisonKind::Greater => ">",
+            ComparisonKind::GreaterEqual => ">=",
+        }
+    }
+
+    fn write_decimal_value(
+        &self,
+        output: &mut fmt::Formatter<'_>,
+        value: RuntimeValueId,
+        decimal_type: FixedDecimalType,
+    ) -> fmt::Result {
+        if self.formatter.verbose {
+            write!(output, "Runtime Binding {}", value.index() + 1)?;
+        } else {
+            output.write_str("runtime value")?;
+        }
+        write!(
+            output,
+            "::decimal({}, {})",
+            decimal_type.precision(),
+            decimal_type.scale()
+        )
+    }
+
     fn list(
         &self,
         output: &mut fmt::Formatter<'_>,

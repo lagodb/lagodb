@@ -17,7 +17,7 @@ use lagodb_core::expr::{
 };
 use lagodb_core::query_contract::ScanId;
 use lagodb_query::plan::{
-    Decimal128Semantics, ExecutionExpr, ExecutionScalarRepr, JoinKey, ScalarSemantics,
+    ExecutionExpr, ExecutionScalarRepr, FixedDecimalType, JoinKey, ScalarSemantics,
 };
 use pgrx::pg_sys;
 
@@ -115,6 +115,22 @@ impl QueryExpressionPlanner {
                     scope.scalar_domain(),
                 )
             };
+        }
+        // NUMERIC leaves keep the scalar path above; NUMERIC arithmetic,
+        // integer casts and conditionals execute in a fixed decimal type.
+        if unsafe { pg_sys::exprType(expression.cast()) } == pg_sys::NUMERICOID
+            && matches!(
+                unsafe { (*expression).type_ },
+                pg_sys::NodeTag::T_OpExpr
+                    | pg_sys::NodeTag::T_FuncExpr
+                    | pg_sys::NodeTag::T_CaseExpr
+                    | pg_sys::NodeTag::T_CoalesceExpr
+            )
+            && let Ok(decimal) = self.attempt(|planner| unsafe {
+                planner.lower_decimal_value(expression, scope)
+            })
+        {
+            return Ok(decimal);
         }
         if let Ok(native) = self.attempt(|planner| unsafe {
             planner.lower_native_shape(expression, scope, scope.scalar_domain())
@@ -388,7 +404,7 @@ impl QueryExpressionPlanner {
 
     /// Resolve the type used to select an exact predicate domain. PostgreSQL's
     /// declared type remains authoritative except when DataFusion preserves a
-    /// bounded Decimal128 representation that the aggregate result typmod lost.
+    /// fixed decimal representation that the aggregate result typmod lost.
     unsafe fn predicate_type(
         expression: *mut pg_sys::Expr,
         scope: ExpressionScope<'_>,
@@ -398,7 +414,7 @@ impl QueryExpressionPlanner {
             .outputs()
             .and_then(|catalog| unsafe { catalog.resolve_output(expression) })
             .and_then(|output| {
-                Decimal128Semantics::for_type(output.execution_type)
+                FixedDecimalType::for_type(output.execution_type)
                     .map(|_| output.execution_type)
             })
             .unwrap_or(declared_type)

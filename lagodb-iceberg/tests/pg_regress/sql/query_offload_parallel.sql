@@ -219,15 +219,18 @@ ORDER BY l.key;
 
 -- A pushed numeric comparison is bound into each planned task, so every
 -- worker decodes its decimal literal. All 33 files still qualify and keep
--- at least two work groups.
+-- at least two work groups. The 47-digit product is summed as Decimal256
+-- across the partial aggregates.
 SET lagodb.query_offload_mode = 'force';
 SELECT ln FROM pg_temp.explain_analyze_text($$
-SELECT key, count(*) FROM query_offload_parallel_left
+SELECT key, count(*), sum(amount * amount * amount) AS cubed
+FROM query_offload_parallel_left
 WHERE amount < 34 GROUP BY key ORDER BY key
 $$) AS ln
 WHERE ln ~ 'Execution Mode|Launched Workers';
 
-SELECT key, count(*) FROM query_offload_parallel_left
+SELECT key, count(*), sum(amount * amount * amount) AS cubed
+FROM query_offload_parallel_left
 WHERE amount < 34 GROUP BY key ORDER BY key;
 
 DROP TABLE query_offload_parallel_small;

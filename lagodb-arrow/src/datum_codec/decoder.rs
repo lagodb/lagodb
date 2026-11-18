@@ -3,6 +3,7 @@
 use std::rc::Rc;
 
 use arrow_array::RecordBatch;
+use arrow_schema::DataType;
 use lagodb_core::datum::ColumnDatumTarget;
 use lagodb_core::tuple::SlotDatumWriter;
 use pgrx::pg_sys;
@@ -11,7 +12,7 @@ use super::batch::{BoundBatch, BoundColumn};
 use super::reader::ScalarRead;
 use super::state::DatumReadState;
 use super::{BoundDatumPlan, DatumCodec};
-use crate::error::ArrowConversionResult;
+use crate::error::{ArrowConversionError, ArrowConversionResult};
 use crate::rule::CellRule;
 
 /// One mapped column: which Arrow batch column to read, its bound conversion
@@ -93,6 +94,37 @@ impl DecodedColumn {
             src_col,
             dest,
             target_oid,
+        })
+    }
+
+    /// Bind a Decimal256 engine result to a PostgreSQL `numeric` slot, keeping
+    /// the Arrow scale as the NUMERIC display scale.
+    ///
+    /// # Safety
+    /// `dest` belongs to the bound output layout and has type `numeric`; every
+    /// bound batch column has exactly `data_type`.
+    pub unsafe fn numeric_from_decimal256(
+        data_type: &DataType,
+        src_col: usize,
+        dest: usize,
+    ) -> ArrowConversionResult<Self> {
+        let &DataType::Decimal256(_, scale) = data_type else {
+            return Err(ArrowConversionError::InvariantViolated(
+                "Decimal256 numeric codec is bound to another Arrow type",
+            ));
+        };
+        let scale = u8::try_from(scale).map_err(|_| {
+            ArrowConversionError::InvariantViolated(
+                "Decimal256 numeric output has a negative scale",
+            )
+        })?;
+        Ok(Self {
+            source: DecoderSource::Physical {
+                read: ScalarRead::NumericFromDecimal256 { scale },
+            },
+            src_col,
+            dest,
+            target_oid: pg_sys::NUMERICOID,
         })
     }
 

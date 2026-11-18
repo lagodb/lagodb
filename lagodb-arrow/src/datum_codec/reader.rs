@@ -10,12 +10,12 @@
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{
-    Date32Type, Decimal128Type, Float32Type, Float64Type, Int16Type, Int32Type,
-    Int64Type, Time64MicrosecondType, TimestampMicrosecondType,
+    Date32Type, Decimal128Type, Decimal256Type, Float32Type, Float64Type, Int16Type,
+    Int32Type, Int64Type, Time64MicrosecondType, TimestampMicrosecondType,
     TimestampNanosecondType,
 };
 use arrow_array::{
-    Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array,
+    Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Decimal256Array,
     FixedSizeBinaryArray, Float32Array, Float64Array, Int16Array, Int32Array,
     Int64Array, LargeBinaryArray, LargeStringArray, StringArray,
     Time64MicrosecondArray, TimestampMicrosecondArray, TimestampNanosecondArray,
@@ -23,7 +23,7 @@ use arrow_array::{
 use arrow_schema::DataType;
 use lagodb_core::datum::{
     ArrayDatumLayout, BoundColumnDatumCodec, ByteaView, Cell, ColumnDatumTarget,
-    Decimal128NumericCodec, StringView,
+    Decimal128NumericCodec, PostgresNumericCodec, StringView,
 };
 use pgrx::pg_sys;
 
@@ -100,8 +100,12 @@ pub(crate) enum ScalarRead {
     },
     List(ListRead),
     PrevalidatedJsonText,
-    PostgresNumericVarlena,
     NumericFromFloat64,
+    /// A Decimal256 engine result; storage never produces Decimal256, so this
+    /// representation has no `CellRule`.
+    NumericFromDecimal256 {
+        scale: u8,
+    },
 }
 
 impl ScalarRead {
@@ -120,12 +124,6 @@ impl ScalarRead {
                 return Self::physical(
                     matches!(rule, CellRule::Utf8),
                     Self::PrevalidatedJsonText,
-                );
-            }
-            DatumCodecKind::PostgresNumericVarlena => {
-                return Self::physical(
-                    matches!(rule, CellRule::Binary),
-                    Self::PostgresNumericVarlena,
                 );
             }
             DatumCodecKind::NumericFromFloat64 => {
@@ -271,15 +269,13 @@ impl ScalarRead {
                 }
                 _ => R::PrevalidatedLargeJsonText(array.as_string::<i64>().clone()),
             },
-            Self::PostgresNumericVarlena => match array.data_type() {
-                DataType::Binary => {
-                    R::PostgresNumericVarlena(array.as_binary::<i32>().clone())
-                }
-                _ => R::PostgresLargeNumericVarlena(array.as_binary::<i64>().clone()),
-            },
             Self::NumericFromFloat64 => {
                 R::NumericFromFloat64(array.as_primitive::<Float64Type>().clone())
             }
+            Self::NumericFromDecimal256 { scale } => R::NumericFromDecimal256 {
+                arr: array.as_primitive::<Decimal256Type>().clone(),
+                scale: *scale,
+            },
         }
     }
 }
@@ -322,9 +318,11 @@ pub(crate) enum BoundDatumReader {
     List(Box<ListReader>),
     PrevalidatedJsonText(StringArray),
     PrevalidatedLargeJsonText(LargeStringArray),
-    PostgresNumericVarlena(BinaryArray),
-    PostgresLargeNumericVarlena(LargeBinaryArray),
     NumericFromFloat64(Float64Array),
+    NumericFromDecimal256 {
+        arr: Decimal256Array,
+        scale: u8,
+    },
 }
 
 impl BoundDatumReader {
@@ -438,18 +436,20 @@ impl BoundDatumReader {
                     DatumCodec::copy_prevalidated_json_text(value)
                 }?)
             }
-            Self::PostgresNumericVarlena(array) => present!(array, |value| unsafe {
-                DatumCodec::copy_postgres_numeric_varlena(value)
-            }),
-            Self::PostgresLargeNumericVarlena(array) => {
-                present!(array, |value| unsafe {
-                    DatumCodec::copy_postgres_numeric_varlena(value)
-                })
-            }
             Self::NumericFromFloat64(array) => {
                 present!(array, |value| DatumCodec::numeric_datum_from_float64(
                     value
                 )?)
+            }
+            // Like Decimal128, numeric_recv allocates in the destination
+            // context and PG errors retain their SQLSTATE at the FFI boundary.
+            Self::NumericFromDecimal256 { arr, scale } => {
+                present!(arr, |value| unsafe {
+                    PostgresNumericCodec::decode_i256_datum(
+                        value.to_be_bytes(),
+                        *scale,
+                    )
+                })
             }
         };
         Ok(Some(datum))

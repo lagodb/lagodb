@@ -169,6 +169,7 @@ impl DistinctPlanBuilder {
             runtime_exprs: self.expressions.take_runtime_exprs(),
             scan_target_exprs,
             scans,
+            postgres_projection_cost: PlannedQuery::NO_POSTGRES_PROJECTION,
         })
     }
 }

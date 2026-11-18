@@ -23,7 +23,8 @@ use lagodb_core::expr::{
 use lagodb_core::query_contract::OutputId;
 use pgrx::pg_sys;
 
-use super::semantics::Decimal128Semantics;
+use super::decimal::{DecimalOperator, FixedDecimalType};
+use super::semantics::{ComparisonKind, Decimal128Semantics};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaseWhen {
@@ -53,9 +54,36 @@ pub enum ExecutionExpr {
     StrictFalse(Box<ExecutionExpr>),
     Column(ColumnRef),
     Value(RuntimeValueId),
+    /// A constant NUMERIC bound exactly in its fixed decimal type: a
+    /// comparison operand's type, or an arithmetic constant's own digits and
+    /// display scale.
     DecimalValue {
         value: RuntimeValueId,
-        semantics: Decimal128Semantics,
+        decimal_type: FixedDecimalType,
+    },
+    /// PostgreSQL NUMERIC `+`, `-` or `*` over fixed decimal operands. The
+    /// PostgreSQL value type is unconstrained `numeric`; `result_type` is the
+    /// proven execution type.
+    DecimalArithmetic {
+        operator: DecimalOperator,
+        left: Box<ExecutionExpr>,
+        right: Box<ExecutionExpr>,
+        result_type: FixedDecimalType,
+    },
+    /// PostgreSQL's implicit `int2`/`int4`/`int8` to `numeric` cast.
+    IntegerToDecimal {
+        value: Box<ExecutionExpr>,
+        result_type: FixedDecimalType,
+    },
+    /// `operand <kind> bound`, where `bound` is a NUMERIC value set by an
+    /// InitPlan and known only at execution. Execution places the value in
+    /// `operand_type` with the rounding that preserves the comparison, or
+    /// folds the comparison when no operand value can equal or pass it.
+    DecimalBoundComparison {
+        kind: ComparisonKind,
+        operand: Box<ExecutionExpr>,
+        bound: RuntimeValueId,
+        operand_type: FixedDecimalType,
     },
     /// A constant `bpchar` padded at execution to the width of the
     /// `character(n)` column it is compared with.
@@ -108,18 +136,60 @@ pub enum ExecutionExpr {
 }
 
 impl ExecutionExpr {
-    /// Fixed Decimal128 representation carried directly by this expression.
-    /// Output references require plan-node facts and are resolved by validation.
-    pub fn decimal128_semantics(&self) -> Option<Decimal128Semantics> {
+    /// Fixed decimal execution type carried by this expression's structure.
+    /// Storage columns are Decimal128; Output references require plan-node
+    /// facts and are resolved by validation. CASE and COALESCE take
+    /// DataFusion's common type of their branches.
+    pub fn decimal_type(&self) -> Option<FixedDecimalType> {
         match self {
-            Self::Column(column) => Decimal128Semantics::for_type(column.value_type),
-            Self::DecimalValue { semantics, .. } => Some(*semantics),
+            Self::Column(column) => {
+                Decimal128Semantics::for_type(column.value_type).map(Into::into)
+            }
+            Self::DecimalValue { decimal_type, .. } => Some(*decimal_type),
+            Self::DecimalArithmetic { result_type, .. }
+            | Self::IntegerToDecimal { result_type, .. } => Some(*result_type),
             Self::Relabel { value, result_type } => {
-                let result = Decimal128Semantics::for_type(*result_type)?;
-                (value.decimal128_semantics() == Some(result)).then_some(result)
+                let result = FixedDecimalType::for_type(*result_type)?;
+                (value.decimal_type() == Some(result)).then_some(result)
+            }
+            Self::Case {
+                when_then,
+                else_expr,
+                result_type,
+            } if result_type.type_oid == pg_sys::NUMERICOID => Self::common_decimal(
+                when_then
+                    .iter()
+                    .map(CaseWhen::then)
+                    .chain(else_expr.as_deref()),
+            ),
+            Self::Function {
+                kind: ScalarFunctionKind::Coalesce,
+                arguments,
+                result_type,
+                ..
+            } if result_type.type_oid == pg_sys::NUMERICOID => {
+                Self::common_decimal(arguments.iter())
             }
             _ => None,
         }
+    }
+
+    /// Common fixed type of conditional branches, all of which must have one.
+    fn common_decimal<'a>(
+        mut branches: impl Iterator<Item = &'a ExecutionExpr>,
+    ) -> Option<FixedDecimalType> {
+        let first = branches.next()?.decimal_type()?;
+        branches.try_fold(first, |common, branch| {
+            common.common(branch.decimal_type()?)
+        })
+    }
+
+    /// The type that selects an aggregate's input semantics: the fixed
+    /// decimal execution type for NUMERIC, otherwise the PostgreSQL type.
+    pub fn execution_type_hint(&self) -> Option<ExprType> {
+        self.decimal_type()
+            .map(FixedDecimalType::value_type)
+            .or_else(|| self.result_type_hint())
     }
 
     /// PostgreSQL-style per-tuple operator units used by the central query
@@ -132,8 +202,13 @@ impl ExecutionExpr {
             | Self::DecimalValue { .. }
             | Self::BpcharValue { .. }
             | Self::Output(_) => 0,
-            Self::Comparison { left, right, .. } => {
+            Self::Comparison { left, right, .. }
+            | Self::DecimalArithmetic { left, right, .. } => {
                 1 + left.cost_units() + right.cost_units()
+            }
+            Self::IntegerToDecimal { value, .. }
+            | Self::DecimalBoundComparison { operand: value, .. } => {
+                1 + value.cost_units()
             }
             Self::IsNull(value)
             | Self::IsNotNull(value)
@@ -182,8 +257,18 @@ impl ExecutionExpr {
     pub fn result_type_hint(&self) -> Option<ExprType> {
         match self {
             Self::Column(column) => Some(column.value_type),
-            Self::DecimalValue { semantics, .. } => Some(semantics.value_type()),
+            Self::DecimalValue { decimal_type, .. } => {
+                Some(decimal_type.value_type())
+            }
+            Self::DecimalArithmetic { .. } | Self::IntegerToDecimal { .. } => {
+                Some(ExprType {
+                    type_oid: pg_sys::NUMERICOID,
+                    typmod: -1,
+                    collation: pg_sys::InvalidOid,
+                })
+            }
             Self::Comparison { .. }
+            | Self::DecimalBoundComparison { .. }
             | Self::IsNull(_)
             | Self::IsNotNull(_)
             | Self::IsNan(_)
@@ -214,8 +299,13 @@ impl ExecutionExpr {
 
     pub fn postgres_fallback_count(&self) -> usize {
         match self {
-            Self::Comparison { left, right, .. } => {
+            Self::Comparison { left, right, .. }
+            | Self::DecimalArithmetic { left, right, .. } => {
                 left.postgres_fallback_count() + right.postgres_fallback_count()
+            }
+            Self::IntegerToDecimal { value, .. }
+            | Self::DecimalBoundComparison { operand: value, .. } => {
+                value.postgres_fallback_count()
             }
             Self::IsNull(value)
             | Self::IsNotNull(value)

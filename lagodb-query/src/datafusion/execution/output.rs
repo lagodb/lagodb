@@ -39,13 +39,6 @@ impl QueryOutputDecoder {
             schema.fields().iter().zip(layout.slots()).enumerate()
         {
             let physical = match (slot.type_oid(), field.data_type()) {
-                (pg_sys::NUMERICOID, DataType::Binary) => {
-                    // SAFETY: only LagoDB's numeric UDAF emits this complete
-                    // detoasted PostgreSQL NUMERIC varlena.
-                    Some((CellRule::Binary, unsafe {
-                        DatumCodec::postgres_numeric_varlena()
-                    }))
-                }
                 (pg_sys::NUMERICOID, DataType::Float64) => {
                     Some((CellRule::F64, DatumCodec::numeric_from_float64()))
                 }
@@ -58,27 +51,39 @@ impl QueryOutputDecoder {
             // ExecutionScalarRepr excludes TextIo types from runtime literals
             // and PostgreSQL fallback evaluation; these cannot manufacture a
             // new TextIo payload from an arbitrary Arrow string.
-            let column = if let Some((rule, codec)) = physical {
-                unsafe {
-                    DecodedColumn::new(
-                        rule,
-                        position,
-                        position,
-                        slot.type_oid(),
-                        codec,
-                    )
-                }
-            } else {
-                // SAFETY: json/jsonb text obeys the validated, NUL-free
-                // forwarding contract above, including array/composite leaves.
-                let plan = unsafe {
-                    BoundDatumPlan::bind_with_prevalidated_json_text(
-                        field,
-                        PgType::new(slot.type_oid(), slot.typmod()),
-                    )
+            let column =
+                if let (pg_sys::NUMERICOID, data_type @ DataType::Decimal256(..)) =
+                    (slot.type_oid(), field.data_type())
+                {
+                    // SAFETY: the slot is NUMERIC and every batch has this
+                    // schema. Decimal256 is an engine result type only, chosen
+                    // where a planned NUMERIC value needs more than 38 digits.
+                    unsafe {
+                        DecodedColumn::numeric_from_decimal256(
+                            data_type, position, position,
+                        )
+                    }
+                } else if let Some((rule, codec)) = physical {
+                    unsafe {
+                        DecodedColumn::new(
+                            rule,
+                            position,
+                            position,
+                            slot.type_oid(),
+                            codec,
+                        )
+                    }
+                } else {
+                    // SAFETY: json/jsonb text obeys the validated, NUL-free
+                    // forwarding contract above, including array/composite leaves.
+                    let plan = unsafe {
+                        BoundDatumPlan::bind_with_prevalidated_json_text(
+                            field,
+                            PgType::new(slot.type_oid(), slot.typmod()),
+                        )
+                    }?;
+                    unsafe { DecodedColumn::bind(plan, position, position) }
                 }?;
-                unsafe { DecodedColumn::bind(plan, position, position) }
-            }?;
             columns.push(column);
             nullable.push(slot.nullable());
         }

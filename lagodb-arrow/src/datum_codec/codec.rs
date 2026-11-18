@@ -6,7 +6,6 @@
 //! from silently selecting a representation.
 
 use std::ffi::c_char;
-use std::ptr;
 
 use lagodb_core::datum::{BoundColumnDatumCodec, ColumnDatumTarget};
 use pgrx::{AnyNumeric, IntoDatum, pg_sys};
@@ -23,7 +22,6 @@ pub struct DatumCodec {
 pub(super) enum DatumCodecKind {
     Standard(BoundColumnDatumCodec),
     PrevalidatedJsonText,
-    PostgresNumericVarlena,
     NumericFromFloat64,
 }
 
@@ -52,19 +50,6 @@ impl DatumCodec {
         }
     }
 
-    /// Bind complete PostgreSQL NUMERIC internal-varlena bytes produced by a
-    /// trusted engine finalizer.
-    ///
-    /// # Safety
-    ///
-    /// Every value must be a complete, detoasted PostgreSQL NUMERIC varlena.
-    /// Bind it only to a `numeric` target through `DecodedColumn::new`.
-    pub unsafe fn postgres_numeric_varlena() -> Self {
-        Self {
-            kind: DatumCodecKind::PostgresNumericVarlena,
-        }
-    }
-
     /// Bind a native Float64 aggregate result to PostgreSQL NUMERIC.
     pub const fn numeric_from_float64() -> Self {
         Self {
@@ -79,8 +64,7 @@ impl DatumCodec {
         let valid = match self.kind {
             DatumCodecKind::Standard(target) => target.oid() == target_oid,
             DatumCodecKind::PrevalidatedJsonText => target_oid == pg_sys::JSONOID,
-            DatumCodecKind::PostgresNumericVarlena
-            | DatumCodecKind::NumericFromFloat64 => target_oid == pg_sys::NUMERICOID,
+            DatumCodecKind::NumericFromFloat64 => target_oid == pg_sys::NUMERICOID,
         };
         if valid {
             Ok(())
@@ -112,26 +96,6 @@ impl DatumCodec {
             pg_sys::cstring_to_text_with_len(text.as_ptr() as *const c_char, len)
         };
         Ok(pg_sys::Datum::from(text_ptr))
-    }
-
-    /// Copy trusted complete PostgreSQL NUMERIC varlena bytes into the current
-    /// destination memory context.
-    ///
-    /// # Safety
-    ///
-    /// `bytes` must be a complete, detoasted NUMERIC varlena, and PostgreSQL
-    /// must be running with the destination memory context selected.
-    pub(super) unsafe fn copy_postgres_numeric_varlena(
-        bytes: &[u8],
-    ) -> pg_sys::Datum {
-        let len = bytes.len();
-        // SAFETY: `bytes` contains `len` initialized bytes and `palloc`
-        // returns a live allocation in the current PostgreSQL memory context.
-        unsafe {
-            let new_ptr = pg_sys::palloc(len);
-            ptr::copy_nonoverlapping(bytes.as_ptr(), new_ptr.cast(), len);
-            pg_sys::Datum::from(new_ptr)
-        }
     }
 
     pub(super) fn numeric_datum_from_float64(

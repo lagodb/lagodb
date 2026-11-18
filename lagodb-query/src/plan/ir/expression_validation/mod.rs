@@ -1,5 +1,7 @@
 //! One-time expression and output validation for decoded query plans.
 
+mod decimal;
+
 use std::mem;
 
 use lagodb_core::expr::{
@@ -9,8 +11,8 @@ use lagodb_core::expr::{
 use pgrx::pg_sys;
 
 use super::{
-    Decimal128Semantics, ExecutionExpr, ExecutionScalarRepr, QueryNode,
-    QueryPlanError, ScalarSemantics,
+    CaseWhen, Decimal128Semantics, ExecutionExpr, ExecutionScalarRepr,
+    FixedDecimalType, QueryNode, QueryPlanError, ScalarFunctionKind, ScalarSemantics,
 };
 
 struct NodeFacts {
@@ -28,10 +30,10 @@ struct OutputFact {
 
 impl OutputFact {
     /// HAVING normally follows PostgreSQL's declared aggregate type. Decimal
-    /// MIN/MAX and SUM(int8) are the exceptions: PostgreSQL erases their
-    /// typmod, while DataFusion emits a bounded Decimal128 representation.
+    /// MIN/MAX, SUM and AVG(numeric) are the exceptions: PostgreSQL erases
+    /// their typmod, while DataFusion emits a fixed decimal representation.
     fn predicate_type(self) -> ExprType {
-        if Decimal128Semantics::for_type(self.execution_type).is_some() {
+        if FixedDecimalType::for_type(self.execution_type).is_some() {
             self.execution_type
         } else {
             self.value_type
@@ -111,7 +113,9 @@ impl<'a> PlanExpressionValidator<'a> {
                 for aggregate in aggregate.aggregates() {
                     let argument_type = aggregate
                         .argument()
-                        .map(|argument| self.expression_type(argument, &input, false))
+                        .map(|argument| {
+                            self.aggregate_argument_type(argument, &input)
+                        })
                         .transpose()?;
                     aggregate.validate_argument_type(argument_type)?;
                     for order in aggregate.order_by() {
@@ -124,7 +128,7 @@ impl<'a> PlanExpressionValidator<'a> {
                     outputs[aggregate.output().index()] = Some(OutputFact {
                         value_type: aggregate.result_type(),
                         execution_type: aggregate.execution_result_type(),
-                        supports_having: aggregate.supports_having_result(),
+                        supports_having: true,
                         nullable: aggregate.nullable(),
                     });
                 }
@@ -337,7 +341,10 @@ impl<'a> PlanExpressionValidator<'a> {
                     .ok_or(QueryPlanError::UnsupportedRuntimeValueType)?;
                 Ok(value_type)
             }
-            ExecutionExpr::DecimalValue { value, semantics } => {
+            ExecutionExpr::DecimalValue {
+                value,
+                decimal_type,
+            } => {
                 let spec = self
                     .runtime_values
                     .values()
@@ -349,8 +356,39 @@ impl<'a> PlanExpressionValidator<'a> {
                 {
                     return Err(QueryPlanError::UnsupportedRuntimeValueType);
                 }
-                Ok(semantics.value_type())
+                Ok(decimal_type.value_type())
             }
+            ExecutionExpr::DecimalArithmetic {
+                operator,
+                left,
+                right,
+                result_type,
+            } => self.validate_decimal_arithmetic(
+                *operator,
+                [left, right],
+                *result_type,
+                facts,
+                allow_outputs,
+            ),
+            ExecutionExpr::IntegerToDecimal { value, result_type } => self
+                .validate_integer_to_decimal(
+                    value,
+                    *result_type,
+                    facts,
+                    allow_outputs,
+                ),
+            ExecutionExpr::DecimalBoundComparison {
+                operand,
+                bound,
+                operand_type,
+                ..
+            } => self.validate_decimal_bound_comparison(
+                operand,
+                *bound,
+                *operand_type,
+                facts,
+                allow_outputs,
+            ),
             ExecutionExpr::BpcharValue { value, semantics } => {
                 let spec = self
                     .runtime_values
@@ -411,13 +449,11 @@ impl<'a> PlanExpressionValidator<'a> {
                     .ok_or(QueryPlanError::UnsupportedPredicate)?;
                 if let Some((_, decimal)) =
                     semantics.decimal_comparison(*operator, left, right)
-                    && (!Self::has_decimal128_representation(
-                        left_expression,
-                        decimal,
-                    ) || !Self::has_decimal128_representation(
-                        right_expression,
-                        decimal,
-                    ))
+                    && (!Self::has_decimal_representation(left_expression, decimal)
+                        || !Self::has_decimal_representation(
+                            right_expression,
+                            decimal,
+                        ))
                 {
                     return Err(QueryPlanError::UnsupportedPredicate);
                 }
@@ -519,6 +555,22 @@ impl<'a> PlanExpressionValidator<'a> {
                 if when_then.is_empty() || result_type.type_oid == pg_sys::JSONBOID {
                     return Err(QueryPlanError::UnsupportedPredicate);
                 }
+                if let Some(common) = expression.decimal_type() {
+                    for branch in when_then {
+                        self.validate_boolean(branch.when(), facts, allow_outputs)?;
+                    }
+                    self.validate_decimal_branches(
+                        when_then
+                            .iter()
+                            .map(CaseWhen::then)
+                            .chain(else_expr.as_deref()),
+                        common,
+                        *result_type,
+                        facts,
+                        allow_outputs,
+                    )?;
+                    return Ok(*result_type);
+                }
                 for branch in when_then {
                     self.validate_boolean(branch.when(), facts, allow_outputs)?;
                     if self.expression_type(branch.then(), facts, allow_outputs)?
@@ -550,9 +602,10 @@ impl<'a> PlanExpressionValidator<'a> {
                 if !ScalarSemantics::Exact.supports_type(value_type) {
                     return Err(QueryPlanError::UnsupportedPredicate);
                 }
-                let decimal = Decimal128Semantics::for_type(value_type);
+                let decimal = Decimal128Semantics::for_type(value_type)
+                    .map(FixedDecimalType::from);
                 if decimal.is_some_and(|decimal| {
-                    !Self::has_decimal128_representation(value, decimal)
+                    !Self::has_decimal_representation(value, decimal)
                 }) {
                     return Err(QueryPlanError::UnsupportedPredicate);
                 }
@@ -567,7 +620,7 @@ impl<'a> PlanExpressionValidator<'a> {
                         return Err(QueryPlanError::TupleLayoutTypeMismatch);
                     }
                     if decimal.is_some_and(|decimal| {
-                        !Self::has_decimal128_representation(item, decimal)
+                        !Self::has_decimal_representation(item, decimal)
                     }) {
                         return Err(QueryPlanError::UnsupportedPredicate);
                     }
@@ -580,6 +633,18 @@ impl<'a> PlanExpressionValidator<'a> {
                 input_collation,
                 result_type,
             } => {
+                if *kind == ScalarFunctionKind::Coalesce
+                    && let Some(common) = expression.decimal_type()
+                {
+                    self.validate_decimal_branches(
+                        arguments.iter(),
+                        common,
+                        *result_type,
+                        facts,
+                        allow_outputs,
+                    )?;
+                    return Ok(*result_type);
+                }
                 let mut argument_types = Vec::with_capacity(arguments.len());
                 for argument in arguments {
                     argument_types.push(self.expression_type(
@@ -698,13 +763,5 @@ impl<'a> PlanExpressionValidator<'a> {
         } else {
             Err(QueryPlanError::UnsupportedPredicate)
         }
-    }
-
-    fn has_decimal128_representation(
-        expression: &ExecutionExpr,
-        semantics: Decimal128Semantics,
-    ) -> bool {
-        matches!(expression, ExecutionExpr::Output(_))
-            || expression.decimal128_semantics() == Some(semantics)
     }
 }

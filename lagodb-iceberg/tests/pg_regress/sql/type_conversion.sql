@@ -231,6 +231,14 @@ INSERT INTO iceberg_numeric_negscale VALUES
 
 SELECT * FROM iceberg_numeric_negscale ORDER BY id;
 
+-- Query offload computes over the normalized decimal(5, 0) type.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT sum(n_neg * 2) AS doubled FROM iceberg_numeric_negscale;
+
+SELECT sum(n_neg * 2) AS doubled FROM iceberg_numeric_negscale;
+RESET lagodb.query_offload_mode;
+
 DROP TABLE iceberg_numeric_negscale;
 
 -- ============================================================================

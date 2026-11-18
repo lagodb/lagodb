@@ -3,7 +3,9 @@
 use lagodb_core::expr::ExprType;
 use pgrx::pg_sys;
 
-use super::super::{Decimal128Semantics, QueryPlanError, ScalarSemantics};
+use super::super::{
+    Decimal128Semantics, FixedDecimalType, QueryPlanError, ScalarSemantics,
+};
 use super::{AggCall, AggregateArguments, AggregateKind};
 
 impl AggregateKind {
@@ -256,8 +258,20 @@ impl AggCall {
                 argument_type == Some(exact(pg_sys::FLOAT8OID))
                     && self.result_type() == exact(pg_sys::FLOAT8OID)
             }
-            pg_sys::F_SUM_NUMERIC | pg_sys::F_AVG_NUMERIC => {
-                argument_type.is_some_and(Self::bounded_numeric_input)
+            // The argument type is the fixed execution type, so arithmetic
+            // over bounded columns is admitted; the sum type must exist.
+            pg_sys::F_SUM_NUMERIC => {
+                argument_type
+                    .and_then(FixedDecimalType::for_type)
+                    .and_then(FixedDecimalType::sum)
+                    .is_some()
+                    && self.result_type() == exact(pg_sys::NUMERICOID)
+            }
+            pg_sys::F_AVG_NUMERIC => {
+                argument_type
+                    .and_then(FixedDecimalType::for_type)
+                    .and_then(FixedDecimalType::average)
+                    .is_some()
                     && self.result_type() == exact(pg_sys::NUMERICOID)
             }
             pg_sys::F_MIN_FLOAT4 | pg_sys::F_MAX_FLOAT4 => {
@@ -461,10 +475,12 @@ impl AggCall {
         ) && value_type.collation != pg_sys::InvalidOid
     }
 
-    /// Current scan providers expose PostgreSQL NUMERIC as Iceberg's fixed
-    /// Decimal128 domain. A declared typmod proves the coefficient and scale
-    /// bounds used by the fixed i256 aggregate state; unbounded NUMERIC remains
-    /// outside the source ABI and must decline at the semantic gate.
+    /// A NUMERIC input whose normalized typmod fits Decimal128, so the engine
+    /// value has one fixed Decimal128 type: MIN/MAX return it unchanged and
+    /// DISTINCT keys compare its coefficients. NUMERIC without a typmod, or
+    /// wider than 38 digits, declines here. SUM/AVG check their own widened
+    /// result types instead ([`FixedDecimalType::sum`],
+    /// [`FixedDecimalType::average`]).
     fn bounded_numeric_input(value_type: ExprType) -> bool {
         Decimal128Semantics::for_type(value_type).is_some()
     }

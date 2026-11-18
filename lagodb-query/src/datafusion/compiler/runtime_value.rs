@@ -4,11 +4,10 @@ use datafusion::common::ScalarValue;
 use lagodb_arrow::PgDatumArrayBuilder;
 use lagodb_core::expr::{
     PgBpcharSemantics, PgBpcharValue, RuntimeValue, RuntimeValueId,
-    RuntimeValueSource,
 };
 use pgrx::{AnyNumeric, FromDatum, pg_sys};
 
-use crate::plan::{Decimal128Semantics, ExecutionScalarRepr, LimitNode};
+use crate::plan::{ExecutionScalarRepr, LimitNode};
 
 use super::DataFusionPlanError;
 use super::expression::DataFusionExpressionCompiler;
@@ -58,37 +57,6 @@ impl DataFusionExpressionCompiler<'_> {
                         .map_err(|_| invalid())
                 })
         }
-    }
-
-    pub(super) fn decimal_runtime_value(
-        value: RuntimeValue,
-        semantics: Decimal128Semantics,
-    ) -> Result<ScalarValue, DataFusionPlanError> {
-        let metadata = value.metadata();
-        let oid = metadata.value_type.type_oid;
-        let invalid = || DataFusionPlanError::InvalidRuntimeValue { oid };
-        if oid != pg_sys::NUMERICOID
-            || metadata.source_kind != RuntimeValueSource::Constant
-        {
-            return Err(invalid());
-        }
-        if value.is_null() {
-            return Ok(ScalarValue::Decimal128(
-                None,
-                semantics.precision(),
-                semantics.scale(),
-            ));
-        }
-        let codec = semantics.codec();
-        // SAFETY: RuntimeValueState evaluated this NUMERIC expression in the
-        // current executor context and retains the datum for plan compilation.
-        let coefficient = unsafe { codec.encode_bound_datum(value.datum()) }
-            .map_err(|_| invalid())?;
-        Ok(ScalarValue::Decimal128(
-            Some(coefficient),
-            semantics.precision(),
-            semantics.scale(),
-        ))
     }
 
     /// Pad a validated constant to its `character(n)` column width, as the

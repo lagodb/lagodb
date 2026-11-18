@@ -1,6 +1,7 @@
 //! Compilation of validated query semantics into DataFusion plans.
 
 mod aggregate;
+mod decimal;
 mod expression;
 mod logical;
 mod plan;
@@ -41,4 +42,6 @@ pub(super) enum DataFusionPlanError {
     InvalidStringAggDelimiter,
     #[error("PostgreSQL expression fallback has an unsupported type contract")]
     UnsupportedPostgresExpression,
+    #[error("NUMERIC expression operand has no fixed decimal execution type")]
+    UntypedDecimalOperand,
 }

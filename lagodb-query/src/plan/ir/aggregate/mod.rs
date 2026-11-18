@@ -12,7 +12,8 @@ mod semantics;
 use super::ordering::{OrderingSemantics, SortDirection};
 use super::semantics::ScalarSemantics;
 use super::{
-    Decimal128Semantics, ExecutionExpr, QueryNode, QueryPlanError, RowEstimate,
+    Decimal128Semantics, ExecutionExpr, FixedDecimalType, QueryNode, QueryPlanError,
+    RowEstimate,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -180,7 +181,7 @@ impl AggCall {
     }
 
     fn scalar_type(value: &ExecutionExpr) -> Option<ExprType> {
-        value.result_type_hint()
+        value.execution_type_hint()
     }
 
     #[inline]
@@ -242,11 +243,17 @@ impl AggCall {
     }
 
     /// Physical type emitted by DataFusion before the PostgreSQL output codec.
-    /// Decimal MIN/MAX preserve their input Decimal128 metadata, and SUM(int8)
-    /// emits its accumulation decimal, even though PostgreSQL's Aggref result
-    /// typmod is -1.
+    /// Decimal MIN/MAX preserve their input decimal type, and SUM(int8),
+    /// SUM(numeric) and AVG(numeric) emit their fixed decimal result, even
+    /// though PostgreSQL's Aggref result typmod is -1.
     pub fn execution_result_type(&self) -> ExprType {
         if let Some(decimal) = self.int8_sum_decimal() {
+            return decimal.value_type();
+        }
+        if let Some(decimal) = self
+            .numeric_sum_type()
+            .or_else(|| self.numeric_average_type())
+        {
             return decimal.value_type();
         }
         if matches!(self.kind, AggregateKind::Min | AggregateKind::Max)
@@ -254,10 +261,32 @@ impl AggCall {
         {
             return self
                 .argument()
-                .and_then(ExecutionExpr::result_type_hint)
+                .and_then(ExecutionExpr::execution_type_hint)
                 .unwrap_or(self.result_type);
         }
         self.result_type
+    }
+
+    /// Result type of SUM(numeric): the narrowest fixed decimal holding a sum
+    /// of up to `u64::MAX` input values. DataFusion's native SUM computes it
+    /// in that type's width ([`FixedDecimalType::native_sum_input`]), so its
+    /// wrapping accumulator cannot wrap.
+    pub fn numeric_sum_type(&self) -> Option<FixedDecimalType> {
+        if self.kind != AggregateKind::NumericSum {
+            return None;
+        }
+        self.argument()?.decimal_type()?.sum()
+    }
+
+    /// Result type of AVG(numeric): DataFusion's native AVG result for its
+    /// widened input ([`FixedDecimalType::average`]). Its scale is the input
+    /// scale plus 4 and the division truncates, unlike PostgreSQL's
+    /// value-dependent, rounded division scale.
+    pub fn numeric_average_type(&self) -> Option<FixedDecimalType> {
+        if self.kind != AggregateKind::NumericAverage {
+            return None;
+        }
+        self.argument()?.decimal_type()?.average()
     }
 
     /// Exact accumulation decimal for SUM(int8), whose PostgreSQL result is
@@ -280,22 +309,6 @@ impl AggCall {
     #[inline]
     pub const fn nullable(&self) -> bool {
         !matches!(self.kind, AggregateKind::Count)
-    }
-
-    /// Whether the aggregate's physical result can participate in HAVING.
-    ///
-    /// Integer AVG deliberately uses DataFusion's native Float64 result even
-    /// though PostgreSQL declares NUMERIC, inheriting Float64 rounding instead
-    /// of PostgreSQL's arbitrary-precision transition semantics. SUM(int8) and
-    /// Decimal MIN/MAX emit bounded Decimal128 results and use the native exact
-    /// comparison path. NUMERIC-input SUM/AVG keep LagoDB's exact Binary result
-    /// and remain unavailable to HAVING.
-    #[inline]
-    pub const fn supports_having_result(&self) -> bool {
-        !matches!(
-            self.kind,
-            AggregateKind::NumericSum | AggregateKind::NumericAverage
-        )
     }
 }
 

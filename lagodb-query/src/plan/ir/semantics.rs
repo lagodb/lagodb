@@ -10,6 +10,8 @@ use pgrx::pg_sys;
 pub use lagodb_core::datum::Decimal128Semantics;
 pub use lagodb_core::expr::PgComparisonKind as ComparisonKind;
 
+use super::FixedDecimalType;
+
 /// Query-layer scalar domains with distinct representation guarantees.
 ///
 /// Provider pruning keeps its separate, smaller IR. Exact query execution may
@@ -88,40 +90,51 @@ impl ScalarSemantics {
         }
     }
 
-    /// Resolve a PostgreSQL NUMERIC comparison to the single fixed Decimal128
+    /// Resolve a PostgreSQL NUMERIC comparison to the single fixed decimal
     /// representation used by both operands. One unbounded-typmod operand is
     /// admitted here only so the planner can prove that it is a direct Const
-    /// exactly encodable in the bounded operand's representation.
+    /// exactly encodable in the bounded operand's representation. A bounded
+    /// type wider than Decimal128 is an aggregate's execution type; storage
+    /// columns remain limited to Decimal128 by their own type support.
     pub fn decimal_comparison(
         self,
         operator: PgComparisonOp,
         left: ExprType,
         right: ExprType,
-    ) -> Option<(ComparisonKind, Decimal128Semantics)> {
-        if matches!(self, Self::Integer)
-            || left.type_oid != pg_sys::NUMERICOID
+    ) -> Option<(ComparisonKind, FixedDecimalType)> {
+        if left.type_oid != pg_sys::NUMERICOID
             || right.type_oid != pg_sys::NUMERICOID
             || left.collation != pg_sys::InvalidOid
             || right.collation != pg_sys::InvalidOid
+        {
+            return None;
+        }
+        let kind = self.numeric_comparison(operator)?;
+        let left = FixedDecimalType::for_type(left);
+        let right = FixedDecimalType::for_type(right);
+        let decimal = match (left, right) {
+            (Some(left), Some(right)) if left == right => left,
+            (Some(decimal), None) | (None, Some(decimal)) => decimal,
+            _ => return None,
+        };
+        Some((kind, decimal))
+    }
+
+    /// The comparison a built-in `numeric` operator performs in this domain.
+    pub fn numeric_comparison(
+        self,
+        operator: PgComparisonOp,
+    ) -> Option<ComparisonKind> {
+        if matches!(self, Self::Integer)
             || operator.opcollid != pg_sys::InvalidOid
             || operator.inputcollid != pg_sys::InvalidOid
         {
             return None;
         }
         let signature = operator.builtin_signature()?;
-        if signature.left_type() != pg_sys::NUMERICOID
-            || signature.right_type() != pg_sys::NUMERICOID
-        {
-            return None;
-        }
-        let left = Decimal128Semantics::for_type(left);
-        let right = Decimal128Semantics::for_type(right);
-        let decimal = match (left, right) {
-            (Some(left), Some(right)) if left == right => left,
-            (Some(decimal), None) | (None, Some(decimal)) => decimal,
-            _ => return None,
-        };
-        Some((signature.kind(), decimal))
+        (signature.left_type() == pg_sys::NUMERICOID
+            && signature.right_type() == pg_sys::NUMERICOID)
+            .then(|| signature.kind())
     }
 
     /// Resolve a `bpchar` comparison between a `character(n)` column and a

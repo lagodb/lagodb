@@ -1,7 +1,7 @@
 //! One numeric policy shared by managed DDL and storage schema construction.
 
 use iceberg_lite::spec::PrimitiveType;
-use lagodb_core::datum::numeric_precision_scale;
+use lagodb_core::datum::NumericScaledDomain;
 
 pub(crate) struct ManagedNumeric {
     decimal: Option<(u32, u32)>,
@@ -9,14 +9,11 @@ pub(crate) struct ManagedNumeric {
 
 impl ManagedNumeric {
     pub(crate) fn new(typmod: i32) -> Self {
-        let decimal = numeric_precision_scale(typmod).and_then(|value| {
-            let (precision, scale) = if value.scale < 0 {
-                (value.precision + value.scale.unsigned_abs(), 0)
-            } else {
-                (value.precision.max(value.scale as u32), value.scale as u32)
-            };
-            (precision <= 38 && scale <= 38).then_some((precision, scale))
-        });
+        // Iceberg decimals hold at most 38 digits; wider NUMERIC is stored
+        // as double.
+        let decimal = NumericScaledDomain::for_typmod(typmod)
+            .filter(|domain| domain.precision() <= 38)
+            .map(|domain| (u32::from(domain.precision()), u32::from(domain.scale())));
         Self { decimal }
     }
 

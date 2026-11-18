@@ -4,12 +4,14 @@
 mod coefficient;
 mod comparison;
 mod read;
+mod scaled;
 
 use pgrx::pg_sys;
 use pgrx::{AnyNumeric, IntoDatum, varlena_to_byte_slice};
 
 pub use coefficient::PostgresNumericCodec;
 pub use comparison::Decimal128ComparisonValue;
+pub use scaled::{NumericRounding, NumericScaledDomain, NumericScaledValue};
 
 unsafe extern "C-unwind" {
     #[link_name = "numeric_send"]
@@ -70,6 +72,9 @@ const MAX_NDIGITS: usize = MAX_DEC_DIGITS / DEC_DIGITS as usize + 1;
 /// and protocol format and are stable across supported PostgreSQL versions.
 const NUMERIC_POS: u16 = 0x0000;
 const NUMERIC_NEG: u16 = 0x4000;
+const NUMERIC_NAN: u16 = 0xC000;
+const NUMERIC_PINF: u16 = 0xD000;
+const NUMERIC_NINF: u16 = 0xF000;
 
 /// Maximum `dscale` accepted by `numeric_recv` (`numeric.c`: NUMERIC_DSCALE_MASK).
 const NUMERIC_DSCALE_MASK: u16 = 0x3FFF;

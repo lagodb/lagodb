@@ -990,5 +990,25 @@ RESET max_parallel_workers_per_gather;
 RESET lagodb.customscan_mode;
 RESET lagodb.query_offload_mode;
 
+-- Query offload places a NUMERIC InitPlan result in the compared
+-- expression's decimal(32, 4) type when execution begins. For > the bound
+-- 2/3 rounds down to 0.6666, so 0.59 * 1.13 = 0.6667 still qualifies.
+CREATE TABLE customscan_numeric_initplan (
+    price numeric(15, 2),
+    discount numeric(15, 2)
+) USING iceberg;
+INSERT INTO customscan_numeric_initplan VALUES
+    (0.59, -0.13), (1.01, 0.34), (3.00, 0.00);
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM customscan_numeric_initplan
+WHERE price * (1 - discount)
+    > (SELECT max(value) FROM (VALUES (2::numeric / 3)) AS input(value));
+SELECT count(*) FROM customscan_numeric_initplan
+WHERE price * (1 - discount)
+    > (SELECT max(value) FROM (VALUES (2::numeric / 3)) AS input(value));
+RESET lagodb.query_offload_mode;
+DROP TABLE customscan_numeric_initplan;
+
 DROP TABLE customscan_null_param_lake;
 DROP TABLE customscan_null_param_outer;

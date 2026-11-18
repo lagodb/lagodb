@@ -1,27 +1,18 @@
-//! Fixed-width aggregate coefficient to PostgreSQL NUMERIC materialization.
+//! Fixed-width Decimal256 coefficient to PostgreSQL NUMERIC materialization.
 
-use std::panic::AssertUnwindSafe;
+use pgrx::pg_sys;
 
-use pgrx::prelude::PgSqlErrorCode;
-use pgrx::{AnyNumeric, PgTryBuilder, pg_sys};
-
-use crate::diag::PgReportError;
-
-use super::super::varlena::DetoastedVarlena;
-use super::{
-    NUMERIC_DSCALE_MASK, NUMERIC_NEG, NUMERIC_POS, receive_numeric_wire,
-    receive_numeric_wire_datum,
-};
+use super::{NUMERIC_NEG, NUMERIC_POS, receive_numeric_wire_datum};
 
 const DECIMAL_DIGITS_PER_GROUP: i32 = 4;
 const NUMERIC_BASE: u64 = 10_000;
-const I256_BYTES: usize = 32;
+pub(super) const I256_BYTES: usize = 32;
 const I256_LIMBS: usize = 4;
 const I256_DECIMAL_DIGITS: usize = 77;
 const I256_NUMERIC_DIGITS: usize = I256_DECIMAL_DIGITS / 4 + 1;
 const I256_WIRE_BYTES: usize = 8 + I256_NUMERIC_DIGITS * 2;
 
-/// Binary materializer for exact aggregate coefficients.
+/// Binary materializer for Decimal256 engine results.
 ///
 /// The input is Arrow `i256`'s signed big-endian two's-complement byte form.
 /// Keeping that representation at the API boundary avoids coupling
@@ -30,65 +21,25 @@ const I256_WIRE_BYTES: usize = 8 + I256_NUMERIC_DIGITS * 2;
 pub struct PostgresNumericCodec;
 
 impl PostgresNumericCodec {
-    pub fn numeric_from_i256_be_bytes(
+    /// Decode one Decimal256 coefficient directly into the current memory
+    /// context, retaining `scale` as the PostgreSQL display scale.
+    ///
+    /// # Safety
+    /// Must run on a PostgreSQL backend thread with the destination context
+    /// selected. PostgreSQL errors are raised to the caller's FFI boundary, as
+    /// for [`Decimal128NumericCodec::decode_datum`](super::Decimal128NumericCodec::decode_datum).
+    pub unsafe fn decode_i256_datum(
         coefficient: [u8; I256_BYTES],
-        scale: u32,
-    ) -> Result<AnyNumeric, PgReportError> {
-        let mut wire = Self::wire(coefficient, scale)?;
-        let len = wire.len;
-        PgTryBuilder::new(AssertUnwindSafe(move || {
-            // SAFETY: NumericWire constructs one complete numeric_recv external
-            // value in stack storage and this runs during backend execution.
-            Ok(unsafe { receive_numeric_wire(&mut wire.bytes[..len], -1) })
-        }))
-        .catch_others(|error| Err(PgReportError::from_caught(error)))
-        .execute()
-    }
-
-    /// Materialize a SUM result directly into the owned varlena bytes expected
-    /// by the DataFusion Binary output, avoiding the intermediate AnyNumeric
-    /// copy and a second PostgreSQL allocation.
-    pub fn varlena_from_i256_be_bytes(
-        coefficient: [u8; I256_BYTES],
-        scale: u32,
-    ) -> Result<Vec<u8>, PgReportError> {
-        let mut wire = Self::wire(coefficient, scale)?;
-        let len = wire.len;
-        PgTryBuilder::new(AssertUnwindSafe(move || {
-            // SAFETY: the wire is complete stack-owned numeric_recv input.
-            let datum =
-                unsafe { receive_numeric_wire_datum(&mut wire.bytes[..len], -1) };
-            let bytes = {
-                // SAFETY: numeric_recv returned a live PostgreSQL varlena datum.
-                let numeric = unsafe { DetoastedVarlena::from_datum(datum) };
-                numeric.full_varlena_bytes().to_vec()
-            };
-            // SAFETY: the datum is copied into owned bytes and remains allocated
-            // by PostgreSQL until this matching release.
-            unsafe { pg_sys::pfree(datum.cast_mut_ptr()) };
-            Ok(bytes)
-        }))
-        .catch_others(|error| Err(PgReportError::from_caught(error)))
-        .execute()
-    }
-
-    fn wire(
-        coefficient: [u8; I256_BYTES],
-        scale: u32,
-    ) -> Result<NumericWire, PgReportError> {
-        let scale = u16::try_from(scale)
-            .ok()
-            .filter(|scale| *scale <= NUMERIC_DSCALE_MASK)
-            .ok_or_else(|| {
-                PgReportError::from_message(
-                    PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-                    "numeric aggregate scale exceeds PostgreSQL's binary NUMERIC limit",
-                )
-            })?;
-        Ok(NumericWire::from_coefficient(
+        scale: u8,
+    ) -> pg_sys::Datum {
+        let mut wire = NumericWire::from_coefficient(
             SignedCoefficient::from_be_bytes(coefficient),
-            scale,
-        ))
+            u16::from(scale),
+        );
+        let len = wire.len;
+        // SAFETY: the wire is complete stack-owned numeric_recv input and a
+        // u8 scale is below PostgreSQL's dscale limit.
+        unsafe { receive_numeric_wire_datum(&mut wire.bytes[..len], -1) }
     }
 }
 
@@ -121,13 +72,82 @@ impl SignedCoefficient {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Unsigned256 {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct Unsigned256 {
     /// Little-endian limbs, so division walks this array in reverse.
     limbs: [u64; I256_LIMBS],
 }
 
+impl Ord for Unsigned256 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.limbs.iter().rev().cmp(other.limbs.iter().rev())
+    }
+}
+
+impl PartialOrd for Unsigned256 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl Unsigned256 {
+    pub(super) const ZERO: Self = Self {
+        limbs: [0; I256_LIMBS],
+    };
+
+    /// `10^exponent` for an exponent of at most 77, the largest decimal power
+    /// below 2^256.
+    pub(super) fn pow10(exponent: u32) -> Self {
+        let one = Self {
+            limbs: [1, 0, 0, 0],
+        };
+        (0..exponent).fold(one, |value, _| {
+            value
+                .checked_mul_add(10, 0)
+                .expect("a decimal power of at most 77 digits fits 256 bits")
+        })
+    }
+
+    /// `self * multiplier + addend`, or `None` beyond 256 bits.
+    pub(super) fn checked_mul_add(
+        self,
+        multiplier: u64,
+        addend: u64,
+    ) -> Option<Self> {
+        let mut carry = u128::from(addend);
+        let mut limbs = self.limbs;
+        for limb in &mut limbs {
+            let value = u128::from(*limb) * u128::from(multiplier) + carry;
+            *limb = value as u64;
+            carry = value >> u64::BITS;
+        }
+        (carry == 0).then_some(Self { limbs })
+    }
+
+    /// Signed big-endian two's-complement bytes of `±self`. The caller keeps
+    /// the magnitude below 2^255.
+    pub(super) fn to_signed_be_bytes(self, negative: bool) -> [u8; I256_BYTES] {
+        let mut bytes = [0u8; I256_BYTES];
+        for (index, limb) in self.limbs.iter().enumerate() {
+            let end = I256_BYTES - index * std::mem::size_of::<u64>();
+            bytes[end - std::mem::size_of::<u64>()..end]
+                .copy_from_slice(&limb.to_be_bytes());
+        }
+        if negative {
+            for byte in &mut bytes {
+                *byte = !*byte;
+            }
+            for byte in bytes.iter_mut().rev() {
+                let (next, carry) = byte.overflowing_add(1);
+                *byte = next;
+                if !carry {
+                    break;
+                }
+            }
+        }
+        bytes
+    }
+
     fn from_be_bytes(bytes: [u8; I256_BYTES]) -> Self {
         let limbs = std::array::from_fn(|index| {
             let start = I256_BYTES - (index + 1) * std::mem::size_of::<u64>();
@@ -140,11 +160,11 @@ impl Unsigned256 {
         Self { limbs }
     }
 
-    fn is_zero(self) -> bool {
+    pub(super) fn is_zero(self) -> bool {
         self.limbs.iter().all(|limb| *limb == 0)
     }
 
-    fn decimal_digit_count(self) -> i32 {
+    pub(super) fn decimal_digit_count(self) -> i32 {
         let mut value = self;
         let mut groups = 0;
         let mut highest = 0;

@@ -11,10 +11,10 @@ use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
 use super::QueryPlanDataError;
 use super::expression_leaf::ExecutionLeafCodec;
 use crate::plan::ir::{
-    BooleanTestKind, CaseWhen, ExecutionExpr, PostgresEvalExpr, PostgresEvalInput,
-    PostgresExprVolatility, ScalarFunctionKind,
+    BooleanTestKind, CaseWhen, ComparisonKind, DecimalOperator, ExecutionExpr,
+    FixedDecimalType, PostgresEvalExpr, PostgresEvalInput, PostgresExprVolatility,
+    QueryPlanError, ScalarFunctionKind,
 };
-use crate::plan::ir::{Decimal128Semantics, QueryPlanError};
 
 const SCALAR: i32 = 1;
 const COMPARISON: i32 = 2;
@@ -36,6 +36,9 @@ const IS_NOT_NAN: i32 = 17;
 const WIDEN_INTEGER: i32 = 18;
 const STRICT_TRUE: i32 = 19;
 const BPCHAR_VALUE: i32 = 20;
+const DECIMAL_ARITHMETIC: i32 = 21;
+const INTEGER_TO_DECIMAL: i32 = 22;
+const DECIMAL_BOUND_COMPARISON: i32 = 23;
 const IMMUTABLE: i32 = 1;
 const STABLE: i32 = 2;
 const VOLATILE: i32 = 3;
@@ -63,12 +66,44 @@ impl ExecutionExprCodec {
                 writer.append_i32(SCALAR);
                 ExecutionLeafCodec::encode_value(*value, writer);
             }
-            ExecutionExpr::DecimalValue { value, semantics } => {
+            ExecutionExpr::DecimalValue {
+                value,
+                decimal_type,
+            } => {
+                writer.append_i32(DECIMAL_VALUE).append_count(value.index());
+                Self::encode_decimal_type(*decimal_type, writer);
+            }
+            ExecutionExpr::DecimalArithmetic {
+                operator,
+                left,
+                right,
+                result_type,
+            } => {
                 writer
-                    .append_i32(DECIMAL_VALUE)
-                    .append_count(value.index())
-                    .append_i32(i32::from(semantics.precision()))
-                    .append_i32(i32::from(semantics.scale()));
+                    .append_i32(DECIMAL_ARITHMETIC)
+                    .append_i32(operator.wire_id());
+                Self::encode_decimal_type(*result_type, writer);
+                writer
+                    .append_nested(|record| Self::encode(left, record))
+                    .append_nested(|record| Self::encode(right, record));
+            }
+            ExecutionExpr::IntegerToDecimal { value, result_type } => {
+                writer.append_i32(INTEGER_TO_DECIMAL);
+                Self::encode_decimal_type(*result_type, writer);
+                writer.append_nested(|record| Self::encode(value, record));
+            }
+            ExecutionExpr::DecimalBoundComparison {
+                kind,
+                operand,
+                bound,
+                operand_type,
+            } => {
+                writer
+                    .append_i32(DECIMAL_BOUND_COMPARISON)
+                    .append_i32(Self::comparison_wire_id(*kind))
+                    .append_count(bound.index());
+                Self::encode_decimal_type(*operand_type, writer);
+                writer.append_nested(|record| Self::encode(operand, record));
             }
             ExecutionExpr::BpcharValue { value, semantics } => {
                 writer
@@ -354,13 +389,57 @@ impl ExecutionExprCodec {
                     reader,
                     runtime_value_count,
                 )?;
-                let precision = u8::try_from(reader.read_i32()?)
-                    .map_err(|_| QueryPlanError::UnsupportedRuntimeValueType)?;
-                let scale = i8::try_from(reader.read_i32()?)
-                    .map_err(|_| QueryPlanError::UnsupportedRuntimeValueType)?;
-                let semantics = Decimal128Semantics::new(precision, scale)
-                    .ok_or(QueryPlanError::UnsupportedRuntimeValueType)?;
-                ExecutionExpr::DecimalValue { value, semantics }
+                ExecutionExpr::DecimalValue {
+                    value,
+                    decimal_type: Self::decode_decimal_type(reader)?,
+                }
+            }
+            DECIMAL_ARITHMETIC => {
+                let raw_operator = reader.read_i32()?;
+                let operator = DecimalOperator::from_wire_id(raw_operator).ok_or(
+                    QueryPlanDataError::UnknownExpressionKind {
+                        found: raw_operator,
+                    },
+                )?;
+                let result_type = Self::decode_decimal_type(reader)?;
+                ExecutionExpr::DecimalArithmetic {
+                    operator,
+                    left: Box::new(reader.read_nested(|record| {
+                        Self::decode(record, runtime_value_count)
+                    })?),
+                    right: Box::new(reader.read_nested(|record| {
+                        Self::decode(record, runtime_value_count)
+                    })?),
+                    result_type,
+                }
+            }
+            INTEGER_TO_DECIMAL => {
+                let result_type = Self::decode_decimal_type(reader)?;
+                ExecutionExpr::IntegerToDecimal {
+                    value: Box::new(reader.read_nested(|record| {
+                        Self::decode(record, runtime_value_count)
+                    })?),
+                    result_type,
+                }
+            }
+            DECIMAL_BOUND_COMPARISON => {
+                let raw_kind = reader.read_i32()?;
+                let kind = Self::comparison_from_wire_id(raw_kind).ok_or(
+                    QueryPlanDataError::UnknownExpressionKind { found: raw_kind },
+                )?;
+                let bound = ExecutionLeafCodec::decode_runtime_value(
+                    reader,
+                    runtime_value_count,
+                )?;
+                let operand_type = Self::decode_decimal_type(reader)?;
+                ExecutionExpr::DecimalBoundComparison {
+                    kind,
+                    operand: Box::new(reader.read_nested(|record| {
+                        Self::decode(record, runtime_value_count)
+                    })?),
+                    bound,
+                    operand_type,
+                }
             }
             BPCHAR_VALUE => {
                 let value = ExecutionLeafCodec::decode_runtime_value(
@@ -424,6 +503,49 @@ impl ExecutionExprCodec {
                 ))
             }
             found => return Err(QueryPlanDataError::UnknownExpressionKind { found }),
+        })
+    }
+
+    fn encode_decimal_type(
+        decimal_type: FixedDecimalType,
+        writer: &mut PlanDataWriter,
+    ) {
+        writer
+            .append_i32(i32::from(decimal_type.precision()))
+            .append_i32(i32::from(decimal_type.scale()));
+    }
+
+    fn decode_decimal_type(
+        reader: &mut PlanDataReader<'_>,
+    ) -> Result<FixedDecimalType, QueryPlanDataError> {
+        let precision = u8::try_from(reader.read_i32()?)
+            .map_err(|_| QueryPlanError::UnsupportedRuntimeValueType)?;
+        let scale = u8::try_from(reader.read_i32()?)
+            .map_err(|_| QueryPlanError::UnsupportedRuntimeValueType)?;
+        FixedDecimalType::new(precision, scale)
+            .ok_or_else(|| QueryPlanError::UnsupportedRuntimeValueType.into())
+    }
+
+    const fn comparison_wire_id(kind: ComparisonKind) -> i32 {
+        match kind {
+            ComparisonKind::Equal => 1,
+            ComparisonKind::NotEqual => 2,
+            ComparisonKind::Less => 3,
+            ComparisonKind::LessEqual => 4,
+            ComparisonKind::Greater => 5,
+            ComparisonKind::GreaterEqual => 6,
+        }
+    }
+
+    const fn comparison_from_wire_id(id: i32) -> Option<ComparisonKind> {
+        Some(match id {
+            1 => ComparisonKind::Equal,
+            2 => ComparisonKind::NotEqual,
+            3 => ComparisonKind::Less,
+            4 => ComparisonKind::LessEqual,
+            5 => ComparisonKind::Greater,
+            6 => ComparisonKind::GreaterEqual,
+            _ => return None,
         })
     }
 

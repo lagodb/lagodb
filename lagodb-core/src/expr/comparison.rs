@@ -30,7 +30,7 @@ pub enum PgNanComparison {
 
 impl PgComparisonKind {
     /// Return the equivalent comparison after exchanging its operands.
-    pub(crate) const fn commuted(self) -> Self {
+    pub const fn commuted(self) -> Self {
         match self {
             Self::Equal | Self::NotEqual => self,
             Self::Less => Self::Greater,

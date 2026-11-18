@@ -150,8 +150,10 @@ unsafe fn materialize_plan(
     target_list: *mut pg_sys::List,
 ) -> Result<*mut pg_sys::Plan, QueryHostError> {
     let path = unsafe { QueryPathPrivate::decode(&*(*best_path).custom_private) }?;
+    // The scan tuple carries the tuple-layout slots; PostgreSQL projects the
+    // target list over them (`set_customscan_references`).
     let scan_target_list =
-        unsafe { build_scan_target_list(target_list, path.scan_target_exprs())? };
+        unsafe { build_scan_target_list(path.scan_target_exprs())? };
     // custom_exprs holds exactly the runtime-value bindings in layout order.
     let custom_exprs = expr_list(path.runtime_exprs().iter().map(|&expression| {
         unsafe { pg_sys::copyObjectImpl(expression.cast::<c_void>()) }
@@ -189,30 +191,22 @@ unsafe fn materialize_plan(
 }
 
 unsafe fn build_scan_target_list(
-    target_list: *mut pg_sys::List,
     scan_target_exprs: &[*mut pg_sys::Expr],
 ) -> Result<*mut pg_sys::List, QueryHostError> {
-    let target_count = unsafe { pg_sys::list_length(target_list) };
-    if target_count as usize != scan_target_exprs.len() {
-        return Err(QueryHostError::invalid_plan(
-            "scan target expression count does not match the PostgreSQL target list",
-        ));
-    }
     let mut scan_target_list = ptr::null_mut();
-    for index in 0..target_count {
-        let target = unsafe { pg_sys::list_nth(target_list, index) }
-            .cast::<pg_sys::TargetEntry>();
-        let scan_target = unsafe {
-            pg_sys::copyObjectImpl(target.cast::<c_void>())
-                .cast::<pg_sys::TargetEntry>()
-        };
-        let scan_expression = scan_target_exprs[index as usize];
+    for (index, &expression) in scan_target_exprs.iter().enumerate() {
+        let resno = pg_sys::AttrNumber::try_from(index + 1).map_err(|_| {
+            QueryHostError::invalid_plan(
+                "scan target list exceeds the attribute range",
+            )
+        })?;
         unsafe {
-            (*scan_target).expr =
-                pg_sys::copyObjectImpl(scan_expression.cast::<c_void>())
-                    .cast::<pg_sys::Expr>();
+            let expression = pg_sys::copyObjectImpl(expression.cast::<c_void>())
+                .cast::<pg_sys::Expr>();
+            let target =
+                pg_sys::makeTargetEntry(expression, resno, ptr::null_mut(), false);
             scan_target_list =
-                pg_sys::lappend(scan_target_list, scan_target.cast::<c_void>());
+                pg_sys::lappend(scan_target_list, target.cast::<c_void>());
         }
     }
     Ok(scan_target_list)

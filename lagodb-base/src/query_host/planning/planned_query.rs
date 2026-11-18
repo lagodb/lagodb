@@ -23,4 +23,16 @@ pub(super) struct PlannedQuery {
     pub(super) runtime_exprs: Vec<ScopedRuntimeBinding>,
     pub(super) scan_target_exprs: Vec<*mut pg_sys::Expr>,
     pub(super) scans: Box<[PlannedScanInput]>,
+    /// PostgreSQL's cost of projecting the path target over the scan slots,
+    /// in PostgreSQL's own cost units. Zero when the engine computes every
+    /// target expression.
+    pub(super) postgres_projection_cost: pg_sys::QualCost,
+}
+
+impl PlannedQuery {
+    /// No target expression is left to PostgreSQL's projection.
+    pub(super) const NO_POSTGRES_PROJECTION: pg_sys::QualCost = pg_sys::QualCost {
+        startup: 0.0,
+        per_tuple: 0.0,
+    };
 }

@@ -3,7 +3,8 @@
 use lagodb_core::expr::pg::{PgBooleanTest, PgConst, PgExprRef, PgScalarArrayOpExpr};
 use lagodb_core::expr::{ExprType, PgComparisonKind, PgComparisonOp};
 use lagodb_query::plan::{
-    CaseWhen, Decimal128Semantics, ExecutionExpr, ScalarFunctionKind,
+    CaseWhen, Decimal128Semantics, ExecutionExpr, FixedDecimalType,
+    ScalarFunctionKind,
 };
 use pgrx::pg_sys;
 
@@ -212,7 +213,9 @@ impl QueryExpressionPlanner {
             return Err(ExpressionDecline::UnsupportedSemantics);
         }
         let operator = membership.comparison_op();
-        let decimal = Decimal128Semantics::for_type(value_type);
+        // An IN-list operand is a storage column or a Decimal128 aggregate.
+        let decimal =
+            Decimal128Semantics::for_type(value_type).map(FixedDecimalType::from);
         let comparison = if decimal.is_some() {
             domain
                 .decimal_comparison(operator, value_type, value_type)
@@ -332,7 +335,9 @@ impl QueryExpressionPlanner {
             .collect()
     }
 
-    unsafe fn list_nodes(list: *mut pg_sys::List) -> Vec<*mut pg_sys::Node> {
+    pub(super) unsafe fn list_nodes(
+        list: *mut pg_sys::List,
+    ) -> Vec<*mut pg_sys::Node> {
         let count = unsafe { pg_sys::list_length(list) };
         (0..count)
             .map(|index| unsafe { pg_sys::list_nth(list, index) }.cast())

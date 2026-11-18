@@ -1,6 +1,7 @@
 //! Provider-neutral relational IR for query offload.
 
 mod aggregate;
+mod decimal;
 mod distinct;
 mod expression;
 mod expression_validation;
@@ -16,6 +17,7 @@ pub use aggregate::{
     AggCall, AggregateArguments, AggregateKind, AggregateNode, AggregateOrderExpr,
     GroupExpr,
 };
+pub use decimal::{DecimalOperator, FixedDecimalType};
 pub use distinct::{DistinctExpr, DistinctNode};
 pub use expression::{
     BooleanTestKind, CaseWhen, ExecutionExpr, ExecutionScalarRepr, PostgresEvalExpr,

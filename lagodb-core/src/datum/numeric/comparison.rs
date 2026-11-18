@@ -3,13 +3,9 @@
 use pgrx::{pg_sys, varlena_to_byte_slice};
 
 use super::{
-    Decimal128NumericCodec, DecimalCodecError, NUMERIC_NEG, NUMERIC_POS,
-    pg_numeric_send,
+    Decimal128NumericCodec, DecimalCodecError, NUMERIC_NAN, NUMERIC_NEG,
+    NUMERIC_NINF, NUMERIC_PINF, NUMERIC_POS, pg_numeric_send,
 };
-
-const NUMERIC_NAN: u16 = 0xC000;
-const NUMERIC_PINF: u16 = 0xD000;
-const NUMERIC_NINF: u16 = 0xF000;
 
 /// A PostgreSQL NUMERIC comparison value relative to a finite Decimal128 column.
 ///

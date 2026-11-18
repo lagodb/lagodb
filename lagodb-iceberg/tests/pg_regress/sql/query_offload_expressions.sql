@@ -281,6 +281,46 @@ SELECT count(*) FILTER (WHERE abs(value_i2) >= 0::smallint)
 FROM query_offload_expression_abs_edge;
 
 DROP TABLE query_offload_expression_abs_edge;
+
+CREATE TABLE query_offload_expression_numeric (
+    id integer,
+    qty integer,
+    price numeric(15, 2),
+    discount numeric(15, 2),
+    tax numeric(15, 2),
+    wide numeric(38, 0)
+) USING iceberg;
+
+INSERT INTO query_offload_expression_numeric VALUES
+    (1, 2, 1234.56, 0.05, 0.08, 1e37),
+    (2, 3, 99.99, 0.10, 0.00, NULL),
+    (3, NULL, NULL, NULL, NULL, NULL),
+    (4, 1, -10.00, 0.00, 0.04, NULL);
+
+-- +, - and * keep PostgreSQL's result scales. The three-factor product has
+-- 47 digits and runs as Decimal256; CASE and COALESCE take the common type of
+-- their branches.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT sum(price * (1 - discount)) AS revenue,
+       sum(price * (1 - discount) * (1 + tax)) AS charge,
+       sum(price + qty) AS price_plus_qty,
+       sum(CASE WHEN qty >= 2 THEN price ELSE coalesce(discount, 0) END)
+           AS conditional
+FROM query_offload_expression_numeric;
+
+SELECT sum(price * (1 - discount)) AS revenue,
+       sum(price * (1 - discount) * (1 + tax)) AS charge,
+       sum(price + qty) AS price_plus_qty,
+       sum(CASE WHEN qty >= 2 THEN price ELSE coalesce(discount, 0) END)
+           AS conditional
+FROM query_offload_expression_numeric;
+
+-- A product that may exceed 76 digits stays in PostgreSQL.
+SELECT sum(wide * wide * wide) AS cubed
+FROM query_offload_expression_numeric;
+
+DROP TABLE query_offload_expression_numeric;
 DROP TABLE query_offload_expression_basic;
 
 RESET timezone;

@@ -145,9 +145,8 @@ $$), '$.** ? (@."Metric: spill_count" > 0)')
 RESET lagodb.query_offload_spill;
 
 -- Spill files are PostgreSQL temporary files, so temp_file_limit bounds them.
--- The session stays usable after a spill fails midway. PostgreSQL 18 quotes
--- the setting name in this error, so only its SQLSTATE is shown. Only the
--- group keys reach the spill here, so its runs are narrow enough to merge.
+-- PostgreSQL 18 quotes the setting name in this error, so only its SQLSTATE
+-- is shown.
 SET temp_file_limit = '64kB';
 \set VERBOSITY sqlstate
 SELECT count(*) FROM (
@@ -157,16 +156,18 @@ SELECT count(*) FROM (
 ) AS grouped;
 \set VERBOSITY default
 RESET temp_file_limit;
+
+-- A grouped aggregate larger than hash_mem spills and reads its runs back.
+-- At this work_mem each run holds more groups than one batch of rows, so its
+-- batches stay well within hash_mem. The session is still usable after the
+-- failed spill above.
+SET work_mem = '512kB';
 SELECT count(*) FROM (
     SELECT key, count(*), sum(id)
     FROM query_offload_spill_fact
     GROUP BY key
 ) AS grouped;
 
--- A grouped aggregate larger than hash_mem spills and reads its runs back.
--- At this work_mem each run holds more groups than one batch of rows, so its
--- batches stay well within hash_mem.
-SET work_mem = '512kB';
 SELECT jsonb_path_exists(pg_temp.explain_json($$
 SELECT id, count(*), sum(key)
 FROM query_offload_spill_fact

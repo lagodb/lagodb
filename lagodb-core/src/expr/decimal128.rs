@@ -3,7 +3,7 @@
 use pgrx::pg_sys;
 
 use crate::datum::{
-    Decimal128ComparisonValue, Decimal128Semantics, numeric_precision_scale,
+    Decimal128ComparisonValue, Decimal128Semantics, NumericScaledDomain,
 };
 
 use super::{ExprType, PgComparisonKind};
@@ -16,11 +16,8 @@ impl Decimal128Semantics {
         {
             return None;
         }
-        let typmod = numeric_precision_scale(value_type.typmod)?;
-        Self::new(
-            u8::try_from(typmod.precision).ok()?,
-            i8::try_from(typmod.scale).ok()?,
-        )
+        let domain = NumericScaledDomain::for_typmod(value_type.typmod)?;
+        Self::new(domain.precision(), i8::try_from(domain.scale()).ok()?)
     }
 
     /// Prove one storage comparison has the same bounded Decimal128 shape on

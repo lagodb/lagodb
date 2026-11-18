@@ -11,6 +11,7 @@ use lagodb_query::plan::{
 };
 use pgrx::pg_sys;
 
+use super::aggregate_output::AggregateScanSlots;
 use super::expression::{
     ExpressionScope, OutputCatalog, PredicateDomain, QueryExpressionPlanner,
     ResolvedOutput,
@@ -89,54 +90,34 @@ impl AggregatePlanBuilder {
         }
 
         let mut aggregates: Vec<(*mut pg_sys::Expr, AggCall)> = Vec::new();
-        let mut project = Vec::new();
-        let mut slots = Vec::new();
-        let mut scan_target_exprs = Vec::new();
+        let mut scan_slots = AggregateScanSlots::default();
         let output_target = self.path_target;
         let target_count = unsafe { pg_sys::list_length((*output_target).exprs) };
         for index in 0..target_count {
             let expression =
                 unsafe { pg_sys::list_nth((*output_target).exprs, index) }
                     .cast::<pg_sys::Expr>();
-            let (semantic_output, scan_expression) = if let Some((_, group)) =
-                groups.iter().find(|(group_expression, _)| unsafe {
-                    pg_sys::equal(
-                        group_expression.cast::<c_void>(),
-                        expression.cast::<c_void>(),
-                    )
-                }) {
-                (group.output(), expression)
-            } else {
-                let aggregate_expression =
-                    unsafe { Self::single_aggregate_output(expression) }?;
-                if let Some((_, aggregate)) =
-                    aggregates.iter().find(|(existing, _)| unsafe {
-                        pg_sys::equal(
-                            existing.cast::<c_void>(),
-                            aggregate_expression.cast::<c_void>(),
-                        )
-                    })
-                {
-                    (aggregate.output(), aggregate_expression)
-                } else {
-                    let output =
-                        OutputId::from_index(groups.len() + aggregates.len());
-                    let aggregate = unsafe {
-                        self.build_aggregate(
-                            aggregate_expression.cast::<pg_sys::Aggref>(),
-                            output,
-                        )
-                    }?;
-                    aggregates.push((aggregate_expression, aggregate));
-                    (output, aggregate_expression)
-                }
+            let group_output =
+                |expression| unsafe { Self::group_output(&groups, expression) };
+            let aggregate_output = |expression| unsafe {
+                self.aggregate_output(&groups, &mut aggregates, expression)
             };
+            unsafe {
+                scan_slots.add_target(expression, group_output, aggregate_output)
+            }?;
+        }
+        let mut project = Vec::new();
+        let mut slots = Vec::new();
+        let mut scan_target_exprs = Vec::new();
+        for (index, (scan_expression, semantic_output)) in
+            scan_slots.iter().enumerate()
+        {
             let result_type = QueryExpressionPlanner::expr_type(scan_expression);
             let nullable = aggregates
                 .iter()
                 .find(|(_, aggregate)| aggregate.output() == semantic_output)
                 .is_none_or(|(_, aggregate)| aggregate.nullable());
-            let physical_output = OutputId::from_index(index as usize);
+            let physical_output = OutputId::from_index(index);
             project.push(ProjectExpr::new(
                 ExecutionExpr::Output(semantic_output),
                 result_type,
@@ -168,27 +149,10 @@ impl AggregatePlanBuilder {
                 if unsafe { (*expression).type_ } != pg_sys::NodeTag::T_Aggref {
                     continue;
                 }
-                if let Some((_, aggregate)) =
-                    aggregates.iter().find(|(existing, _)| unsafe {
-                        pg_sys::equal(
-                            existing.cast::<c_void>(),
-                            expression.cast::<c_void>(),
-                        )
-                    })
-                {
-                    if !aggregate.supports_having_result() {
-                        return None;
-                    }
-                    continue;
-                }
-                let output = OutputId::from_index(groups.len() + aggregates.len());
-                let aggregate = unsafe {
-                    self.build_aggregate(expression.cast::<pg_sys::Aggref>(), output)
+                // Register the Aggref so HAVING can reference its output.
+                unsafe {
+                    self.aggregate_output(&groups, &mut aggregates, expression)
                 }?;
-                if !aggregate.supports_having_result() {
-                    return None;
-                }
-                aggregates.push((expression, aggregate));
             }
             let catalog = HavingOutputCatalog {
                 entries: groups
@@ -219,7 +183,7 @@ impl AggregatePlanBuilder {
                 .ok()?,
             )
         };
-        if (groups.is_empty() && aggregates.is_empty()) || project.is_empty() {
+        if scan_slots.is_empty() {
             return None;
         }
 
@@ -263,35 +227,45 @@ impl AggregatePlanBuilder {
             runtime_exprs: self.expressions.take_runtime_exprs(),
             scan_target_exprs,
             scans,
+            // PostgreSQL evaluates the target over the raw grouping and
+            // Aggref slots; its PathTarget cost charges exactly that work
+            // (`set_pathtarget_cost_width`, Aggrefs free like Vars).
+            postgres_projection_cost: unsafe { (*self.path_target).cost },
         })
     }
 
-    /// Return the sole aggregate computed by one output expression.
-    ///
-    /// PostgreSQL evaluates wrappers such as `COALESCE(COUNT(*), 0)` in the
-    /// CustomScan result projection. The scan slot carries only the raw Aggref,
-    /// which `set_customscan_references()` rewrites to `INDEX_VAR`. Expressions
-    /// that also read a grouping Var need more than one scan-slot input and are
-    /// therefore outside this one-output/one-slot contract.
-    unsafe fn single_aggregate_output(
+    /// The grouping output of an expression equal to a grouping expression.
+    unsafe fn group_output(
+        groups: &[(*mut pg_sys::Expr, GroupExpr)],
         expression: *mut pg_sys::Expr,
-    ) -> Option<*mut pg_sys::Expr> {
-        if unsafe { (*expression).type_ } == pg_sys::NodeTag::T_Aggref {
-            return Some(expression);
+    ) -> Option<OutputId> {
+        groups.iter().find_map(|(candidate, group)| {
+            unsafe {
+                pg_sys::equal(candidate.cast::<c_void>(), expression.cast::<c_void>())
+            }
+            .then(|| group.output())
+        })
+    }
+
+    /// The output of an Aggref, built on first use. Equal Aggrefs in the
+    /// target list and HAVING share one aggregate.
+    unsafe fn aggregate_output(
+        &mut self,
+        groups: &[(*mut pg_sys::Expr, GroupExpr)],
+        aggregates: &mut Vec<(*mut pg_sys::Expr, AggCall)>,
+        expression: *mut pg_sys::Expr,
+    ) -> Option<OutputId> {
+        if let Some((_, aggregate)) = aggregates.iter().find(|(existing, _)| unsafe {
+            pg_sys::equal(existing.cast::<c_void>(), expression.cast::<c_void>())
+        }) {
+            return Some(aggregate.output());
         }
-        let references = unsafe {
-            pg_sys::pull_var_clause(
-                expression.cast(),
-                pg_sys::PVC_INCLUDE_AGGREGATES as c_int,
-            )
-        };
-        if unsafe { pg_sys::list_length(references) } != 1 {
-            return None;
-        }
-        let reference =
-            unsafe { pg_sys::list_nth(references, 0) }.cast::<pg_sys::Expr>();
-        (unsafe { (*reference).type_ } == pg_sys::NodeTag::T_Aggref)
-            .then_some(reference)
+        let output = OutputId::from_index(groups.len() + aggregates.len());
+        let aggregate = unsafe {
+            self.build_aggregate(expression.cast::<pg_sys::Aggref>(), output)
+        }?;
+        aggregates.push((expression, aggregate));
+        Some(output)
     }
 
     unsafe fn build_aggregate(

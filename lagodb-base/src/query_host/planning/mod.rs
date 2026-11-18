@@ -3,6 +3,7 @@
 use std::ffi::c_void;
 
 mod aggregate_candidate;
+mod aggregate_output;
 mod aggregate_plan;
 mod candidate;
 mod distinct_plan;

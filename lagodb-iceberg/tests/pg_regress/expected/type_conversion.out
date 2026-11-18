@@ -261,6 +261,27 @@ SELECT * FROM iceberg_numeric_negscale ORDER BY id;
   4 |  12000
 (4 rows)
 
+-- Query offload computes over the normalized decimal(5, 0) type.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT sum(n_neg * 2) AS doubled FROM iceberg_numeric_negscale;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: SUM((n_neg * runtime value::decimal(1, 0)))
+         ->  Table Scan on iceberg_numeric_negscale
+               Access Method: iceberg
+(6 rows)
+
+SELECT sum(n_neg * 2) AS doubled FROM iceberg_numeric_negscale;
+ doubled 
+---------
+ -172000
+(1 row)
+
+RESET lagodb.query_offload_mode;
 DROP TABLE iceberg_numeric_negscale;
 -- ============================================================================
 -- 6. Numeric Negative Scale Beyond 38 Uses Double

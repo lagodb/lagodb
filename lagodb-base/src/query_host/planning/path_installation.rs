@@ -160,7 +160,18 @@ impl QueryPathInstallation {
                     &scan_rows,
                 )
                 .estimate(self.planned.query.fragment())
-                .map(|estimate| estimate.cost())
+                .and_then(|estimate| {
+                    // PostgreSQL's projection is charged as create_agg_path
+                    // charges its target, without the engine multiplier.
+                    let engine = estimate.cost();
+                    let projection = self.planned.postgres_projection_cost;
+                    PlanCost::try_new(
+                        engine.startup() + projection.startup,
+                        engine.total()
+                            + projection.startup
+                            + projection.per_tuple * self.output_rows,
+                    )
+                })
                 .map_err(QueryHostError::invalid_plan)
             }
         }

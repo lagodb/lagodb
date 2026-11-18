@@ -9,7 +9,9 @@ use datafusion::functions::math::expr_fn::isnan;
 use datafusion::logical_expr::expr::{Case, InList, Placeholder};
 use datafusion::logical_expr::expr_fn::cast;
 use datafusion::logical_expr::{Expr, col};
-use lagodb_core::expr::{ColumnRef, RuntimeValue, RuntimeValueLayout};
+use lagodb_core::expr::{
+    ColumnRef, RuntimeValue, RuntimeValueId, RuntimeValueLayout,
+};
 use lagodb_core::query_contract::OutputId;
 use pgrx::pg_sys;
 
@@ -99,26 +101,25 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                     Ok(Self::typed_value(representation.data_type()))
                 }
             },
-            ExecutionExpr::DecimalValue { value, semantics } => {
-                match &self.bindings {
-                    ExpressionBindings::Execution { values, .. } => values
-                        .get(value.index())
-                        .copied()
-                        .ok_or(DataFusionPlanError::MissingRuntimeValue {
-                            index: value.index(),
-                        })
-                        .and_then(|value| {
-                            Self::decimal_runtime_value(value, *semantics)
-                        })
-                        .map(|value| Expr::Literal(value, None)),
-                    ExpressionBindings::Planning { .. } => {
-                        Ok(Self::typed_value(DataType::Decimal128(
-                            semantics.precision(),
-                            semantics.scale(),
-                        )))
-                    }
-                }
+            ExecutionExpr::DecimalValue {
+                value,
+                decimal_type,
+            } => self.decimal_value(*value, *decimal_type),
+            ExecutionExpr::DecimalArithmetic {
+                operator,
+                left,
+                right,
+                result_type,
+            } => self.decimal_arithmetic(*operator, left, right, *result_type),
+            ExecutionExpr::IntegerToDecimal { value, result_type } => {
+                self.integer_to_decimal(value, *result_type)
             }
+            ExecutionExpr::DecimalBoundComparison {
+                kind,
+                operand,
+                bound,
+                operand_type,
+            } => self.decimal_bound_comparison(*kind, operand, *bound, *operand_type),
             ExecutionExpr::BpcharValue { value, semantics } => match &self.bindings {
                 ExpressionBindings::Execution { values, .. } => values
                     .get(value.index())
@@ -138,26 +139,17 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                 left,
                 right,
             } => {
-                let left = self.compile(left)?;
-                let right = self.compile(right)?;
-                Ok(
-                    match operator
-                        .builtin_signature()
-                        .map(|signature| signature.kind())
-                    {
-                        Some(ComparisonKind::Equal) => left.eq(right),
-                        Some(ComparisonKind::NotEqual) => left.not_eq(right),
-                        Some(ComparisonKind::Less) => left.lt(right),
-                        Some(ComparisonKind::LessEqual) => left.lt_eq(right),
-                        Some(ComparisonKind::Greater) => left.gt(right),
-                        Some(ComparisonKind::GreaterEqual) => left.gt_eq(right),
-                        None => {
-                            return Err(DataFusionPlanError::UnsupportedOperator {
-                                oid: operator.opno,
-                            });
-                        }
-                    },
-                )
+                let kind = operator
+                    .builtin_signature()
+                    .map(|signature| signature.kind())
+                    .ok_or(DataFusionPlanError::UnsupportedOperator {
+                        oid: operator.opno,
+                    })?;
+                Ok(Self::comparison(
+                    kind,
+                    self.compile(left)?,
+                    self.compile(right)?,
+                ))
             }
             ExecutionExpr::IsNull(value) => Ok(self.compile(value)?.is_null()),
             ExecutionExpr::IsNotNull(value) => Ok(self.compile(value)?.is_not_null()),
@@ -206,18 +198,19 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                 else_expr,
                 ..
             } => {
+                let common = expression.decimal_type();
                 let when_then_expr = when_then
                     .iter()
                     .map(|branch| {
                         Ok((
                             Box::new(self.compile(branch.when())?),
-                            Box::new(self.compile(branch.then())?),
+                            Box::new(self.compile_branch(branch.then(), common)?),
                         ))
                     })
                     .collect::<Result<Vec<_>, DataFusionPlanError>>()?;
                 let else_expr = else_expr
                     .as_deref()
-                    .map(|expression| self.compile(expression).map(Box::new))
+                    .map(|branch| self.compile_branch(branch, common).map(Box::new))
                     .transpose()?;
                 Ok(Expr::Case(Case::new(None, when_then_expr, else_expr)))
             }
@@ -239,9 +232,11 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                 result_type,
                 ..
             } => {
+                // Only COALESCE over NUMERIC has a common decimal type.
+                let common = expression.decimal_type();
                 let arguments = arguments
                     .iter()
-                    .map(|argument| self.compile(argument))
+                    .map(|argument| self.compile_branch(argument, common))
                     .collect::<Result<Vec<_>, _>>()?;
                 Self::native_function(*kind, arguments, result_type.type_oid)
             }
@@ -264,6 +259,34 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                     }
                 }
             }
+        }
+    }
+
+    pub(super) fn comparison(kind: ComparisonKind, left: Expr, right: Expr) -> Expr {
+        match kind {
+            ComparisonKind::Equal => left.eq(right),
+            ComparisonKind::NotEqual => left.not_eq(right),
+            ComparisonKind::Less => left.lt(right),
+            ComparisonKind::LessEqual => left.lt_eq(right),
+            ComparisonKind::Greater => left.gt(right),
+            ComparisonKind::GreaterEqual => left.gt_eq(right),
+        }
+    }
+
+    /// The runtime value bound for execution, or `None` while planning.
+    pub(super) fn bound_value(
+        &self,
+        value: RuntimeValueId,
+    ) -> Result<Option<RuntimeValue>, DataFusionPlanError> {
+        match &self.bindings {
+            ExpressionBindings::Execution { values, .. } => {
+                values.get(value.index()).copied().map(Some).ok_or(
+                    DataFusionPlanError::MissingRuntimeValue {
+                        index: value.index(),
+                    },
+                )
+            }
+            ExpressionBindings::Planning { .. } => Ok(None),
         }
     }
 
@@ -372,7 +395,7 @@ impl<'a> DataFusionExpressionCompiler<'a> {
         )
     }
 
-    fn typed_value(data_type: DataType) -> Expr {
+    pub(super) fn typed_value(data_type: DataType) -> Expr {
         Expr::Placeholder(Placeholder::new_with_field(
             "$type".to_owned(),
             Some(Arc::new(Field::new("", data_type, true))),
