@@ -94,13 +94,12 @@ JOIN query_offload_join_right AS r
 WHERE l.id >= 2
   AND l.measure + r.measure >= 220
 ORDER BY left_id, right_id;
-                                                                   QUERY PLAN                                                                    
--------------------------------------------------------------------------------------------------------------------------------------------------
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Output: l.id, r.id
    Engine: DataFusion
    Maximum Batch Rows: 2
-   PostgreSQL Expression Fallbacks: 1
    ->  Sort
          Sort Key: l.id ASC NULLS LAST, r.id ASC NULLS LAST
          ->  Projection
@@ -108,7 +107,7 @@ ORDER BY left_id, right_id;
                ->  Hash Join
                      Join Type: Inner
                      Hash Cond: l.key_i4 = r.key_i4 AND l.key_i8 = r.key_i8
-                     Join Filter: ((l.measure < r.measure) AND (PostgreSQL immutable expression over l.measure, r.measure >= Runtime Binding 2))
+                     Join Filter: ((l.measure < r.measure) AND ((l.measure + r.measure) >= Runtime Binding 2))
                      ->  Table Scan on public.query_offload_join_left l
                            Access Method: iceberg
                            Scan ID: 0
@@ -119,7 +118,7 @@ ORDER BY left_id, right_id;
                            Access Method: iceberg
                            Scan ID: 1
                            Output: r.id, r.key_i4, r.key_i8, r.measure
-(23 rows)
+(22 rows)
 
 SELECT l.id AS left_id, r.id AS right_id
 FROM query_offload_join_left AS l

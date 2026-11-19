@@ -11,61 +11,9 @@ use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
     Volatility,
 };
-use lagodb_core::diag::PgReportError;
 use pgrx::pg_sys;
-use pgrx::prelude::PgSqlErrorCode;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum PgIntegerKind {
-    SmallInt,
-    Integer,
-    BigInt,
-}
-
-impl PgIntegerKind {
-    const fn from_oid(type_oid: pg_sys::Oid) -> Option<Self> {
-        match type_oid {
-            pg_sys::INT2OID => Some(Self::SmallInt),
-            pg_sys::INT4OID => Some(Self::Integer),
-            pg_sys::INT8OID => Some(Self::BigInt),
-            _ => None,
-        }
-    }
-
-    const fn overflow_message(self) -> &'static str {
-        match self {
-            Self::SmallInt => "smallint out of range",
-            Self::Integer => "integer out of range",
-            Self::BigInt => "bigint out of range",
-        }
-    }
-
-    const fn data_type(self) -> DataType {
-        match self {
-            // Iceberg has no distinct smallint physical type. LagoDB widens
-            // PostgreSQL int2 columns to Arrow Int32 at the scan boundary.
-            Self::SmallInt | Self::Integer => DataType::Int32,
-            Self::BigInt => DataType::Int64,
-        }
-    }
-
-    const fn codec_tag(self) -> u8 {
-        match self {
-            Self::SmallInt => 1,
-            Self::Integer => 2,
-            Self::BigInt => 3,
-        }
-    }
-
-    const fn from_codec_tag(tag: u8) -> Option<Self> {
-        match tag {
-            1 => Some(Self::SmallInt),
-            2 => Some(Self::Integer),
-            3 => Some(Self::BigInt),
-            _ => None,
-        }
-    }
-}
+use super::pg_integer::PgIntegerKind;
 
 /// Integer ABS retaining DataFusion's batch execution while restoring the
 /// PostgreSQL overflow domain and structured SQL error.
@@ -107,13 +55,8 @@ impl PgIntegerAbsUdf {
         }))
     }
 
-    #[cold]
-    #[inline(never)]
     fn overflow(&self) -> DataFusionError {
-        DataFusionError::External(Box::new(PgReportError::from_message(
-            PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-            self.kind.overflow_message(),
-        )))
+        DataFusionError::External(Box::new(self.kind.out_of_range()))
     }
 
     fn smallint_abs(

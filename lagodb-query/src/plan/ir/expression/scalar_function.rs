@@ -22,6 +22,26 @@ pub enum ScalarFunctionKind {
     Coalesce,
     NullIf,
     Rtrim,
+    /// PostgreSQL's built-in integer and floating-point `+`.
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    /// Integer `%`; PostgreSQL has no floating-point modulo operator.
+    Modulo,
+    /// PostgreSQL's `int2/int4/int8 -> float4/float8` and `float4 -> float8`
+    /// cast functions, whether inserted implicitly for mixed integer and float
+    /// operands or written explicitly. Some are rounding conversions
+    /// (`int8 -> float8`), so this is not a widening.
+    FloatCast,
+}
+
+/// How EXPLAIN writes a call of a scalar function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalarFunctionNotation {
+    Call,
+    Infix(&'static str),
+    Cast,
 }
 
 impl ScalarFunctionKind {
@@ -46,6 +66,12 @@ impl ScalarFunctionKind {
             13 => Self::Coalesce,
             14 => Self::NullIf,
             15 => Self::Rtrim,
+            16 => Self::Add,
+            17 => Self::Subtract,
+            18 => Self::Multiply,
+            19 => Self::Divide,
+            20 => Self::Modulo,
+            21 => Self::FloatCast,
             _ => return None,
         })
     }
@@ -150,7 +176,70 @@ impl ScalarFunctionKind {
                     && result.typmod == -1
                     && result.collation == pg_sys::InvalidOid
             }
+            Self::Add | Self::Subtract | Self::Multiply | Self::Divide => {
+                matches!(arguments, [left, right]
+                    if Self::arithmetic_result(left.type_oid, right.type_oid)
+                        .is_some_and(scalar_result))
+            }
+            Self::Modulo => {
+                matches!(arguments, [left, right]
+                    if matches!(
+                        left.type_oid,
+                        pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID
+                    ) && right.type_oid == left.type_oid
+                        && scalar_result(left.type_oid))
+            }
+            Self::FloatCast => {
+                matches!(arguments, [value]
+                    if matches!(
+                        (value.type_oid, result.type_oid),
+                        (
+                            pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID,
+                            pg_sys::FLOAT4OID | pg_sys::FLOAT8OID
+                        ) | (pg_sys::FLOAT4OID, pg_sys::FLOAT8OID)
+                    ) && scalar_result(result.type_oid))
+            }
         }
+    }
+
+    /// How EXPLAIN writes this function.
+    pub const fn notation(self) -> ScalarFunctionNotation {
+        match self {
+            Self::Add => ScalarFunctionNotation::Infix("+"),
+            Self::Subtract => ScalarFunctionNotation::Infix("-"),
+            Self::Multiply => ScalarFunctionNotation::Infix("*"),
+            Self::Divide => ScalarFunctionNotation::Infix("/"),
+            Self::Modulo => ScalarFunctionNotation::Infix("%"),
+            Self::FloatCast => ScalarFunctionNotation::Cast,
+            _ => ScalarFunctionNotation::Call,
+        }
+    }
+
+    /// The result type of PostgreSQL's built-in `+ - * /` over two operand
+    /// types: integers compute in the wider integer, floats in the wider
+    /// float. PostgreSQL has no mixed integer/float operator; it casts the
+    /// integer operand to float first.
+    const fn arithmetic_result(
+        left: pg_sys::Oid,
+        right: pg_sys::Oid,
+    ) -> Option<pg_sys::Oid> {
+        Some(match (left, right) {
+            (pg_sys::INT2OID, pg_sys::INT2OID) => pg_sys::INT2OID,
+            (
+                pg_sys::INT2OID | pg_sys::INT4OID,
+                pg_sys::INT2OID | pg_sys::INT4OID,
+            ) => pg_sys::INT4OID,
+            (
+                pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID,
+                pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID,
+            ) => pg_sys::INT8OID,
+            (pg_sys::FLOAT4OID, pg_sys::FLOAT4OID) => pg_sys::FLOAT4OID,
+            (
+                pg_sys::FLOAT4OID | pg_sys::FLOAT8OID,
+                pg_sys::FLOAT4OID | pg_sys::FLOAT8OID,
+            ) => pg_sys::FLOAT8OID,
+            _ => return None,
+        })
     }
 
     fn is_deterministic_collation(collation: pg_sys::Oid) -> bool {
@@ -177,6 +266,12 @@ impl fmt::Display for ScalarFunctionKind {
             Self::Coalesce => "coalesce",
             Self::NullIf => "nullif",
             Self::Rtrim => "rtrim",
+            Self::Add => "add",
+            Self::Subtract => "subtract",
+            Self::Multiply => "multiply",
+            Self::Divide => "divide",
+            Self::Modulo => "modulo",
+            Self::FloatCast => "float_cast",
         })
     }
 }

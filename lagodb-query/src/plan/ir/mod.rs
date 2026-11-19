@@ -22,6 +22,7 @@ pub use distinct::{DistinctExpr, DistinctNode};
 pub use expression::{
     BooleanTestKind, CaseWhen, ExecutionExpr, ExecutionScalarRepr, PostgresEvalExpr,
     PostgresEvalInput, PostgresExprVolatility, ScalarFunctionKind,
+    ScalarFunctionNotation,
 };
 pub(in crate::plan) use expression_validation::PlanExpressionValidator;
 pub use join::{JoinKey, JoinNode, JoinType, MarkFilter, RelationValueRef};

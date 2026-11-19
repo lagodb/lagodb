@@ -1,6 +1,7 @@
 //! Compilation of validated query semantics into DataFusion plans.
 
 mod aggregate;
+mod arithmetic;
 mod decimal;
 mod expression;
 mod logical;

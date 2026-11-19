@@ -233,6 +233,24 @@ SELECT key, count(*), sum(amount * amount * amount) AS cubed
 FROM query_offload_parallel_left
 WHERE amount < 34 GROUP BY key ORDER BY key;
 
+-- Integer arithmetic runs as LagoDB UDFs that every worker decodes from the
+-- physical codec, in the filter and in the partial aggregates.
+SELECT ln FROM pg_temp.explain_analyze_text($$
+SELECT key, sum(value * 2 - id % 3) AS adjusted
+FROM query_offload_parallel_left
+WHERE id * 2 >= 2 GROUP BY key ORDER BY key
+$$) AS ln
+WHERE ln ~ 'Execution Mode|Launched Workers';
+
+SELECT key, sum(value * 2 - id % 3) AS adjusted
+FROM query_offload_parallel_left
+WHERE id * 2 >= 2 GROUP BY key ORDER BY key;
+
+SET lagodb.query_offload_mode = 'off';
+SELECT key, sum(value * 2 - id % 3) AS adjusted
+FROM query_offload_parallel_left
+WHERE id * 2 >= 2 GROUP BY key ORDER BY key;
+
 DROP TABLE query_offload_parallel_small;
 DROP TABLE query_offload_parallel_right;
 DROP TABLE query_offload_parallel_left;

@@ -15,7 +15,7 @@ pub use physical::ExecutionScalarRepr;
 pub use postgres_eval::{
     PostgresEvalExpr, PostgresEvalInput, PostgresExprVolatility,
 };
-pub use scalar_function::ScalarFunctionKind;
+pub use scalar_function::{ScalarFunctionKind, ScalarFunctionNotation};
 
 use lagodb_core::expr::{
     ColumnRef, ExprType, PgBpcharSemantics, PgComparisonOp, RuntimeValueId,

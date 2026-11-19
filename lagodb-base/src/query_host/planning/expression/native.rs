@@ -9,6 +9,8 @@ use pgrx::pg_sys;
 
 use super::QueryExpressionPlanner;
 
+mod arithmetic;
+
 #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
 const REVERSE_TEXT_FUNCTION_OID: u32 = pg_sys::F_REVERSE;
 #[cfg(feature = "pg18")]
@@ -25,6 +27,9 @@ impl NativeScalarCall {
         match unsafe { (*node).type_ } {
             pg_sys::NodeTag::T_FuncExpr => unsafe {
                 Self::classify_function(node.cast())
+            },
+            pg_sys::NodeTag::T_OpExpr => unsafe {
+                Self::classify_operator(node.cast())
             },
             pg_sys::NodeTag::T_MinMaxExpr => unsafe {
                 Self::classify_minmax(node.cast())
@@ -43,23 +48,63 @@ impl NativeScalarCall {
     }
 
     unsafe fn classify_function(expression: *mut pg_sys::FuncExpr) -> Option<Self> {
-        let arguments = unsafe { Self::arguments((*expression).args) };
+        let function = unsafe { &*expression };
+        if function.funcretset || function.funcvariadic {
+            return None;
+        }
+        unsafe {
+            Self::classify_call(
+                expression.cast(),
+                function.funcid,
+                function.args,
+                function.funcresulttype,
+                function.inputcollid,
+            )
+        }
+    }
+
+    /// PostgreSQL evaluates an operator as a call of its function
+    /// (`ExecInitExprRec`, `T_OpExpr`), so it is classified as one.
+    unsafe fn classify_operator(expression: *mut pg_sys::OpExpr) -> Option<Self> {
+        let operator = unsafe { &*expression };
+        if operator.opretset {
+            return None;
+        }
+        // eval_const_expressions sets opfuncid on the OpExprs of the query.
+        // A clause the planner builds, such as an implied join equality
+        // (make_opclause), may carry InvalidOid, which matches no signature.
+        unsafe {
+            Self::classify_call(
+                expression.cast(),
+                operator.opfuncid,
+                operator.args,
+                operator.opresulttype,
+                operator.inputcollid,
+            )
+        }
+    }
+
+    unsafe fn classify_call(
+        expression: *mut pg_sys::Expr,
+        function: pg_sys::Oid,
+        arguments: *mut pg_sys::List,
+        declared_result: pg_sys::Oid,
+        input_collation: pg_sys::Oid,
+    ) -> Option<Self> {
+        let signature = FunctionSignature::for_oid(function)?;
+        let arguments = unsafe { Self::arguments(arguments) };
         let argument_types = arguments
             .iter()
             .map(|argument| QueryExpressionPlanner::expr_type((*argument).cast()))
             .collect::<Vec<_>>();
-        let signature = FunctionSignature::for_oid(unsafe { (*expression).funcid })?;
-        let result_type = QueryExpressionPlanner::expr_type(expression.cast());
-        let input_collation = unsafe { (*expression).inputcollid };
+        let result_type = QueryExpressionPlanner::expr_type(expression);
         if !signature
             .argument_types
             .iter()
             .copied()
             .eq(argument_types.iter().map(|argument| argument.type_oid))
-            || signature.result_type != unsafe { (*expression).funcresulttype }
+            || signature.result_type != declared_result
             || unsafe { pg_sys::exprTypmod(expression.cast()) } != -1
-            || unsafe { (*expression).funcretset }
-            || unsafe { (*expression).funcvariadic }
             || !signature.accepts_collation(input_collation)
             || !signature.kind.supports_signature(
                 &argument_types,
@@ -240,7 +285,7 @@ impl FunctionSignature {
                     pg_sys::FLOAT8OID,
                     CollationPolicy::Ignored,
                 ),
-                _ => return None,
+                function => return Self::for_arithmetic(function),
             };
         Some(Self {
             kind,

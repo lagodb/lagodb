@@ -23,8 +23,8 @@ pub use ir::{
     FixedDecimalType, GroupExpr, JoinKey, JoinNode, JoinType, LimitEstimate,
     LimitNode, MarkFilter, PostgresEvalExpr, PostgresEvalInput,
     PostgresExprVolatility, ProjectExpr, ProjectNode, QueryFragment, QueryNode,
-    QueryPlanError, RelationValueRef, ScalarFunctionKind, ScalarSemantics, ScanNode,
-    SortDirection, SortExpr, SortNode,
+    QueryPlanError, RelationValueRef, ScalarFunctionKind, ScalarFunctionNotation,
+    ScalarSemantics, ScanNode, SortDirection, SortExpr, SortNode,
 };
 pub use lagodb_core::query_contract::OutputId;
 pub use layout::{QueryTupleLayout, QueryTupleSlot};

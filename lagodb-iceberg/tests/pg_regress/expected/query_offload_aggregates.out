@@ -982,14 +982,16 @@ ORDER BY group_i4;
         2 |    1
 (1 row)
 
--- Aggregate FILTER and HAVING use the same exact-expression planner.
+-- Aggregate FILTER and HAVING use the same exact-expression planner. Unary
+-- minus keeps a PostgreSQL fallback over the aggregate output beneath native
+-- mod(); mod(-x, 7) <= 0 selects the same groups as mod(x, 7) >= 0.
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT group_i4,
        count(*) FILTER (WHERE lower(value_text) = 'alpha') AS alpha_rows
 FROM query_offload_aggregate_basic
 GROUP BY group_i4
-HAVING mod(sum(value_i4), 7) >= 0
+HAVING mod(-sum(value_i4), 7) <= 0
 ORDER BY group_i4;
                                                    QUERY PLAN                                                   
 ----------------------------------------------------------------------------------------------------------------
@@ -999,7 +1001,7 @@ ORDER BY group_i4;
    ->  Sort
          Sort Key: group_i4 ASC NULLS LAST
          ->  Filter
-               Filter: ((PostgreSQL expression >= runtime value))
+               Filter: (((PostgreSQL expression % runtime value) <= runtime value))
                ->  Aggregate
                      Group Key: group_i4
                      Aggregates: COUNT(*) FILTER (WHERE (PostgreSQL expression = runtime value)), SUM(value_i4)
@@ -1011,7 +1013,7 @@ SELECT group_i4,
        count(*) FILTER (WHERE lower(value_text) = 'alpha') AS alpha_rows
 FROM query_offload_aggregate_basic
 GROUP BY group_i4
-HAVING mod(sum(value_i4), 7) >= 0
+HAVING mod(-sum(value_i4), 7) <= 0
 ORDER BY group_i4;
  group_i4 | alpha_rows 
 ----------+------------
@@ -1024,7 +1026,7 @@ SELECT group_i4,
        count(*) FILTER (WHERE lower(value_text) = 'alpha') AS alpha_rows
 FROM query_offload_aggregate_basic
 GROUP BY group_i4
-HAVING mod(sum(value_i4), 7) >= 0
+HAVING mod(-sum(value_i4), 7) <= 0
 ORDER BY group_i4;
  group_i4 | alpha_rows 
 ----------+------------

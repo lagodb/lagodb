@@ -10,7 +10,7 @@ use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::expr::{Case, InList, Placeholder};
 use datafusion::logical_expr::expr_fn::cast;
 use lagodb_core::expr::{
-    ColumnRef, RuntimeValue, RuntimeValueId, RuntimeValueLayout,
+    ColumnRef, ExprType, RuntimeValue, RuntimeValueId, RuntimeValueLayout,
 };
 use lagodb_core::query_contract::OutputId;
 use pgrx::pg_sys;
@@ -22,6 +22,7 @@ use crate::plan::{
 
 use super::DataFusionPlanError;
 use crate::datafusion::integer_abs::PgIntegerAbsUdf;
+use crate::datafusion::pg_arithmetic::PgArithmeticOperator;
 use crate::datafusion::postgres_eval::{PgExprRuntime, PgExprSignature, PgExprUdf};
 use crate::datafusion::scan_binding::ScanBindings;
 
@@ -187,15 +188,10 @@ impl<'a> DataFusionExpressionCompiler<'a> {
             }
             ExecutionExpr::Not(child) => Ok(self.compile(child)?.not()),
             ExecutionExpr::Relabel { value, .. } => self.compile(value),
-            ExecutionExpr::WidenInteger { value, result_type } => {
-                let representation =
-                    ExecutionScalarRepr::for_runtime_value(*result_type).ok_or(
-                        DataFusionPlanError::UnsupportedRuntimeType {
-                            oid: result_type.type_oid,
-                        },
-                    )?;
-                Ok(cast(self.compile(value)?, representation.data_type()))
-            }
+            ExecutionExpr::WidenInteger { value, result_type } => Ok(cast(
+                self.compile(value)?,
+                Self::scalar_data_type(*result_type)?,
+            )),
             ExecutionExpr::Case {
                 when_then,
                 else_expr,
@@ -241,7 +237,7 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                     .iter()
                     .map(|argument| self.compile_branch(argument, common))
                     .collect::<Result<Vec<_>, _>>()?;
-                Self::native_function(*kind, arguments, result_type.type_oid)
+                Self::native_function(*kind, arguments, *result_type)
             }
             ExecutionExpr::Postgres(postgres) => {
                 let arguments = postgres
@@ -296,7 +292,7 @@ impl<'a> DataFusionExpressionCompiler<'a> {
     fn native_function(
         kind: ScalarFunctionKind,
         arguments: Vec<Expr>,
-        result_type: pg_sys::Oid,
+        result_type: ExprType,
     ) -> Result<Expr, DataFusionPlanError> {
         use datafusion::functions::core::expr_fn::{
             coalesce, greatest, least, nullif,
@@ -315,6 +311,12 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                 "native scalar function has an invalid argument layout".to_owned(),
             )
         };
+        let mut arithmetic =
+            |operator: PgArithmeticOperator| -> Result<Expr, DataFusionPlanError> {
+                let left = arguments.next().ok_or_else(missing)?;
+                let right = arguments.next().ok_or_else(missing)?;
+                Self::arithmetic(operator, left, right, result_type)
+            };
 
         Ok(match kind {
             ScalarFunctionKind::Ascii => ascii(arguments.next().ok_or_else(missing)?),
@@ -347,9 +349,9 @@ impl<'a> DataFusionExpressionCompiler<'a> {
             }
             ScalarFunctionKind::Abs => {
                 let argument = arguments.next().ok_or_else(missing)?;
-                match result_type {
+                match result_type.type_oid {
                     pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID => {
-                        PgIntegerAbsUdf::for_type(result_type)
+                        PgIntegerAbsUdf::for_type(result_type.type_oid)
                             .ok_or_else(|| {
                                 DataFusionError::Plan(
                                     "native integer ABS has an invalid PostgreSQL type"
@@ -380,6 +382,19 @@ impl<'a> DataFusionExpressionCompiler<'a> {
             ScalarFunctionKind::Rtrim => {
                 rtrim(vec![arguments.next().ok_or_else(missing)?])
             }
+            ScalarFunctionKind::Add => arithmetic(PgArithmeticOperator::Add)?,
+            ScalarFunctionKind::Subtract => {
+                arithmetic(PgArithmeticOperator::Subtract)?
+            }
+            ScalarFunctionKind::Multiply => {
+                arithmetic(PgArithmeticOperator::Multiply)?
+            }
+            ScalarFunctionKind::Divide => arithmetic(PgArithmeticOperator::Divide)?,
+            ScalarFunctionKind::Modulo => arithmetic(PgArithmeticOperator::Modulo)?,
+            ScalarFunctionKind::FloatCast => cast(
+                arguments.next().ok_or_else(missing)?,
+                Self::scalar_data_type(result_type)?,
+            ),
         })
     }
 

@@ -175,7 +175,8 @@ SELECT count(*) FILTER (WHERE id > ANY (ARRAY[2, 5]::integer[])) AS any_gt_rows,
        ) AS simple_case_rows
 FROM query_offload_expression_basic;
 
--- Non-selected error branches prove PostgreSQL lazy CASE/COALESCE evaluation.
+-- Native division by zero in non-selected branches proves lazy CASE/COALESCE
+-- evaluation, as in PostgreSQL.
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT count(*) FILTER (
@@ -201,12 +202,13 @@ FROM query_offload_expression_basic
 WHERE value_i4 IS NOT NULL;
 
 -- One matrix covers every initial fallback converter family, including NULLs.
+-- Unary minus keeps the integer and float4 entries in PostgreSQL.
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT sum((-value_i2)::smallint) AS udf_i2,
-       sum(mod(value_i4, 7)) AS udf_i4,
-       sum(mod(value_i8, 7::bigint)) AS udf_i8,
-       sum(value_f4 + 0::real) AS udf_f4,
+       sum(-value_i4) AS udf_i4,
+       sum(-value_i8) AS udf_i8,
+       sum(-value_f4) AS udf_f4,
        sum(degrees(value_f8)) AS udf_f8,
        bool_and(value_bool IS NOT FALSE) AS udf_bool,
        string_agg(lower(value_text), ',' ORDER BY id) AS udf_text,
@@ -215,9 +217,9 @@ SELECT sum((-value_i2)::smallint) AS udf_i2,
 FROM query_offload_expression_basic;
 
 SELECT sum((-value_i2)::smallint) AS udf_i2,
-       sum(mod(value_i4, 7)) AS udf_i4,
-       sum(mod(value_i8, 7::bigint)) AS udf_i8,
-       sum(value_f4 + 0::real) AS udf_f4,
+       sum(-value_i4) AS udf_i4,
+       sum(-value_i8) AS udf_i8,
+       sum(-value_f4) AS udf_f4,
        sum(degrees(value_f8)) AS udf_f8,
        bool_and(value_bool IS NOT FALSE) AS udf_bool,
        string_agg(lower(value_text), ',' ORDER BY id) AS udf_text,
@@ -227,9 +229,9 @@ FROM query_offload_expression_basic;
 
 SET lagodb.query_offload_mode = 'off';
 SELECT sum((-value_i2)::smallint) AS udf_i2,
-       sum(mod(value_i4, 7)) AS udf_i4,
-       sum(mod(value_i8, 7::bigint)) AS udf_i8,
-       sum(value_f4 + 0::real) AS udf_f4,
+       sum(-value_i4) AS udf_i4,
+       sum(-value_i8) AS udf_i8,
+       sum(-value_f4) AS udf_f4,
        sum(degrees(value_f8)) AS udf_f8,
        bool_and(value_bool IS NOT FALSE) AS udf_bool,
        string_agg(lower(value_text), ',' ORDER BY id) AS udf_text,
@@ -281,6 +283,109 @@ SELECT count(*) FILTER (WHERE abs(value_i2) >= 0::smallint)
 FROM query_offload_expression_abs_edge;
 
 DROP TABLE query_offload_expression_abs_edge;
+
+-- Integer and floating-point arithmetic runs in the engine in grouping keys,
+-- filters and aggregate arguments, so auto mode keeps the offload path. The
+-- query crosses widths, constants on either side, NULL operands, mod(), the
+-- int4 cast PostgreSQL places over an int2 expression for `%` and COALESCE,
+-- and the float casts of integer operands.
+SET lagodb.query_offload_mode = 'auto';
+SET lagodb.query_offload_setup_cost = 0;
+SET lagodb.query_offload_cpu_cost_multiplier = 0;
+EXPLAIN (COSTS OFF)
+SELECT id % 2 AS parity,
+       sum(2::smallint * value_i2 - value_i2 / 2::smallint) AS smallint_ops,
+       sum(value_i2 * value_i4 - value_i8 / 3) AS mixed_widths,
+       sum((value_i2 + value_i2) % value_i4) AS widened_modulo,
+       sum(coalesce(value_i2 + 1::smallint, value_i4)) AS widened_coalesce,
+       sum(mod(value_i8, 7) + (100 - value_i4)) AS mod_function,
+       sum(value_i4 * value_f8 + value_f4) AS float8_mixed,
+       sum(value_f4 / 2::real) AS float4_divide
+FROM query_offload_expression_basic
+WHERE id * 2 <= 8
+GROUP BY id % 2
+ORDER BY parity;
+
+SELECT id % 2 AS parity,
+       sum(2::smallint * value_i2 - value_i2 / 2::smallint) AS smallint_ops,
+       sum(value_i2 * value_i4 - value_i8 / 3) AS mixed_widths,
+       sum((value_i2 + value_i2) % value_i4) AS widened_modulo,
+       sum(coalesce(value_i2 + 1::smallint, value_i4)) AS widened_coalesce,
+       sum(mod(value_i8, 7) + (100 - value_i4)) AS mod_function,
+       sum(value_i4 * value_f8 + value_f4) AS float8_mixed,
+       sum(value_f4 / 2::real) AS float4_divide
+FROM query_offload_expression_basic
+WHERE id * 2 <= 8
+GROUP BY id % 2
+ORDER BY parity;
+
+RESET lagodb.query_offload_setup_cost;
+RESET lagodb.query_offload_cpu_cost_multiplier;
+
+SET lagodb.query_offload_mode = 'off';
+SELECT id % 2 AS parity,
+       sum(2::smallint * value_i2 - value_i2 / 2::smallint) AS smallint_ops,
+       sum(value_i2 * value_i4 - value_i8 / 3) AS mixed_widths,
+       sum((value_i2 + value_i2) % value_i4) AS widened_modulo,
+       sum(coalesce(value_i2 + 1::smallint, value_i4)) AS widened_coalesce,
+       sum(mod(value_i8, 7) + (100 - value_i4)) AS mod_function,
+       sum(value_i4 * value_f8 + value_f4) AS float8_mixed,
+       sum(value_f4 / 2::real) AS float4_divide
+FROM query_offload_expression_basic
+WHERE id * 2 <= 8
+GROUP BY id % 2
+ORDER BY parity;
+
+-- PostgreSQL folds a NULL constant operand away, but a NULL parameter of a
+-- generic plan reaches the int2 kernel as a NULL scalar on either side.
+SET lagodb.query_offload_mode = 'force';
+SET plan_cache_mode = force_generic_plan;
+PREPARE query_offload_expression_null_operand (smallint) AS
+SELECT count(value_i2 + $1) AS right_operand,
+       count($1 - value_i2) AS left_operand
+FROM query_offload_expression_basic;
+EXPLAIN (COSTS OFF) EXECUTE query_offload_expression_null_operand(NULL);
+EXECUTE query_offload_expression_null_operand(NULL);
+EXECUTE query_offload_expression_null_operand(1);
+DEALLOCATE query_offload_expression_null_operand;
+RESET plan_cache_mode;
+
+-- Integer errors match PostgreSQL: int2 results are checked in the int2
+-- range, MIN / -1 overflows, MIN % -1 is 0, and division by zero raises.
+-- Float arithmetic follows IEEE: overflow gives Infinity, underflow 0 and
+-- division by zero Infinity, where PostgreSQL raises.
+CREATE TABLE query_offload_expression_arithmetic_edge (
+    value_i2 smallint,
+    value_i4 integer,
+    value_i8 bigint,
+    value_f8 double precision
+) USING iceberg;
+
+INSERT INTO query_offload_expression_arithmetic_edge VALUES
+    ('-32768'::smallint, '-2147483648'::integer,
+     '-9223372036854775808'::bigint, 1e308);
+
+SET lagodb.query_offload_mode = 'force';
+SELECT sum(value_i2 % '-1'::smallint) AS i2_modulo,
+       sum(value_i4 % -1) AS i4_modulo,
+       sum(value_i8 % -1) AS i8_modulo
+FROM query_offload_expression_arithmetic_edge;
+
+SELECT sum(value_i2 * 2::smallint) FROM query_offload_expression_arithmetic_edge;
+SELECT sum(value_i2 / '-1'::smallint) FROM query_offload_expression_arithmetic_edge;
+SELECT sum(value_i2 / (value_i2 - value_i2))
+FROM query_offload_expression_arithmetic_edge;
+SELECT sum(value_i4 - 1) FROM query_offload_expression_arithmetic_edge;
+SELECT sum(value_i8 / -1) FROM query_offload_expression_arithmetic_edge;
+SELECT sum(value_i4 / (value_i4 - value_i4))
+FROM query_offload_expression_arithmetic_edge;
+
+SELECT max(value_f8 * 10) AS overflow,
+       max(1 / value_f8 / value_f8) AS underflow,
+       max(value_f8 / (value_f8 - value_f8)) AS divide_by_zero
+FROM query_offload_expression_arithmetic_edge;
+
+DROP TABLE query_offload_expression_arithmetic_edge;
 
 CREATE TABLE query_offload_expression_numeric (
     id integer,

@@ -19,6 +19,9 @@ use super::catalog::WorkerSourceCatalog;
 use super::scan_exec::ParallelTableScanExec;
 use crate::datafusion::integer_abs::PgIntegerAbsUdf;
 use crate::datafusion::join_planning::AdaptiveHashJoinExec;
+use crate::datafusion::pg_arithmetic::{
+    PgArithmeticOperator, PgIntegerArithmeticUdf,
+};
 use crate::datafusion::{real_sum, udaf_by_name};
 use lagodb_core::query_contract::ScanId;
 
@@ -200,23 +203,36 @@ impl PhysicalExtensionCodec for LagoPhysicalCodec {
         if name == real_sum::NAME && buf.is_empty() {
             return Ok(real_sum::result());
         }
-        if name != "abs" || buf.len() != 1 {
-            return Err(DataFusionError::NotImplemented(format!(
+        // NotImplemented hands a UDF this codec does not own to the next user
+        // codec. The integer UDFs carry their PostgreSQL integer type as one
+        // tag byte; the name identifies the function.
+        let not_implemented = || {
+            DataFusionError::NotImplemented(format!(
                 "LagoDB UDF {name:?} has no physical codec",
-            )));
-        }
-        PgIntegerAbsUdf::from_codec_tag(buf[0])
-            .map(Arc::new)
-            .ok_or_else(|| {
-                proto_error(format!("invalid PostgreSQL ABS codec tag {}", buf[0]))
-            })
+            ))
+        };
+        let &[tag] = buf else {
+            return Err(not_implemented());
+        };
+        let udf = match (name, PgArithmeticOperator::from_integer_name(name)) {
+            ("abs", _) => PgIntegerAbsUdf::from_codec_tag(tag),
+            (_, Some(operator)) => {
+                PgIntegerArithmeticUdf::from_codec_tag(operator, tag)
+            }
+            (_, None) => return Err(not_implemented()),
+        };
+        udf.map(Arc::new).ok_or_else(|| {
+            proto_error(format!("invalid LagoDB UDF {name:?} codec tag {tag}"))
+        })
     }
 
     fn try_encode_udf(&self, node: &ScalarUDF, buf: &mut Vec<u8>) -> Result<()> {
         if node.name() == real_sum::NAME {
             return Ok(());
         }
-        let Some(tag) = PgIntegerAbsUdf::codec_tag(node) else {
+        let Some(tag) = PgIntegerAbsUdf::codec_tag(node)
+            .or_else(|| PgIntegerArithmeticUdf::codec_tag(node))
+        else {
             return Err(DataFusionError::NotImplemented(format!(
                 "LagoDB UDF codec does not encode {}",
                 node.name(),

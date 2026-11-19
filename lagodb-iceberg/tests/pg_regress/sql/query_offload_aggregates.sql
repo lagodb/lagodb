@@ -616,21 +616,23 @@ WHERE id >= 2 AND lower(value_text) = 'alpha'
 GROUP BY group_i4
 ORDER BY group_i4;
 
--- Aggregate FILTER and HAVING use the same exact-expression planner.
+-- Aggregate FILTER and HAVING use the same exact-expression planner. Unary
+-- minus keeps a PostgreSQL fallback over the aggregate output beneath native
+-- mod(); mod(-x, 7) <= 0 selects the same groups as mod(x, 7) >= 0.
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT group_i4,
        count(*) FILTER (WHERE lower(value_text) = 'alpha') AS alpha_rows
 FROM query_offload_aggregate_basic
 GROUP BY group_i4
-HAVING mod(sum(value_i4), 7) >= 0
+HAVING mod(-sum(value_i4), 7) <= 0
 ORDER BY group_i4;
 
 SELECT group_i4,
        count(*) FILTER (WHERE lower(value_text) = 'alpha') AS alpha_rows
 FROM query_offload_aggregate_basic
 GROUP BY group_i4
-HAVING mod(sum(value_i4), 7) >= 0
+HAVING mod(-sum(value_i4), 7) <= 0
 ORDER BY group_i4;
 
 SET lagodb.query_offload_mode = 'off';
@@ -638,7 +640,7 @@ SELECT group_i4,
        count(*) FILTER (WHERE lower(value_text) = 'alpha') AS alpha_rows
 FROM query_offload_aggregate_basic
 GROUP BY group_i4
-HAVING mod(sum(value_i4), 7) >= 0
+HAVING mod(-sum(value_i4), 7) <= 0
 ORDER BY group_i4;
 
 -- PostgreSQL evaluates FILTER before aggregate arguments. This expression

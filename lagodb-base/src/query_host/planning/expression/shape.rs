@@ -1,7 +1,13 @@
-//! Native lowering for PostgreSQL expression shapes beyond scalar functions.
+//! Native lowering for PostgreSQL expression shapes other than classified
+//! scalar calls: relabels, integer widening casts, boolean tests,
+//! conditionals and scalar-array comparisons.
 
-use lagodb_core::expr::pg::{PgBooleanTest, PgConst, PgExprRef, PgScalarArrayOpExpr};
-use lagodb_core::expr::{ExprType, PgComparisonKind, PgComparisonOp};
+use lagodb_core::expr::pg::{
+    PgBooleanTest, PgConst, PgExprRef, PgFuncExpr, PgScalarArrayOpExpr,
+};
+use lagodb_core::expr::{
+    ExprType, PgComparisonKind, PgComparisonOp, PgIntegerWidening,
+};
 use lagodb_query::plan::{
     CaseWhen, Decimal128Semantics, ExecutionExpr, FixedDecimalType,
     ScalarFunctionKind,
@@ -23,6 +29,9 @@ impl QueryExpressionPlanner {
         match unsafe { (*expression).type_ } {
             pg_sys::NodeTag::T_RelabelType => unsafe {
                 self.lower_relabel(expression.cast(), scope)
+            },
+            pg_sys::NodeTag::T_FuncExpr => unsafe {
+                self.lower_integer_widening(expression.cast(), scope)
             },
             pg_sys::NodeTag::T_BooleanTest => unsafe {
                 self.lower_boolean_test(expression.cast(), scope, domain)
@@ -60,6 +69,35 @@ impl QueryExpressionPlanner {
         Ok(ExecutionExpr::Relabel {
             value: Box::new(unsafe {
                 self.lower(argument.cast(), scope.as_scalar())
+            }?),
+            result_type: Self::expr_type(expression.cast()),
+        })
+    }
+
+    /// One of PostgreSQL's lossless integer widening casts over any integer
+    /// expression. A cast of a scan column is already lowered as a leaf
+    /// before this shape is tried.
+    unsafe fn lower_integer_widening(
+        &mut self,
+        expression: *mut pg_sys::FuncExpr,
+        scope: ExpressionScope<'_>,
+    ) -> ExpressionPlanResult<ExecutionExpr> {
+        let function = PgFuncExpr::try_from_expr(unsafe {
+            PgExprRef::from_raw(expression.cast())
+        })
+        .expect("FuncExpr dispatch established the node kind");
+        let argument = function
+            .argument(0)
+            .ok_or(ExpressionDecline::InvalidShape)?;
+        PgIntegerWidening::for_function(
+            function.function_oid(),
+            argument.type_oid(),
+            function.result_type(),
+        )
+        .ok_or(ExpressionDecline::UnsupportedSemantics)?;
+        Ok(ExecutionExpr::WidenInteger {
+            value: Box::new(unsafe {
+                self.lower(argument.as_ptr().cast(), scope.as_scalar())
             }?),
             result_type: Self::expr_type(expression.cast()),
         })

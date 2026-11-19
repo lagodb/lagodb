@@ -3,10 +3,11 @@
 use std::ffi::CStr;
 use std::fmt::{self, Write};
 
-use lagodb_core::expr::{ColumnRef, PgComparisonSignature, RuntimeValueId};
+use lagodb_core::expr::{ColumnRef, ExprType, PgComparisonSignature, RuntimeValueId};
 use lagodb_query::plan::{
     AggCall, AggregateArguments, AggregateKind, ComparisonKind, ExecutionExpr,
-    FixedDecimalType, OutputId, PostgresExprVolatility, QueryNode, SortDirection,
+    FixedDecimalType, OutputId, PostgresExprVolatility, QueryNode,
+    ScalarFunctionNotation, SortDirection,
 };
 use pgrx::pg_sys;
 
@@ -289,15 +290,7 @@ impl fmt::Display for ExpressionExplain<'_, '_, '_> {
             ExecutionExpr::Not(value) => write!(output, "NOT ({})", nested(value)),
             ExecutionExpr::Relabel { value, result_type }
             | ExecutionExpr::WidenInteger { value, result_type } => {
-                let type_name = unsafe {
-                    pg_sys::format_type_with_typemod(
-                        result_type.type_oid,
-                        result_type.typmod,
-                    )
-                };
-                let type_name =
-                    unsafe { CStr::from_ptr(type_name) }.to_string_lossy();
-                write!(output, "({})::{type_name}", nested(value))
+                self.write_cast(output, value, *result_type)
             }
             ExecutionExpr::Case {
                 when_then,
@@ -338,17 +331,28 @@ impl fmt::Display for ExpressionExplain<'_, '_, '_> {
                 output.write_char(')')
             }
             ExecutionExpr::Function {
-                kind, arguments, ..
-            } => {
-                write!(output, "{kind}(")?;
-                for (index, argument) in arguments.iter().enumerate() {
-                    if index != 0 {
-                        output.write_str(", ")?;
-                    }
-                    write!(output, "{}", nested(argument))?;
+                kind,
+                arguments,
+                result_type,
+                ..
+            } => match (kind.notation(), &arguments[..]) {
+                (ScalarFunctionNotation::Infix(symbol), [left, right]) => {
+                    write!(output, "({} {symbol} {})", nested(left), nested(right))
                 }
-                output.write_char(')')
-            }
+                (ScalarFunctionNotation::Cast, [value]) => {
+                    self.write_cast(output, value, *result_type)
+                }
+                _ => {
+                    write!(output, "{kind}(")?;
+                    for (index, argument) in arguments.iter().enumerate() {
+                        if index != 0 {
+                            output.write_str(", ")?;
+                        }
+                        write!(output, "{}", nested(argument))?;
+                    }
+                    output.write_char(')')
+                }
+            },
             ExecutionExpr::Postgres(_) if !self.formatter.verbose => {
                 output.write_str("PostgreSQL expression")
             }
@@ -403,6 +407,28 @@ impl ExpressionExplain<'_, '_, '_> {
             "::decimal({}, {})",
             decimal_type.precision(),
             decimal_type.scale()
+        )
+    }
+
+    /// `(value)::type`, as PostgreSQL deparses a cast.
+    fn write_cast(
+        &self,
+        output: &mut fmt::Formatter<'_>,
+        value: &ExecutionExpr,
+        result_type: ExprType,
+    ) -> fmt::Result {
+        let type_name = unsafe {
+            pg_sys::format_type_with_typemod(result_type.type_oid, result_type.typmod)
+        };
+        let type_name = unsafe { CStr::from_ptr(type_name) }.to_string_lossy();
+        write!(
+            output,
+            "({})::{type_name}",
+            ExpressionExplain {
+                formatter: self.formatter,
+                expression: value,
+                output_source: self.output_source,
+            }
         )
     }
 

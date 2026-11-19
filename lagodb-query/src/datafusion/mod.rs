@@ -13,6 +13,8 @@ mod join_planning;
 mod memory;
 mod metrics;
 mod parallel;
+mod pg_arithmetic;
+mod pg_integer;
 mod physical_plan;
 mod postgres_eval;
 mod postgres_string_agg;

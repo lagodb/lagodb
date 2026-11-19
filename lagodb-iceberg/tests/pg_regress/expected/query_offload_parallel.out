@@ -500,6 +500,43 @@ WHERE amount < 34 GROUP BY key ORDER BY key;
    3 |     8 | 78155.000000
 (4 rows)
 
+-- Integer arithmetic runs as LagoDB UDFs that every worker decodes from the
+-- physical codec, in the filter and in the partial aggregates.
+SELECT ln FROM pg_temp.explain_analyze_text($$
+SELECT key, sum(value * 2 - id % 3) AS adjusted
+FROM query_offload_parallel_left
+WHERE id * 2 >= 2 GROUP BY key ORDER BY key
+$$) AS ln
+WHERE ln ~ 'Execution Mode|Launched Workers';
+              ln               
+-------------------------------
+   Execution Mode: Parallel
+   Maximum Launched Workers: 2
+(2 rows)
+
+SELECT key, sum(value * 2 - id % 3) AS adjusted
+FROM query_offload_parallel_left
+WHERE id * 2 >= 2 GROUP BY key ORDER BY key;
+ key | adjusted 
+-----+----------
+   0 |     2473
+   1 |     2454
+   2 |     1753
+   3 |     2413
+(4 rows)
+
+SET lagodb.query_offload_mode = 'off';
+SELECT key, sum(value * 2 - id % 3) AS adjusted
+FROM query_offload_parallel_left
+WHERE id * 2 >= 2 GROUP BY key ORDER BY key;
+ key | adjusted 
+-----+----------
+   0 |     2473
+   1 |     2454
+   2 |     1753
+   3 |     2413
+(4 rows)
+
 DROP TABLE query_offload_parallel_small;
 DROP TABLE query_offload_parallel_right;
 DROP TABLE query_offload_parallel_left;
