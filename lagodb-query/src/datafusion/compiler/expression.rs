@@ -4,11 +4,11 @@ use std::ops::Not;
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field};
-use datafusion::common::DataFusionError;
+use datafusion::common::{Column, DataFusionError, TableReference};
 use datafusion::functions::math::expr_fn::isnan;
+use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::expr::{Case, InList, Placeholder};
 use datafusion::logical_expr::expr_fn::cast;
-use datafusion::logical_expr::{Expr, col};
 use lagodb_core::expr::{
     ColumnRef, RuntimeValue, RuntimeValueId, RuntimeValueLayout,
 };
@@ -133,7 +133,13 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                     Ok(Self::typed_value(ExecutionScalarRepr::Utf8.data_type()))
                 }
             },
-            ExecutionExpr::Output(output) => Ok(col(Self::output_name(*output))),
+            ExecutionExpr::Output(output)
+            | ExecutionExpr::DecimalOutput { output, .. } => {
+                Ok(Expr::Column(Column::new(
+                    Some(Self::output_relation()),
+                    Self::output_name(*output),
+                )))
+            }
             ExecutionExpr::Comparison {
                 operator,
                 left,
@@ -145,11 +151,8 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                     .ok_or(DataFusionPlanError::UnsupportedOperator {
                         oid: operator.opno,
                     })?;
-                Ok(Self::comparison(
-                    kind,
-                    self.compile(left)?,
-                    self.compile(right)?,
-                ))
+                let (left, right) = self.comparison_operands(left, right)?;
+                Ok(Self::comparison(kind, left, right))
             }
             ExecutionExpr::IsNull(value) => Ok(self.compile(value)?.is_null()),
             ExecutionExpr::IsNotNull(value) => Ok(self.compile(value)?.is_not_null()),
@@ -404,5 +407,13 @@ impl<'a> DataFusionExpressionCompiler<'a> {
 
     pub(super) fn output_name(output: OutputId) -> String {
         format!("__lagodb_output_{}", output.index())
+    }
+
+    /// The relation qualifying every output column. Validation keeps the
+    /// OutputIds of one schema disjoint, so the qualified names stay unique
+    /// beside scan columns, which keep their source names under
+    /// `__lagodb_scan_{n}`.
+    pub(super) fn output_relation() -> TableReference {
+        TableReference::bare("__lagodb_output")
     }
 }

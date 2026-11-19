@@ -11,7 +11,7 @@ use pgrx::pg_sys;
 
 use super::{NodeFacts, PlanExpressionValidator};
 use crate::plan::ir::{
-    DecimalOperator, ExecutionExpr, FixedDecimalType, QueryPlanError,
+    DecimalOperator, ExecutionExpr, FixedDecimalType, QueryPlanError, ScalarSemantics,
 };
 
 impl PlanExpressionValidator<'_> {
@@ -21,10 +21,10 @@ impl PlanExpressionValidator<'_> {
         operands: [&ExecutionExpr; 2],
         result_type: FixedDecimalType,
         facts: &NodeFacts,
-        allow_outputs: bool,
+        domain: ScalarSemantics,
     ) -> Result<ExprType, QueryPlanError> {
         let [left, right] = operands.map(|operand| {
-            self.validate_numeric(operand, facts, allow_outputs)?;
+            self.validate_numeric(operand, facts, domain)?;
             operand
                 .decimal_type()
                 .ok_or(QueryPlanError::UnsupportedPredicate)
@@ -40,9 +40,9 @@ impl PlanExpressionValidator<'_> {
         value: &ExecutionExpr,
         result_type: FixedDecimalType,
         facts: &NodeFacts,
-        allow_outputs: bool,
+        domain: ScalarSemantics,
     ) -> Result<ExprType, QueryPlanError> {
-        let input_type = self.expression_type(value, facts, allow_outputs)?;
+        let input_type = self.expression_type(value, facts, domain)?;
         if input_type.typmod != -1
             || input_type.collation != pg_sys::InvalidOid
             || FixedDecimalType::for_integer(input_type.type_oid) != Some(result_type)
@@ -61,7 +61,7 @@ impl PlanExpressionValidator<'_> {
         bound: RuntimeValueId,
         operand_type: FixedDecimalType,
         facts: &NodeFacts,
-        allow_outputs: bool,
+        domain: ScalarSemantics,
     ) -> Result<ExprType, QueryPlanError> {
         let spec = self
             .runtime_values
@@ -74,13 +74,8 @@ impl PlanExpressionValidator<'_> {
         {
             return Err(QueryPlanError::UnsupportedRuntimeValueType);
         }
-        let value_type = self.validate_numeric(operand, facts, allow_outputs)?;
-        // An Output is typed by its aggregate's execution type.
-        let actual = match operand {
-            ExecutionExpr::Output(_) => FixedDecimalType::for_type(value_type),
-            operand => operand.decimal_type(),
-        };
-        if actual != Some(operand_type) {
+        self.validate_numeric(operand, facts, domain)?;
+        if operand.decimal_type() != Some(operand_type) {
             return Err(QueryPlanError::UnsupportedPredicate);
         }
         Ok(Self::boolean_type())
@@ -95,10 +90,10 @@ impl PlanExpressionValidator<'_> {
         common: FixedDecimalType,
         result_type: ExprType,
         facts: &NodeFacts,
-        allow_outputs: bool,
+        domain: ScalarSemantics,
     ) -> Result<(), QueryPlanError> {
         for branch in branches {
-            self.validate_numeric(branch, facts, allow_outputs)?;
+            self.validate_numeric(branch, facts, domain)?;
         }
         if result_type.collation != pg_sys::InvalidOid
             || (result_type.typmod != -1
@@ -116,7 +111,8 @@ impl PlanExpressionValidator<'_> {
         argument: &ExecutionExpr,
         input: &NodeFacts,
     ) -> Result<ExprType, QueryPlanError> {
-        let value_type = self.expression_type(argument, input, false)?;
+        let value_type =
+            self.expression_type(argument, input, ScalarSemantics::Exact)?;
         if value_type.type_oid != pg_sys::NUMERICOID {
             return Ok(value_type);
         }
@@ -125,21 +121,25 @@ impl PlanExpressionValidator<'_> {
             .map_or(value_type, FixedDecimalType::value_type))
     }
 
-    pub(super) fn has_decimal_representation(
+    /// The type a comparison operand compares in: a NUMERIC expression's
+    /// fixed execution type, which PostgreSQL's value type leaves unbounded
+    /// for arithmetic, otherwise the value type.
+    pub(super) fn comparison_type(
         expression: &ExecutionExpr,
-        decimal: FixedDecimalType,
-    ) -> bool {
-        matches!(expression, ExecutionExpr::Output(_))
-            || expression.decimal_type() == Some(decimal)
+        value_type: ExprType,
+    ) -> ExprType {
+        expression
+            .decimal_type()
+            .map_or(value_type, FixedDecimalType::value_type)
     }
 
     fn validate_numeric(
         &self,
         expression: &ExecutionExpr,
         facts: &NodeFacts,
-        allow_outputs: bool,
+        domain: ScalarSemantics,
     ) -> Result<ExprType, QueryPlanError> {
-        let value_type = self.expression_type(expression, facts, allow_outputs)?;
+        let value_type = self.expression_type(expression, facts, domain)?;
         if value_type.type_oid != pg_sys::NUMERICOID
             || value_type.collation != pg_sys::InvalidOid
         {

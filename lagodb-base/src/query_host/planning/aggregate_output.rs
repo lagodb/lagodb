@@ -13,6 +13,8 @@ use std::ffi::c_int;
 use lagodb_core::query_contract::OutputId;
 use pgrx::pg_sys;
 
+use super::aggregate_block::AggregateBlockBuilder;
+
 #[derive(Default)]
 pub(super) struct AggregateScanSlots {
     /// Scan-tlist expression and the aggregate output it carries.
@@ -20,10 +22,10 @@ pub(super) struct AggregateScanSlots {
 }
 
 impl AggregateScanSlots {
-    /// Add the slots one path-target expression reads. `group_output`
-    /// resolves a grouping expression; `aggregate_output` resolves or builds
-    /// an Aggref. A Var or PlaceHolderVar outside every grouping expression,
-    /// or a GroupingFunc, has no slot and declines.
+    /// Add the slots one path-target expression reads: a grouping
+    /// expression's output, or each Aggref's, built on first use. A Var or
+    /// PlaceHolderVar outside every grouping expression, or a GroupingFunc,
+    /// has no slot and declines.
     ///
     /// # Safety
     ///
@@ -31,10 +33,9 @@ impl AggregateScanSlots {
     pub(super) unsafe fn add_target(
         &mut self,
         expression: *mut pg_sys::Expr,
-        group_output: impl Fn(*mut pg_sys::Expr) -> Option<OutputId>,
-        mut aggregate_output: impl FnMut(*mut pg_sys::Expr) -> Option<OutputId>,
+        block: &mut AggregateBlockBuilder<'_>,
     ) -> Option<()> {
-        if let Some(output) = group_output(expression) {
+        if let Some(output) = block.group_output(expression) {
             self.push(expression, output);
             return Some(());
         }
@@ -49,9 +50,11 @@ impl AggregateScanSlots {
             let reference =
                 unsafe { pg_sys::list_nth(references, index) }.cast::<pg_sys::Expr>();
             let output = match unsafe { (*reference).type_ } {
-                pg_sys::NodeTag::T_Aggref => aggregate_output(reference)?,
+                pg_sys::NodeTag::T_Aggref => {
+                    unsafe { block.aggregate_output(reference) }?
+                }
                 pg_sys::NodeTag::T_Var | pg_sys::NodeTag::T_PlaceHolderVar => {
-                    group_output(reference)?
+                    block.group_output(reference)?
                 }
                 _ => return None,
             };

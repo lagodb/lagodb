@@ -361,7 +361,7 @@ impl<'a> QueryCostEstimator<'a> {
         PlanEstimate::try_new(
             rows,
             self.context.batches(rows),
-            input.width,
+            aggregate.estimated_width(),
             PlanCost::try_new(startup, total)?,
         )
     }

@@ -2,6 +2,7 @@
 
 use std::ffi::c_void;
 
+mod aggregate_block;
 mod aggregate_candidate;
 mod aggregate_output;
 mod aggregate_plan;

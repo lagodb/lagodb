@@ -7,13 +7,14 @@ use lagodb_core::expr::{
     PgBpcharSemantics, PgComparisonOp,
 };
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
+use lagodb_core::query_contract::OutputId;
 
 use super::QueryPlanDataError;
 use super::expression_leaf::ExecutionLeafCodec;
 use crate::plan::ir::{
     BooleanTestKind, CaseWhen, ComparisonKind, DecimalOperator, ExecutionExpr,
     FixedDecimalType, PostgresEvalExpr, PostgresEvalInput, PostgresExprVolatility,
-    QueryPlanError, ScalarFunctionKind,
+    QueryPlanError, RelationValueRef, ScalarFunctionKind,
 };
 
 const SCALAR: i32 = 1;
@@ -39,6 +40,7 @@ const BPCHAR_VALUE: i32 = 20;
 const DECIMAL_ARITHMETIC: i32 = 21;
 const INTEGER_TO_DECIMAL: i32 = 22;
 const DECIMAL_BOUND_COMPARISON: i32 = 23;
+const DECIMAL_OUTPUT: i32 = 24;
 const IMMUTABLE: i32 = 1;
 const STABLE: i32 = 2;
 const VOLATILE: i32 = 3;
@@ -114,6 +116,15 @@ impl ExecutionExprCodec {
             ExecutionExpr::Output(output) => {
                 writer.append_i32(SCALAR);
                 ExecutionLeafCodec::encode_output(*output, writer);
+            }
+            ExecutionExpr::DecimalOutput {
+                output,
+                decimal_type,
+            } => {
+                writer
+                    .append_i32(DECIMAL_OUTPUT)
+                    .append_count(output.index());
+                Self::encode_decimal_type(*decimal_type, writer);
             }
             ExecutionExpr::Comparison {
                 operator,
@@ -394,6 +405,10 @@ impl ExecutionExprCodec {
                     decimal_type: Self::decode_decimal_type(reader)?,
                 }
             }
+            DECIMAL_OUTPUT => ExecutionExpr::DecimalOutput {
+                output: OutputId::from_index(reader.read_count()?),
+                decimal_type: Self::decode_decimal_type(reader)?,
+            },
             DECIMAL_ARITHMETIC => {
                 let raw_operator = reader.read_i32()?;
                 let operator = DecimalOperator::from_wire_id(raw_operator).ok_or(
@@ -557,5 +572,18 @@ impl ExecutionExprCodec {
         reader: &mut PlanDataReader<'_>,
     ) -> Result<ColumnRef, QueryPlanDataError> {
         ExecutionLeafCodec::decode_column(reader)
+    }
+
+    pub(super) fn encode_relation_value(
+        value: RelationValueRef,
+        writer: &mut PlanDataWriter,
+    ) {
+        ExecutionLeafCodec::encode_relation_value(value, writer);
+    }
+
+    pub(super) fn decode_relation_value(
+        reader: &mut PlanDataReader<'_>,
+    ) -> Result<RelationValueRef, QueryPlanDataError> {
+        ExecutionLeafCodec::decode_relation_value(reader)
     }
 }

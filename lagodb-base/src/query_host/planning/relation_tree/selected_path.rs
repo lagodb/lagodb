@@ -5,6 +5,7 @@ use std::ptr;
 use lagodb_query::plan::{ExecutionExpr, JoinKey, JoinType};
 use pgrx::pg_sys;
 
+use super::subplan::LiftedScalarSubPlan;
 use super::{PlannedRelationTree, RelationNode, RelationTreePlanner};
 use crate::query_host::planning::candidate::SingleRelationCandidate;
 use crate::query_host::planning::expression::{ExpressionScope, PredicateDomain};
@@ -25,6 +26,9 @@ struct JoinLevelPredicates {
     join_restrictions: Vec<*mut pg_sys::RestrictInfo>,
     on_filters: Vec<ExecutionExpr>,
     post_filters: Vec<ExecutionExpr>,
+    /// Inner-join restrictions over a correlated scalar subquery, applied
+    /// above the join through the decorrelated subquery.
+    scalar: Vec<LiftedScalarSubPlan>,
 }
 
 struct JoinLevel {
@@ -81,6 +85,7 @@ impl JoinLevelPredicates {
             join_restrictions: Vec::new(),
             on_filters: Vec::new(),
             post_filters: Vec::new(),
+            scalar: Vec::new(),
         }
     }
 
@@ -285,7 +290,9 @@ impl RelationTreePlanner {
                 &predicates.key_restrictions,
             )
         };
-        let join_rows = if predicates.post_filters.is_empty() {
+        let join_rows = if predicates.post_filters.is_empty()
+            && predicates.scalar.is_empty()
+        {
             final_rows
         } else {
             let matched_rows = unsafe {
@@ -309,15 +316,34 @@ impl RelationTreePlanner {
             estimated_key_rows,
             estimated_rows: join_rows,
         };
-        if predicates.post_filters.is_empty() {
-            Some(join)
+        let mut current = if predicates.post_filters.is_empty() {
+            join
         } else {
-            Some(RelationNode::Filter {
+            RelationNode::Filter {
                 input: Box::new(join),
                 predicates: predicates.post_filters,
                 estimated_rows: final_rows,
-            })
+            }
+        };
+        let scalar_count = predicates.scalar.len();
+        for (index, lifted) in predicates.scalar.into_iter().enumerate() {
+            // PostgreSQL's join rows already apply every restriction.
+            let estimated_rows = if index + 1 == scalar_count {
+                final_rows
+            } else {
+                unsafe {
+                    Self::estimate_restriction_rows(
+                        root,
+                        lifted.restriction(),
+                        current.estimated_rows(),
+                    )
+                }
+            };
+            current = unsafe {
+                self.wrap_scalar_subplan(root, current, lifted, estimated_rows)
+            }?;
         }
+        Some(current)
     }
 
     unsafe fn classify_join_restrictions(
@@ -339,6 +365,18 @@ impl RelationTreePlanner {
                 .cast::<pg_sys::RestrictInfo>();
             let restriction = unsafe { &*restriction_ptr };
             if !predicates.mark_applied(restriction) {
+                continue;
+            }
+            if let Some(scalar) =
+                unsafe { Self::extract_scalar_subplan(root, restriction_ptr) }
+            {
+                // Above an inner join a restriction filters the joined rows
+                // wherever it is placed. At any other join it decides
+                // matches or runs above NULL extension.
+                if join_type != JoinType::Inner || restriction.pseudoconstant {
+                    return None;
+                }
+                predicates.scalar.push(scalar);
                 continue;
             }
             if restriction.pseudoconstant

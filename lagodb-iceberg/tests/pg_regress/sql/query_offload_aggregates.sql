@@ -320,6 +320,21 @@ GROUP BY group_i4
 HAVING sum(value_i4) >= 0 AND avg(value_i4) >= 10
 ORDER BY group_i4;
 
+-- An integer AVG inside COALESCE keeps that Float64 comparison, while SUM
+-- arithmetic compares exactly in its fixed decimal type.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT group_i4, sum(value_numeric) AS sum_numeric
+FROM query_offload_aggregate_basic
+GROUP BY group_i4
+HAVING coalesce(avg(value_i4), 0) >= 10 AND sum(value_numeric) * 2 > 1.00
+ORDER BY group_i4;
+SELECT group_i4, sum(value_numeric) AS sum_numeric
+FROM query_offload_aggregate_basic
+GROUP BY group_i4
+HAVING coalesce(avg(value_i4), 0) >= 10 AND sum(value_numeric) * 2 > 1.00
+ORDER BY group_i4;
+
 -- ============================================================================
 -- Bounded NUMERIC aggregates.
 -- ============================================================================

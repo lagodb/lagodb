@@ -54,6 +54,10 @@ pub(super) struct RelationTreePlanner {
     scopes: Vec<PlannerRelationScope>,
     scan_origins: Vec<ScanOrigin>,
     expressions: QueryExpressionPlanner,
+    /// The first output identity not yet defined by an aggregate inside the
+    /// tree. Outputs a join emits must be disjoint; an aggregate above the
+    /// tree defines its own from zero.
+    next_output: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -140,6 +144,7 @@ impl RelationTreePlanner {
             scopes: vec![scope],
             scan_origins,
             expressions: QueryExpressionPlanner::new(sources),
+            next_output: 0,
         })
     }
 

@@ -1,6 +1,7 @@
 //! Base-restriction classification and exact SubPlan lifting.
 
 mod extraction;
+mod scalar;
 
 use std::ptr;
 
@@ -12,6 +13,7 @@ use super::{RelationBinding, RelationNode, RelationTreePlanner};
 use crate::query_host::planning::candidate::SingleRelationCandidate;
 use crate::query_host::planning::expression::{ExpressionScope, PredicateDomain};
 use crate::query_host::planning::planner_info::PlannerInfoExt;
+pub(super) use scalar::LiftedScalarSubPlan;
 
 #[derive(Clone, Copy)]
 struct LiftedSubPlan {
@@ -36,6 +38,7 @@ struct ClassifiedRestrictions {
     ordinary_restrictions: *mut pg_sys::List,
     top_level: Vec<LiftedSubPlan>,
     mark: Vec<LiftedMarkSubPlan>,
+    scalar: Vec<LiftedScalarSubPlan>,
 }
 
 impl ClassifiedRestrictions {
@@ -45,6 +48,7 @@ impl ClassifiedRestrictions {
             ordinary_restrictions: ptr::null_mut(),
             top_level: Vec::new(),
             mark: Vec::new(),
+            scalar: Vec::new(),
         }
     }
 }
@@ -56,19 +60,38 @@ impl RelationTreePlanner {
         binding: RelationBinding,
         allow_mark: bool,
     ) -> Option<RelationNode> {
-        let restrictions = unsafe {
-            Self::classify_restrictions(
+        unsafe {
+            self.build_scan_from_restrictions(
                 root,
+                binding,
                 (*binding.relation.input_rel).baserestrictinfo,
+                allow_mark,
+                false,
             )
-        }?;
+        }
+    }
+
+    /// Build the scan of `binding` under `restrictions`, a subset of its
+    /// base restrictions; `partial` when some were taken out, so the
+    /// relation's row estimate no longer applies.
+    unsafe fn build_scan_from_restrictions(
+        &mut self,
+        root: *mut pg_sys::PlannerInfo,
+        binding: RelationBinding,
+        restrictions: *mut pg_sys::List,
+        allow_mark: bool,
+        partial: bool,
+    ) -> Option<RelationNode> {
+        let restrictions =
+            unsafe { Self::classify_restrictions(root, restrictions) }?;
         if !allow_mark && !restrictions.mark.is_empty() {
             return None;
         }
 
-        let has_lifted =
-            !restrictions.top_level.is_empty() || !restrictions.mark.is_empty();
-        let scan_rows = if has_lifted {
+        let has_lifted = !restrictions.top_level.is_empty()
+            || !restrictions.mark.is_empty()
+            || !restrictions.scalar.is_empty();
+        let scan_rows = if has_lifted || partial {
             unsafe {
                 Self::estimate_scan_rows(
                     root,
@@ -108,6 +131,18 @@ impl RelationTreePlanner {
         for lifted in restrictions.mark {
             current = unsafe { self.wrap_mark_subplan(root, current, lifted) }?;
         }
+        for lifted in restrictions.scalar {
+            let estimated_rows = unsafe {
+                Self::estimate_restriction_rows(
+                    root,
+                    lifted.restriction(),
+                    current.estimated_rows(),
+                )
+            };
+            current = unsafe {
+                self.wrap_scalar_subplan(root, current, lifted, estimated_rows)
+            }?;
+        }
         Some(current)
     }
 
@@ -141,6 +176,12 @@ impl RelationTreePlanner {
                 unsafe { Self::extract_mark_subplan(root, restriction, or_clause) }
             {
                 classified.mark.push(mark);
+                continue;
+            }
+            if let Some(scalar) =
+                unsafe { Self::extract_scalar_subplan(root, restriction) }
+            {
+                classified.scalar.push(scalar);
                 continue;
             }
             // An unrecognized SubPlan cannot be left for PostgreSQL after the
@@ -238,8 +279,9 @@ impl RelationTreePlanner {
         }
         .ok()?;
         let key = unsafe { self.orient_join_key(&left, &right, key) }?;
-        if key.left().scan != self.binding(outer_root, lifted.null_varno)?.scan
-            || key.left().attno != lifted.null_attno
+        let null_test = key.left().column()?;
+        if null_test.scan != self.binding(outer_root, lifted.null_varno)?.scan
+            || null_test.attno != lifted.null_attno
         {
             return None;
         }
@@ -261,7 +303,7 @@ impl RelationTreePlanner {
             on_filters: Vec::new(),
             null_aware: false,
             mark_filter: Some(super::node::RelationMarkFilter {
-                null_test: key.left(),
+                null_test,
                 anti: lifted.anti,
             }),
             estimated_key_rows,
@@ -322,7 +364,7 @@ impl RelationTreePlanner {
         unsafe { pg_sys::clamp_row_est(source_rows * selectivity) }
     }
 
-    unsafe fn estimate_restriction_rows(
+    pub(super) unsafe fn estimate_restriction_rows(
         root: *mut pg_sys::PlannerInfo,
         restriction: *mut pg_sys::RestrictInfo,
         input_rows: f64,

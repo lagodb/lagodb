@@ -3,7 +3,8 @@
 use lagodb_core::expr::ColumnRef;
 use lagodb_core::query_contract::ScanId;
 use lagodb_query::plan::{
-    ExecutionExpr, FilterNode, JoinKey, JoinNode, JoinType, QueryNode, ScanNode,
+    AggCall, AggregateNode, ExecutionExpr, FilterNode, GroupExpr, JoinKey, JoinNode,
+    JoinType, QueryNode, ScanNode,
 };
 use pgrx::pg_sys;
 
@@ -55,6 +56,17 @@ pub(super) enum RelationNode {
         predicates: Vec<ExecutionExpr>,
         estimated_rows: f64,
     },
+    /// A decorrelated scalar subquery's aggregate, grouped by its correlation
+    /// columns. It is only the right input of a LEFT join, which reads its
+    /// outputs; its scans belong to the subquery's planner scope and are
+    /// emitted to no ancestor.
+    Aggregate {
+        input: Box<Self>,
+        groups: Box<[GroupExpr]>,
+        aggregates: Box<[AggCall]>,
+        estimated_rows: f64,
+        estimated_width: i32,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -81,7 +93,8 @@ impl RelationNode {
         match self {
             Self::Scan(node) => node.estimated_rows,
             Self::Join { estimated_rows, .. } => *estimated_rows,
-            Self::Filter { estimated_rows, .. } => *estimated_rows,
+            Self::Filter { estimated_rows, .. }
+            | Self::Aggregate { estimated_rows, .. } => *estimated_rows,
         }
     }
 
@@ -89,7 +102,9 @@ impl RelationNode {
         match self {
             Self::Scan(_) => false,
             Self::Join { .. } => true,
-            Self::Filter { input, .. } => input.contains_join(),
+            Self::Filter { input, .. } | Self::Aggregate { input, .. } => {
+                input.contains_join()
+            }
         }
     }
 
@@ -104,6 +119,7 @@ impl RelationNode {
                 ..
             } => left.emits(scan) || (join_type.emits_right() && right.emits(scan)),
             Self::Filter { input, .. } => input.emits(scan),
+            Self::Aggregate { .. } => false,
         }
     }
 
@@ -120,6 +136,8 @@ impl RelationNode {
                 unsafe { right.add_relids(relids) }
             }
             Self::Filter { input, .. } => unsafe { input.add_relids(relids) },
+            // The subquery's relids name its own planner's range table.
+            Self::Aggregate { .. } => relids,
         }
     }
 
@@ -235,6 +253,22 @@ impl RelationNode {
                     None => Some(input),
                 }
             }
+            Self::Aggregate {
+                input,
+                groups,
+                aggregates,
+                estimated_rows,
+                estimated_width,
+            } => Some(QueryNode::Aggregate(
+                AggregateNode::new(
+                    input.materialize(expressions, scans)?,
+                    groups,
+                    aggregates,
+                    estimated_rows,
+                    estimated_width,
+                )
+                .ok()?,
+            )),
         }
     }
 

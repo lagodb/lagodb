@@ -42,8 +42,15 @@ impl JoinCandidate {
         // so their standard paths must remain visible. A correlated/LATERAL
         // scope cannot be lifted; it instead owns this serial Join CustomPath
         // and rebinds PARAM_EXEC values on each relevant PostgreSQL rescan.
-        if unsafe { !(*root).parent_root.is_null() && (*root).plan_params.is_null() }
-        {
+        // A level's plan_params is empty before one of its subqueries is
+        // planned, collects the references to that level from the subquery
+        // and its descendants while it is planned (assign_param_for_var), and
+        // is taken and cleared when planning returns (make_subplan,
+        // set_subquery_pathlist). A non-empty parent list therefore means
+        // this scope or a scope nested in it reads PARAM_EXEC values the
+        // parent sets for this scope.
+        let parent = unsafe { (*root).parent_root };
+        if !parent.is_null() && unsafe { (*parent).plan_params }.is_null() {
             return None;
         }
         let join_type = match join_type {
@@ -95,22 +102,10 @@ impl JoinCandidate {
         {
             return None;
         }
+        // RelationTreePlanner classifies every join restriction: it lifts a
+        // correlated scalar subquery and rejects pseudoconstant and other
+        // SubPlan clauses.
         let restrict_list = unsafe { (*extra).restrictlist };
-        let count = unsafe { pg_sys::list_length(restrict_list) };
-        for index in 0..count {
-            let restriction = unsafe { pg_sys::list_nth(restrict_list, index) }
-                .cast::<pg_sys::RestrictInfo>();
-            if unsafe { (*restriction).pseudoconstant }
-                || !unsafe {
-                    SingleRelationCandidate::expression_is_safe(
-                        root,
-                        (*restriction).clause.cast(),
-                    )
-                }
-            {
-                return None;
-            }
-        }
         Some(Self {
             root,
             join_rel,

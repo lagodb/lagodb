@@ -6,10 +6,11 @@ use arrow_schema::Schema;
 use datafusion::common::Statistics;
 use datafusion::common::stats::Precision;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::aggregates::AggregateExec;
 
 use crate::datafusion::parallel::ParallelTableScanExec;
 use crate::datafusion::table_scan::ExternalTableScanExec;
-use crate::plan::{QueryFragment, QueryNode};
+use crate::plan::{AggregateNode, QueryFragment, QueryNode};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RelationEstimate {
@@ -35,9 +36,12 @@ impl RelationEstimate {
 /// one subtree. Where a Filter and its input cover the same scans, the Filter's
 /// outer estimate wins: DataFusion can merge that filter into the join or leave
 /// it above, and a join decision only reads the size of the complete input.
+/// An aggregate joined as a relation covers the same scans as its input, so
+/// its estimate is kept apart and answers only for the aggregate operator.
 #[derive(Debug, Default)]
 pub(super) struct PlanEstimates {
     relations: HashMap<Box<[usize]>, RelationEstimate>,
+    aggregates: HashMap<Box<[usize]>, RelationEstimate>,
     has_join: bool,
 }
 
@@ -66,7 +70,12 @@ impl PlanEstimates {
             QueryNode::Join(join) => {
                 self.has_join = true;
                 let (mut scans, left) = self.record(join.left())?;
-                let (right_scans, right) = self.record(join.right())?;
+                let (right_scans, right) = match join.right() {
+                    QueryNode::Aggregate(aggregate) => {
+                        self.record_aggregate(aggregate)?
+                    }
+                    right => self.record(right)?,
+                };
                 scans.extend(right_scans);
                 let estimate = RelationEstimate {
                     rows: join.estimated_rows(),
@@ -94,6 +103,23 @@ impl PlanEstimates {
         Some((scans, estimate))
     }
 
+    /// Record an aggregate joined as a relation: the decorrelated scalar
+    /// subquery's grouped aggregate.
+    fn record_aggregate(
+        &mut self,
+        aggregate: &AggregateNode,
+    ) -> Option<(Vec<usize>, RelationEstimate)> {
+        let (scans, _) = self.record(aggregate.input())?;
+        let estimate = RelationEstimate {
+            rows: aggregate.estimated_rows(),
+            width: aggregate.estimated_width(),
+        };
+        let mut key = scans.clone().into_boxed_slice();
+        key.sort_unstable();
+        self.aggregates.insert(key, estimate);
+        Some((scans, estimate))
+    }
+
     fn ascend(
         &mut self,
         input: &QueryNode,
@@ -112,7 +138,12 @@ impl PlanEstimates {
         let mut scans = Vec::new();
         Self::collect_scans(plan, &mut scans);
         scans.sort_unstable();
-        self.relations.get(scans.as_slice()).copied()
+        let estimates = if plan.is::<AggregateExec>() {
+            &self.aggregates
+        } else {
+            &self.relations
+        };
+        estimates.get(scans.as_slice()).copied()
     }
 
     fn collect_scans(plan: &dyn ExecutionPlan, scans: &mut Vec<usize>) {

@@ -24,7 +24,7 @@ pub use expression::{
     PostgresEvalInput, PostgresExprVolatility, ScalarFunctionKind,
 };
 pub(in crate::plan) use expression_validation::PlanExpressionValidator;
-pub use join::{JoinKey, JoinNode, JoinType, MarkFilter};
+pub use join::{JoinKey, JoinNode, JoinType, MarkFilter, RelationValueRef};
 pub use limit::{LimitEstimate, LimitNode};
 pub use ordering::SortDirection;
 pub use project::{ProjectExpr, ProjectNode};
@@ -32,7 +32,7 @@ pub use semantics::{ComparisonKind, Decimal128Semantics, ScalarSemantics};
 pub use sort::{SortExpr, SortNode};
 
 use lagodb_core::expr::ColumnRef;
-use lagodb_core::query_contract::ScanId;
+use lagodb_core::query_contract::{OutputId, ScanId};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum QueryPlanError {
@@ -288,10 +288,10 @@ impl QueryFragment {
                 QueryNode::Aggregate(aggregate) => {
                     Self::validate_aggregate_input(aggregate.input())
                 }
-                QueryNode::Join(join) => Self::validate_binary_join(join),
+                QueryNode::Join(join) => Self::validate_join(join),
                 _ => Err(QueryPlanError::UnsupportedTopology),
             },
-            QueryNode::Join(join) => Self::validate_binary_join(join),
+            QueryNode::Join(join) => Self::validate_join(join),
             _ => Err(QueryPlanError::UnsupportedTopology),
         }
     }
@@ -303,19 +303,53 @@ impl QueryFragment {
         Self::validate_relation_tree(input)
     }
 
-    fn validate_binary_join(join: &JoinNode) -> Result<(), QueryPlanError> {
+    fn validate_join(join: &JoinNode) -> Result<(), QueryPlanError> {
         Self::validate_relation_tree(join.left())?;
-        Self::validate_relation_tree(join.right())
+        match join.right() {
+            QueryNode::Aggregate(aggregate) => {
+                Self::validate_scalar_aggregate_join(join, aggregate)
+            }
+            right => Self::validate_relation_tree(right),
+        }
+    }
+
+    /// A decorrelated scalar subquery: a LEFT join of the outer rows to the
+    /// subquery's aggregate grouped by its correlation columns, keyed by outer
+    /// column = grouping output. Keys covering every group match each outer
+    /// row with at most one aggregate row. Every other aggregate stays above
+    /// the tree.
+    fn validate_scalar_aggregate_join(
+        join: &JoinNode,
+        aggregate: &AggregateNode,
+    ) -> Result<(), QueryPlanError> {
+        let keyed = |output: OutputId| {
+            join.keys().iter().any(|key| {
+                matches!(key.right(), RelationValueRef::Output { output: keyed, .. }
+                    if keyed == output)
+            })
+        };
+        if join.join_type() != JoinType::Left
+            || join.null_aware()
+            || join.mark_filter().is_some()
+            || join.on_filter().is_some()
+            || aggregate.groups().is_empty()
+            || !join.keys().iter().all(|key| {
+                matches!(key.left(), RelationValueRef::Column(_))
+                    && matches!(key.right(), RelationValueRef::Output { output, .. }
+                        if aggregate.groups().iter().any(|group| group.output() == output))
+            })
+            || !aggregate.groups().iter().all(|group| keyed(group.output()))
+        {
+            return Err(QueryPlanError::UnsupportedTopology);
+        }
+        Self::validate_relation_tree(aggregate.input())
     }
 
     fn validate_relation_tree(node: &QueryNode) -> Result<(), QueryPlanError> {
         match node {
             QueryNode::Scan(_) => Ok(()),
             QueryNode::Filter(filter) => Self::validate_relation_tree(filter.input()),
-            QueryNode::Join(join) => {
-                Self::validate_relation_tree(join.left())?;
-                Self::validate_relation_tree(join.right())
-            }
+            QueryNode::Join(join) => Self::validate_join(join),
             _ => Err(QueryPlanError::UnsupportedTopology),
         }
     }
@@ -338,9 +372,21 @@ impl QueryFragment {
                 Ok(vec![false; output_count])
             }
             QueryNode::Join(join) => {
-                let _ = Self::validate_node(join.left(), used_scans, output_count)?;
-                let _ = Self::validate_node(join.right(), used_scans, output_count)?;
-                Ok(vec![false; output_count])
+                // Outputs are scoped to the node defining them; a join emits
+                // those of both inputs, which must therefore be disjoint.
+                let mut outputs =
+                    Self::validate_node(join.left(), used_scans, output_count)?;
+                let right =
+                    Self::validate_node(join.right(), used_scans, output_count)?;
+                for (index, (defined, right)) in
+                    outputs.iter_mut().zip(right).enumerate()
+                {
+                    if *defined && right {
+                        return Err(QueryPlanError::DuplicateOutput { index });
+                    }
+                    *defined |= right;
+                }
+                Ok(outputs)
             }
             QueryNode::Aggregate(aggregate) => {
                 let _ =

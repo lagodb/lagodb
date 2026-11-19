@@ -2,6 +2,7 @@
 
 use lagodb_core::expr::{ColumnRef, ExprType, PgComparisonKind, PgComparisonOp};
 use lagodb_core::expr::{PgComparisonSignature, PgTextComparisonSemantics};
+use lagodb_core::query_contract::OutputId;
 use pgrx::pg_sys;
 
 use super::{
@@ -78,18 +79,56 @@ impl MarkFilter {
     }
 }
 
+/// A value one join input emits: a storage column, or a grouping output of
+/// an aggregate input. An output carries its value type, which only the
+/// aggregate node's facts otherwise hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationValueRef {
+    Column(ColumnRef),
+    Output {
+        output: OutputId,
+        value_type: ExprType,
+    },
+}
+
+impl RelationValueRef {
+    #[inline]
+    pub const fn value_type(self) -> ExprType {
+        match self {
+            Self::Column(column) => column.value_type,
+            Self::Output { value_type, .. } => value_type,
+        }
+    }
+
+    #[inline]
+    pub const fn column(self) -> Option<ColumnRef> {
+        match self {
+            Self::Column(column) => Some(column),
+            Self::Output { .. } => None,
+        }
+    }
+
+    /// The expression reading this value from its input.
+    pub fn expression(self) -> ExecutionExpr {
+        match self {
+            Self::Column(column) => ExecutionExpr::Column(column),
+            Self::Output { output, .. } => ExecutionExpr::Output(output),
+        }
+    }
+}
+
 /// One exact, hashable PostgreSQL equality key with explicit side identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JoinKey {
-    left: ColumnRef,
-    right: ColumnRef,
+    left: RelationValueRef,
+    right: RelationValueRef,
     operator: PgComparisonOp,
 }
 
 impl JoinKey {
     pub fn try_new(
-        left: ColumnRef,
-        right: ColumnRef,
+        left: RelationValueRef,
+        right: RelationValueRef,
         operator: PgComparisonOp,
     ) -> Result<Self, QueryPlanError> {
         let key = Self {
@@ -102,12 +141,12 @@ impl JoinKey {
     }
 
     #[inline]
-    pub const fn left(self) -> ColumnRef {
+    pub const fn left(self) -> RelationValueRef {
         self.left
     }
 
     #[inline]
-    pub const fn right(self) -> ColumnRef {
+    pub const fn right(self) -> RelationValueRef {
         self.right
     }
 
@@ -117,8 +156,8 @@ impl JoinKey {
     }
 
     pub(crate) fn validate_semantics(self) -> Result<ExprType, QueryPlanError> {
-        let left = self.left.value_type;
-        let right = self.right.value_type;
+        let left = self.left.value_type();
+        let right = self.right.value_type();
         // Keep the complete type contract, including NUMERIC typmod. Decimal
         // coefficients use each column's declared scale, so comparing
         // differently scaled coefficients without coercion is not PostgreSQL
@@ -287,7 +326,10 @@ impl JoinNode {
         estimated_rows: f64,
     ) -> Result<Self, QueryPlanError> {
         let filter = MarkFilter::new(null_test, anti);
-        if !filter.null_test.same_storage_column(key.left()) {
+        if !matches!(
+            key.left(),
+            RelationValueRef::Column(column) if filter.null_test.same_storage_column(column)
+        ) {
             return Err(QueryPlanError::UnsupportedTopology);
         }
         Ok(Self {

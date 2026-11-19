@@ -219,7 +219,7 @@ impl QueryExpressionPlanner {
         let comparison = if decimal.is_some() {
             domain
                 .decimal_comparison(operator, value_type, value_type)
-                .map(|(comparison, _)| comparison)
+                .map(|(comparison, ..)| comparison)
         } else {
             domain.comparison(operator, value_type, value_type)
         }
@@ -236,7 +236,7 @@ impl QueryExpressionPlanner {
             // encodable in the column's representation.
             if element_types.any(|element_type| {
                 domain.decimal_comparison(operator, value_type, element_type)
-                    != Some((comparison, decimal))
+                    != Some((comparison, decimal, decimal))
             }) {
                 return Err(ExpressionDecline::UnsupportedSemantics);
             }

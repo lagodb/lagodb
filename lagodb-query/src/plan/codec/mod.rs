@@ -87,6 +87,8 @@ impl QueryPlanData {
             Box::new([]),
             Box::new([aggregate]),
             1.0,
+            // The one int8 COUNT value.
+            8,
         )?);
         let fragment = QueryFragment::new(QueryNode::Project(ProjectNode::new(
             aggregate,
@@ -175,15 +177,23 @@ impl QueryPlanData {
         Ok(())
     }
 
+    /// One more than the largest output identity any node defines. Outputs
+    /// are scoped, so an aggregate may reuse the identities of an aggregate
+    /// inside its input.
     fn semantic_output_count(node: &QueryNode) -> usize {
         match node {
-            QueryNode::Scan(_) | QueryNode::Join(_) => 0,
+            QueryNode::Scan(_) => 0,
+            QueryNode::Join(join) => Self::semantic_output_count(join.left())
+                .max(Self::semantic_output_count(join.right())),
             QueryNode::Aggregate(aggregate) => aggregate
                 .groups()
                 .iter()
                 .map(GroupExpr::output)
                 .chain(aggregate.aggregates().iter().map(AggCall::output))
                 .map(|output| output.index() + 1)
+                .chain(std::iter::once(Self::semantic_output_count(
+                    aggregate.input(),
+                )))
                 .max()
                 .unwrap_or(0),
             QueryNode::Distinct(distinct) => distinct

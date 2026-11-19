@@ -1,21 +1,18 @@
 //! Aggregate expression recognition and provider-neutral query IR construction.
 
-use std::ffi::{CStr, CString, c_int, c_void};
+use std::ffi::c_int;
 
-use lagodb_core::expr::{ExprType, PgOrderingDirection, RuntimeValueLayout};
+use lagodb_core::expr::RuntimeValueLayout;
 use lagodb_core::query_contract::OutputId;
 use lagodb_query::plan::{
-    AggCall, AggregateArguments, AggregateNode, AggregateOrderExpr, ExecutionExpr,
-    FilterNode, GroupExpr, ProjectExpr, ProjectNode, QueryFragment, QueryNode,
-    QueryPlanData, QueryTupleLayout, QueryTupleSlot, ScalarSemantics,
+    AggCall, AggregateNode, ExecutionExpr, FilterNode, ProjectExpr, ProjectNode,
+    QueryFragment, QueryNode, QueryPlanData, QueryTupleLayout, QueryTupleSlot,
 };
 use pgrx::pg_sys;
 
+use super::aggregate_block::AggregateBlockBuilder;
 use super::aggregate_output::AggregateScanSlots;
-use super::expression::{
-    ExpressionScope, OutputCatalog, PredicateDomain, QueryExpressionPlanner,
-    ResolvedOutput,
-};
+use super::expression::{PredicateDomain, QueryExpressionPlanner};
 use super::planned_query::PlannedQuery;
 use super::planner_info::PlannerInfoExt;
 use super::relation_tree::{PlannedRelationInput, PlannedRelationTree};
@@ -53,7 +50,8 @@ impl AggregatePlanBuilder {
 
     pub(super) unsafe fn build(&mut self) -> Option<PlannedQuery> {
         let parse = unsafe { &*(*self.root).parse };
-        let mut groups = Vec::new();
+        let mut block =
+            AggregateBlockBuilder::new(self.root, &mut self.expressions, 0);
         let processed_groups = unsafe { (*self.root).processed_group_clause() };
         let group_count = unsafe { pg_sys::list_length(processed_groups) };
         for index in 0..group_count {
@@ -68,28 +66,11 @@ impl AggregatePlanBuilder {
             if target.is_null() {
                 return None;
             }
-            let scalar = unsafe {
-                self.expressions
-                    .lower((*target).expr.cast(), ExpressionScope::scalar(self.root))
-            }
-            .ok()?;
-            let result_type =
-                QueryExpressionPlanner::expr_type(unsafe { (*target).expr });
-            if !ScalarSemantics::Exact.supports_grouping(
-                result_type,
-                unsafe { (*clause).eqop },
-                unsafe { (*clause).hashable },
-            ) {
-                return None;
-            }
-            let output = OutputId::from_index(groups.len());
-            groups.push((
-                unsafe { (*target).expr },
-                GroupExpr::try_new(scalar, result_type, output).ok()?,
-            ));
+            unsafe {
+                block.add_group((*target).expr, (*clause).eqop, (*clause).hashable)
+            }?;
         }
 
-        let mut aggregates: Vec<(*mut pg_sys::Expr, AggCall)> = Vec::new();
         let mut scan_slots = AggregateScanSlots::default();
         let output_target = self.path_target;
         let target_count = unsafe { pg_sys::list_length((*output_target).exprs) };
@@ -97,14 +78,10 @@ impl AggregatePlanBuilder {
             let expression =
                 unsafe { pg_sys::list_nth((*output_target).exprs, index) }
                     .cast::<pg_sys::Expr>();
-            let group_output =
-                |expression| unsafe { Self::group_output(&groups, expression) };
-            let aggregate_output = |expression| unsafe {
-                self.aggregate_output(&groups, &mut aggregates, expression)
-            };
-            unsafe {
-                scan_slots.add_target(expression, group_output, aggregate_output)
-            }?;
+            unsafe { scan_slots.add_target(expression, &mut block) }?;
+        }
+        if scan_slots.is_empty() {
+            return None;
         }
         let mut project = Vec::new();
         let mut slots = Vec::new();
@@ -113,10 +90,9 @@ impl AggregatePlanBuilder {
             scan_slots.iter().enumerate()
         {
             let result_type = QueryExpressionPlanner::expr_type(scan_expression);
-            let nullable = aggregates
-                .iter()
-                .find(|(_, aggregate)| aggregate.output() == semantic_output)
-                .is_none_or(|(_, aggregate)| aggregate.nullable());
+            let nullable = block
+                .aggregate(semantic_output)
+                .is_none_or(AggCall::nullable);
             let physical_output = OutputId::from_index(index);
             project.push(ProjectExpr::new(
                 ExecutionExpr::Output(semantic_output),
@@ -150,58 +126,25 @@ impl AggregatePlanBuilder {
                     continue;
                 }
                 // Register the Aggref so HAVING can reference its output.
-                unsafe {
-                    self.aggregate_output(&groups, &mut aggregates, expression)
-                }?;
+                unsafe { block.aggregate_output(expression) }?;
             }
-            let catalog = HavingOutputCatalog {
-                entries: groups
-                    .iter()
-                    .map(|(expression, group)| {
-                        (*expression, group.output(), group.result_type())
-                    })
-                    .chain(aggregates.iter().map(|(expression, aggregate)| {
-                        (
-                            *expression,
-                            aggregate.output(),
-                            aggregate.execution_result_type(),
-                        )
-                    }))
-                    .collect(),
-            };
-            Some(
-                unsafe {
-                    self.expressions.lower(
-                        parse.havingQual,
-                        ExpressionScope::output_predicate(
-                            self.root,
-                            &catalog,
-                            PredicateDomain::Having,
-                        ),
-                    )
-                }
-                .ok()?,
-            )
+            Some(unsafe {
+                block.lower_over_outputs(
+                    parse.havingQual,
+                    Some(PredicateDomain::Having),
+                )
+            }?)
         };
-        if scan_slots.is_empty() {
-            return None;
-        }
+        let (groups, aggregates) = block.into_parts();
 
         let (input, scans) = self.input.take()?.materialize(&self.expressions)?;
         let aggregate = QueryNode::Aggregate(
             AggregateNode::new(
                 input,
-                groups
-                    .into_iter()
-                    .map(|(_, group)| group)
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-                aggregates
-                    .into_iter()
-                    .map(|(_, aggregate)| aggregate)
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
+                groups,
+                aggregates,
                 self.aggregate_rows,
+                unsafe { (*self.path_target).width },
             )
             .ok()?,
         );
@@ -232,238 +175,5 @@ impl AggregatePlanBuilder {
             // (`set_pathtarget_cost_width`, Aggrefs free like Vars).
             postgres_projection_cost: unsafe { (*self.path_target).cost },
         })
-    }
-
-    /// The grouping output of an expression equal to a grouping expression.
-    unsafe fn group_output(
-        groups: &[(*mut pg_sys::Expr, GroupExpr)],
-        expression: *mut pg_sys::Expr,
-    ) -> Option<OutputId> {
-        groups.iter().find_map(|(candidate, group)| {
-            unsafe {
-                pg_sys::equal(candidate.cast::<c_void>(), expression.cast::<c_void>())
-            }
-            .then(|| group.output())
-        })
-    }
-
-    /// The output of an Aggref, built on first use. Equal Aggrefs in the
-    /// target list and HAVING share one aggregate.
-    unsafe fn aggregate_output(
-        &mut self,
-        groups: &[(*mut pg_sys::Expr, GroupExpr)],
-        aggregates: &mut Vec<(*mut pg_sys::Expr, AggCall)>,
-        expression: *mut pg_sys::Expr,
-    ) -> Option<OutputId> {
-        if let Some((_, aggregate)) = aggregates.iter().find(|(existing, _)| unsafe {
-            pg_sys::equal(existing.cast::<c_void>(), expression.cast::<c_void>())
-        }) {
-            return Some(aggregate.output());
-        }
-        let output = OutputId::from_index(groups.len() + aggregates.len());
-        let aggregate = unsafe {
-            self.build_aggregate(expression.cast::<pg_sys::Aggref>(), output)
-        }?;
-        aggregates.push((expression, aggregate));
-        Some(output)
-    }
-
-    unsafe fn build_aggregate(
-        &mut self,
-        aggregate: *mut pg_sys::Aggref,
-        output: OutputId,
-    ) -> Option<AggCall> {
-        let aggregate = unsafe { &*aggregate };
-        if !aggregate.aggdirectargs.is_null()
-            || aggregate.aggvariadic
-            || aggregate.agglevelsup != 0
-            || aggregate.aggsplit != pg_sys::AggSplit::AGGSPLIT_SIMPLE
-        {
-            return None;
-        }
-        let semantic_arguments = unsafe { Self::semantic_arguments(aggregate.args) };
-        let arguments = if aggregate.aggstar {
-            if !semantic_arguments.is_empty() {
-                return None;
-            }
-            AggregateArguments::None
-        } else if u32::from(aggregate.aggfnoid) == pg_sys::F_STRING_AGG_TEXT_TEXT {
-            let &[value, delimiter] = semantic_arguments.as_slice() else {
-                return None;
-            };
-            let value = unsafe {
-                self.expressions
-                    .lower((*value).expr.cast(), ExpressionScope::scalar(self.root))
-            }
-            .ok()?;
-            let delimiter = unsafe { Self::string_agg_delimiter((*delimiter).expr) }?;
-            AggregateArguments::StringAgg { value, delimiter }
-        } else {
-            let &[target] = semantic_arguments.as_slice() else {
-                return None;
-            };
-            AggregateArguments::Unary(
-                unsafe {
-                    self.expressions.lower(
-                        (*target).expr.cast(),
-                        ExpressionScope::scalar(self.root),
-                    )
-                }
-                .ok()?,
-            )
-        };
-        let distinct = !aggregate.aggdistinct.is_null();
-        let filter = if aggregate.aggfilter.is_null() {
-            None
-        } else {
-            Some(
-                unsafe {
-                    self.expressions.lower(
-                        aggregate.aggfilter.cast(),
-                        ExpressionScope::predicate(self.root, PredicateDomain::Exact),
-                    )
-                }
-                .ok()?,
-            )
-        };
-        let call = AggCall::try_new(
-            aggregate.aggfnoid,
-            arguments,
-            distinct,
-            filter,
-            ExprType {
-                type_oid: aggregate.aggtype,
-                typmod: unsafe {
-                    pg_sys::exprTypmod(aggregate as *const _ as *const pg_sys::Node)
-                },
-                collation: aggregate.aggcollid,
-            },
-            output,
-        )
-        .ok()?;
-        let order_by = unsafe { self.build_aggregate_order_by(aggregate, &call) }?;
-        call.try_with_order_by(order_by.into_boxed_slice()).ok()
-    }
-
-    unsafe fn semantic_arguments(
-        arguments: *mut pg_sys::List,
-    ) -> Vec<*mut pg_sys::TargetEntry> {
-        let count = unsafe { pg_sys::list_length(arguments) };
-        let mut semantic = Vec::with_capacity(count as usize);
-        for index in 0..count {
-            let target = unsafe { pg_sys::list_nth(arguments, index) }
-                .cast::<pg_sys::TargetEntry>();
-            if !unsafe { (*target).resjunk } {
-                semantic.push(target);
-            }
-        }
-        semantic
-    }
-
-    unsafe fn build_aggregate_order_by(
-        &mut self,
-        aggregate: &pg_sys::Aggref,
-        call: &AggCall,
-    ) -> Option<Vec<AggregateOrderExpr>> {
-        let count = unsafe { pg_sys::list_length(aggregate.aggorder) };
-        let honors_order_by = call.kind().honors_order_by();
-        if count > 0 && call.result_depends_on_input_order() && !honors_order_by {
-            return None;
-        }
-        let mut order_by = if honors_order_by {
-            Vec::with_capacity(count as usize)
-        } else {
-            Vec::new()
-        };
-        // An order-insensitive transition can omit sorting only after proving
-        // that the skipped expression is a direct column and the comparator is
-        // a side-effect-free built-in operator. Implementations that honor
-        // ORDER BY retain the same proof before lowering the key into the IR.
-        for index in 0..count {
-            let clause = unsafe { pg_sys::list_nth(aggregate.aggorder, index) }
-                .cast::<pg_sys::SortGroupClause>();
-            let target = unsafe {
-                pg_sys::get_sortgroupref_tle(
-                    (*clause).tleSortGroupRef,
-                    aggregate.args,
-                )
-            };
-            let target_expression = unsafe { (*target).expr };
-            let direct =
-                unsafe { QueryExpressionPlanner::unwrap_relabel(target_expression) };
-            if unsafe { (*direct).type_ } != pg_sys::NodeTag::T_Var {
-                return None;
-            }
-            let direction =
-                PgOrderingDirection::from_builtin_sort_operator(unsafe {
-                    (*clause).sortop
-                })?;
-            if !honors_order_by {
-                continue;
-            }
-            let expression = unsafe {
-                self.expressions.lower(
-                    target_expression.cast(),
-                    ExpressionScope::scalar(self.root),
-                )
-            }
-            .ok()?;
-            order_by.push(
-                AggregateOrderExpr::try_new(expression, direction, unsafe {
-                    (*clause).nulls_first
-                })
-                .ok()?,
-            );
-        }
-        Some(order_by)
-    }
-
-    unsafe fn string_agg_delimiter(expression: *mut pg_sys::Expr) -> Option<CString> {
-        let expression =
-            unsafe { QueryExpressionPlanner::unwrap_relabel(expression) };
-        if unsafe { (*expression).type_ } != pg_sys::NodeTag::T_Const {
-            return None;
-        }
-        let constant = expression.cast::<pg_sys::Const>();
-        if unsafe { (*constant).consttype != pg_sys::TEXTOID } {
-            return None;
-        }
-        // PostgreSQL treats a NULL STRING_AGG delimiter as no separator.
-        // DataFusion requires a non-null literal delimiter, so the empty
-        // literal is the equivalent representation at this plan boundary.
-        if unsafe { (*constant).constisnull } {
-            return Some(c"".to_owned());
-        }
-        let text =
-            unsafe { (*constant).constvalue.cast_mut_ptr::<pg_sys::varlena>() };
-        let delimiter = unsafe { pg_sys::text_to_cstring(text) };
-        (!delimiter.is_null())
-            .then(|| unsafe { CStr::from_ptr(delimiter).to_owned() })
-    }
-}
-
-struct HavingOutputCatalog {
-    entries: Vec<(*mut pg_sys::Expr, OutputId, ExprType)>,
-}
-
-impl OutputCatalog for HavingOutputCatalog {
-    unsafe fn resolve_output(
-        &self,
-        expression: *mut pg_sys::Expr,
-    ) -> Option<ResolvedOutput> {
-        self.entries
-            .iter()
-            .find_map(|(candidate, output, execution_type)| {
-                unsafe {
-                    pg_sys::equal(
-                        candidate.cast::<c_void>(),
-                        expression.cast::<c_void>(),
-                    )
-                }
-                .then_some(ResolvedOutput {
-                    output: *output,
-                    execution_type: *execution_type,
-                })
-            })
     }
 }

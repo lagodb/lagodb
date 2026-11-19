@@ -384,39 +384,180 @@ WHERE l.key_i4 NOT IN (
 )
 ORDER BY l.id;
 
--- For parameterized query offload, PostgreSQL drives the outer LATERAL
--- relation; the correlated inner
--- two-source join is the query-offload consumer rebuilt for each PARAM_EXEC.
+-- OFFSET 0 keeps the LATERAL subquery a separate plan, so PostgreSQL's
+-- Nested Loop sets l.key_i8 as a PARAM_EXEC for every outer row, and the
+-- offloaded inner join rebuilds whenever the value changes. Repeated, NULL
+-- and unmatched outer values each read their own rows.
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT l.id, nested.right_id, nested.label
 FROM query_offload_join_left AS l
-CROSS JOIN LATERAL (
+LEFT JOIN LATERAL (
     SELECT r.id AS right_id, a.label
     FROM query_offload_join_right AS r
     JOIN query_offload_join_aux AS a USING (key_i4)
-    WHERE r.key_i4 = l.key_i4
-) AS nested
+    WHERE r.key_i8 = l.key_i8
+    OFFSET 0
+) AS nested ON true
 ORDER BY l.id, nested.right_id;
 SELECT l.id, nested.right_id, nested.label
 FROM query_offload_join_left AS l
-CROSS JOIN LATERAL (
+LEFT JOIN LATERAL (
     SELECT r.id AS right_id, a.label
     FROM query_offload_join_right AS r
     JOIN query_offload_join_aux AS a USING (key_i4)
-    WHERE r.key_i4 = l.key_i4
-) AS nested
+    WHERE r.key_i8 = l.key_i8
+    OFFSET 0
+) AS nested ON true
 ORDER BY l.id, nested.right_id;
 SET lagodb.query_offload_mode = 'off';
 SELECT l.id, nested.right_id, nested.label
 FROM query_offload_join_left AS l
-CROSS JOIN LATERAL (
+LEFT JOIN LATERAL (
     SELECT r.id AS right_id, a.label
     FROM query_offload_join_right AS r
     JOIN query_offload_join_aux AS a USING (key_i4)
-    WHERE r.key_i4 = l.key_i4
-) AS nested
+    WHERE r.key_i8 = l.key_i8
+    OFFSET 0
+) AS nested ON true
 ORDER BY l.id, nested.right_id;
+
+-- EXISTS stops each rescan after one row, abandoning the running inner
+-- stream before the next outer value rebuilds the plan.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT l.id
+FROM query_offload_join_left AS l
+WHERE EXISTS (
+    SELECT 1
+    FROM query_offload_join_right AS r
+    JOIN query_offload_join_aux AS a USING (key_i4)
+    WHERE r.key_i8 = l.key_i8
+    OFFSET 0
+)
+ORDER BY l.id;
+SELECT l.id
+FROM query_offload_join_left AS l
+WHERE EXISTS (
+    SELECT 1
+    FROM query_offload_join_right AS r
+    JOIN query_offload_join_aux AS a USING (key_i4)
+    WHERE r.key_i8 = l.key_i8
+    OFFSET 0
+)
+ORDER BY l.id;
+
+-- ============================================================================
+-- Correlated scalar subqueries: the aggregate grouped by the correlation
+-- column is LEFT joined to the outer rows, which read NULL without a group,
+-- the subquery's value over no rows. The outer column named like an engine
+-- output must stay distinct from the joined aggregate's outputs.
+-- ============================================================================
+
+CREATE TABLE query_offload_join_scalar (
+    id integer,
+    key_i4 integer,
+    __lagodb_output_0 numeric(12, 2)
+) USING iceberg;
+
+INSERT INTO query_offload_join_scalar VALUES
+    (1, 1, 0.40),
+    (2, 2, 2.00),
+    (3, 2, 2.50),
+    (4, 3, 1.00),
+    (5, NULL, 1.00);
+
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT s.id
+FROM query_offload_join_scalar AS s
+WHERE s.__lagodb_output_0 <= (
+    SELECT 0.5 * sum(r.key_numeric)
+    FROM query_offload_join_right AS r
+    WHERE r.key_i4 = s.key_i4
+)
+ORDER BY s.id;
+SELECT s.id
+FROM query_offload_join_scalar AS s
+WHERE s.__lagodb_output_0 <= (
+    SELECT 0.5 * sum(r.key_numeric)
+    FROM query_offload_join_right AS r
+    WHERE r.key_i4 = s.key_i4
+)
+ORDER BY s.id;
+SET lagodb.query_offload_mode = 'off';
+SELECT s.id
+FROM query_offload_join_scalar AS s
+WHERE s.__lagodb_output_0 <= (
+    SELECT 0.5 * sum(r.key_numeric)
+    FROM query_offload_join_right AS r
+    WHERE r.key_i4 = s.key_i4
+)
+ORDER BY s.id;
+
+-- The comparison reads both join inputs, so it filters the inner join.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT l.id AS left_id, r.id AS right_id
+FROM query_offload_join_left AS l
+JOIN query_offload_join_right AS r ON l.key_i4 = r.key_i4
+WHERE l.key_numeric * l.id < (
+    SELECT 2.5 * avg(r2.key_numeric)
+    FROM query_offload_join_right AS r2
+    WHERE r2.key_i4 = r.key_i4
+)
+ORDER BY left_id, right_id;
+SELECT l.id AS left_id, r.id AS right_id
+FROM query_offload_join_left AS l
+JOIN query_offload_join_right AS r ON l.key_i4 = r.key_i4
+WHERE l.key_numeric * l.id < (
+    SELECT 2.5 * avg(r2.key_numeric)
+    FROM query_offload_join_right AS r2
+    WHERE r2.key_i4 = r.key_i4
+)
+ORDER BY left_id, right_id;
+SET lagodb.query_offload_mode = 'off';
+SELECT l.id AS left_id, r.id AS right_id
+FROM query_offload_join_left AS l
+JOIN query_offload_join_right AS r ON l.key_i4 = r.key_i4
+WHERE l.key_numeric * l.id < (
+    SELECT 2.5 * avg(r2.key_numeric)
+    FROM query_offload_join_right AS r2
+    WHERE r2.key_i4 = r.key_i4
+)
+ORDER BY left_id, right_id;
+
+-- COUNT over no rows is 0, not NULL, and a volatile subquery is evaluated
+-- per outer row; both stay PostgreSQL SubPlans.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT l.id
+FROM query_offload_join_left AS l
+WHERE l.measure > (
+    SELECT count(*)
+    FROM query_offload_join_right AS r
+    WHERE r.key_i4 = l.key_i4
+)
+ORDER BY l.id;
+SELECT l.id
+FROM query_offload_join_left AS l
+WHERE l.measure > (
+    SELECT count(*)
+    FROM query_offload_join_right AS r
+    WHERE r.key_i4 = l.key_i4
+)
+ORDER BY l.id;
+EXPLAIN (COSTS OFF)
+SELECT s.id
+FROM query_offload_join_scalar AS s
+WHERE s.__lagodb_output_0 <= (
+    SELECT 0.5 * sum(r.key_numeric)
+    FROM query_offload_join_right AS r
+    WHERE r.key_i4 = s.key_i4 AND random() >= 0
+)
+ORDER BY s.id;
+
+DROP TABLE query_offload_join_scalar;
 
 -- ============================================================================
 -- Negative capability gates: forcing query offload cannot bypass an

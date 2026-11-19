@@ -306,8 +306,18 @@ impl AggCall {
         self.output
     }
 
+    /// COUNT is never NULL; every other aggregate is NULL at least on empty
+    /// input.
     #[inline]
     pub const fn nullable(&self) -> bool {
+        self.is_null_on_empty()
+    }
+
+    /// Whether the value over no input row is NULL: PostgreSQL's aggregates
+    /// other than COUNT, whose initial state is 0, return NULL when no rows
+    /// are selected.
+    #[inline]
+    pub const fn is_null_on_empty(&self) -> bool {
         !matches!(self.kind, AggregateKind::Count)
     }
 }
@@ -362,6 +372,7 @@ pub struct AggregateNode {
     groups: Box<[GroupExpr]>,
     aggregates: Box<[AggCall]>,
     estimated_rows: RowEstimate,
+    estimated_width: i32,
 }
 
 impl AggregateNode {
@@ -370,6 +381,7 @@ impl AggregateNode {
         groups: Box<[GroupExpr]>,
         aggregates: Box<[AggCall]>,
         estimated_rows: f64,
+        estimated_width: i32,
     ) -> Result<Self, QueryPlanError> {
         if groups.is_empty() && aggregates.is_empty() {
             return Err(QueryPlanError::EmptyAggregate);
@@ -379,6 +391,7 @@ impl AggregateNode {
             groups,
             aggregates,
             estimated_rows: RowEstimate::try_new(estimated_rows)?,
+            estimated_width,
         })
     }
 
@@ -400,5 +413,11 @@ impl AggregateNode {
     #[inline]
     pub const fn estimated_rows(&self) -> f64 {
         self.estimated_rows.get()
+    }
+
+    /// PostgreSQL's average output tuple width, as `PathTarget.width`.
+    #[inline]
+    pub const fn estimated_width(&self) -> i32 {
+        self.estimated_width
     }
 }

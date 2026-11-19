@@ -7,7 +7,8 @@ use lagodb_core::expr::{
     ColumnRef, ExprType, RuntimeValueExpr, RuntimeValueId, RuntimeValueSource,
     RuntimeValueSpec,
 };
-use lagodb_core::query_contract::{OutputId, ScanId};
+use lagodb_core::query_contract::ScanId;
+use lagodb_query::plan::ExecutionExpr;
 use pgrx::pg_sys;
 
 use super::{
@@ -140,20 +141,19 @@ impl ExpressionSourceCatalog {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(in crate::query_host::planning) struct ResolvedOutput {
-    pub(in crate::query_host::planning) output: OutputId,
-    pub(in crate::query_host::planning) execution_type: ExprType,
-}
-
+/// PostgreSQL expressions whose values an input node already computes.
 pub(in crate::query_host::planning) trait OutputCatalog {
+    /// The engine expression reading `expression`'s value: an aggregate
+    /// output, typed when it has a fixed decimal execution type, or an
+    /// expression over such outputs.
+    ///
     /// # Safety
     ///
     /// `expression` must be a live planner-owned expression node.
     unsafe fn resolve_output(
         &self,
         expression: *mut pg_sys::Expr,
-    ) -> Option<ResolvedOutput>;
+    ) -> Option<&ExecutionExpr>;
 }
 
 #[derive(Clone, Copy)]
@@ -198,6 +198,20 @@ impl<'a> ExpressionScope<'a> {
             outputs: Some(outputs),
             predicate: Some(domain),
             scalar_domain: domain,
+        }
+    }
+
+    /// A scalar expression over an input node's outputs, such as a scalar
+    /// subquery's target over its aggregate.
+    pub(in crate::query_host::planning) const fn output_scalar(
+        source_root: *mut pg_sys::PlannerInfo,
+        outputs: &'a dyn OutputCatalog,
+    ) -> Self {
+        Self {
+            source_root,
+            outputs: Some(outputs),
+            predicate: None,
+            scalar_domain: PredicateDomain::Exact,
         }
     }
 

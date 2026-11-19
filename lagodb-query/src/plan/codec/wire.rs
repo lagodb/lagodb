@@ -56,6 +56,7 @@ impl QueryPlanData {
                 writer
                     .append_i32(NODE_AGGREGATE)
                     .append_i64(aggregate.estimated_rows().to_bits() as i64)
+                    .append_i32(aggregate.estimated_width())
                     .append_nested(|input| {
                         Self::encode_node(aggregate.input(), input)
                     })
@@ -86,8 +87,11 @@ impl QueryPlanData {
                     .append_count(join.keys().len());
                 for key in join.keys() {
                     writer.append_nested(|record| {
-                        ExecutionExprCodec::encode_column(key.left(), record);
-                        ExecutionExprCodec::encode_column(key.right(), record);
+                        ExecutionExprCodec::encode_relation_value(key.left(), record);
+                        ExecutionExprCodec::encode_relation_value(
+                            key.right(),
+                            record,
+                        );
                         key.operator().encode_plan_data(record);
                     });
                 }
@@ -215,6 +219,7 @@ impl QueryPlanData {
             }
             NODE_AGGREGATE => {
                 let estimated_rows = f64::from_bits(reader.read_i64()? as u64);
+                let estimated_width = reader.read_i32()?;
                 let input = reader.read_nested(|record| {
                     Self::decode_node(record, runtime_value_count)
                 })?;
@@ -242,6 +247,7 @@ impl QueryPlanData {
                     groups.into_boxed_slice(),
                     aggregates.into_boxed_slice(),
                     estimated_rows,
+                    estimated_width,
                 )?))
             }
             NODE_JOIN => {
@@ -262,8 +268,8 @@ impl QueryPlanData {
                 for _ in 0..count {
                     keys.push(reader.read_nested(|record| {
                         JoinKey::try_new(
-                            ExecutionExprCodec::decode_column(record)?,
-                            ExecutionExprCodec::decode_column(record)?,
+                            ExecutionExprCodec::decode_relation_value(record)?,
+                            ExecutionExprCodec::decode_relation_value(record)?,
                             PgComparisonOp::decode_plan_data(record, ())?,
                         )
                         .map_err(QueryPlanDataError::from)

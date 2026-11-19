@@ -17,7 +17,8 @@ use lagodb_core::expr::{
 };
 use lagodb_core::query_contract::ScanId;
 use lagodb_query::plan::{
-    ExecutionExpr, ExecutionScalarRepr, FixedDecimalType, JoinKey, ScalarSemantics,
+    ExecutionExpr, ExecutionScalarRepr, FixedDecimalType, JoinKey, RelationValueRef,
+    ScalarSemantics,
 };
 use pgrx::pg_sys;
 
@@ -27,8 +28,7 @@ pub(in crate::query_host::planning) use state::{
     ExpressionDecline, ExpressionPlanResult,
 };
 pub(super) use state::{
-    ExpressionScope, ExpressionSourceCatalog, OutputCatalog, ResolvedOutput,
-    ScopedRuntimeBinding,
+    ExpressionScope, ExpressionSourceCatalog, OutputCatalog, ScopedRuntimeBinding,
 };
 
 pub(super) type PredicateDomain = ScalarSemantics;
@@ -126,7 +126,7 @@ impl QueryExpressionPlanner {
                     | pg_sys::NodeTag::T_CaseExpr
                     | pg_sys::NodeTag::T_CoalesceExpr
             )
-            && let Ok(decimal) = self.attempt(|planner| unsafe {
+            && let Ok((decimal, _)) = self.attempt(|planner| unsafe {
                 planner.lower_decimal_value(expression, scope)
             })
         {
@@ -219,11 +219,11 @@ impl QueryExpressionPlanner {
         expression: *mut pg_sys::Expr,
         scope: ExpressionScope<'_>,
     ) -> ExpressionPlanResult<ExecutionExpr> {
-        if let Some(output) = scope
+        if let Some(value) = scope
             .outputs()
             .and_then(|catalog| unsafe { catalog.resolve_output(expression) })
         {
-            return Ok(ExecutionExpr::Output(output.output));
+            return Ok(value.clone());
         }
         let expression_ref = unsafe { PgExprRef::from_raw(expression) };
         match PgScalarExprRef::parse(expression_ref).map_err(|_| {
@@ -331,13 +331,19 @@ impl QueryExpressionPlanner {
             PostgresExpressionBuilder::lower(expression, |dependency| {
                 let value_type = Self::expr_type(dependency.cast());
                 ExecutionScalarRepr::for_postgres_eval(value_type)?;
-                let lowered = if let Some(output) = scope
+                // An evaluator input reads an output by identity in
+                // PostgreSQL's value type; an expression over outputs, such
+                // as a scalar subquery's target, is no evaluator input.
+                let lowered = match scope
                     .outputs()
                     .and_then(|catalog| catalog.resolve_output(dependency.cast()))
                 {
-                    ExecutionExpr::Output(output.output)
-                } else {
-                    self.lower_leaf(dependency.cast(), scope).ok()?
+                    Some(
+                        &ExecutionExpr::Output(output)
+                        | &ExecutionExpr::DecimalOutput { output, .. },
+                    ) => ExecutionExpr::Output(output),
+                    Some(_) => return None,
+                    None => self.lower_leaf(dependency.cast(), scope).ok()?,
                 };
                 Some((lowered, value_type))
             })
@@ -403,27 +409,24 @@ impl QueryExpressionPlanner {
     }
 
     /// Resolve the type used to select an exact predicate domain. PostgreSQL's
-    /// declared type remains authoritative except when DataFusion preserves a
-    /// fixed decimal representation that the aggregate result typmod lost.
+    /// declared type remains authoritative except when an input's output
+    /// keeps a fixed decimal execution type that PostgreSQL's type erased: an
+    /// aggregate result, or a scalar subquery's decimal target.
     unsafe fn predicate_type(
         expression: *mut pg_sys::Expr,
         scope: ExpressionScope<'_>,
     ) -> ExprType {
-        let declared_type = Self::expr_type(expression);
         scope
             .outputs()
             .and_then(|catalog| unsafe { catalog.resolve_output(expression) })
-            .and_then(|output| {
-                FixedDecimalType::for_type(output.execution_type)
-                    .map(|_| output.execution_type)
-            })
-            .unwrap_or(declared_type)
+            .and_then(|value| value.decimal_type())
+            .map_or_else(|| Self::expr_type(expression), FixedDecimalType::value_type)
     }
 
     /// Inspect a direct join-key column through type-preserving RelabelType
     /// wrappers without changing the eventual scan projection. PlaceHolderVar
     /// remains outside the query executor contract.
-    unsafe fn inspect_join_column(
+    pub(in crate::query_host::planning) unsafe fn inspect_join_column(
         &self,
         source_root: *mut pg_sys::PlannerInfo,
         expression: *mut pg_sys::Expr,
@@ -492,8 +495,8 @@ impl QueryExpressionPlanner {
             return Err(ExpressionDecline::UnsupportedSemantics);
         }
         JoinKey::try_new(
-            left,
-            right,
+            RelationValueRef::Column(left),
+            RelationValueRef::Column(right),
             PgComparisonOp {
                 opno: unsafe { (*operator).opno },
                 opfuncid: unsafe { (*operator).opfuncid },
@@ -574,8 +577,8 @@ impl QueryExpressionPlanner {
             return Err(ExpressionDecline::UnsupportedSemantics);
         }
         JoinKey::try_new(
-            outer,
-            inner,
+            RelationValueRef::Column(outer),
+            RelationValueRef::Column(inner),
             PgComparisonOp {
                 opno: unsafe { (*operator).opno },
                 opfuncid: unsafe { (*operator).opfuncid },
@@ -606,7 +609,8 @@ impl QueryExpressionPlanner {
         unsafe { self.lower_join_key(source_root, restriction.clause.cast()) }
     }
 
-    /// Register both endpoints selected for one relational Join key.
+    /// Register both column endpoints selected for one relational Join key.
+    /// An output endpoint reads a grouping output its aggregate registered.
     ///
     /// This is also the commit point for equivalence-class substitutions: if
     /// either endpoint conflicts with the scan projection contract, neither
@@ -616,8 +620,10 @@ impl QueryExpressionPlanner {
         key: JoinKey,
     ) -> ExpressionPlanResult<()> {
         self.attempt(|planner| {
-            planner.record_column(key.left())?;
-            planner.record_column(key.right())
+            [key.left(), key.right()]
+                .into_iter()
+                .filter_map(RelationValueRef::column)
+                .try_for_each(|column| planner.record_column(column))
         })
     }
 }

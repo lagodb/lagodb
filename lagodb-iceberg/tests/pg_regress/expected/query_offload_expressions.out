@@ -494,6 +494,43 @@ FROM query_offload_expression_numeric;
  1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 (1 row)
 
+-- Comparisons run in the engine: a constant is bound exactly in the other
+-- operand's fixed type, and operands of two fixed types compare in their
+-- lossless common type.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FILTER (WHERE price * (1 - discount) >= 1172.83) AS bound,
+       count(*) FILTER (WHERE price < wide) AS mixed,
+       count(*) FILTER (WHERE price * (1 - discount) > tax * 10000) AS derived
+FROM query_offload_expression_numeric;
+                                                                                                                                            QUERY PLAN                                                                                                                                            
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*) FILTER (WHERE ((price * (runtime value::decimal(1, 0) - discount)) >= runtime value::decimal(32, 4))), COUNT(*) FILTER (WHERE (price < wide)), COUNT(*) FILTER (WHERE ((price * (runtime value::decimal(1, 0) - discount)) > (tax * runtime value::decimal(5, 0))))
+         ->  Table Scan on query_offload_expression_numeric
+               Access Method: iceberg
+(6 rows)
+
+SELECT count(*) FILTER (WHERE price * (1 - discount) >= 1172.83) AS bound,
+       count(*) FILTER (WHERE price < wide) AS mixed,
+       count(*) FILTER (WHERE price * (1 - discount) > tax * 10000) AS derived
+FROM query_offload_expression_numeric;
+ bound | mixed | derived 
+-------+-------+---------
+     1 |     1 |       2
+(1 row)
+
+-- A constant finer than the other operand's scale stays in PostgreSQL.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FILTER (WHERE price + tax >= 100.005)
+FROM query_offload_expression_numeric;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Aggregate
+   ->  Seq Scan on query_offload_expression_numeric
+(2 rows)
+
 DROP TABLE query_offload_expression_numeric;
 DROP TABLE query_offload_expression_basic;
 RESET timezone;

@@ -9,7 +9,9 @@
 
 use lagodb_core::datum::{NumericRounding, NumericScaledDomain, NumericScaledValue};
 use lagodb_core::expr::pg::PgExprRef;
-use lagodb_core::expr::{PgComparisonOp, RuntimeValueSource, RuntimeValueSpec};
+use lagodb_core::expr::{
+    ExprType, PgComparisonOp, RuntimeValueSource, RuntimeValueSpec,
+};
 use lagodb_query::plan::{
     CaseWhen, DecimalOperator, ExecutionExpr, FixedDecimalType, ScalarFunctionKind,
 };
@@ -21,19 +23,20 @@ use super::{
 };
 
 impl QueryExpressionPlanner {
-    /// Lower a NUMERIC operand of a comparison in the comparison's fixed type.
+    /// Lower a NUMERIC comparison operand in its fixed type `decimal`. A
+    /// direct Const is bound exactly in `decimal`, the other operand's type.
     pub(super) unsafe fn lower_decimal_operand(
         &mut self,
         expression: *mut pg_sys::Expr,
         scope: ExpressionScope<'_>,
         decimal: FixedDecimalType,
     ) -> ExpressionPlanResult<ExecutionExpr> {
-        if let Some(output) = scope
+        if let Some(value) = scope
             .outputs()
             .and_then(|catalog| unsafe { catalog.resolve_output(expression) })
-            && FixedDecimalType::for_type(output.execution_type) == Some(decimal)
+            && value.decimal_type() == Some(decimal)
         {
-            return Ok(ExecutionExpr::Output(output.output));
+            return Ok(value.clone());
         }
         let direct = unsafe { Self::unwrap_relabel(expression) };
         if unsafe { (*direct).type_ } == pg_sys::NodeTag::T_Const {
@@ -71,13 +74,23 @@ impl QueryExpressionPlanner {
         Ok(value)
     }
 
-    /// Lower a NUMERIC expression to an engine value with a proven fixed
+    /// Lower a NUMERIC expression to an engine value and its proven fixed
     /// type, or decline.
     pub(super) unsafe fn lower_decimal_value(
         &mut self,
         expression: *mut pg_sys::Expr,
         scope: ExpressionScope<'_>,
-    ) -> ExpressionPlanResult<ExecutionExpr> {
+    ) -> ExpressionPlanResult<(ExecutionExpr, FixedDecimalType)> {
+        // An expression an input already computes is read from that input.
+        if let Some(value) = scope
+            .outputs()
+            .and_then(|catalog| unsafe { catalog.resolve_output(expression) })
+        {
+            let decimal = value
+                .decimal_type()
+                .ok_or(ExpressionDecline::UnsupportedSemantics)?;
+            return Ok((value.clone(), decimal));
+        }
         // A NUMERIC-to-NUMERIC RelabelType (a domain) keeps the value.
         let expression = unsafe { Self::unwrap_relabel(expression) };
         if Self::expr_type(expression).type_oid != pg_sys::NUMERICOID {
@@ -111,8 +124,9 @@ impl QueryExpressionPlanner {
                 let coalesce = expression.cast::<pg_sys::CoalesceExpr>();
                 let arguments = unsafe { Self::list_nodes((*coalesce).args) }
                     .into_iter()
-                    .map(|argument| unsafe {
-                        self.lower_decimal_value(argument.cast(), scope)
+                    .map(|argument| {
+                        unsafe { self.lower_decimal_value(argument.cast(), scope) }
+                            .map(|(value, _)| value)
                     })
                     .collect::<ExpressionPlanResult<Vec<_>>>()?;
                 ExecutionExpr::Function {
@@ -124,10 +138,10 @@ impl QueryExpressionPlanner {
             }
             _ => unsafe { self.lower_leaf(expression, scope) }?,
         };
-        if value.decimal_type().is_none() {
-            return Err(ExpressionDecline::UnsupportedSemantics);
-        }
-        Ok(value)
+        let decimal = value
+            .decimal_type()
+            .ok_or(ExpressionDecline::UnsupportedSemantics)?;
+        Ok((value, decimal))
     }
 
     /// `operand <op> $initplan` over a NUMERIC InitPlan result. The value is
@@ -153,32 +167,17 @@ impl QueryExpressionPlanner {
             _ => return None,
         };
         let operand = operand.as_ptr();
-        let output = scope
+        // An integer AVG output keeps its Float64 comparison on the scalar
+        // path.
+        if let Some(value) = scope
             .outputs()
-            .and_then(|catalog| unsafe { catalog.resolve_output(operand) });
-        // An integer AVG keeps its Float64 comparison on the scalar path.
-        let output = match output {
-            Some(output) => Some((
-                output.output,
-                FixedDecimalType::for_type(output.execution_type)?,
-            )),
-            None => None,
-        };
+            .and_then(|catalog| unsafe { catalog.resolve_output(operand) })
+        {
+            value.decimal_type()?;
+        }
         self.attempt(|planner| {
-            let (operand, operand_type) = match output {
-                Some((output, operand_type)) => {
-                    (ExecutionExpr::Output(output), operand_type)
-                }
-                None => {
-                    let operand = unsafe {
-                        planner.lower_decimal_value(operand, scope.as_scalar())
-                    }?;
-                    let operand_type = operand
-                        .decimal_type()
-                        .expect("lowered decimal values have a fixed type");
-                    (operand, operand_type)
-                }
-            };
+            let (operand, operand_type) =
+                unsafe { planner.lower_decimal_value(operand, scope.as_scalar()) }?;
             let bound = bound.as_ptr();
             Ok(ExecutionExpr::DecimalBoundComparison {
                 kind,
@@ -197,6 +196,87 @@ impl QueryExpressionPlanner {
         .ok()
     }
 
+    /// `left <op> right` where an operand is NUMERIC arithmetic, an integer
+    /// cast, or a conditional, whose PostgreSQL type has no typmod. The proof
+    /// is every non-constant operand lowered in a fixed type; a direct Const
+    /// is then bound exactly in the other operand's type, and the two types
+    /// compare in their lossless common type, or the comparison declines.
+    /// `None` leaves every other comparison to the typmod-driven paths,
+    /// including one whose proof fails: an operand over an integer AVG
+    /// compares in Float64 there.
+    pub(super) unsafe fn lower_decimal_expression_comparison(
+        &mut self,
+        operator: PgComparisonOp,
+        left: *mut pg_sys::Expr,
+        right: *mut pg_sys::Expr,
+        types: [ExprType; 2],
+        scope: ExpressionScope<'_>,
+        domain: PredicateDomain,
+    ) -> Option<ExpressionPlanResult<ExecutionExpr>> {
+        let is_constant = |expression| unsafe {
+            (*Self::unwrap_relabel(expression)).type_ == pg_sys::NodeTag::T_Const
+        };
+        let is_expression = |expression, expression_type| {
+            FixedDecimalType::for_type(expression_type).is_none()
+                && !is_constant(expression)
+        };
+        if types.iter().any(|value_type| {
+            value_type.type_oid != pg_sys::NUMERICOID
+                || value_type.collation != pg_sys::InvalidOid
+        }) || !(is_expression(left, types[0]) || is_expression(right, types[1]))
+        {
+            return None;
+        }
+        domain.numeric_comparison(operator)?;
+        let scope = scope.as_scalar();
+        let mut proven = false;
+        let comparison = self.attempt(|planner| {
+            let ((left, left_type), (right, right_type)) =
+                match (is_constant(left), is_constant(right)) {
+                    (false, true) => {
+                        let (left, decimal) =
+                            unsafe { planner.lower_decimal_value(left, scope) }?;
+                        proven = true;
+                        let right = unsafe {
+                            planner.lower_decimal_operand(right, scope, decimal)
+                        }?;
+                        ((left, decimal), (right, decimal))
+                    }
+                    (true, false) => {
+                        let (right, decimal) =
+                            unsafe { planner.lower_decimal_value(right, scope) }?;
+                        proven = true;
+                        let left = unsafe {
+                            planner.lower_decimal_operand(left, scope, decimal)
+                        }?;
+                        ((left, decimal), (right, decimal))
+                    }
+                    _ => {
+                        let left =
+                            unsafe { planner.lower_decimal_value(left, scope) }?;
+                        let right =
+                            unsafe { planner.lower_decimal_value(right, scope) }?;
+                        proven = true;
+                        (left, right)
+                    }
+                };
+            domain
+                .decimal_comparison(
+                    operator,
+                    left_type.value_type(),
+                    right_type.value_type(),
+                )
+                .ok_or(ExpressionDecline::UnsupportedSemantics)?;
+            Ok(ExecutionExpr::Comparison {
+                operator,
+                left: Box::new(left),
+                right: Box::new(right),
+            })
+        });
+        // `attempt` has rolled back an unproven operand's registrations.
+        proven.then_some(comparison)
+    }
+
     unsafe fn lower_decimal_arithmetic(
         &mut self,
         expression: *mut pg_sys::OpExpr,
@@ -210,12 +290,12 @@ impl QueryExpressionPlanner {
         else {
             return Err(ExpressionDecline::InvalidShape);
         };
-        let left = unsafe { self.lower_decimal_value(left.cast(), scope) }?;
-        let right = unsafe { self.lower_decimal_value(right.cast(), scope) }?;
-        let result_type = left
-            .decimal_type()
-            .zip(right.decimal_type())
-            .and_then(|(left, right)| left.arithmetic(operator, right))
+        let (left, left_type) =
+            unsafe { self.lower_decimal_value(left.cast(), scope) }?;
+        let (right, right_type) =
+            unsafe { self.lower_decimal_value(right.cast(), scope) }?;
+        let result_type = left_type
+            .arithmetic(operator, right_type)
             .ok_or(ExpressionDecline::UnsupportedSemantics)?;
         Ok(ExecutionExpr::DecimalArithmetic {
             operator,
@@ -271,16 +351,17 @@ impl QueryExpressionPlanner {
                     scope.with_predicate(scope.scalar_domain()),
                 )
             }?;
-            let then = unsafe { self.lower_decimal_value((*branch).result, scope) }?;
+            let (then, _) =
+                unsafe { self.lower_decimal_value((*branch).result, scope) }?;
             when_then.push(CaseWhen::new(when, then));
         }
         let else_node = unsafe { (*expression).defresult };
         let else_expr = if else_node.is_null() {
             None
         } else {
-            Some(Box::new(unsafe {
-                self.lower_decimal_value(else_node, scope)
-            }?))
+            Some(Box::new(
+                unsafe { self.lower_decimal_value(else_node, scope) }?.0,
+            ))
         };
         Ok(ExecutionExpr::Case {
             when_then: when_then.into_boxed_slice(),

@@ -122,7 +122,9 @@ impl<'a> DataFusionLogicalPlanCompiler<'a> {
                         output = output.project(projection)?;
                     }
                 }
-                Ok(output)
+                output
+                    .alias(DataFusionExpressionCompiler::output_relation())
+                    .map_err(Into::into)
             }
             QueryNode::Join(join) => {
                 let left = self.node(join.left())?;
@@ -133,9 +135,8 @@ impl<'a> DataFusionLogicalPlanCompiler<'a> {
                 for key in join.keys() {
                     on.push(
                         expressions
-                            .compile(&ExecutionExpr::Column(key.left()))?
-                            .eq(expressions
-                                .compile(&ExecutionExpr::Column(key.right()))?),
+                            .compile(&key.left().expression())?
+                            .eq(expressions.compile(&key.right().expression())?),
                     );
                 }
                 if let Some(filter) = join.on_filter() {
@@ -169,7 +170,7 @@ impl<'a> DataFusionLogicalPlanCompiler<'a> {
                     // outer keys; the immediate filter below then inverts
                     // that closed mark while retaining outer NULL rows.
                     let inner_null = expressions
-                        .compile(&ExecutionExpr::Column(join.keys()[0].right()))?
+                        .compile(&join.keys()[0].right().expression())?
                         .is_null();
                     on = vec![equality.clone().or(inner_null)];
                 }
@@ -227,7 +228,8 @@ impl<'a> DataFusionLogicalPlanCompiler<'a> {
                         LogicalPlanBuilderOptions::new()
                             .with_add_implicit_group_by_exprs(true),
                     )
-                    .aggregate(keys, Vec::<Expr>::new())
+                    .aggregate(keys, Vec::<Expr>::new())?
+                    .alias(DataFusionExpressionCompiler::output_relation())
                     .map_err(Into::into)
             }
             QueryNode::Filter(filter) => {

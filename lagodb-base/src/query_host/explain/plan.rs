@@ -160,8 +160,14 @@ impl<'a> QueryExplainPlan<'a> {
                         .map(|key| {
                             format!(
                                 "{} = {}",
-                                self.expressions.column(key.left()),
-                                self.expressions.column(key.right())
+                                self.expressions.expression_from(
+                                    &key.left().expression(),
+                                    join.left()
+                                ),
+                                self.expressions.expression_from(
+                                    &key.right().expression(),
+                                    join.right()
+                                )
                             )
                         })
                         .collect::<Vec<_>>()

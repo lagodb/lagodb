@@ -1,7 +1,9 @@
 //! PostgreSQL equivalence-class rewrites for join keys hidden by SEMI/ANTI.
+//!
+//! Only column-to-column keys between relation-tree inputs are oriented here.
 
 use lagodb_core::expr::{ColumnRef, ExprType};
-use lagodb_query::plan::JoinKey;
+use lagodb_query::plan::{JoinKey, RelationValueRef};
 use pgrx::{PgList, pg_sys};
 
 use super::{RelationNode, RelationTreePlanner};
@@ -20,8 +22,9 @@ impl RelationTreePlanner {
             return Some(oriented);
         }
 
-        let left_visible = Self::is_output_visible(left, right, key.left());
-        let right_visible = Self::is_output_visible(left, right, key.right());
+        let (key_left, key_right) = (key.left().column()?, key.right().column()?);
+        let left_visible = Self::is_output_visible(left, right, key_left);
+        let right_visible = Self::is_output_visible(left, right, key_right);
         if left_visible && right_visible {
             return None;
         }
@@ -29,20 +32,20 @@ impl RelationTreePlanner {
         let left_equivalents = if left_visible {
             Vec::new()
         } else {
-            unsafe { self.output_equivalents(left, right, key.left()) }?
+            unsafe { self.output_equivalents(left, right, key_left) }?
         };
         let right_equivalents = if right_visible {
             Vec::new()
         } else {
-            unsafe { self.output_equivalents(left, right, key.right()) }?
+            unsafe { self.output_equivalents(left, right, key_right) }?
         };
 
         match (left_visible, right_visible) {
             (true, false) => right_equivalents.into_iter().find_map(|replacement| {
-                self.orient_and_record(left, right, key.left(), replacement, key)
+                self.orient_and_record(left, right, key_left, replacement, key)
             }),
             (false, true) => left_equivalents.into_iter().find_map(|replacement| {
-                self.orient_and_record(left, right, replacement, key.right(), key)
+                self.orient_and_record(left, right, replacement, key_right, key)
             }),
             (false, false) => {
                 for replacement_left in left_equivalents {
@@ -72,8 +75,12 @@ impl RelationTreePlanner {
         key_right: ColumnRef,
         original: JoinKey,
     ) -> Option<JoinKey> {
-        let candidate =
-            JoinKey::try_new(key_left, key_right, original.operator()).ok()?;
+        let candidate = JoinKey::try_new(
+            RelationValueRef::Column(key_left),
+            RelationValueRef::Column(key_right),
+            original.operator(),
+        )
+        .ok()?;
         let oriented = Self::orient_visible_key(left, right, candidate)?;
         self.expressions.record_join_key(oriented).ok()?;
         Some(oriented)
@@ -84,10 +91,11 @@ impl RelationTreePlanner {
         right: &RelationNode,
         key: JoinKey,
     ) -> Option<JoinKey> {
-        if left.emits(key.left().scan) && right.emits(key.right().scan) {
+        let (key_left, key_right) = (key.left().column()?, key.right().column()?);
+        if left.emits(key_left.scan) && right.emits(key_right.scan) {
             return Some(key);
         }
-        if left.emits(key.right().scan) && right.emits(key.left().scan) {
+        if left.emits(key_right.scan) && right.emits(key_left.scan) {
             return JoinKey::try_new(key.right(), key.left(), key.operator()).ok();
         }
         None

@@ -90,18 +90,21 @@ impl ScalarSemantics {
         }
     }
 
-    /// Resolve a PostgreSQL NUMERIC comparison to the single fixed decimal
-    /// representation used by both operands. One unbounded-typmod operand is
-    /// admitted here only so the planner can prove that it is a direct Const
-    /// exactly encodable in the bounded operand's representation. A bounded
-    /// type wider than Decimal128 is an aggregate's execution type; storage
-    /// columns remain limited to Decimal128 by their own type support.
+    /// Resolve a PostgreSQL NUMERIC comparison to the fixed decimal types of
+    /// its left and right operands. Two bounded operands may differ; they
+    /// compare in their lossless common type ([`FixedDecimalType::common`]),
+    /// which must exist. One unbounded-typmod operand is admitted only so the
+    /// planner can prove that it is a direct Const exactly encodable in the
+    /// bounded operand's representation, which both sides then share. A
+    /// bounded type wider than Decimal128 is an aggregate's execution type or
+    /// a decimal expression's; storage columns remain limited to Decimal128
+    /// by their own type support.
     pub fn decimal_comparison(
         self,
         operator: PgComparisonOp,
         left: ExprType,
         right: ExprType,
-    ) -> Option<(ComparisonKind, FixedDecimalType)> {
+    ) -> Option<(ComparisonKind, FixedDecimalType, FixedDecimalType)> {
         if left.type_oid != pg_sys::NUMERICOID
             || right.type_oid != pg_sys::NUMERICOID
             || left.collation != pg_sys::InvalidOid
@@ -110,14 +113,18 @@ impl ScalarSemantics {
             return None;
         }
         let kind = self.numeric_comparison(operator)?;
-        let left = FixedDecimalType::for_type(left);
-        let right = FixedDecimalType::for_type(right);
-        let decimal = match (left, right) {
-            (Some(left), Some(right)) if left == right => left,
-            (Some(decimal), None) | (None, Some(decimal)) => decimal,
-            _ => return None,
+        let (left, right) = match (
+            FixedDecimalType::for_type(left),
+            FixedDecimalType::for_type(right),
+        ) {
+            (Some(left), Some(right)) => {
+                left.common(right)?;
+                (left, right)
+            }
+            (Some(decimal), None) | (None, Some(decimal)) => (decimal, decimal),
+            (None, None) => return None,
         };
-        Some((kind, decimal))
+        Some((kind, left, right))
     }
 
     /// The comparison a built-in `numeric` operator performs in this domain.
@@ -163,7 +170,7 @@ impl ScalarSemantics {
         left: ExprType,
         right: ExprType,
     ) -> Option<ComparisonKind> {
-        if let Some((kind, _)) = self.decimal_comparison(operator, left, right) {
+        if let Some((kind, ..)) = self.decimal_comparison(operator, left, right) {
             return Some(kind);
         }
         if !self.supports_type(left) || !self.supports_type(right) {

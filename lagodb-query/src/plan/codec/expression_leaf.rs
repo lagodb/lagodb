@@ -9,7 +9,7 @@ use lagodb_core::query_contract::{OutputId, ScanId};
 use pgrx::pg_sys;
 
 use super::QueryPlanDataError;
-use crate::plan::ir::ExecutionExpr;
+use crate::plan::ir::{ExecutionExpr, RelationValueRef};
 
 const COLUMN: i32 = 1;
 const VALUE: i32 = 2;
@@ -43,6 +43,34 @@ impl ExecutionLeafCodec {
             return Err(ExpressionCodecError::UnknownScalar(tag).into());
         }
         Self::decode_column_payload(reader)
+    }
+
+    pub(super) fn encode_relation_value(
+        value: RelationValueRef,
+        writer: &mut PlanDataWriter,
+    ) {
+        match value {
+            RelationValueRef::Column(column) => Self::encode_column(column, writer),
+            RelationValueRef::Output { output, value_type } => {
+                Self::encode_output(output, writer);
+                value_type.encode_plan_data(writer);
+            }
+        }
+    }
+
+    pub(super) fn decode_relation_value(
+        reader: &mut PlanDataReader<'_>,
+    ) -> Result<RelationValueRef, QueryPlanDataError> {
+        match reader.read_i32()? {
+            COLUMN => Ok(RelationValueRef::Column(Self::decode_column_payload(
+                reader,
+            )?)),
+            OUTPUT => Ok(RelationValueRef::Output {
+                output: OutputId::from_index(reader.read_count()?),
+                value_type: ExprType::decode_plan_data(reader, ())?,
+            }),
+            tag => Err(ExpressionCodecError::UnknownScalar(tag).into()),
+        }
     }
 
     pub(super) fn decode(

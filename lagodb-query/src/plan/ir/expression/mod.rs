@@ -92,6 +92,13 @@ pub enum ExecutionExpr {
         semantics: PgBpcharSemantics,
     },
     Output(OutputId),
+    /// A NUMERIC output in its fixed decimal execution type, the plan node's
+    /// fact for that output. A decimal operation reads its operands' types
+    /// from the expression structure, so an output it reads names its type.
+    DecimalOutput {
+        output: OutputId,
+        decimal_type: FixedDecimalType,
+    },
     Comparison {
         operator: PgComparisonOp,
         left: Box<ExecutionExpr>,
@@ -137,15 +144,16 @@ pub enum ExecutionExpr {
 
 impl ExecutionExpr {
     /// Fixed decimal execution type carried by this expression's structure.
-    /// Storage columns are Decimal128; Output references require plan-node
-    /// facts and are resolved by validation. CASE and COALESCE take
+    /// Storage columns are Decimal128; a DecimalOutput's type is checked
+    /// against its plan-node fact by validation. CASE and COALESCE take
     /// DataFusion's common type of their branches.
     pub fn decimal_type(&self) -> Option<FixedDecimalType> {
         match self {
             Self::Column(column) => {
                 Decimal128Semantics::for_type(column.value_type).map(Into::into)
             }
-            Self::DecimalValue { decimal_type, .. } => Some(*decimal_type),
+            Self::DecimalValue { decimal_type, .. }
+            | Self::DecimalOutput { decimal_type, .. } => Some(*decimal_type),
             Self::DecimalArithmetic { result_type, .. }
             | Self::IntegerToDecimal { result_type, .. } => Some(*result_type),
             Self::Relabel { value, result_type } => {
@@ -201,7 +209,8 @@ impl ExecutionExpr {
             | Self::Value(_)
             | Self::DecimalValue { .. }
             | Self::BpcharValue { .. }
-            | Self::Output(_) => 0,
+            | Self::Output(_)
+            | Self::DecimalOutput { .. } => 0,
             Self::Comparison { left, right, .. }
             | Self::DecimalArithmetic { left, right, .. } => {
                 1 + left.cost_units() + right.cost_units()
@@ -289,7 +298,10 @@ impl ExecutionExpr {
             | Self::Case { result_type, .. }
             | Self::Function { result_type, .. } => Some(*result_type),
             Self::Postgres(expression) => Some(expression.result_type()),
-            Self::Value(_) | Self::BpcharValue { .. } | Self::Output(_) => None,
+            Self::Value(_)
+            | Self::BpcharValue { .. }
+            | Self::Output(_)
+            | Self::DecimalOutput { .. } => None,
         }
     }
 
@@ -358,7 +370,8 @@ impl ExecutionExpr {
             | Self::Value(_)
             | Self::DecimalValue { .. }
             | Self::BpcharValue { .. }
-            | Self::Output(_) => 0,
+            | Self::Output(_)
+            | Self::DecimalOutput { .. } => 0,
         }
     }
 }

@@ -106,6 +106,30 @@ impl DataFusionExpressionCompiler<'_> {
         })
     }
 
+    /// Compile the operands of a comparison. Fixed decimal operands of two
+    /// types compare in their lossless common type, so DataFusion's decimal
+    /// comparison coercion never chooses the width or scale.
+    pub(super) fn comparison_operands(
+        &self,
+        left: &ExecutionExpr,
+        right: &ExecutionExpr,
+    ) -> Result<(Expr, Expr), DataFusionPlanError> {
+        let (compiled_left, compiled_right) =
+            (self.compile(left)?, self.compile(right)?);
+        Ok(match (left.decimal_type(), right.decimal_type()) {
+            (Some(left_type), Some(right_type)) if left_type != right_type => {
+                let common = left_type
+                    .common(right_type)
+                    .expect("validated decimal comparison has a common type");
+                (
+                    cast(compiled_left, common.data_type()),
+                    cast(compiled_right, common.data_type()),
+                )
+            }
+            _ => (compiled_left, compiled_right),
+        })
+    }
+
     /// Place an InitPlan's NUMERIC value in the operand's domain. A value
     /// between two domain values is rounded in the direction that keeps the
     /// ordering (`<` and `>=` up, `<=` and `>` down) and decides equality

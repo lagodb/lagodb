@@ -243,12 +243,15 @@ impl fmt::Display for ExpressionExplain<'_, '_, '_> {
             ExecutionExpr::BpcharValue { semantics, .. } => {
                 write!(output, "runtime value::bpchar({})", semantics.width())
             }
-            ExecutionExpr::Output(value) => self.formatter.write_output(
-                output,
-                self.output_source
-                    .expect("validated output expression has an input producer"),
-                *value,
-            ),
+            ExecutionExpr::Output(value)
+            | ExecutionExpr::DecimalOutput { output: value, .. } => {
+                self.formatter.write_output(
+                    output,
+                    self.output_source
+                        .expect("validated output expression has an input producer"),
+                    *value,
+                )
+            }
             ExecutionExpr::Comparison {
                 operator,
                 left,
@@ -478,9 +481,40 @@ impl ExpressionFormatter<'_> {
             QueryNode::Limit(limit) => {
                 self.write_output(target, limit.input(), output)
             }
-            QueryNode::Scan(_) | QueryNode::Join(_) => {
+            QueryNode::Join(join) => {
+                let input = if Self::defines_output(join.left(), output) {
+                    join.left()
+                } else {
+                    join.right()
+                };
+                self.write_output(target, input, output)
+            }
+            QueryNode::Scan(_) => {
                 unreachable!("validated output reference has no semantic producer")
             }
+        }
+    }
+
+    /// Whether the relation tree under `node` defines `output`: an
+    /// aggregate joined as a relation, possibly below further joins.
+    fn defines_output(node: &QueryNode, output: OutputId) -> bool {
+        match node {
+            QueryNode::Aggregate(aggregate) => {
+                aggregate
+                    .groups()
+                    .iter()
+                    .any(|group| group.output() == output)
+                    || aggregate
+                        .aggregates()
+                        .iter()
+                        .any(|aggregate| aggregate.output() == output)
+            }
+            QueryNode::Join(join) => {
+                Self::defines_output(join.left(), output)
+                    || Self::defines_output(join.right(), output)
+            }
+            QueryNode::Filter(filter) => Self::defines_output(filter.input(), output),
+            _ => false,
         }
     }
 }

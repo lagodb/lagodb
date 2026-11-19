@@ -512,6 +512,40 @@ ORDER BY group_i4;
         1 |     30 | 15.0000
 (1 row)
 
+-- An integer AVG inside COALESCE keeps that Float64 comparison, while SUM
+-- arithmetic compares exactly in its fixed decimal type.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT group_i4, sum(value_numeric) AS sum_numeric
+FROM query_offload_aggregate_basic
+GROUP BY group_i4
+HAVING coalesce(avg(value_i4), 0) >= 10 AND sum(value_numeric) * 2 > 1.00
+ORDER BY group_i4;
+                                                                                 QUERY PLAN                                                                                  
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Sort
+         Sort Key: group_i4 ASC NULLS LAST
+         ->  Filter
+               Filter: ((coalesce(AVG(value_i4), runtime value) >= runtime value) AND ((SUM(value_numeric) * runtime value::decimal(1, 0)) > runtime value::decimal(34, 2)))
+               ->  Aggregate
+                     Group Key: group_i4
+                     Aggregates: SUM(value_numeric), AVG(value_i4)
+                     ->  Table Scan on query_offload_aggregate_basic
+                           Access Method: iceberg
+(11 rows)
+
+SELECT group_i4, sum(value_numeric) AS sum_numeric
+FROM query_offload_aggregate_basic
+GROUP BY group_i4
+HAVING coalesce(avg(value_i4), 0) >= 10 AND sum(value_numeric) * 2 > 1.00
+ORDER BY group_i4;
+ group_i4 | sum_numeric 
+----------+-------------
+        1 |        3.75
+(1 row)
+
 -- ============================================================================
 -- Bounded NUMERIC aggregates.
 -- ============================================================================

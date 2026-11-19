@@ -45,6 +45,15 @@ impl RelationTreePlanner {
         ) {
             return None;
         }
+        let inner_root = unsafe { Self::subplan_root(root, subplan) }?;
+        Some((subplan, anti, inner_root))
+    }
+
+    /// The PlannerInfo PostgreSQL planned the SubPlan's subquery with.
+    pub(super) unsafe fn subplan_root(
+        root: *mut pg_sys::PlannerInfo,
+        subplan: *mut pg_sys::SubPlan,
+    ) -> Option<*mut pg_sys::PlannerInfo> {
         let plan_id = unsafe { (*subplan).plan_id };
         let planner = unsafe { &*root };
         if plan_id <= 0
@@ -57,7 +66,7 @@ impl RelationTreePlanner {
             pg_sys::list_nth((*planner.glob).subroots, plan_id - 1)
                 .cast::<pg_sys::PlannerInfo>()
         };
-        (!inner_root.is_null()).then_some((subplan, anti, inner_root))
+        (!inner_root.is_null()).then_some(inner_root)
     }
 
     pub(super) unsafe fn extract_mark_subplan(

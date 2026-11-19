@@ -68,6 +68,23 @@ impl<'query> QueryShape<'query> {
             && self.query.limitCount.is_null()
     }
 
+    /// A correlated scalar subquery decorrelated into an aggregate grouped by
+    /// its correlation columns: one ungrouped aggregate row per outer row,
+    /// with nothing above the aggregate that could change that row.
+    pub(super) fn supports_scalar_aggregate_subquery(&self) -> bool {
+        self.supports_relational_base()
+            && self.query.hasAggs
+            && !self.query.hasSubLinks
+            && self.query.groupClause.is_null()
+            && self.query.havingQual.is_null()
+            && !self.query.hasDistinctOn
+            && self.query.distinctClause.is_null()
+            && self.query.groupingSets.is_null()
+            && self.query.windowClause.is_null()
+            && self.query.limitOffset.is_null()
+            && self.query.limitCount.is_null()
+    }
+
     /// Structural exclusions shared by every current relational candidate.
     /// Operator-owned clauses deliberately do not belong in this predicate.
     fn supports_relational_base(&self) -> bool {

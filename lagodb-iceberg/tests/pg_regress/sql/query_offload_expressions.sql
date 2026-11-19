@@ -320,6 +320,25 @@ FROM query_offload_expression_numeric;
 SELECT sum(wide * wide * wide) AS cubed
 FROM query_offload_expression_numeric;
 
+-- Comparisons run in the engine: a constant is bound exactly in the other
+-- operand's fixed type, and operands of two fixed types compare in their
+-- lossless common type.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FILTER (WHERE price * (1 - discount) >= 1172.83) AS bound,
+       count(*) FILTER (WHERE price < wide) AS mixed,
+       count(*) FILTER (WHERE price * (1 - discount) > tax * 10000) AS derived
+FROM query_offload_expression_numeric;
+
+SELECT count(*) FILTER (WHERE price * (1 - discount) >= 1172.83) AS bound,
+       count(*) FILTER (WHERE price < wide) AS mixed,
+       count(*) FILTER (WHERE price * (1 - discount) > tax * 10000) AS derived
+FROM query_offload_expression_numeric;
+
+-- A constant finer than the other operand's scale stays in PostgreSQL.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FILTER (WHERE price + tax >= 100.005)
+FROM query_offload_expression_numeric;
+
 DROP TABLE query_offload_expression_numeric;
 DROP TABLE query_offload_expression_basic;
 

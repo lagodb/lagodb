@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use datafusion::common::Result;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::aggregates::{AggregateExec, AggregateOutputMode};
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::joins::{HashJoinExec, NestedLoopJoinExec};
 use datafusion::physical_plan::operator_statistics::{
@@ -26,10 +27,17 @@ impl PlanStatisticsProvider {
         Self { estimates }
     }
 
+    /// An aggregate stage that emits accumulator state, not the aggregate's
+    /// rows, corresponds to no relation-tree node.
     fn is_relation_operator(plan: &dyn ExecutionPlan) -> bool {
         plan.is::<HashJoinExec>()
             || plan.is::<NestedLoopJoinExec>()
             || plan.is::<FilterExec>()
+            || plan
+                .downcast_ref::<AggregateExec>()
+                .is_some_and(|aggregate| {
+                    aggregate.mode().output_mode() == AggregateOutputMode::Final
+                })
             || plan.is::<ExternalTableScanExec>()
             || plan.is::<ParallelTableScanExec>()
     }

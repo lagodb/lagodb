@@ -63,15 +63,27 @@ impl QueryExpressionPlanner {
                 let left_type = unsafe { Self::predicate_type(left.as_ptr(), scope) };
                 let right_type =
                     unsafe { Self::predicate_type(right.as_ptr(), scope) };
+                if let Some(result) = unsafe {
+                    self.lower_decimal_expression_comparison(
+                        op,
+                        left.as_ptr(),
+                        right.as_ptr(),
+                        [left_type, right_type],
+                        scope,
+                        domain,
+                    )
+                } {
+                    return result;
+                }
                 let decimal = domain
                     .decimal_comparison(op, left_type, right_type)
-                    .map(|(_, decimal)| decimal);
+                    .map(|(_, left, right)| (left, right));
                 if decimal.is_none()
                     && domain.comparison(op, left_type, right_type).is_none()
                 {
                     return Err(ExpressionDecline::UnsupportedSemantics);
                 }
-                let left = if let Some(decimal) = decimal {
+                let left = if let Some((decimal, _)) = decimal {
                     unsafe {
                         self.lower_decimal_operand(
                             left.as_ptr(),
@@ -82,7 +94,7 @@ impl QueryExpressionPlanner {
                 } else {
                     unsafe { self.lower(left.as_ptr().cast(), scope.as_scalar()) }?
                 };
-                let right = if let Some(decimal) = decimal {
+                let right = if let Some((_, decimal)) = decimal {
                     unsafe {
                         self.lower_decimal_operand(
                             right.as_ptr(),
