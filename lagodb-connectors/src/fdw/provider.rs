@@ -7,6 +7,7 @@ use lagodb_core::fdw::{
     register_modify, register_scan, register_truncate,
 };
 use lagodb_core::pg_fdw;
+use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 
 use super::options::validate_catalog_options;
@@ -31,7 +32,7 @@ impl ForeignDataWrapper for LagodbConnectors {
     }
 
     fn validate(
-        options: &[Option<String>],
+        options: ForeignOptionView<'_>,
         catalog: Option<pg_sys::Oid>,
     ) -> Result<(), ForeignValidationError> {
         validate_catalog_options(options, catalog)?;

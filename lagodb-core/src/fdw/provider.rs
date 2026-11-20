@@ -7,6 +7,7 @@ use pgrx::pg_sys;
 
 use super::routine::FdwRoutine;
 use super::validation::ForeignValidationError;
+use crate::storage::foreign::ForeignOptionView;
 
 /// Root contract implemented by every FDW provider.
 pub trait ForeignDataWrapper: 'static {
@@ -30,10 +31,11 @@ pub trait ForeignDataWrapper: 'static {
     /// Validate options supplied for this FDW, server, user mapping, or table.
     ///
     /// PostgreSQL invokes the generated SQL validator only when it is named in
-    /// `CREATE FOREIGN DATA WRAPPER` or a related command. The default accepts
-    /// all options.
+    /// `CREATE FOREIGN DATA WRAPPER` or a related command. `options` is the
+    /// complete option list the command would store. The default accepts all
+    /// options.
     fn validate(
-        _options: &[Option<String>],
+        _options: ForeignOptionView<'_>,
         _catalog: Option<pg_sys::Oid>,
     ) -> Result<(), ForeignValidationError> {
         Ok(())

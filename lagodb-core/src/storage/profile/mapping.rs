@@ -24,22 +24,6 @@ pub(super) struct MappingOptions<'a> {
 }
 
 impl<'a> MappingOptions<'a> {
-    pub(super) fn parse(
-        options: &'a [Option<String>],
-    ) -> Result<Self, StorageProfileError> {
-        let mut parsed = Self::default();
-        for option in options.iter().flatten() {
-            let (name, value) = option.split_once('=').ok_or_else(|| {
-                StorageProfileError::invalid_option(
-                    "user mapping option",
-                    "expected name=value",
-                )
-            })?;
-            parsed.set(name, value)?;
-        }
-        Ok(parsed)
-    }
-
     pub(super) fn from_view(
         options: ForeignOptionView<'a>,
     ) -> Result<Self, StorageProfileError> {

@@ -123,7 +123,7 @@ impl AvroValueKind {
             Schema::Double => Ok(Self::Double),
             Schema::Bytes | Schema::Fixed(_) => Ok(Self::Bytes),
             Schema::String | Schema::Enum(_) => Ok(Self::String),
-            Schema::Uuid => Ok(Self::Uuid),
+            Schema::Uuid(_) => Ok(Self::Uuid),
             Schema::Date => Ok(Self::Date),
             Schema::TimeMillis | Schema::TimeMicros => Ok(Self::TimeMicros),
             Schema::TimestampMillis | Schema::TimestampMicros => {

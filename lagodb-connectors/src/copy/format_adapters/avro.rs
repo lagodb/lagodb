@@ -2,8 +2,6 @@
 
 use std::io::BufReader;
 
-use apache_avro::types::Value;
-use apache_avro::{Reader, Schema};
 use lagodb_core::copy::{
     CopyColumnLayout, CopyDatumCoercion, CopyDatumSource, CopyError, CopyInputRow,
     CopyOutputRow, CopyRowOutcome, CopyTupleDestination,
@@ -11,7 +9,8 @@ use lagodb_core::copy::{
 
 use crate::error::ConnectorError;
 use crate::format::avro::{
-    AvroDatumRow, AvroObjectWriter, AvroReadColumn, AvroWritePlan,
+    AvroDatumRow, AvroObjectHeader, AvroObjectReader, AvroObjectWriter,
+    AvroReadColumn, AvroWritePlan,
 };
 use crate::format::{AvroWriteCompression, EmptyOutputPolicy, FormatKind};
 use crate::storage::{
@@ -27,7 +26,7 @@ struct CopyReadColumn {
 
 /// Avro-to-Datum source for PostgreSQL COPY FROM.
 pub(in crate::copy) struct AvroCopySource {
-    reader: Reader<'static, BufReader<ProgressReader<InputFile>>>,
+    reader: AvroObjectReader<BufReader<ProgressReader<InputFile>>>,
     columns: Box<[CopyReadColumn]>,
     logical_row: u64,
     progress: ReadProgress,
@@ -45,16 +44,8 @@ impl AvroCopySource {
         );
         let progress = ReadProgress::default();
         let object = ProgressReader::new(first?, Some(progress.clone()));
-        let reader =
-            Reader::new(BufReader::new(object)).map_err(ConnectorError::from)?;
-        let schema = reader.writer_schema().clone();
-        let Schema::Record(record) = &schema else {
-            return Err(ConnectorError::invalid_object_schema(
-                FormatKind::Avro,
-                "the Avro container writer schema must be a record",
-            )
-            .into());
-        };
+        let header = AvroObjectHeader::read(BufReader::new(object))?;
+        let record = header.record()?;
         let mut columns = Vec::with_capacity(layout.len());
         for column in layout.columns() {
             let name = column.name().to_str().map_err(|_| {
@@ -89,6 +80,10 @@ impl AvroCopySource {
             );
             columns.push(CopyReadColumn { reader, coercion });
         }
+        let reader = AvroObjectReader::new(
+            header,
+            columns.iter().map(|column| column.reader.source()),
+        )?;
         Ok(Self {
             reader,
             columns: columns.into_boxed_slice(),
@@ -103,26 +98,16 @@ impl CopyDatumSource for AvroCopySource {
         &mut self,
         row: CopyInputRow<'_>,
     ) -> Result<CopyRowOutcome, CopyError> {
-        let Some(value) = self.reader.next() else {
+        let Some(record) = self.reader.next_row()? else {
             return Ok(CopyRowOutcome::End);
-        };
-        let value = value.map_err(ConnectorError::from)?;
-        let Value::Record(fields) = value else {
-            return Err(ConnectorError::invalid_object_schema(
-                FormatKind::Avro,
-                "the Avro container yielded a non-record value",
-            )
-            .into());
         };
         self.logical_row += 1;
         for (column_index, (target, column)) in
             row.columns().zip(self.columns.iter_mut()).enumerate()
         {
-            // SAFETY: bind resolved this index against the exact writer schema
-            // and the decoded record remains live for this call. COPY selected
-            // its per-tuple context for the produced datum.
-            let source = unsafe { fields.get_unchecked(column.reader.source()) };
-            let value = match unsafe { column.reader.datum(&source.1) } {
+            // SAFETY: COPY selected its per-tuple context for the produced
+            // datum, and the reader's plan bound every column's source field.
+            let value = match unsafe { column.reader.datum(&record) } {
                 Ok(value) => value,
                 Err(error) => {
                     return error

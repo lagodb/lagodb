@@ -86,6 +86,27 @@ INSERT INTO lagodb_connectors_regress.avro_write
 SELECT * FROM lagodb_connectors_regress.avro_source;
 SELECT * FROM lagodb_connectors_regress.avro_write ORDER BY id;
 
+-- A local container from an external writer
+-- (scripts/pg_regress/avro_nested_fixture.py). The scan skips unprojected
+-- nested records, arrays and maps with byte-sized blocks, an enum, fixed
+-- values, a fixed(16) uuid, and named and recursive references; ref_id reads a
+-- fixed(16) uuid, and amount is a union whose non-null branch comes first.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set avro_nested_path :abs_srcdir '/data/avro_nested.avro'
+CREATE SERVER lagodb_connectors_regress_avro_local FOREIGN DATA WRAPPER lagodb_connectors;
+CREATE FOREIGN TABLE lagodb_connectors_regress.avro_nested (
+    id integer,
+    label text,
+    ref_id uuid,
+    amount bigint,
+    flag boolean
+)
+SERVER lagodb_connectors_regress_avro_local
+OPTIONS (path :'avro_nested_path');
+SELECT * FROM lagodb_connectors_regress.avro_nested ORDER BY id;
+DROP FOREIGN TABLE lagodb_connectors_regress.avro_nested;
+DROP SERVER lagodb_connectors_regress_avro_local;
+
 -- Avro integer widths are fixed: a reader cannot narrow long to integer, and
 -- smallint has no Avro representation.
 CREATE FOREIGN TABLE lagodb_connectors_regress.avro_narrow (bigint_col integer)

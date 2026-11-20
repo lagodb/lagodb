@@ -8,6 +8,7 @@ use std::ffi::{CStr, CString};
 
 use lagodb_core::catalog::CatalogObject;
 use lagodb_core::diag::PgReportError;
+use lagodb_core::storage::foreign::ForeignOptionView;
 use lagodb_core::storage::profile::{
     StorageProfileConfig, StorageServerCatalog, StorageServerPolicy,
 };
@@ -23,13 +24,11 @@ pub(crate) struct ConnectorAccess;
 
 impl ConnectorAccess {
     pub(crate) fn validate_options(
-        options: &[Option<String>],
+        options: ForeignOptionView<'_>,
         catalog: Option<pg_sys::Oid>,
     ) -> Result<(), ConnectorError> {
         // An optionless server is the connector's local-file namespace.
-        if catalog == Some(pg_sys::ForeignServerRelationId)
-            && options.iter().flatten().next().is_none()
-        {
+        if catalog == Some(pg_sys::ForeignServerRelationId) && options.is_empty() {
             return Ok(());
         }
         StorageProfileConfig::validate_options(options, catalog).map_err(Into::into)

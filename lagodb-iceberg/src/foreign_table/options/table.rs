@@ -20,11 +20,7 @@ impl ForeignTableCreateOptions {
     pub(crate) fn from_view(
         options: ForeignOptionView<'_>,
     ) -> Result<Self, IcebergFdwError> {
-        Self::from_options(ParsedOptions::from_view(
-            OptionLayer::Table,
-            options,
-            true,
-        )?)
+        Self::from_options(ParsedOptions::from_view(OptionLayer::Table, options)?)
     }
 
     pub(super) fn from_options(
@@ -169,7 +165,7 @@ impl ForeignImportOptions {
     pub(crate) fn from_view(
         options: ForeignOptionView<'_>,
     ) -> Result<Self, IcebergFdwError> {
-        let parsed = ParsedOptions::from_view(OptionLayer::Import, options, true)?;
+        let parsed = ParsedOptions::from_view(OptionLayer::Import, options)?;
         let strict = parsed
             .values
             .get("strict")

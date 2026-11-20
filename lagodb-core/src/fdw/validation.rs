@@ -3,11 +3,37 @@
 use std::error::Error as StdError;
 use std::fmt::{self, Display, Formatter};
 
+use pgrx::datum::Array;
+use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::prelude::PgSqlErrorCode;
 use thiserror::Error;
 
+use super::provider::ForeignDataWrapper;
 use crate::diag::{PgReportError, PgReportParts, PgReportableError, SqlStateError};
+use crate::storage::foreign::ForeignOptionView;
+
+/// Run `P::validate` for the generated SQL validator.
+///
+/// PostgreSQL passes the catalog's `name=value` `text[]`, or SQL NULL from a
+/// direct call. Like `file_fdw_validator`, convert it with
+/// `untransformRelOptions` so validation reads the same `DefElem` list as
+/// every catalog-backed [`ForeignOptionView`].
+pub fn run_validator<P: ForeignDataWrapper>(
+    options: Option<Array<'_, &str>>,
+    catalog: Option<pg_sys::Oid>,
+) -> Result<(), ForeignValidationError> {
+    let options = options.map_or(pg_sys::Datum::null(), |options| {
+        pg_sys::Datum::from(options.into_array_type())
+    });
+    // SAFETY: `options` is NULL or the detoasted `text[]` argument of this
+    // call. untransformRelOptions returns NIL for NULL, raises an ERROR for
+    // NULL elements, and copies the names and values into the current memory
+    // context, which outlives the view.
+    let list = unsafe { pg_sys::untransformRelOptions(options) };
+    // SAFETY: `list` is the DefElem list created above.
+    P::validate(unsafe { ForeignOptionView::from_raw(list) }, catalog)
+}
 
 /// Error returned by [`super::ForeignDataWrapper::validate`].
 #[derive(Debug)]

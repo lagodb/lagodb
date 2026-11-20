@@ -49,9 +49,9 @@ pub(crate) enum ResolvedForeignFormat {
 
 impl ResolvedForeignFormat {
     pub(crate) fn validate_column_catalog_options(
-        options: &[Option<String>],
+        options: ForeignOptionView<'_>,
     ) -> Result<(), ConnectorError> {
-        CsvFormat::validate_column_options(options)
+        CsvFormat::validate_column_view(options)
     }
 
     pub(crate) fn resolve(
@@ -152,7 +152,7 @@ impl ResolvedForeignFormat {
     ) -> Result<(), ConnectorError> {
         match self {
             Self::Csv(_) => CsvFormat::validate_column_view(options),
-            _ if options.iter().next().is_none() => Ok(()),
+            _ if options.is_empty() => Ok(()),
             _ => Err(ConnectorError::unknown_option(
                 "foreign column option",
                 "force_null and force_not_null are only valid for csv",

@@ -1,4 +1,5 @@
 use lagodb_core::fdw::ForeignValidationError;
+use lagodb_core::storage::foreign::ForeignOptionView;
 use lagodb_core::storage::profile::StorageProfileConfig;
 use pgrx::pg_sys;
 
@@ -18,7 +19,7 @@ impl IcebergFdwOptions {
     }
 
     pub(crate) fn validate_catalog(
-        options: &[Option<String>],
+        options: ForeignOptionView<'_>,
         catalog: Option<pg_sys::Oid>,
     ) -> Result<(), ForeignValidationError> {
         let layer = OptionLayer::from_catalog(catalog);
@@ -29,7 +30,7 @@ impl IcebergFdwOptions {
             }
             OptionLayer::Server => {
                 let options = CatalogServerOptions::from_options(
-                    ParsedOptions::from_array(layer, options)?,
+                    ParsedOptions::from_view(layer, options)?,
                 )?;
                 if options.catalog_type() == CatalogType::Sqlite {
                     // Match file_fdw/COPY's existing server-file privilege model.
@@ -57,27 +58,30 @@ impl IcebergFdwOptions {
         Ok(())
     }
 
-    fn is_storage_server(options: &[Option<String>]) -> bool {
-        options.iter().flatten().any(|option| {
-            option.split_once('=').is_some_and(|(name, value)| {
-                StorageProfileConfig::is_server_discriminator(name, value)
-            })
+    fn is_storage_server(options: ForeignOptionView<'_>) -> bool {
+        options.iter().any(|option| {
+            matches!(
+                (option.name().to_str(), option.value_str()),
+                (Ok(name), Ok(value))
+                    if StorageProfileConfig::is_server_discriminator(name, value)
+            )
         })
     }
 
     fn validate_mapping(
-        options: &[Option<String>],
+        options: ForeignOptionView<'_>,
         catalog: Option<pg_sys::Oid>,
     ) -> Result<(), ForeignValidationError> {
         let mut has_rest_only = false;
         let mut has_storage_only = false;
-        for option in options.iter().flatten() {
-            let (name, _) = option.split_once('=').ok_or_else(|| {
-                IcebergFdwError::invalid_option(
-                    "foreign option",
-                    "expected name=value",
-                )
-            })?;
+        for option in options.iter() {
+            let name =
+                option
+                    .name()
+                    .to_str()
+                    .map_err(|_| IcebergFdwError::InvalidUtf8 {
+                        subject: "foreign option name",
+                    })?;
             let rest = OptionLayer::Mapping.accepts(name);
             let storage = StorageProfileConfig::accepts_user_mapping_option(name);
             if !rest && !storage {

@@ -6,8 +6,6 @@ mod write;
 
 use std::io::BufReader;
 
-use apache_avro::{Reader, Schema};
-
 use crate::error::ConnectorError;
 use crate::storage::InputFile;
 
@@ -16,7 +14,7 @@ use super::{
     InferredColumn, InferredSchema,
 };
 
-pub(crate) use read::AvroReadColumn;
+pub(crate) use read::{AvroObjectHeader, AvroObjectReader, AvroReadColumn};
 use value_kind::AvroValueKind;
 pub(crate) use write::{AvroDatumRow, AvroObjectWriter, AvroWritePlan};
 
@@ -55,16 +53,10 @@ impl FormatSchemaReader for AvroFormat {
         &self,
         file: &mut InputFile,
     ) -> Result<InferredSchema, ConnectorError> {
-        // OCF headers contain byte-wise varints even though record payloads
-        // are buffered internally by apache-avro.
-        let reader = Reader::new(BufReader::new(file))?;
-        let Schema::Record(record) = reader.writer_schema() else {
-            return Err(ConnectorError::invalid_object_schema(
-                self.kind(),
-                "the Avro container writer schema must be a record",
-            ));
-        };
-        let columns = record
+        // Only the header is read; its varints are read byte by byte.
+        let header = AvroObjectHeader::read(BufReader::new(file))?;
+        let columns = header
+            .record()?
             .fields
             .iter()
             .map(|field| {

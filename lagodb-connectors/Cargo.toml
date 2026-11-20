@@ -23,7 +23,7 @@ pg17 = ["pgrx/pg17", "lagodb-core/pg17", "lagodb-arrow/pg17"]
 pg18 = ["pgrx/pg18", "lagodb-core/pg18", "lagodb-arrow/pg18"]
 
 [dependencies]
-apache-avro = { version = "0.21", default-features = false, features = ["snappy", "zstandard"] }
+apache-avro = { version = "0.22", default-features = false, features = ["snappy", "zstandard"] }
 arrow-schema = { workspace = true }
 arrow-array = { workspace = true }
 arrow-arith = { workspace = true }

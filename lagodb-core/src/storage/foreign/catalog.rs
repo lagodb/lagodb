@@ -88,17 +88,23 @@ impl<'a> ForeignOptionView<'a> {
     ///
     /// # Safety
     ///
-    /// `list` must be the live `List *` of `DefElem` values returned by
-    /// PostgreSQL for a `ForeignServer` or `UserMapping`. The list and all
-    /// values it references must remain valid for the returned view's lifetime.
+    /// `list` must be `NIL` or a live `List *` of non-null `DefElem` values,
+    /// such as a catalog object's option list or the result of
+    /// `untransformRelOptions`. The list and all values it references must
+    /// remain valid for the returned view's lifetime.
     pub unsafe fn from_raw(list: *mut pg_sys::List) -> Self {
         Self::new(list)
     }
 
+    pub fn is_empty(&self) -> bool {
+        // SAFETY: `list` is NIL or a live List for the duration of this view.
+        unsafe { pg_sys::list_length(self.list) == 0 }
+    }
+
     /// Finds an option without allocating or copying its value.
     pub fn get(&self, name: &str) -> Option<ForeignOption<'a>> {
-        // SAFETY: `list` is borrowed from a live PostgreSQL ForeignServer or
-        // UserMapping object for the duration of this view.
+        // SAFETY: `list` is a live PostgreSQL DefElem list for the duration
+        // of this view.
         let option_count = unsafe { pg_sys::list_length(self.list) };
         for index in 0..option_count {
             // SAFETY: `index` is within list_length and foreign option lists
@@ -114,7 +120,7 @@ impl<'a> ForeignOptionView<'a> {
             // SAFETY: `def` is a valid DefElem from the option list.
             let value = unsafe { pg_sys::defGetString(def) };
             // SAFETY: defGetString returns a PostgreSQL-owned NUL-terminated
-            // string valid with the surrounding catalog object.
+            // string valid with the option list.
             let value = unsafe { CStr::from_ptr(value) };
             return Some(ForeignOption {
                 name: def_name,

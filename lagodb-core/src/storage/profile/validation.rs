@@ -2,6 +2,8 @@
 
 use pgrx::pg_sys;
 
+use crate::storage::foreign::ForeignOptionView;
+
 use super::config::{StorageProfileConfig, StorageServerOptions};
 use super::mapping::MappingOptions;
 use super::{ObjectUri, StorageProfileError};
@@ -17,27 +19,27 @@ impl StorageProfileConfig {
     }
 
     pub fn validate_options(
-        options: &[Option<String>],
+        options: ForeignOptionView<'_>,
         catalog: Option<pg_sys::Oid>,
     ) -> Result<(), StorageProfileError> {
         Self::validate_catalog_options(options, catalog, false)
     }
 
     pub fn validate_scoped_options(
-        options: &[Option<String>],
+        options: ForeignOptionView<'_>,
         catalog: Option<pg_sys::Oid>,
     ) -> Result<(), StorageProfileError> {
         Self::validate_catalog_options(options, catalog, true)
     }
 
     fn validate_catalog_options(
-        options: &[Option<String>],
+        options: ForeignOptionView<'_>,
         catalog: Option<pg_sys::Oid>,
         require_scope: bool,
     ) -> Result<(), StorageProfileError> {
         match catalog {
             Some(catalog) if catalog == pg_sys::ForeignDataWrapperRelationId => {
-                if options.iter().flatten().next().is_some() {
+                if !options.is_empty() {
                     return Err(StorageProfileError::invalid_option(
                         "FDW option",
                         "wrapper-level options are not supported",
@@ -45,16 +47,7 @@ impl StorageProfileConfig {
                 }
             }
             Some(catalog) if catalog == pg_sys::ForeignServerRelationId => {
-                let mut server = StorageServerOptions::default();
-                for option in options.iter().flatten() {
-                    let (name, value) = option.split_once('=').ok_or_else(|| {
-                        StorageProfileError::invalid_option(
-                            "server option",
-                            "expected name=value",
-                        )
-                    })?;
-                    server.set_option(name, value)?;
-                }
+                let server = StorageServerOptions::from_view(options)?;
                 if require_scope && server.scope().is_none() {
                     return Err(StorageProfileError::invalid_option(
                         "scope",
@@ -64,10 +57,11 @@ impl StorageProfileConfig {
                 server.into_profile(MappingOptions::default())?.validate()?;
             }
             Some(catalog) if catalog == pg_sys::UserMappingRelationId => {
-                MappingOptions::parse(options)?.validate_provider_independent()?;
+                MappingOptions::from_view(options)?
+                    .validate_provider_independent()?;
             }
             _ => {
-                if options.iter().flatten().next().is_some() {
+                if !options.is_empty() {
                     return Err(StorageProfileError::invalid_option(
                         "FDW option",
                         "options are not supported at this catalog layer",

@@ -198,12 +198,6 @@ impl CsvFormat {
         })
     }
 
-    pub(crate) fn validate_column_options(
-        options: &[Option<String>],
-    ) -> Result<(), ConnectorError> {
-        CsvColumnOptions::parse(options).map(drop)
-    }
-
     pub(crate) fn validate_column_view(
         options: ForeignOptionView<'_>,
     ) -> Result<(), ConnectorError> {
@@ -251,20 +245,6 @@ impl CsvColumnOptions {
             seen_force_null: false,
             seen_force_not_null: false,
         }
-    }
-
-    fn parse(options: &[Option<String>]) -> Result<Self, ConnectorError> {
-        let mut parsed = Self::empty();
-        for option in options.iter().flatten() {
-            let (name, value) = option.split_once('=').ok_or_else(|| {
-                ConnectorError::invalid_option(
-                    "foreign column option",
-                    "expected name=value",
-                )
-            })?;
-            parsed.set(name, value)?;
-        }
-        Ok(parsed)
     }
 
     pub(crate) fn parse_view(

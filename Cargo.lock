@@ -161,33 +161,6 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
 name = "apache-avro"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36fa98bc79671c7981272d91a8753a928ff6a1cd8e4f20a44c45bd5d313840bf"
-dependencies = [
- "bigdecimal",
- "bon",
- "crc32fast",
- "digest 0.10.7",
- "log",
- "miniz_oxide 0.8.9",
- "num-bigint 0.4.8",
- "quad-rand",
- "rand 0.9.4",
- "regex-lite",
- "serde",
- "serde_bytes",
- "serde_json",
- "snap",
- "strum 0.27.2",
- "strum_macros 0.27.2",
- "thiserror 2.0.18",
- "uuid",
- "zstd",
-]
-
-[[package]]
-name = "apache-avro"
 version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "312c1ea69e5fe9966e0029fb95aca8790100b85aff4f0d3b00a9337c74069a9c"
@@ -3443,7 +3416,7 @@ source = "git+https://github.com/lagodb/iceberg-lite.git?rev=41bf5a9f2ff8039680a
 dependencies = [
  "aes-gcm",
  "anyhow",
- "apache-avro 0.22.0",
+ "apache-avro",
  "array-init",
  "arrow-arith",
  "arrow-array",
@@ -3848,7 +3821,7 @@ dependencies = [
 name = "lagodb-connectors"
 version = "0.1.0"
 dependencies = [
- "apache-avro 0.21.0",
+ "apache-avro",
  "arrow-arith",
  "arrow-array",
  "arrow-ord",

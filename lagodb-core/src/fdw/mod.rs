@@ -58,6 +58,7 @@ pub use validation::ForeignValidationError;
 #[doc(hidden)]
 pub mod __private {
     pub use super::routine::new_routine;
+    pub use super::validation::run_validator;
 }
 
 /// Common imports for FDW providers.

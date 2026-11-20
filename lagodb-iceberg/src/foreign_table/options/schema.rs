@@ -64,9 +64,9 @@ impl OptionLayer {
 
     pub(super) fn validate(
         self,
-        options: &[Option<String>],
+        options: ForeignOptionView<'_>,
     ) -> Result<(), IcebergFdwError> {
-        let parsed = ParsedOptions::from_array(self, options)?;
+        let parsed = ParsedOptions::from_view(self, options)?;
         if matches!(self, Self::Table) {
             ForeignTableCreateOptions::from_options(parsed)?;
         }
@@ -80,25 +80,6 @@ pub(in crate::foreign_table) struct ParsedOptions {
 }
 
 impl ParsedOptions {
-    /// Parse the complete options array supplied by the PostgreSQL validator.
-    pub(super) fn from_array(
-        layer: OptionLayer,
-        options: &[Option<String>],
-    ) -> Result<Self, IcebergFdwError> {
-        let mut parsed = Self::default();
-        for option in options.iter().flatten() {
-            let (name, value) = option.split_once('=').ok_or_else(|| {
-                IcebergFdwError::invalid_option(
-                    "foreign option",
-                    "expected name=value",
-                )
-            })?;
-            parsed.set(layer, name, value)?;
-        }
-        parsed.validate_required(layer)?;
-        Ok(parsed)
-    }
-
     fn validate_value(name: &str, value: &str) -> Result<(), IcebergFdwError> {
         match name {
             "uri" if value.starts_with("sqlite:") => {
@@ -169,7 +150,6 @@ impl ParsedOptions {
     pub(in crate::foreign_table) fn from_view(
         layer: OptionLayer,
         options: ForeignOptionView<'_>,
-        require_complete: bool,
     ) -> Result<Self, IcebergFdwError> {
         let mut parsed = Self::default();
         for option in options.iter() {
@@ -188,9 +168,7 @@ impl ParsedOptions {
                     })?;
             parsed.set(layer, name, value)?;
         }
-        if require_complete {
-            parsed.validate_required(layer)?;
-        }
+        parsed.validate_required(layer)?;
         Ok(parsed)
     }
 

@@ -64,7 +64,7 @@ impl<'a> StorageServerOptions<'a> {
         Ok(parsed)
     }
 
-    pub(super) fn set_option(
+    fn set_option(
         &mut self,
         name: &str,
         value: &'a str,

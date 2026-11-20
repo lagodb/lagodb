@@ -11,12 +11,12 @@ use crate::format::{
 use crate::storage::StoragePath;
 
 pub(crate) fn validate_catalog_options(
-    options: &[Option<String>],
+    options: ForeignOptionView<'_>,
     catalog: Option<pg_sys::Oid>,
 ) -> Result<(), ConnectorError> {
     match catalog {
         Some(catalog) if catalog == pg_sys::ForeignTableRelationId => {
-            let resolved = RawTableOptions::parse(options)?.resolve()?;
+            let resolved = resolve_table_options(options)?;
             if matches!(resolved.object, StoragePath::Local(_)) {
                 // file_fdw checks the role when a filename is set, so table
                 // privileges can subsequently share reads with other roles.
@@ -57,20 +57,6 @@ impl<'a> RawTableOptions<'a> {
             compression: None,
             format_options: Vec::new(),
         }
-    }
-
-    fn parse(options: &'a [Option<String>]) -> Result<Self, ConnectorError> {
-        let mut parsed = Self::empty();
-        for option in options.iter().flatten() {
-            let (name, value) = option.split_once('=').ok_or_else(|| {
-                ConnectorError::invalid_option(
-                    "foreign table option",
-                    "expected name=value",
-                )
-            })?;
-            parsed.set(name, value)?;
-        }
-        Ok(parsed)
     }
 
     fn parse_view(options: ForeignOptionView<'a>) -> Result<Self, ConnectorError> {

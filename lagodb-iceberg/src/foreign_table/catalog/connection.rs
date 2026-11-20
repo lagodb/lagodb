@@ -36,7 +36,7 @@ impl UserCredentials {
             });
         };
         let options = mapping.options();
-        let options = ParsedOptions::from_view(OptionLayer::Mapping, options, true)?;
+        let options = ParsedOptions::from_view(OptionLayer::Mapping, options)?;
         Ok(Self {
             mapping_oid: Some(mapping.oid()),
             mapping_user: Some(mapping.user_oid()),
@@ -99,7 +99,7 @@ impl CatalogConnection {
         let catalog_type = CatalogType::from_server(server)?;
         let owner_fdw_oid = server.fdwid;
         let options = unsafe { ForeignOptionView::from_raw(server.options) };
-        let options = ParsedOptions::from_view(OptionLayer::Server, options, true)?;
+        let options = ParsedOptions::from_view(OptionLayer::Server, options)?;
         let options = CatalogServerOptions::from_options(options)?;
         options.validate_type(catalog_type)?;
         let mut properties = options.into_properties();

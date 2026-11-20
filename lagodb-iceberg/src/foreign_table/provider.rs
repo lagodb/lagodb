@@ -8,6 +8,7 @@ use lagodb_core::fdw::{
     register_import_schema, register_modify, register_scan,
 };
 use lagodb_core::pg_fdw;
+use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
 
 use super::import::IcebergSchemaImporter;
@@ -31,7 +32,7 @@ impl ForeignDataWrapper for LagodbIceberg {
     }
 
     fn validate(
-        options: &[Option<String>],
+        options: ForeignOptionView<'_>,
         catalog: Option<pg_sys::Oid>,
     ) -> Result<(), ForeignValidationError> {
         IcebergFdwOptions::validate_catalog(options, catalog)

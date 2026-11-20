@@ -28,6 +28,7 @@ use metadata::ProviderMetadata;
 /// use core::ffi::CStr;
 /// use lagodb_core::fdw::prelude::*;
 /// use lagodb_core::pg_fdw;
+/// use lagodb_core::storage::foreign::ForeignOptionView;
 ///
 /// #[pg_fdw(
 ///     version = "0.1.0",
@@ -45,7 +46,7 @@ use metadata::ProviderMetadata;
 ///     }
 ///
 ///     fn validate(
-///         options: &[Option<String>],
+///         options: ForeignOptionView<'_>,
 ///         catalog: Option<pgrx::pg_sys::Oid>,
 ///     ) -> Result<(), ForeignValidationError> {
 ///         let _ = (options, catalog);
@@ -118,11 +119,11 @@ pub fn pg_fdw(attr: TokenStream, item: TokenStream) -> TokenStream {
 
             #[pg_extern(create_or_replace)]
             fn #fn_validator_ident(
-                options: Vec<Option<String>>,
+                options: Option<::pgrx::datum::Array<'_, &str>>,
                 catalog: Option<pg_sys::Oid>,
             ) {
-                <#ident as ::lagodb_core::fdw::ForeignDataWrapper>::validate(
-                    &options,
+                ::lagodb_core::fdw::__private::run_validator::<#ident>(
+                    options,
                     catalog,
                 )
                 .report_unwrap();

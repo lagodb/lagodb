@@ -3,8 +3,6 @@
 use std::ffi::CStr;
 use std::io::BufReader;
 
-use apache_avro::types::Value;
-use apache_avro::{Reader, Schema};
 use lagodb_core::fdw::{
     ReScanForeignScanContext, ScanOutputColumn, ScanSlotWriter,
     StartForeignScanContext,
@@ -15,7 +13,7 @@ use crate::error::ConnectorError;
 use crate::fdw::LagodbConnectors;
 use crate::fdw::format_adapters::FormatScanState;
 use crate::format::FormatKind;
-use crate::format::avro::AvroReadColumn;
+use crate::format::avro::{AvroObjectHeader, AvroObjectReader, AvroReadColumn};
 use crate::storage::{InputFile, InputFiles};
 
 struct ScanColumn {
@@ -25,8 +23,8 @@ struct ScanColumn {
 
 pub(super) struct AvroScanState {
     files: InputFiles,
-    reader: Option<Reader<'static, BufReader<InputFile>>>,
-    schema: Option<Schema>,
+    /// `None` only when the prefix has no objects.
+    reader: Option<AvroObjectReader<BufReader<InputFile>>>,
     columns: Box<[ScanColumn]>,
 }
 
@@ -54,18 +52,11 @@ impl AvroScanState {
             return Ok(Self {
                 files,
                 reader: None,
-                schema: None,
                 columns: Box::new([]),
             });
         };
-        let reader = Reader::new(BufReader::new(first?))?;
-        let schema = reader.writer_schema().clone();
-        let Schema::Record(record) = &schema else {
-            return Err(ConnectorError::invalid_object_schema(
-                FormatKind::Avro,
-                "the Avro container writer schema must be a record",
-            ));
-        };
+        let header = AvroObjectHeader::read(BufReader::new(first?))?;
+        let record = header.record()?;
         let columns = context
             .output_layout
             .columns()
@@ -101,30 +92,26 @@ impl AvroScanState {
             })
             .collect::<Result<Vec<_>, ConnectorError>>()?
             .into_boxed_slice();
+        let reader = AvroObjectReader::new(
+            header,
+            columns.iter().map(|column| column.reader.source()),
+        )?;
         Ok(Self {
             files,
             reader: Some(reader),
-            schema: Some(schema),
             columns,
         })
     }
 
-    fn open_next_reader(&mut self) -> Result<bool, ConnectorError> {
-        let Some(file) = self.files.next() else {
+    /// Opens the next object under the prefix. Returns `false` when none remain.
+    fn open_next_object(
+        files: &mut InputFiles,
+        reader: &mut AvroObjectReader<BufReader<InputFile>>,
+    ) -> Result<bool, ConnectorError> {
+        let Some(file) = files.next() else {
             return Ok(false);
         };
-        let reader = Reader::new(BufReader::new(file?))?;
-        let schema = self
-            .schema
-            .as_ref()
-            .expect("a non-empty Avro input has a bound writer schema");
-        if reader.writer_schema() != schema {
-            return Err(ConnectorError::invalid_object_schema(
-                FormatKind::Avro,
-                "objects under one prefix do not share the same Avro writer schema",
-            ));
-        }
-        self.reader = Some(reader);
+        reader.open_next(AvroObjectHeader::read(BufReader::new(file?))?)?;
         Ok(true)
     }
 }
@@ -134,27 +121,19 @@ impl FormatScanState for AvroScanState {
         &mut self,
         output: &mut ScanSlotWriter<'_>,
     ) -> Result<bool, ConnectorError> {
+        let Some(reader) = self.reader.as_mut() else {
+            return Ok(false);
+        };
         loop {
-            if let Some(reader) = self.reader.as_mut()
-                && let Some(value) = reader.next()
-            {
-                let value = value?;
-                let Value::Record(fields) = value else {
-                    unreachable!(
-                        "a record writer schema always decodes to a record value"
-                    );
-                };
+            if let Some(row) = reader.next_row()? {
                 // SAFETY: each ScanColumn was created from this scan's output
                 // layout and all by-reference Datum values are allocated in the
                 // executor tuple context by its bound codec.
                 let mut writer = unsafe { output.datum_writer() };
                 for column in self.columns.iter() {
-                    // SAFETY: `source` was resolved against this exact writer
-                    // schema at Begin; apache-avro decodes a record with one
-                    // value per writer-schema field in that order.
-                    let source =
-                        unsafe { fields.get_unchecked(column.reader.source()) };
-                    let value = unsafe { column.reader.datum(&source.1) }?;
+                    // SAFETY: the executor tuple context is current, and the
+                    // reader's plan bound every column's source field.
+                    let value = unsafe { column.reader.datum(&row) }?;
                     unsafe {
                         writer.write(
                             column.output,
@@ -165,8 +144,7 @@ impl FormatScanState for AvroScanState {
                 }
                 return Ok(true);
             }
-            self.reader = None;
-            if !self.open_next_reader()? {
+            if !Self::open_next_object(&mut self.files, reader)? {
                 return Ok(false);
             }
         }
@@ -177,8 +155,10 @@ impl FormatScanState for AvroScanState {
         _context: ReScanForeignScanContext<'_, LagodbConnectors>,
     ) -> Result<(), ConnectorError> {
         self.files.reset();
-        self.reader = None;
-        self.open_next_reader()?;
+        if let Some(reader) = self.reader.as_mut() {
+            reader.close();
+            Self::open_next_object(&mut self.files, reader)?;
+        }
         Ok(())
     }
 
