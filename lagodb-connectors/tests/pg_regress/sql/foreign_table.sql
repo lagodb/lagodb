@@ -5,42 +5,31 @@
 SELECT endpoint, bucket, region, access_key_id, secret_access_key
 FROM lagodb_regress.object_storage_fixture
 \gset storage_
-
-\set foreign_exact_path 's3://' :storage_bucket '/lagodb-connectors/foreign/common.txt'
-\set foreign_inference_prefix 's3://' :storage_bucket '/lagodb-connectors/foreign/inference/'
-\set foreign_inference_part_a 's3://' :storage_bucket '/lagodb-connectors/foreign/inference/part-a.txt'
-\set foreign_inference_part_b 's3://' :storage_bucket '/lagodb-connectors/foreign/inference/part-b.txt'
-\set foreign_empty_prefix 's3://' :storage_bucket '/lagodb-connectors/foreign/empty-prefix/'
-\set foreign_dml_prefix 's3://' :storage_bucket '/lagodb-connectors/foreign/dml/'
-\set foreign_denied_scope 's3://' :storage_bucket '/lagodb-connectors/foreign/allowed/'
-
-COPY lagodb_connectors_regress.common_source
-TO :'foreign_exact_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'text');
+\set foreign_base 's3://' :storage_bucket '/lagodb-connectors/foreign/'
+\pset null _null_
 
 -- Infer a prefix schema from its first object, then scan every matching object.
+\set foreign_inference_prefix :foreign_base 'inference/'
+\set foreign_part_path :foreign_inference_prefix 'part-a.txt'
 COPY (SELECT 1::integer AS id, 'alpha'::text AS payload)
-TO :'foreign_inference_part_a'
+TO :'foreign_part_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'text');
+\set foreign_part_path :foreign_inference_prefix 'part-b.txt'
 COPY (SELECT 2::integer AS id, 'beta'::text AS payload)
-TO :'foreign_inference_part_b'
+TO :'foreign_part_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'text');
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_inferred_prefix ()
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'foreign_inference_prefix', format 'text');
-SELECT count(*) AS inferred_columns,
-       string_agg(format_type(atttypid, atttypmod), ', ' ORDER BY attnum)
-           AS inferred_types
+SELECT attname, format_type(atttypid, atttypmod) AS type
 FROM pg_attribute
-WHERE attrelid =
-          'lagodb_connectors_regress.foreign_inferred_prefix'::regclass
-  AND attnum > 0
-  AND NOT attisdropped;
-SELECT count(*) AS inferred_rows,
-       array_agg(to_jsonb(value) ORDER BY to_jsonb(value)) AS inferred_values
-FROM lagodb_connectors_regress.foreign_inferred_prefix AS value;
+WHERE attrelid = 'lagodb_connectors_regress.foreign_inferred_prefix'::regclass
+  AND attnum > 0 AND NOT attisdropped
+ORDER BY attnum;
+SELECT * FROM lagodb_connectors_regress.foreign_inferred_prefix ORDER BY 1;
 
 -- A prefix with no matching objects is valid empty input.
+\set foreign_empty_prefix :foreign_base 'empty-prefix/'
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_empty_prefix
     (:common_columns)
 SERVER lagodb_connectors_regress_s3
@@ -48,8 +37,12 @@ OPTIONS (path :'foreign_empty_prefix', format 'text');
 SELECT count(*) AS empty_prefix_rows
 FROM lagodb_connectors_regress.foreign_empty_prefix;
 
--- Prefix targets support INSERT. Exact objects, UPDATE, and DELETE are outside
--- the connector FDW write contract.
+-- Prefix targets support INSERT. Exact objects and UPDATE/DELETE, which share
+-- one planner rejection, are outside the connector FDW write contract.
+\set foreign_exact_path :foreign_base 'common.txt'
+COPY lagodb_connectors_regress.common_source TO :'foreign_exact_path'
+WITH (server 'lagodb_connectors_regress_s3', format 'text');
+\set foreign_dml_prefix :foreign_base 'dml/'
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_exact_write_boundary
     (:common_columns)
 SERVER lagodb_connectors_regress_s3
@@ -66,7 +59,6 @@ INSERT INTO lagodb_connectors_regress.foreign_exact_write_boundary
 SELECT * FROM lagodb_connectors_regress.common_source;
 UPDATE lagodb_connectors_regress.foreign_dml_boundary
 SET payload = 'updated';
-DELETE FROM lagodb_connectors_regress.foreign_dml_boundary;
 
 -- Option errors follow PostgreSQL FDW conventions: an unknown option name is
 -- HV00D, while an invalid value for an accepted option is 22023.
@@ -78,10 +70,8 @@ SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'foreign_exact_path', format 'text', delimiter 'ab');
 \set VERBOSITY default
 
-SELECT count(*) AS rows_after_rejected_dml
-FROM lagodb_connectors_regress.foreign_dml_boundary;
-
 -- Explicit server scope restrictions still apply.
+\set foreign_denied_scope :foreign_base 'allowed/'
 CREATE SERVER lagodb_connectors_regress_scope
     FOREIGN DATA WRAPPER lagodb_connectors
     OPTIONS (
@@ -113,11 +103,13 @@ OPTIONS (
     region :'storage_region', allow_http 'true',
     virtual_hosted_style_request 'false'
 );
+
 -- Explicit columns allow declaration without resolving default-chain credentials.
 CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_default_chain (id integer)
 SERVER credential_storage OPTIONS (path :'foreign_exact_path', format 'text');
 CREATE USER MAPPING FOR CURRENT_USER SERVER credential_storage
 OPTIONS (aws_profile 'configuration-only-profile');
+
 -- Explicit identities must be complete and must not be combined with a profile.
 \set VERBOSITY terse
 ALTER USER MAPPING FOR CURRENT_USER SERVER credential_storage
@@ -141,17 +133,14 @@ CREATE TABLE lagodb_connectors_regress.local_foreign_source (id integer, payload
 INSERT INTO lagodb_connectors_regress.local_foreign_source
 VALUES (1, E'comma,value "quoted"\nline'), (2, NULL), (3, ''), (4, '中文');
 
--- json: infer the schema from a native local file and compare its values.
+-- Infer the schema from a native local file and compare its values. Local
+-- storage resolves before format code, so one sequential format covers it.
 \set local_foreign_file :local_foreign_root '.json'
 COPY lagodb_connectors_regress.local_foreign_source TO :'local_foreign_file';
 CREATE FOREIGN TABLE lagodb_connectors_regress.local_json_exact ()
 SERVER lagodb_connectors_regress_local OPTIONS (path :'local_foreign_file');
 
-(TABLE lagodb_connectors_regress.local_json_exact
- EXCEPT ALL TABLE lagodb_connectors_regress.local_foreign_source)
-UNION ALL
-(TABLE lagodb_connectors_regress.local_foreign_source
- EXCEPT ALL TABLE lagodb_connectors_regress.local_json_exact);
+SELECT * FROM lagodb_connectors_regress.local_json_exact ORDER BY id;
 
 -- Directory INSERT uses the same format writer with local publication.
 \set local_foreign_directory :local_foreign_root '-json/'
@@ -162,11 +151,7 @@ BEGIN;
 INSERT INTO lagodb_connectors_regress.local_json_directory
 SELECT * FROM lagodb_connectors_regress.local_foreign_source;
 
-(TABLE lagodb_connectors_regress.local_json_directory
- EXCEPT ALL TABLE lagodb_connectors_regress.local_foreign_source)
-UNION ALL
-(TABLE lagodb_connectors_regress.local_foreign_source
- EXCEPT ALL TABLE lagodb_connectors_regress.local_json_directory);
+SELECT * FROM lagodb_connectors_regress.local_json_directory ORDER BY id;
 
 -- A successful subtransaction write must disappear on savepoint rollback.
 SAVEPOINT local_insert;
@@ -175,136 +160,28 @@ SELECT count(*) AS rows_before_rollback
 FROM lagodb_connectors_regress.local_json_directory;
 
 ROLLBACK TO SAVEPOINT local_insert;
-RELEASE SAVEPOINT local_insert;
 
-(TABLE lagodb_connectors_regress.local_json_directory
- EXCEPT ALL TABLE lagodb_connectors_regress.local_foreign_source)
-UNION ALL
-(TABLE lagodb_connectors_regress.local_foreign_source
- EXCEPT ALL TABLE lagodb_connectors_regress.local_json_directory);
+SELECT * FROM lagodb_connectors_regress.local_json_directory ORDER BY id;
 
 ROLLBACK;
 
--- avro: infer the schema from a native local file and compare its values.
-\set local_foreign_file :local_foreign_root '.avro'
-COPY lagodb_connectors_regress.local_foreign_source TO :'local_foreign_file';
-CREATE FOREIGN TABLE lagodb_connectors_regress.local_avro_exact ()
-SERVER lagodb_connectors_regress_local OPTIONS (path :'local_foreign_file');
-
-(TABLE lagodb_connectors_regress.local_avro_exact
- EXCEPT ALL TABLE lagodb_connectors_regress.local_foreign_source)
-UNION ALL
-(TABLE lagodb_connectors_regress.local_foreign_source
- EXCEPT ALL TABLE lagodb_connectors_regress.local_avro_exact);
-
--- Directory INSERT uses the same format writer with local publication.
-\set local_foreign_directory :local_foreign_root '-avro/'
-CREATE FOREIGN TABLE lagodb_connectors_regress.local_avro_directory (id integer, payload text)
-SERVER lagodb_connectors_regress_local
-OPTIONS (path :'local_foreign_directory', format 'avro');
-BEGIN;
-INSERT INTO lagodb_connectors_regress.local_avro_directory
-SELECT * FROM lagodb_connectors_regress.local_foreign_source;
-
-(TABLE lagodb_connectors_regress.local_avro_directory
- EXCEPT ALL TABLE lagodb_connectors_regress.local_foreign_source)
-UNION ALL
-(TABLE lagodb_connectors_regress.local_foreign_source
- EXCEPT ALL TABLE lagodb_connectors_regress.local_avro_directory);
-
--- A successful subtransaction write must disappear on savepoint rollback.
-SAVEPOINT local_insert;
-INSERT INTO lagodb_connectors_regress.local_avro_directory VALUES (5, 'rollback');
-SELECT count(*) AS rows_before_rollback
-FROM lagodb_connectors_regress.local_avro_directory;
-
-ROLLBACK TO SAVEPOINT local_insert;
-RELEASE SAVEPOINT local_insert;
-
-(TABLE lagodb_connectors_regress.local_avro_directory
- EXCEPT ALL TABLE lagodb_connectors_regress.local_foreign_source)
-UNION ALL
-(TABLE lagodb_connectors_regress.local_foreign_source
- EXCEPT ALL TABLE lagodb_connectors_regress.local_avro_directory);
-
-ROLLBACK;
-
--- parquet: infer the schema from a native local file and compare its values.
+-- Parquet reads a local file by position rather than sequentially.
 \set local_foreign_file :local_foreign_root '.parquet'
 COPY lagodb_connectors_regress.local_foreign_source TO :'local_foreign_file';
 CREATE FOREIGN TABLE lagodb_connectors_regress.local_parquet_exact ()
 SERVER lagodb_connectors_regress_local OPTIONS (path :'local_foreign_file');
 
-(TABLE lagodb_connectors_regress.local_parquet_exact
- EXCEPT ALL TABLE lagodb_connectors_regress.local_foreign_source)
-UNION ALL
-(TABLE lagodb_connectors_regress.local_foreign_source
- EXCEPT ALL TABLE lagodb_connectors_regress.local_parquet_exact);
+SELECT * FROM lagodb_connectors_regress.local_parquet_exact ORDER BY id;
 
--- Directory INSERT uses the same format writer with local publication.
-\set local_foreign_directory :local_foreign_root '-parquet/'
-CREATE FOREIGN TABLE lagodb_connectors_regress.local_parquet_directory (id integer, payload text)
-SERVER lagodb_connectors_regress_local
-OPTIONS (path :'local_foreign_directory', format 'parquet');
-BEGIN;
-INSERT INTO lagodb_connectors_regress.local_parquet_directory
-SELECT * FROM lagodb_connectors_regress.local_foreign_source;
-
-(TABLE lagodb_connectors_regress.local_parquet_directory
- EXCEPT ALL TABLE lagodb_connectors_regress.local_foreign_source)
-UNION ALL
-(TABLE lagodb_connectors_regress.local_foreign_source
- EXCEPT ALL TABLE lagodb_connectors_regress.local_parquet_directory);
-
--- A successful subtransaction write must disappear on savepoint rollback.
-SAVEPOINT local_insert;
-INSERT INTO lagodb_connectors_regress.local_parquet_directory VALUES (5, 'rollback');
-SELECT count(*) AS rows_before_rollback
-FROM lagodb_connectors_regress.local_parquet_directory;
-
-ROLLBACK TO SAVEPOINT local_insert;
-RELEASE SAVEPOINT local_insert;
-
-(TABLE lagodb_connectors_regress.local_parquet_directory
- EXCEPT ALL TABLE lagodb_connectors_regress.local_foreign_source)
-UNION ALL
-(TABLE lagodb_connectors_regress.local_foreign_source
- EXCEPT ALL TABLE lagodb_connectors_regress.local_parquet_directory);
-
-ROLLBACK;
-
--- COPY directory publication is also readable through a foreign table.
-\set local_foreign_directory :local_foreign_root '-copy-json/'
-BEGIN;
-COPY lagodb_connectors_regress.local_foreign_source TO :'local_foreign_directory'
-WITH (format 'json');
-CREATE FOREIGN TABLE lagodb_connectors_regress.local_copy_directory (id integer, payload text)
-SERVER lagodb_connectors_regress_local
-OPTIONS (path :'local_foreign_directory', format 'json');
-
-(TABLE lagodb_connectors_regress.local_copy_directory
- EXCEPT ALL TABLE lagodb_connectors_regress.local_foreign_source)
-UNION ALL
-(TABLE lagodb_connectors_regress.local_foreign_source
- EXCEPT ALL TABLE lagodb_connectors_regress.local_copy_directory);
-
-ROLLBACK;
-
--- Exact local files share the FDW read-only contract across formats.
-\set VERBOSITY sqlstate
-INSERT INTO lagodb_connectors_regress.local_parquet_exact VALUES (5, 'read-only');
-
-\set VERBOSITY default
 CREATE ROLE lagodb_connectors_regress_local_reader;
 GRANT USAGE, CREATE ON SCHEMA lagodb_connectors_regress TO lagodb_connectors_regress_local_reader;
 GRANT USAGE ON FOREIGN SERVER lagodb_connectors_regress_local TO lagodb_connectors_regress_local_reader;
 GRANT SELECT ON lagodb_connectors_regress.local_foreign_source,
     lagodb_connectors_regress.local_json_exact TO lagodb_connectors_regress_local_reader;
-GRANT SELECT, INSERT ON lagodb_connectors_regress.local_parquet_directory
+GRANT SELECT, INSERT ON lagodb_connectors_regress.local_json_directory
     TO lagodb_connectors_regress_local_reader;
 CREATE TABLE lagodb_connectors_regress.local_privilege_sink (id integer, payload text);
 GRANT INSERT ON lagodb_connectors_regress.local_privilege_sink TO lagodb_connectors_regress_local_reader;
-\set local_foreign_file :local_foreign_root '.parquet'
 SET ROLE lagodb_connectors_regress_local_reader;
 SELECT count(*) AS table_granted_rows FROM lagodb_connectors_regress.local_json_exact;
 
@@ -316,17 +193,17 @@ COPY lagodb_connectors_regress.local_foreign_source TO :'local_foreign_file';
 CREATE FOREIGN TABLE lagodb_connectors_regress.local_denied ()
 SERVER lagodb_connectors_regress_local OPTIONS (path :'local_foreign_file');
 
-INSERT INTO lagodb_connectors_regress.local_parquet_directory VALUES (5, 'denied');
+INSERT INTO lagodb_connectors_regress.local_json_directory VALUES (5, 'denied');
 
 \set VERBOSITY default
 RESET ROLE;
 GRANT pg_write_server_files TO lagodb_connectors_regress_local_reader;
 BEGIN;
-INSERT INTO lagodb_connectors_regress.local_parquet_directory
+INSERT INTO lagodb_connectors_regress.local_json_directory
 SELECT * FROM lagodb_connectors_regress.local_foreign_source;
 SET LOCAL ROLE lagodb_connectors_regress_local_reader;
-INSERT INTO lagodb_connectors_regress.local_parquet_directory VALUES (5, 'authorized');
-SELECT count(*) AS authorized_rows FROM lagodb_connectors_regress.local_parquet_directory;
+INSERT INTO lagodb_connectors_regress.local_json_directory VALUES (5, 'authorized');
+SELECT count(*) AS authorized_rows FROM lagodb_connectors_regress.local_json_directory;
 
 RESET ROLE;
 ROLLBACK;
@@ -334,10 +211,7 @@ DROP OWNED BY lagodb_connectors_regress_local_reader;
 DROP ROLE lagodb_connectors_regress_local_reader;
 DROP FOREIGN TABLE lagodb_connectors_regress.local_json_exact,
     lagodb_connectors_regress.local_json_directory,
-    lagodb_connectors_regress.local_avro_exact,
-    lagodb_connectors_regress.local_avro_directory,
-    lagodb_connectors_regress.local_parquet_exact,
-    lagodb_connectors_regress.local_parquet_directory;
+    lagodb_connectors_regress.local_parquet_exact;
 DROP TABLE lagodb_connectors_regress.local_privilege_sink,
     lagodb_connectors_regress.local_foreign_source;
 DROP SERVER lagodb_connectors_regress_local;

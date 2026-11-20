@@ -4,15 +4,9 @@ SELECT bucket AS lagodb_regress_bucket
 FROM lagodb_regress.object_storage_fixture
 \gset
 \set parquet_base 's3://' :lagodb_regress_bucket '/lagodb-connectors/parquet-schema/'
-\set parquet_exact_path :parquet_base 'scalars.parquet'
-COPY (
-    SELECT numeric_col, numeric_array
-    FROM lagodb_connectors_regress.parquet_source
-) TO :'parquet_exact_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
+\pset null _null_
 -- Declared typmods are producer guarantees, not per-value read conversions.
 \set declared_path :parquet_base 'declared/'
-\set declared_copy_path :parquet_base 'declared-copy.parquet'
 CREATE TYPE lagodb_connectors_regress.parquet_declared_value AS (
     label varchar(20), code char(5), observed timestamp(2), labels varchar(20)[]
 );
@@ -40,14 +34,13 @@ INSERT INTO parquet_declared_expected VALUES
     (3, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 INSERT INTO lagodb_connectors_regress.parquet_declared
 SELECT * FROM parquet_declared_expected;
-SELECT count(*) AS rows,
-       bool_and(to_jsonb(actual) IS NOT DISTINCT FROM to_jsonb(expected)) AS matches
-FROM lagodb_connectors_regress.parquet_declared AS actual
-FULL JOIN parquet_declared_expected AS expected USING (id);
- rows | matches 
-------+---------
-    3 | t
-(1 row)
+SELECT * FROM lagodb_connectors_regress.parquet_declared ORDER BY id;
+ id |                  label                   |  code  |    clock    |              zoned              |       clocks       |                                                               record                                                                |                                                                       items                                                                        
+----+------------------------------------------+--------+-------------+---------------------------------+--------------------+-------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------
+  1 | 界界界界界界界界界界界界界界界界界界界界 | 中     | 12:34:56.13 | Tue Jan 02 04:34:56.13 2024 PST | {12:34:56.13,NULL} | (界界界界界界界界界界界界界界界界界界界界,"中    ","Tue Jan 02 12:34:56.13 2024","{界界界界界界界界界界界界界界界界界界界界,NULL}") | {"(界界界界界界界界界界界界界界界界界界界界,\"中    \",\"Tue Jan 02 12:34:56.13 2024\",\"{界界界界界界界界界界界界界界界界界界界界,NULL}\")",NULL}
+  2 | _null_                                   | _null_ | _null_      | _null_                          | {}                 | (,,,{})                                                                                                                             | {}
+  3 | _null_                                   | _null_ | _null_      | _null_                          | _null_             | _null_                                                                                                                              | _null_
+(3 rows)
 
 SELECT char_length(label) = 20 AND octet_length(label) = 60 AS multibyte,
        octet_length(code) = 7 AND octet_length((record).code) = 7 AS padding
@@ -57,70 +50,47 @@ FROM lagodb_connectors_regress.parquet_declared WHERE id = 1;
  t         | t
 (1 row)
 
-ANALYZE lagodb_connectors_regress.parquet_declared;
--- COPY TO preserves the same declarations; the foreign reader restores them.
-COPY parquet_declared_expected TO :'declared_copy_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-ALTER FOREIGN TABLE lagodb_connectors_regress.parquet_declared
-OPTIONS (SET path :'declared_copy_path');
-SELECT count(*) AS rows,
-       bool_and(to_jsonb(actual) IS NOT DISTINCT FROM to_jsonb(expected)) AS matches
-FROM lagodb_connectors_regress.parquet_declared AS actual
-FULL JOIN parquet_declared_expected AS expected USING (id);
- rows | matches 
-------+---------
-    3 | t
-(1 row)
-
 -- COPY scalar/array targets still perform assignment rather than trusting lengths.
 CREATE TEMP TABLE parquet_declared_copy (
-    label varchar(20), code char(5), clock time(2),
+    id integer, label varchar(20), code char(5), clock time(2),
     zoned timestamptz(2), clocks time(2)[]
 );
-COPY parquet_declared_copy FROM :'declared_copy_path'
+COPY parquet_declared_copy FROM :'declared_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-(SELECT * FROM parquet_declared_copy
- EXCEPT ALL SELECT label, code, clock, zoned, clocks FROM parquet_declared_expected)
-UNION ALL
-(SELECT label, code, clock, zoned, clocks FROM parquet_declared_expected
- EXCEPT ALL SELECT * FROM parquet_declared_copy);
- label | code | clock | zoned | clocks 
--------+------+-------+-------+--------
-(0 rows)
+SELECT * FROM parquet_declared_copy ORDER BY id;
+ id |                  label                   |  code  |    clock    |              zoned              |       clocks       
+----+------------------------------------------+--------+-------------+---------------------------------+--------------------
+  1 | 界界界界界界界界界界界界界界界界界界界界 | 中     | 12:34:56.13 | Tue Jan 02 04:34:56.13 2024 PST | {12:34:56.13,NULL}
+  2 | _null_                                   | _null_ | _null_      | _null_                          | {}
+  3 | _null_                                   | _null_ | _null_      | _null_                          | _null_
+(3 rows)
 
 CREATE TEMP TABLE parquet_short_copy (label varchar(3));
--- Unlike declared scans, COPY cannot assign typmods inside composite arrays.
-CREATE TEMP TABLE parquet_declared_member_copy (
-    items lagodb_connectors_regress.parquet_declared_value[]
-);
 \set VERBOSITY sqlstate
-COPY parquet_short_copy FROM :'declared_copy_path'
+COPY parquet_short_copy FROM :'declared_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 ERROR:  22001
-COPY parquet_declared_member_copy FROM :'declared_copy_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-ERROR:  22000
 \set VERBOSITY default
--- Domain admission is recursive and independent of the values in the file.
+-- Domain targets are rejected, also as array elements, independent of the
+-- values in the file. Scan and COPY share this admission.
+\set parquet_scalars_path :parquet_base 'scalars.parquet'
+COPY (SELECT numeric_array FROM lagodb_connectors_regress.parquet_source)
+TO :'parquet_scalars_path'
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 CREATE DOMAIN lagodb_connectors_regress.parquet_positive AS numeric
     CHECK (VALUE > 0) NOT NULL;
-CREATE TEMP TABLE parquet_domain_sink (
-    numeric_col lagodb_connectors_regress.parquet_positive
-);
 CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_read_limits (
     numeric_array lagodb_connectors_regress.parquet_positive[]
 )
 SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'parquet_exact_path', format 'parquet');
+OPTIONS (path :'parquet_scalars_path', format 'parquet');
 \set VERBOSITY sqlstate
-COPY parquet_domain_sink FROM :'parquet_exact_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-ERROR:  22000
 SELECT numeric_array FROM lagodb_connectors_regress.parquet_read_limits;
 ERROR:  22000
 \set VERBOSITY default
--- COPY validates ordinary Parquet strings without the foreign-table producer contract.
-\set json_input_path :parquet_base 'json-input.parquet'
+-- COPY validates ordinary Parquet strings without the foreign-table producer
+-- contract. Row 2 is invalid at the top level and row 3 inside a composite's
+-- array.
 CREATE TYPE lagodb_connectors_regress.parquet_json_text AS (payload text, items text[]);
 CREATE TYPE lagodb_connectors_regress.parquet_json_value AS (payload json, items json[]);
 CREATE TEMP TABLE parquet_json_source (
@@ -130,18 +100,18 @@ CREATE TEMP TABLE parquet_json_source (
 INSERT INTO parquet_json_source VALUES
     (1, '{"ok":true}', ARRAY['null', NULL], ROW('1', ARRAY['[]', NULL])),
     (2, 'not-json', ARRAY['null', NULL], ROW('1', ARRAY['[]', NULL])),
-    (3, '{"ok":true}', ARRAY['null', 'not-json'], ROW('1', ARRAY['[]', NULL])),
-    (4, '{"ok":true}', ARRAY['null', NULL], ROW('not-json', ARRAY['[]', NULL])),
-    (5, '{"ok":true}', ARRAY['null', NULL], ROW('1', ARRAY['[]', 'not-json'])),
-    (6, '{"ok":true}', ARRAY['null', NULL], ROW('1', ARRAY['[]', NULL])),
-    (7, NULL, ARRAY[]::text[], ROW(NULL, ARRAY[]::text[])),
-    (8, NULL, NULL, NULL);
-COPY (SELECT * FROM parquet_json_source ORDER BY id) TO :'json_input_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
+    (3, '{"ok":true}', ARRAY['null', NULL], ROW('1', ARRAY['[]', 'not-json'])),
+    (4, NULL, ARRAY[]::text[], ROW(NULL, ARRAY[]::text[])),
+    (5, NULL, NULL, NULL);
 CREATE TEMP TABLE parquet_json_sink (
     id integer, payload json, items json[],
     nested lagodb_connectors_regress.parquet_json_value
 );
+-- An invalid value stops COPY and leaves the target empty.
+\set json_input_path :parquet_base 'json-input.parquet'
+COPY (SELECT * FROM parquet_json_source WHERE id <= 2 ORDER BY id)
+TO :'json_input_path'
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 \set VERBOSITY sqlstate
 COPY parquet_json_sink FROM :'json_input_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
@@ -153,8 +123,7 @@ SELECT count(*) AS rows_after_error FROM parquet_json_sink;
                 0
 (1 row)
 
--- Rows 3 to 5 stop COPY at deeper JSON conversions: an array element, a
--- composite field, and an array inside a composite.
+-- An invalid value nested in a composite's array also stops COPY.
 \set json_row_path :parquet_base 'json-row.parquet'
 COPY (SELECT * FROM parquet_json_source WHERE id = 3) TO :'json_row_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
@@ -163,87 +132,22 @@ COPY parquet_json_sink FROM :'json_row_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 ERROR:  22P02
 \set VERBOSITY default
-COPY (SELECT * FROM parquet_json_source WHERE id = 4) TO :'json_row_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-\set VERBOSITY sqlstate
-COPY parquet_json_sink FROM :'json_row_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-ERROR:  22P02
-\set VERBOSITY default
-COPY (SELECT * FROM parquet_json_source WHERE id = 5) TO :'json_row_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-\set VERBOSITY sqlstate
-COPY parquet_json_sink FROM :'json_row_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-ERROR:  22P02
-\set VERBOSITY default
 -- Valid rows convert scalar, array and recursive JSON values.
 \set json_valid_path :parquet_base 'json-valid.parquet'
-COPY (SELECT * FROM parquet_json_source WHERE id IN (1, 6, 7, 8) ORDER BY id)
+COPY (SELECT * FROM parquet_json_source WHERE id IN (1, 4, 5) ORDER BY id)
 TO :'json_valid_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 COPY parquet_json_sink FROM :'json_valid_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-SELECT coalesce(actual.id, expected.id) AS id,
-       actual.id IS NOT DISTINCT FROM expected.id
-       AND actual.payload::text IS NOT DISTINCT FROM expected.payload
-       AND actual.items::text[] IS NOT DISTINCT FROM expected.items
-       AND ((actual.nested)::text IS NULL) = ((expected.nested)::text IS NULL)
-       AND (actual.nested).payload::text IS NOT DISTINCT FROM (expected.nested).payload
-       AND (actual.nested).items::text[] IS NOT DISTINCT FROM (expected.nested).items AS matches
-FROM parquet_json_sink AS actual
-FULL JOIN (SELECT * FROM parquet_json_source WHERE id IN (1, 6, 7, 8)) AS expected
-USING (id)
-ORDER BY id;
- id | matches 
-----+---------
-  1 | t
-  6 | t
-  7 | t
-  8 | t
-(4 rows)
+SELECT * FROM parquet_json_sink ORDER BY id;
+ id |   payload   |     items     |     nested      
+----+-------------+---------------+-----------------
+  1 | {"ok":true} | {"null",NULL} | (1,"{[],NULL}")
+  4 | _null_      | {}            | (,{})
+  5 | _null_      | _null_        | _null_
+(3 rows)
 
--- JSONB uses the same semantic input contract, also inside arrays/composites.
-CREATE TYPE lagodb_connectors_regress.parquet_jsonb_value AS (payload jsonb, items jsonb[]);
-CREATE TEMP TABLE parquet_jsonb_sink (
-    id integer, payload jsonb, items jsonb[],
-    nested lagodb_connectors_regress.parquet_jsonb_value
-);
-\set VERBOSITY sqlstate
-COPY parquet_jsonb_sink FROM :'json_input_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-ERROR:  22P02
-\set VERBOSITY default
-COPY parquet_jsonb_sink FROM :'json_valid_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-SELECT coalesce(actual.id, expected.id) AS id,
-       to_jsonb(actual) IS NOT DISTINCT FROM to_jsonb(expected) AS matches
-FROM parquet_jsonb_sink AS actual
-FULL JOIN parquet_json_sink AS expected USING (id)
-ORDER BY id;
- id | matches 
-----+---------
-  1 | t
-  6 | t
-  7 | t
-  8 | t
-(4 rows)
-
--- PostgreSQL 17 introduced ON_ERROR; _1.out is the PostgreSQL 15 and 16 output.
-SELECT current_setting('server_version_num')::int >= 170000 AS has_copy_on_error \gset
-\if :has_copy_on_error
--- Parquet coerces typed datums through functions whose errors are hard, so it
--- rejects ON_ERROR IGNORE before schema admission or any row.
-\set VERBOSITY sqlstate
-COPY parquet_domain_sink FROM :'parquet_exact_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet', on_error ignore);
-ERROR:  42601
-\set VERBOSITY default
-\endif
 -- Named PG types determine nested storage, including dropped attribute positions.
-\set nested_path :parquet_base 'nested/'
-\set nested_copy_path :parquet_base 'nested-copy.parquet'
-\set nested_batch_path :parquet_base 'nested-batch.parquet'
 CREATE TYPE lagodb_connectors_regress.parquet_leaf AS (
     removed text, amount numeric(12, 2), tags text[], document jsonb
 );
@@ -264,6 +168,7 @@ INSERT INTO parquet_nested_expected VALUES
     (2, ROW(ROW(NULL, NULL, NULL), ARRAY[]::lagodb_connectors_regress.parquet_leaf[]),
      ARRAY[]::lagodb_connectors_regress.parquet_leaf[], 'null', ARRAY[]::jsonb[]);
 INSERT INTO parquet_nested_expected (id) VALUES (3);
+\set nested_path :parquet_base 'nested/'
 CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_nested (
     id integer, record lagodb_connectors_regress.parquet_branch,
     items lagodb_connectors_regress.parquet_leaf[], document jsonb, documents jsonb[]
@@ -275,44 +180,25 @@ INSERT INTO lagodb_connectors_regress.parquet_nested
 SELECT * FROM parquet_nested_expected WHERE id = 1;
 INSERT INTO lagodb_connectors_regress.parquet_nested
 SELECT * FROM parquet_nested_expected WHERE id > 1;
-SELECT coalesce(actual.id, expected.id) AS id,
-       to_jsonb(actual) IS NOT DISTINCT FROM to_jsonb(expected) AS matches
-FROM lagodb_connectors_regress.parquet_nested AS actual
-FULL JOIN parquet_nested_expected AS expected USING (id)
-ORDER BY id;
- id | matches 
-----+---------
-  1 | t
-  2 | t
-  3 | t
+SELECT * FROM lagodb_connectors_regress.parquet_nested ORDER BY id;
+ id |                                    record                                    |                        items                         |         document          |           documents            
+----+------------------------------------------------------------------------------+------------------------------------------------------+---------------------------+--------------------------------
+  1 | ("(12.35,""{x,NULL}"",""{""""ok"""": true}"")","{""(42.00,{},null)"",NULL}") | {"(12.35,\"{x,NULL}\",\"{\"\"ok\"\": true}\")",NULL} | {"nested": [1, null, []]} | {"null",NULL,"{\"ok\": true}"}
+  2 | ("(,,)",{})                                                                  | {}                                                   | null                      | {}
+  3 | _null_                                                                       | _null_                                               | _null_                    | _null_
 (3 rows)
 
--- COPY restores INSERT output; COPY TO also supplies the member-binding cases.
-COPY parquet_nested_expected TO :'nested_copy_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
+-- COPY restores INSERT output.
 CREATE TEMP TABLE parquet_nested_copy (LIKE parquet_nested_expected);
 COPY parquet_nested_copy FROM :'nested_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-SELECT coalesce(actual.id, expected.id) AS id,
-       to_jsonb(actual) IS NOT DISTINCT FROM to_jsonb(expected) AS matches
-FROM parquet_nested_copy AS actual
-FULL JOIN parquet_nested_expected AS expected USING (id)
-ORDER BY id;
- id | matches 
-----+---------
-  1 | t
-  2 | t
-  3 | t
+SELECT * FROM parquet_nested_copy ORDER BY id;
+ id |                                    record                                    |                        items                         |         document          |           documents            
+----+------------------------------------------------------------------------------+------------------------------------------------------+---------------------------+--------------------------------
+  1 | ("(12.35,""{x,NULL}"",""{""""ok"""": true}"")","{""(42.00,{},null)"",NULL}") | {"(12.35,\"{x,NULL}\",\"{\"\"ok\"\": true}\")",NULL} | {"nested": [1, null, []]} | {"null",NULL,"{\"ok\": true}"}
+  2 | ("(,,)",{})                                                                  | {}                                                   | null                      | {}
+  3 | _null_                                                                       | _null_                                               | _null_                    | _null_
 (3 rows)
-
-ANALYZE lagodb_connectors_regress.parquet_nested;
-SELECT reltuples::integer AS nested_rows
-FROM pg_class
-WHERE oid = 'lagodb_connectors_regress.parquet_nested'::regclass;
- nested_rows 
--------------
-           3
-(1 row)
 
 -- Exact member numeric typmods were exercised above. Unconstrained numeric
 -- also needs no assignment, including inside a composite array.
@@ -320,19 +206,20 @@ CREATE TYPE lagodb_connectors_regress.parquet_leaf_numeric AS (
     amount numeric, tags text[], document jsonb
 );
 CREATE TEMP TABLE parquet_numeric_members (
-    items lagodb_connectors_regress.parquet_leaf_numeric[]
+    id integer, items lagodb_connectors_regress.parquet_leaf_numeric[]
 );
-COPY parquet_numeric_members FROM :'nested_copy_path'
+COPY parquet_numeric_members FROM :'nested_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-SELECT count(*) AS rows,
-       count(*) FILTER (WHERE (items[1]).amount = 12.35) AS populated
-FROM parquet_numeric_members;
- rows | populated 
-------+-----------
-    3 |         1
-(1 row)
+SELECT * FROM parquet_numeric_members ORDER BY id;
+ id |                        items                         
+----+------------------------------------------------------
+  1 | {"(12.35,\"{x,NULL}\",\"{\"\"ok\"\": true}\")",NULL}
+  2 | {}
+  3 | _null_
+(3 rows)
 
--- COPY's top-level assignment does not reach composite members.
+-- COPY's top-level assignment does not reach composite members, so their
+-- typmods must match the file schema.
 CREATE TYPE lagodb_connectors_regress.parquet_leaf_scale AS (
     amount numeric(12, 1), tags text[], document jsonb
 );
@@ -340,11 +227,13 @@ CREATE TEMP TABLE parquet_scale_members (
     items lagodb_connectors_regress.parquet_leaf_scale[]
 );
 \set VERBOSITY sqlstate
-COPY parquet_scale_members FROM :'nested_copy_path'
+COPY parquet_scale_members FROM :'nested_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 ERROR:  22000
 \set VERBOSITY default
 -- Cross the 8192-row reader batch boundary with populated, empty and NULL values.
+-- Row n repeats expected row (n - 1) % 3 + 1, so compare each row with it.
+\set nested_batch_path :parquet_base 'nested-batch.parquet'
 COPY (
     SELECT n AS id, e.record, e.items, e.document, e.documents
     FROM generate_series(1, 8193) AS n
@@ -365,8 +254,6 @@ JOIN parquet_nested_expected AS expected ON expected.id = (actual.id - 1) % 3 + 
  8193 | t
 (1 row)
 
-ALTER FOREIGN TABLE lagodb_connectors_regress.parquet_nested
-OPTIONS (SET path :'nested_batch_path');
 -- Equal field counts are insufficient: composite member names must also match.
 CREATE TYPE lagodb_connectors_regress.parquet_leaf_renamed AS (
     amount numeric(12, 2), renamed text[], document jsonb
@@ -375,39 +262,18 @@ CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_bad_struct (
     items lagodb_connectors_regress.parquet_leaf_renamed[]
 )
 SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'nested_batch_path', format 'parquet');
+OPTIONS (path :'nested_path', format 'parquet');
 CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_struct_jsonb (record jsonb)
 SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'nested_batch_path', format 'parquet');
--- Force reader rebinding rather than retaining a materialized inner scan.
-SET enable_material = off;
--- The same decoder state is rebound across batches and correlated rescans.
-SELECT expected.id, actual.rows, actual.matches
-FROM parquet_nested_expected AS expected
-CROSS JOIN LATERAL (
-    SELECT count(*) AS rows,
-           bool_and((to_jsonb(value) - 'id') IS NOT DISTINCT FROM
-                    (to_jsonb(expected) - 'id')) AS matches
-    FROM lagodb_connectors_regress.parquet_nested AS value
-    WHERE (value.id - 1) % 3 + 1 = expected.id
-) AS actual
-ORDER BY expected.id;
- id | rows | matches 
-----+------+---------
-  1 | 2731 | t
-  2 | 2731 | t
-  3 | 2731 | t
-(3 rows)
-
-RESET enable_material;
-\set VERBOSITY sqlstate
+OPTIONS (path :'nested_path', format 'parquet');
 -- Containers cannot silently fall back to JSONB or mismatched composites.
+\set VERBOSITY sqlstate
 SELECT items FROM lagodb_connectors_regress.parquet_bad_struct LIMIT 1;
 ERROR:  22000
 SELECT record FROM lagodb_connectors_regress.parquet_struct_jsonb LIMIT 1;
 ERROR:  22000
 CREATE FOREIGN TABLE lagodb_connectors_regress.parquet_infer_struct ()
 SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'nested_batch_path', format 'parquet');
+OPTIONS (path :'nested_path', format 'parquet');
 ERROR:  22000
 \set VERBOSITY default

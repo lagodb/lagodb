@@ -137,6 +137,7 @@ SELECT source.*,
 FROM lagodb_connectors_regress.common_source AS source
 ORDER BY source.id;
 
+-- Row 1 arrays carry a NULL element for every Parquet list element type.
 CREATE TABLE lagodb_connectors_regress.parquet_source (:parquet_columns);
 
 INSERT INTO lagodb_connectors_regress.parquet_source
@@ -146,47 +147,47 @@ SELECT source.*,
             ELSE NULL
        END,
        CASE WHEN source.id = 1
-            THEN ARRAY[true, false]
+            THEN ARRAY[true, NULL, false]
             ELSE ARRAY[]::boolean[]
        END,
        CASE WHEN source.id = 1
-            THEN ARRAY[7::smallint, -2::smallint]
+            THEN ARRAY[7::smallint, NULL, -2::smallint]
             ELSE NULL
        END,
        CASE WHEN source.id = 1
-            THEN ARRAY[11, -12]
+            THEN ARRAY[11, NULL, -12]
             ELSE ARRAY[]::integer[]
        END,
        CASE WHEN source.id = 1
-            THEN ARRAY[9000000000::bigint, -9000000000::bigint]
+            THEN ARRAY[9000000000::bigint, NULL, -9000000000::bigint]
             ELSE NULL
        END,
        CASE WHEN source.id = 1
-            THEN ARRAY[1.25::real, -2.5::real]
+            THEN ARRAY[1.25::real, NULL, -2.5::real]
             ELSE ARRAY[]::real[]
        END,
        CASE WHEN source.id = 1
-            THEN ARRAY[2.5::double precision, -2.5::double precision]
+            THEN ARRAY[2.5::double precision, NULL, -2.5::double precision]
             ELSE NULL
        END,
        CASE WHEN source.id = 1
-            THEN ARRAY['a', 'comma,value']
+            THEN ARRAY['a', NULL, 'comma,value']
             ELSE ARRAY[]::text[]
        END,
        CASE WHEN source.id = 1
-            THEN ARRAY['varchar-one'::varchar(20), 'two'::varchar(20)]
+            THEN ARRAY['varchar-one'::varchar(20), NULL, 'two'::varchar(20)]
             ELSE NULL
        END,
        CASE WHEN source.id = 1
-            THEN ARRAY['abc'::character(5), 'xy'::character(5)]
+            THEN ARRAY['abc'::character(5), NULL, 'xy'::character(5)]
             ELSE ARRAY[]::character(5)[]
        END,
        CASE WHEN source.id = 1
-            THEN ARRAY['name-one'::name, 'name-two'::name]
+            THEN ARRAY['name-one'::name, NULL, 'name-two'::name]
             ELSE NULL
        END,
        CASE WHEN source.id = 1
-            THEN ARRAY['{"a":1}'::json, '{"b":2}'::json]
+            THEN ARRAY['{"a":1}'::json, NULL, '{"b":2}'::json]
             ELSE ARRAY[]::json[]
        END,
        CASE WHEN source.id = 1 THEN ARRAY[source.bytea_col, NULL]

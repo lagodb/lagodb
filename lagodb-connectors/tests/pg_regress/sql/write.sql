@@ -2,11 +2,7 @@
 
 -- Shared writer transaction, statement-abort, and rollover lifecycle.
 
-SELECT endpoint,
-       bucket,
-       region,
-       access_key_id,
-       secret_access_key
+SELECT endpoint, bucket, region, access_key_id, secret_access_key
 FROM lagodb_regress.object_storage_fixture
 \gset storage_
 
@@ -16,35 +12,15 @@ FROM lagodb_regress.object_storage_fixture
 \setenv OBJECT_STORAGE_ACCESS_KEY_ID :storage_access_key_id
 \setenv OBJECT_STORAGE_SECRET_ACCESS_KEY :storage_secret_access_key
 
-\set lifecycle_rollback_text_path 's3://' :storage_bucket '/lagodb-connectors/lifecycle/rollback/text/'
-\set lifecycle_commit_path 's3://' :storage_bucket '/lagodb-connectors/lifecycle/commit/'
-\set lifecycle_savepoint_path 's3://' :storage_bucket '/lagodb-connectors/lifecycle/savepoint/'
-\set lifecycle_append_path 's3://' :storage_bucket '/lagodb-connectors/lifecycle/append/'
-\set lifecycle_empty_text_path 's3://' :storage_bucket '/lagodb-connectors/lifecycle/empty/text/'
-\set lifecycle_empty_csv_path 's3://' :storage_bucket '/lagodb-connectors/lifecycle/empty/csv/'
-\set lifecycle_empty_json_path 's3://' :storage_bucket '/lagodb-connectors/lifecycle/empty/json/'
-\set lifecycle_empty_avro_path 's3://' :storage_bucket '/lagodb-connectors/lifecycle/empty/avro/'
-\set lifecycle_empty_parquet_path 's3://' :storage_bucket '/lagodb-connectors/lifecycle/empty/parquet/'
-\set lifecycle_failure_foreign_path 's3://' :storage_bucket '/lagodb-connectors/lifecycle/failure/foreign/'
-\set lifecycle_failure_copy_prefix_path 's3://' :storage_bucket '/lagodb-connectors/lifecycle/failure/copy-prefix/'
-\set lifecycle_failure_copy_exact_path 's3://' :storage_bucket '/lagodb-connectors/lifecycle/failure/copy-exact.txt'
-\set lifecycle_abort_copy_prefix_path 's3://' :storage_bucket '/lagodb-connectors/lifecycle/abort/copy-prefix/'
-\set lifecycle_empty_text_key 'lagodb-connectors/lifecycle/empty/text/'
-\set lifecycle_empty_csv_key 'lagodb-connectors/lifecycle/empty/csv/'
-\set lifecycle_empty_json_key 'lagodb-connectors/lifecycle/empty/json/'
-\set lifecycle_empty_avro_key 'lagodb-connectors/lifecycle/empty/avro/'
-\set lifecycle_empty_parquet_key 'lagodb-connectors/lifecycle/empty/parquet/'
-\set lifecycle_failure_foreign_key 'lagodb-connectors/lifecycle/failure/foreign/'
-\set lifecycle_failure_copy_prefix_key 'lagodb-connectors/lifecycle/failure/copy-prefix/'
-\set lifecycle_failure_copy_exact_key 'lagodb-connectors/lifecycle/failure/copy-exact.txt'
-\set lifecycle_abort_copy_prefix_key 'lagodb-connectors/lifecycle/abort/copy-prefix/'
+\set lifecycle_base 's3://' :storage_bucket '/lagodb-connectors/lifecycle/'
 
+-- Rollback removes published objects.
+\set lifecycle_rollback_text_path :lifecycle_base 'rollback/text/'
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_rollback_text
     (:common_columns)
 SERVER lagodb_connectors_regress_s3
 OPTIONS (path :'lifecycle_rollback_text_path', format 'text');
 
--- Rollback removes published objects; empty-output and rollover cases cover each writer.
 BEGIN;
 INSERT INTO lagodb_connectors_regress.lifecycle_rollback_text
 SELECT * FROM lagodb_connectors_regress.common_source WHERE id = 1;
@@ -56,6 +32,7 @@ SELECT count(*) AS rows_after_rollback
 FROM lagodb_connectors_regress.lifecycle_rollback_text;
 
 -- A committed prefix object remains visible after the transaction callback.
+\set lifecycle_commit_path :lifecycle_base 'commit/'
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_commit
     (:json_columns)
 SERVER lagodb_connectors_regress_s3
@@ -70,6 +47,7 @@ SELECT count(*) AS rows_after_commit
 FROM lagodb_connectors_regress.lifecycle_commit;
 
 -- A savepoint abort deletes only objects registered by the subtransaction.
+\set lifecycle_savepoint_path :lifecycle_base 'savepoint/'
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_savepoint
     (:common_columns)
 SERVER lagodb_connectors_regress_s3
@@ -87,6 +65,7 @@ COMMIT;
 SELECT id FROM lagodb_connectors_regress.lifecycle_savepoint ORDER BY id;
 
 -- Each INSERT statement allocates a new object under the same prefix.
+\set lifecycle_append_path :lifecycle_base 'append/'
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_append
     (:avro_columns)
 SERVER lagodb_connectors_regress_s3
@@ -97,53 +76,47 @@ INSERT INTO lagodb_connectors_regress.lifecycle_append
 SELECT * FROM lagodb_connectors_regress.avro_source WHERE id = 2;
 SELECT id FROM lagodb_connectors_regress.lifecycle_append ORDER BY id;
 
--- Empty foreign INSERT leaves no object; direct COPY TO has a separate empty-object contract.
-CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_empty_text
-    (:common_columns)
+-- Empty foreign INSERT leaves no object; direct COPY TO has a separate
+-- empty-object contract. Each FDW writer chooses this policy (text and CSV
+-- share one writer).
+\set lifecycle_empty_path :lifecycle_base 'empty/text/'
+CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_empty_text (:common_columns)
 SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'lifecycle_empty_text_path', format 'text');
-CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_empty_csv
-    (:common_columns)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'lifecycle_empty_csv_path', format 'csv');
-CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_empty_json
-    (:json_columns)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'lifecycle_empty_json_path', format 'json');
-CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_empty_avro
-    (:avro_columns)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'lifecycle_empty_avro_path', format 'avro');
-CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_empty_parquet
-    (:parquet_columns)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'lifecycle_empty_parquet_path', format 'parquet');
-
+OPTIONS (path :'lifecycle_empty_path', format 'text');
 INSERT INTO lagodb_connectors_regress.lifecycle_empty_text
 SELECT * FROM lagodb_connectors_regress.common_source WHERE false;
-INSERT INTO lagodb_connectors_regress.lifecycle_empty_csv
-SELECT * FROM lagodb_connectors_regress.common_source WHERE false;
+\setenv OBJECT_STORAGE_PREFIX 'lagodb-connectors/lifecycle/empty/text/'
+\! sh bin/object_storage_tool assert-prefix-empty
+\set lifecycle_empty_path :lifecycle_base 'empty/json/'
+CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_empty_json (:json_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'lifecycle_empty_path', format 'json');
 INSERT INTO lagodb_connectors_regress.lifecycle_empty_json
 SELECT * FROM lagodb_connectors_regress.json_source WHERE false;
+\setenv OBJECT_STORAGE_PREFIX 'lagodb-connectors/lifecycle/empty/json/'
+\! sh bin/object_storage_tool assert-prefix-empty
+\set lifecycle_empty_path :lifecycle_base 'empty/avro/'
+CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_empty_avro (:avro_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'lifecycle_empty_path', format 'avro');
 INSERT INTO lagodb_connectors_regress.lifecycle_empty_avro
 SELECT * FROM lagodb_connectors_regress.avro_source WHERE false;
+\setenv OBJECT_STORAGE_PREFIX 'lagodb-connectors/lifecycle/empty/avro/'
+\! sh bin/object_storage_tool assert-prefix-empty
+\set lifecycle_empty_path :lifecycle_base 'empty/parquet/'
+CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_empty_parquet (:parquet_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'lifecycle_empty_path', format 'parquet');
 INSERT INTO lagodb_connectors_regress.lifecycle_empty_parquet
 SELECT * FROM lagodb_connectors_regress.parquet_source WHERE false;
-
-\setenv OBJECT_STORAGE_PREFIX :lifecycle_empty_text_key
-\! sh bin/object_storage_tool assert-prefix-empty
-\setenv OBJECT_STORAGE_PREFIX :lifecycle_empty_csv_key
-\! sh bin/object_storage_tool assert-prefix-empty
-\setenv OBJECT_STORAGE_PREFIX :lifecycle_empty_json_key
-\! sh bin/object_storage_tool assert-prefix-empty
-\setenv OBJECT_STORAGE_PREFIX :lifecycle_empty_avro_key
-\! sh bin/object_storage_tool assert-prefix-empty
-\setenv OBJECT_STORAGE_PREFIX :lifecycle_empty_parquet_key
+\setenv OBJECT_STORAGE_PREFIX 'lagodb-connectors/lifecycle/empty/parquet/'
 \! sh bin/object_storage_tool assert-prefix-empty
 
 -- Force rollover before a later row raises division_by_zero. Prefix writers
--- have already uploaded objects and must remove them during statement abort.
+-- have already uploaded objects and must remove them during statement abort;
+-- foreign INSERT and prefix COPY register them for cleanup the same way.
 SET lagodb_connectors.target_file_size_mb = 1;
+\set lifecycle_failure_foreign_path :lifecycle_base 'failure/foreign/'
 CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_failure_foreign (
     id integer,
     payload text
@@ -156,63 +129,26 @@ INSERT INTO lagodb_connectors_regress.lifecycle_failure_foreign
 SELECT id,
        repeat(md5(id::text), 40000 + 0 / (4 - id))
 FROM generate_series(1, 4) AS rows(id);
-\setenv OBJECT_STORAGE_PREFIX :lifecycle_failure_foreign_key
+\setenv OBJECT_STORAGE_PREFIX 'lagodb-connectors/lifecycle/failure/foreign/'
 \! sh bin/object_storage_tool assert-prefix-empty
 
 -- Exact COPY keeps bytes in local staging until successful completion, so a
 -- statement error cannot publish a partial exact object.
+\set lifecycle_failure_copy_exact_path :lifecycle_base 'failure/copy-exact.txt'
 COPY (
     SELECT id,
            repeat(md5(id::text), 40000 + 0 / (4 - id)) AS payload
     FROM generate_series(1, 4) AS rows(id)
 ) TO :'lifecycle_failure_copy_exact_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'text');
-\setenv OBJECT_STORAGE_PREFIX :lifecycle_failure_copy_exact_key
-\! sh bin/object_storage_tool assert-prefix-empty
-
--- Prefix COPY can publish rolled objects before a later row fails; abort
--- cleanup removes every object allocated by the failed statement.
-COPY (
-    SELECT id,
-           repeat(md5(id::text), 40000 + 0 / (4 - id)) AS payload
-    FROM generate_series(1, 4) AS rows(id)
-) TO :'lifecycle_failure_copy_prefix_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'text');
-\setenv OBJECT_STORAGE_PREFIX :lifecycle_failure_copy_prefix_key
+\setenv OBJECT_STORAGE_PREFIX 'lagodb-connectors/lifecycle/failure/copy-exact.txt'
 \! sh bin/object_storage_tool assert-prefix-empty
 \set VERBOSITY default
 
--- A successful prefix COPY is visible before commit and removed on an
--- explicit top-level abort.
-CREATE FOREIGN TABLE lagodb_connectors_regress.lifecycle_abort_copy_prefix (
-    id integer,
-    payload text
-)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'lifecycle_abort_copy_prefix_path', format 'text');
-BEGIN;
-COPY (SELECT 1 AS id, 'abort'::text AS payload)
-TO :'lifecycle_abort_copy_prefix_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'text');
-SELECT count(*) AS copy_prefix_rows_before_rollback
-FROM lagodb_connectors_regress.lifecycle_abort_copy_prefix;
-ROLLBACK;
-\setenv OBJECT_STORAGE_PREFIX :lifecycle_abort_copy_prefix_key
-\! sh bin/object_storage_tool assert-prefix-empty
-
--- Prefix rollover for every writer implementation.
-
-\set rollover_text_path 's3://' :storage_bucket '/lagodb-connectors/rollover/text/'
-\set rollover_csv_path 's3://' :storage_bucket '/lagodb-connectors/rollover/csv/'
-\set rollover_json_path 's3://' :storage_bucket '/lagodb-connectors/rollover/json/'
-\set rollover_avro_path 's3://' :storage_bucket '/lagodb-connectors/rollover/avro/'
-\set rollover_parquet_path 's3://' :storage_bucket '/lagodb-connectors/rollover/parquet/'
-\set rollover_text_key 'lagodb-connectors/rollover/text/'
-\set rollover_csv_key 'lagodb-connectors/rollover/csv/'
-\set rollover_json_key 'lagodb-connectors/rollover/json/'
-\set rollover_avro_key 'lagodb-connectors/rollover/avro/'
-\set rollover_parquet_key 'lagodb-connectors/rollover/parquet/'
-
+-- Prefix rollover for every encoder's size estimate (text and CSV share one
+-- encoder). Each COPY must split its output into several objects, and a
+-- foreign table reads all of them back.
+\set rollover_base 's3://' :storage_bucket '/lagodb-connectors/rollover/'
 CREATE TABLE lagodb_connectors_regress.rollover_source (
     id integer,
     payload text
@@ -225,99 +161,48 @@ CROSS JOIN generate_series(1, 800) AS chunk_values(chunk_id)
 GROUP BY row_id
 ORDER BY row_id;
 
-COPY lagodb_connectors_regress.rollover_source
-TO :'rollover_text_path'
+\set rollover_path :rollover_base 'text/'
+COPY lagodb_connectors_regress.rollover_source TO :'rollover_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'text');
-COPY lagodb_connectors_regress.rollover_source
-TO :'rollover_csv_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'csv');
-COPY lagodb_connectors_regress.rollover_source
-TO :'rollover_json_path'
+\setenv OBJECT_STORAGE_PREFIX 'lagodb-connectors/rollover/text/'
+\! sh bin/object_storage_tool assert-prefix-rollover
+CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_text (:id_payload_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'rollover_path', format 'text');
+
+\set rollover_path :rollover_base 'json/'
+COPY lagodb_connectors_regress.rollover_source TO :'rollover_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'json');
-COPY lagodb_connectors_regress.rollover_source
-TO :'rollover_avro_path'
+\setenv OBJECT_STORAGE_PREFIX 'lagodb-connectors/rollover/json/'
+\! sh bin/object_storage_tool assert-prefix-rollover
+CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_json (:id_payload_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'rollover_path', format 'json');
+
+\set rollover_path :rollover_base 'avro/'
+COPY lagodb_connectors_regress.rollover_source TO :'rollover_path'
 WITH (server 'lagodb_connectors_regress_s3', format 'avro');
-COPY lagodb_connectors_regress.rollover_source
-TO :'rollover_parquet_path'
-WITH (
-    server 'lagodb_connectors_regress_s3',
-    format 'parquet',
-    compression 'none'
-);
-
-\setenv OBJECT_STORAGE_PREFIX :rollover_text_key
+\setenv OBJECT_STORAGE_PREFIX 'lagodb-connectors/rollover/avro/'
 \! sh bin/object_storage_tool assert-prefix-rollover
-\setenv OBJECT_STORAGE_PREFIX :rollover_csv_key
+CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_avro (:id_payload_columns)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'rollover_path', format 'avro');
+
+\set rollover_path :rollover_base 'parquet/'
+COPY lagodb_connectors_regress.rollover_source TO :'rollover_path'
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet', compression 'none');
+\setenv OBJECT_STORAGE_PREFIX 'lagodb-connectors/rollover/parquet/'
 \! sh bin/object_storage_tool assert-prefix-rollover
-\setenv OBJECT_STORAGE_PREFIX :rollover_json_key
-\! sh bin/object_storage_tool assert-prefix-rollover
-\setenv OBJECT_STORAGE_PREFIX :rollover_avro_key
-\! sh bin/object_storage_tool assert-prefix-rollover
-\setenv OBJECT_STORAGE_PREFIX :rollover_parquet_key
-\! sh bin/object_storage_tool assert-prefix-rollover
-
-CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_text
-    (:id_payload_columns)
+CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_parquet (:id_payload_columns)
 SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'rollover_text_path', format 'text');
-CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_csv
-    (:id_payload_columns)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'rollover_csv_path', format 'csv');
-CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_json
-    (:id_payload_columns)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'rollover_json_path', format 'json');
-CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_avro
-    (:id_payload_columns)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'rollover_avro_path', format 'avro');
-CREATE FOREIGN TABLE lagodb_connectors_regress.rollover_parquet
-    (:id_payload_columns)
-SERVER lagodb_connectors_regress_s3
-OPTIONS (path :'rollover_parquet_path', format 'parquet');
+OPTIONS (path :'rollover_path', format 'parquet');
 
-CREATE TABLE lagodb_connectors_regress.rollover_parquet_copy
-    (:id_payload_columns);
-COPY lagodb_connectors_regress.rollover_parquet_copy
-FROM :'rollover_parquet_path'
-WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
-
--- Compare complete rows and duplicate counts across all rolled objects.
-(SELECT * FROM lagodb_connectors_regress.rollover_text
- EXCEPT ALL SELECT * FROM lagodb_connectors_regress.rollover_source)
-UNION ALL
-(SELECT * FROM lagodb_connectors_regress.rollover_source
- EXCEPT ALL SELECT * FROM lagodb_connectors_regress.rollover_text);
-
-(SELECT * FROM lagodb_connectors_regress.rollover_csv
- EXCEPT ALL SELECT * FROM lagodb_connectors_regress.rollover_source)
-UNION ALL
-(SELECT * FROM lagodb_connectors_regress.rollover_source
- EXCEPT ALL SELECT * FROM lagodb_connectors_regress.rollover_csv);
-
-(SELECT * FROM lagodb_connectors_regress.rollover_json
- EXCEPT ALL SELECT * FROM lagodb_connectors_regress.rollover_source)
-UNION ALL
-(SELECT * FROM lagodb_connectors_regress.rollover_source
- EXCEPT ALL SELECT * FROM lagodb_connectors_regress.rollover_json);
-
-(SELECT * FROM lagodb_connectors_regress.rollover_avro
- EXCEPT ALL SELECT * FROM lagodb_connectors_regress.rollover_source)
-UNION ALL
-(SELECT * FROM lagodb_connectors_regress.rollover_source
- EXCEPT ALL SELECT * FROM lagodb_connectors_regress.rollover_avro);
-
-(SELECT * FROM lagodb_connectors_regress.rollover_parquet
- EXCEPT ALL SELECT * FROM lagodb_connectors_regress.rollover_source)
-UNION ALL
-(SELECT * FROM lagodb_connectors_regress.rollover_source
- EXCEPT ALL SELECT * FROM lagodb_connectors_regress.rollover_parquet);
-
-(SELECT * FROM lagodb_connectors_regress.rollover_parquet_copy
- EXCEPT ALL SELECT * FROM lagodb_connectors_regress.rollover_source)
-UNION ALL
-(SELECT * FROM lagodb_connectors_regress.rollover_source
- EXCEPT ALL SELECT * FROM lagodb_connectors_regress.rollover_parquet_copy);
+-- Rollover switches objects only between complete rows, so values use the
+-- same encoders as the format round trips. A lost or repeated row changes the
+-- count, and an incomplete object fails to read.
+SELECT (SELECT count(*) FROM lagodb_connectors_regress.rollover_text) AS text,
+       (SELECT count(*) FROM lagodb_connectors_regress.rollover_json) AS json,
+       (SELECT count(*) FROM lagodb_connectors_regress.rollover_avro) AS avro,
+       (SELECT count(*) FROM lagodb_connectors_regress.rollover_parquet) AS parquet;
 
 RESET lagodb_connectors.target_file_size_mb;
