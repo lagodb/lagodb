@@ -67,7 +67,7 @@ impl ParquetWritePlan {
     }
 
     /// COPY binds a newly generated schema in exactly its output layout order.
-    pub(super) fn into_datum_buffer(
+    pub(crate) fn into_datum_buffer(
         self,
     ) -> Result<BoundDatumBuffer, ConnectorError> {
         let plans = self.columns.into_iter().map(|(_, plan)| plan).collect();

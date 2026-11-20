@@ -8,6 +8,7 @@ use core::marker::PhantomData;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
 
+use crate::datum::SoftErrorContext;
 use crate::tuple::TupleSlotRow;
 
 use super::{CopyColumn, CopyColumnLayout, CopyError};
@@ -64,6 +65,13 @@ impl CopyRowRejection {
     pub fn location(&self) -> Option<&str> {
         self.location.as_deref()
     }
+}
+
+/// PostgreSQL's parsed COPY `ON_ERROR` choice, known before a source opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyOnError {
+    Stop,
+    Ignore,
 }
 
 #[derive(Debug)]
@@ -145,6 +153,7 @@ pub struct CopyInputRow<'a> {
     nulls: *mut bool,
     layout: &'a CopyColumnLayout,
     materialized_bytes: *mut usize,
+    soft_errors: Option<SoftErrorContext<'a>>,
     _borrow: PhantomData<&'a mut [pg_sys::Datum]>,
 }
 
@@ -154,20 +163,32 @@ impl<'a> CopyInputRow<'a> {
     /// `values` and `nulls` must be the writable arrays for the relation
     /// descriptor from which `layout` was built. They must remain live in the
     /// current COPY per-tuple context for `'a`. The callback is synchronous;
-    /// neither the row nor any datum pointer may be retained.
+    /// neither the row nor any datum pointer may be retained. A non-null
+    /// `soft_errors` is this COPY state's live `ErrorSaveContext`.
     pub(crate) unsafe fn from_raw(
         values: *mut pg_sys::Datum,
         nulls: *mut bool,
         layout: &'a CopyColumnLayout,
         materialized_bytes: &'a mut usize,
+        soft_errors: *mut pg_sys::Node,
     ) -> Self {
         Self {
             values,
             nulls,
             layout,
             materialized_bytes,
+            // SAFETY: guaranteed by the caller.
+            soft_errors: unsafe { SoftErrorContext::from_raw(soft_errors) },
             _borrow: PhantomData,
         }
+    }
+
+    /// PostgreSQL's soft input-error context under `ON_ERROR IGNORE`, or
+    /// `None` when input errors are hard. A source whose input call saves an
+    /// error here stops converting the row and returns
+    /// [`CopyRowOutcome::Rejected`].
+    pub fn soft_errors(&self) -> Option<SoftErrorContext<'a>> {
+        self.soft_errors
     }
 
     pub fn columns(self) -> CopyInputColumns<'a> {

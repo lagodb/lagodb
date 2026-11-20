@@ -62,7 +62,7 @@ impl AvroReadColumn {
     }
 
     /// Typmod already enforced when materializing this source datum.
-    pub(super) fn datum_typmod(self) -> i32 {
+    pub(crate) fn datum_typmod(self) -> i32 {
         match self.kind {
             AvroValueKind::Decimal(codec) => codec.typmod(),
             _ => -1,

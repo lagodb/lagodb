@@ -1,12 +1,9 @@
 //! Relation-bound PostgreSQL assignment of external COPY datums.
 
 use std::ffi::c_void;
-use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 
-use pgrx::{PgTryBuilder, pg_sys};
-
-use crate::diag::PgError;
+use pgrx::pg_sys;
 
 use super::pg::CopyBridge;
 
@@ -23,25 +20,19 @@ impl CopyDatumCoercion {
     /// `source_typmod` is the typmod already enforced by the source decoder,
     /// or -1 when decoding produced an unconstrained value. As in PG's parser,
     /// matching source and target typmods need no additional conversion.
+    /// PG errors unwind to the COPY driver that opens the source.
     pub fn bind(
         type_oid: pg_sys::Oid,
         source_typmod: i32,
         target_typmod: i32,
-    ) -> Result<Self, PgError> {
+    ) -> Self {
+        // SAFETY: called on the backend thread during the COPY utility command.
         let state = unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                Ok(CopyBridge::begin_datum_coercion(
-                    type_oid,
-                    source_typmod,
-                    target_typmod,
-                ))
-            }))
-            .catch_others(|error| Err(PgError::from_caught(error)))
-            .execute()
-        }?;
-        Ok(Self {
+            CopyBridge::begin_datum_coercion(type_oid, source_typmod, target_typmod)
+        };
+        Self {
             state: NonNull::new(state),
-        })
+        }
     }
 
     /// Apply target assignment without serializing or reparsing the datum.
@@ -49,8 +40,8 @@ impl CopyDatumCoercion {
     /// # Safety
     ///
     /// `value` must have the bound column's type. PostgreSQL must be active
-    /// with COPY's per-tuple context selected. The caller must catch PG errors
-    /// at its row conversion boundary, where ON_ERROR can classify rejection.
+    /// with COPY's per-tuple context selected. Coercion errors are hard, so
+    /// they unwind to the COPY driver and never become row rejections.
     pub unsafe fn apply(
         &mut self,
         value: Option<pg_sys::Datum>,

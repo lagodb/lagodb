@@ -51,7 +51,7 @@ pub use typed_driver::{
     TypedCopyFromDriver, TypedCopyFromSpec, TypedCopyToDriver, TypedCopyToSpec,
 };
 pub use typed_io::{
-    CopyDatumSource, CopyInputColumn, CopyInputColumns, CopyInputRow,
+    CopyDatumSource, CopyInputColumn, CopyInputColumns, CopyInputRow, CopyOnError,
     CopyOutputDatum, CopyOutputDatums, CopyOutputRow, CopyRowOutcome,
     CopyRowRejection, CopyTupleDestination,
 };

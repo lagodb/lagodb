@@ -10,6 +10,7 @@
 //! output contract. Format adapters retain ownership of encoding and safe
 //! split boundaries.
 
+mod format_adapters;
 mod options;
 
 use lagodb_core::copy::{
@@ -23,8 +24,10 @@ use crate::access::ConnectorAccess;
 use crate::error::ConnectorError;
 use crate::storage::{ObjectUri, StoragePath};
 
-use self::options::CopyCommandOptions;
-use crate::format::{FormatCopyInput, FormatCopyOutput};
+use format_adapters::{
+    CopyFormat, CopyFromFormat, CopyToFormat, FormatCopyOutput, StreamCopySource,
+};
+use options::CopyCommandOptions;
 
 pub(crate) struct ConnectorCopyConsumer;
 
@@ -55,47 +58,41 @@ impl CopyConsumer for ConnectorCopyConsumer {
         &self,
         context: &mut CopyContext<'_>,
     ) -> Result<CopyCompletion, CopyError> {
-        self.consume_inner(context)
-    }
-}
-
-impl ConnectorCopyConsumer {
-    fn consume_inner(
-        &self,
-        context: &mut CopyContext<'_>,
-    ) -> Result<CopyCompletion, CopyError> {
         let statement = context.statement();
         let filename = statement.filename().ok_or_else(|| {
-            ConnectorError::invalid_option(
-                "path",
-                "a file path or object URI is required",
-            )
+            ConnectorError::invalid_path("a file path or object URI is required")
         })?;
         let filename = filename
             .to_str()
             .map_err(|_| ConnectorError::invalid_object_uri("must be valid UTF-8"))?;
         let object = StoragePath::parse(filename)?;
         let options = CopyCommandOptions::from_statement(statement, &object)?;
-        if statement.is_from() {
-            self.copy_from(context, object, options)
-        } else {
-            self.copy_to(context, object, options)
+        let server = options.server.as_deref();
+        match options.format {
+            CopyFormat::From(format) => {
+                self.copy_from(context, object, server, format)
+            }
+            CopyFormat::To(format) => self.copy_to(context, object, server, format),
         }
     }
+}
 
+impl ConnectorCopyConsumer {
     fn copy_from(
         &self,
         context: &mut CopyContext<'_>,
         object: StoragePath,
-        options: CopyCommandOptions,
+        server: Option<&str>,
+        format: CopyFromFormat,
     ) -> Result<CopyCompletion, CopyError> {
         let parse_state = context.parse_state();
         let preparation = context.prepare_from(&parse_state)?;
-        let location = ConnectorAccess::resolve(object, options.server.as_deref())?;
-        let format = options.format;
-        let pg_options = format.input_options(context);
-        let processed = match format.input() {
-            FormatCopyInput::Bytes => {
+        let location = ConnectorAccess::resolve(object, server)?;
+        let pg_options = format.postgres_options(context);
+        // Core drivers validate PostgreSQL options before a source opens, so
+        // location policy is checked inside the open callbacks.
+        let processed = match format {
+            CopyFromFormat::Delimited(_, compression) => {
                 let spec = unsafe {
                     CopyFromSpec::new(
                         context.statement(),
@@ -104,10 +101,12 @@ impl ConnectorCopyConsumer {
                         pg_options,
                     )
                 };
-                unsafe { CopyFromDriver::begin(spec)? }
-                    .execute(|| format.open_byte_source(&location))?
+                unsafe { CopyFromDriver::begin(spec)? }.execute(|| {
+                    format.validate_location(&location)?;
+                    Ok(Box::new(StreamCopySource::open(&location, compression)?))
+                })?
             }
-            FormatCopyInput::Datums => {
+            CopyFromFormat::Typed(typed) => {
                 let spec = unsafe {
                     TypedCopyFromSpec::new(
                         context.statement(),
@@ -116,8 +115,11 @@ impl ConnectorCopyConsumer {
                         pg_options,
                     )
                 };
-                TypedCopyFromDriver::begin(spec)?
-                    .execute(|layout| format.open_datum_source(&location, layout))?
+                TypedCopyFromDriver::begin(spec)?.execute(|layout, on_error| {
+                    typed.validate_on_error(on_error)?;
+                    format.validate_location(&location)?;
+                    typed.open_source(&location, layout)
+                })?
             }
         };
         parse_state.dispose()?;
@@ -128,13 +130,14 @@ impl ConnectorCopyConsumer {
         &self,
         context: &mut CopyContext<'_>,
         object: StoragePath,
-        options: CopyCommandOptions,
+        server: Option<&str>,
+        format: CopyToFormat,
     ) -> Result<CopyCompletion, CopyError> {
         let parse_state = context.parse_state();
         let preparation = context.prepare_to(&parse_state)?;
-        let location = ConnectorAccess::resolve(object, options.server.as_deref())?;
+        let location = ConnectorAccess::resolve(object, server)?;
 
-        let mut destination = options.format.open_destination(&location)?;
+        let mut destination = format.open_destination(&location)?;
         let pg_options = destination.postgres_options(context);
         let processed = match destination.output() {
             FormatCopyOutput::Bytes(destination) => {

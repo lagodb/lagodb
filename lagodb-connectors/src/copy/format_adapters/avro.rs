@@ -1,7 +1,6 @@
 //! Direct Datum/slot adapters for Avro COPY FROM and COPY TO.
 
 use std::io::BufReader;
-use std::panic::AssertUnwindSafe;
 
 use apache_avro::types::Value;
 use apache_avro::{Reader, Schema};
@@ -9,18 +8,17 @@ use lagodb_core::copy::{
     CopyColumnLayout, CopyDatumCoercion, CopyDatumSource, CopyError, CopyInputRow,
     CopyOutputRow, CopyRowOutcome, CopyTupleDestination,
 };
-use lagodb_core::diag::PgReportError;
-use pgrx::PgTryBuilder;
 
 use crate::error::ConnectorError;
-use crate::format::copy::{FormatCopyDestination, FormatCopyOutput};
-use crate::format::{AvroWriteCompression, FormatKind};
+use crate::format::avro::{
+    AvroDatumRow, AvroObjectWriter, AvroReadColumn, AvroWritePlan,
+};
+use crate::format::{AvroWriteCompression, EmptyOutputPolicy, FormatKind};
 use crate::storage::{
-    InputFile, InputFiles, ProgressReader, ReadProgress, StorageOutput,
+    InputFile, ProgressReader, ReadProgress, ResolvedStorageLocation, StorageOutput,
 };
 
-use super::read::AvroReadColumn;
-use super::write::{AvroDatumRow, AvroObjectWriter, AvroWritePlan};
+use super::{FormatCopyDestination, FormatCopyOutput};
 
 struct CopyReadColumn {
     reader: AvroReadColumn,
@@ -28,7 +26,7 @@ struct CopyReadColumn {
 }
 
 /// Avro-to-Datum source for PostgreSQL COPY FROM.
-pub(in crate::format) struct AvroCopySource {
+pub(in crate::copy) struct AvroCopySource {
     reader: Reader<'static, BufReader<ProgressReader<InputFile>>>,
     columns: Box<[CopyReadColumn]>,
     logical_row: u64,
@@ -36,10 +34,12 @@ pub(in crate::format) struct AvroCopySource {
 }
 
 impl AvroCopySource {
-    pub(in crate::format) fn new(
-        mut files: InputFiles,
+    /// The caller has validated that `location` names one exact object.
+    pub(in crate::copy) fn open(
+        location: &ResolvedStorageLocation,
         layout: &CopyColumnLayout,
     ) -> Result<Self, CopyError> {
+        let mut files = FormatKind::Avro.input(location)?.open();
         let first = files.next().expect(
             "Avro COPY FROM resolves one exact object before opening its source",
         );
@@ -56,46 +56,39 @@ impl AvroCopySource {
             .into());
         };
         let mut columns = Vec::with_capacity(layout.len());
-        let bind = PgTryBuilder::new(AssertUnwindSafe(|| {
-            for column in layout.columns() {
-                let name = column.name().to_str().map_err(|_| {
+        for column in layout.columns() {
+            let name = column.name().to_str().map_err(|_| {
+                ConnectorError::invalid_object_schema(
+                    FormatKind::Avro,
+                    "COPY column names must be valid UTF-8 for Avro",
+                )
+            })?;
+            let source = record
+                .fields
+                .iter()
+                .position(|field| field.name == name)
+                .ok_or_else(|| {
                     ConnectorError::invalid_object_schema(
                         FormatKind::Avro,
-                        "COPY column names must be valid UTF-8 for Avro",
+                        format!("COPY target column {name:?} is missing from the Avro schema"),
                     )
                 })?;
-                let source = record
-                    .fields
-                    .iter()
-                    .position(|field| field.name == name)
-                    .ok_or_else(|| {
-                        ConnectorError::invalid_object_schema(
-                            FormatKind::Avro,
-                            format!("COPY target column {name:?} is missing from the Avro schema"),
-                        )
-                    })?;
-                // Decode according to the writer schema, then let PostgreSQL
-                // assign the result to the target typmod. COPY does not require
-                // numeric precision/scale to match as a foreign scan does.
-                let reader = AvroReadColumn::bind(
-                    source,
-                    &record.fields[source].schema,
-                    column.type_oid(),
-                    -1,
-                )?;
-                let coercion = CopyDatumCoercion::bind(
-                    column.type_oid(),
-                    reader.datum_typmod(),
-                    column.type_mod(),
-                )
-                .map_err(PgReportError::from_pg_error)?;
-                columns.push(CopyReadColumn { reader, coercion });
-            }
-            Ok::<(), ConnectorError>(())
-        }))
-        .catch_others(|error| Err(ConnectorError::Postgres(PgReportError::from_caught(error))))
-        .execute();
-        bind.map_err(CopyError::from)?;
+            // Decode according to the writer schema, then let PostgreSQL
+            // assign the result to the target typmod. COPY does not require
+            // numeric precision/scale to match as a foreign scan does.
+            let reader = AvroReadColumn::bind(
+                source,
+                &record.fields[source].schema,
+                column.type_oid(),
+                -1,
+            )?;
+            let coercion = CopyDatumCoercion::bind(
+                column.type_oid(),
+                reader.datum_typmod(),
+                column.type_mod(),
+            );
+            columns.push(CopyReadColumn { reader, coercion });
+        }
         Ok(Self {
             reader,
             columns: columns.into_boxed_slice(),
@@ -121,36 +114,29 @@ impl CopyDatumSource for AvroCopySource {
             )
             .into());
         };
-        let mut active_column = 0;
-        let result = unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                for (column_index, (target, column)) in
-                    row.columns().zip(self.columns.iter_mut()).enumerate()
-                {
-                    active_column = column_index;
-                    // SAFETY: bind resolved this index against the exact writer
-                    // schema and the decoded record remains live for this call.
-                    let source = fields.get_unchecked(column.reader.source());
-                    let value = column.reader.datum(&source.1)?;
-                    target.set(column.coercion.apply(value));
-                }
-                Ok::<(), ConnectorError>(())
-            }))
-            .catch_others(|error| {
-                Err(ConnectorError::Postgres(PgReportError::from_caught(error)))
-            })
-            .execute()
-        };
         self.logical_row += 1;
-        match result {
-            Ok(()) => Ok(CopyRowOutcome::Row),
-            Err(error) => error
-                .into_copy_row_rejection(
-                    Some(active_column),
-                    format!("Avro record {}", self.logical_row),
-                )
-                .map(CopyRowOutcome::Rejected),
+        for (column_index, (target, column)) in
+            row.columns().zip(self.columns.iter_mut()).enumerate()
+        {
+            // SAFETY: bind resolved this index against the exact writer schema
+            // and the decoded record remains live for this call. COPY selected
+            // its per-tuple context for the produced datum.
+            let source = unsafe { fields.get_unchecked(column.reader.source()) };
+            let value = match unsafe { column.reader.datum(&source.1) } {
+                Ok(value) => value,
+                Err(error) => {
+                    return error
+                        .into_copy_row_rejection(
+                            Some(column_index),
+                            format!("Avro record {}", self.logical_row),
+                        )
+                        .map(CopyRowOutcome::Rejected);
+                }
+            };
+            // PostgreSQL typmod coercion errors unwind to the COPY boundary.
+            target.set(unsafe { column.coercion.apply(value) });
         }
+        Ok(CopyRowOutcome::Row)
     }
 
     fn bytes_consumed(&self) -> u64 {
@@ -164,14 +150,14 @@ struct ReadyAvroCopyDestination {
 }
 
 /// Tuple-slot-to-Avro destination for PostgreSQL COPY TO.
-pub(in crate::format) struct AvroCopyDestination {
+pub(super) struct AvroCopyDestination {
     output: Option<StorageOutput>,
     compression: AvroWriteCompression,
     ready: Option<ReadyAvroCopyDestination>,
 }
 
 impl AvroCopyDestination {
-    pub(in crate::format) fn new(
+    pub(super) fn new(
         output: StorageOutput,
         compression: AvroWriteCompression,
     ) -> Self {
@@ -231,7 +217,7 @@ impl CopyTupleDestination for AvroCopyDestination {
             .as_mut()
             .expect("COPY TO initializes its destination before completion")
             .writer
-            .finish(true)
+            .finish(EmptyOutputPolicy::EmitFile)
             .map_err(CopyError::from)
     }
 

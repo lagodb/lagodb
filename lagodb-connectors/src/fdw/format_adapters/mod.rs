@@ -9,6 +9,7 @@ mod delimited_options;
 mod delimited_scan;
 mod delimited_write;
 mod filter;
+mod fixed_scan;
 mod json;
 mod parquet;
 mod scan;
@@ -20,8 +21,7 @@ pub(super) use filter::{
     FormatBoundFilter, FormatFilterPlan, FormatFilterPlanner, FormatPlannedFilter,
 };
 pub(super) use scan::{
-    FormatAnalyzer, FormatFdwReader, FormatScanPlanner, FormatScanPrivate,
-    FormatScanState,
+    FormatAnalyzer, FormatFdwReader, FormatScanPlanner, FormatScanState,
 };
 pub(super) use selection::FdwFormat;
 pub(super) use write::{FormatWriteState, FormatWriter};

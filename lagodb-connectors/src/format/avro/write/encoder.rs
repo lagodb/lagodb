@@ -17,8 +17,9 @@ use crate::format::{
 };
 use crate::storage::{ObjectFileSuffix, OutputWriter};
 
+use super::super::AvroValueKind;
 use super::ocf::{AvroBinaryBuffer, AvroOcfWriter};
-use super::plan::{AvroValueKind, AvroWritePlan};
+use super::plan::AvroWritePlan;
 
 const AVRO_SUFFIX: ObjectFileSuffix = ObjectFileSuffix::new("avro");
 

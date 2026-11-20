@@ -1,5 +1,7 @@
 //! Parquet Foreign Table planning and scan execution.
 
+use std::ffi::CStr;
+
 use lagodb_arrow::BoundBatch;
 use lagodb_core::datum::PgType;
 use lagodb_core::fdw::{
@@ -10,10 +12,10 @@ use lagodb_core::fdw::{
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
-use crate::fdw::LagodbConnectors;
 use crate::fdw::format_adapters::{
-    FormatBoundFilter, FormatScanPlanner, FormatScanPrivate, FormatScanState,
+    FormatBoundFilter, FormatScanPlanner, FormatScanState,
 };
+use crate::fdw::{LagodbConnectors, PlannedFormat};
 use crate::format::FormatKind;
 use crate::format::parquet::{
     ParquetBatchSource, ParquetBoundPredicate, ParquetReadMode, ParquetReadPlan,
@@ -51,7 +53,7 @@ impl FormatScanPlanner for ParquetScanPlanner {
     fn build_paths(
         &self,
         context: &ForeignPathContext<'_>,
-        paths: &mut ForeignPathBuilder<FormatScanPrivate>,
+        paths: &mut ForeignPathBuilder<PlannedFormat>,
     ) -> Result<(), ConnectorError> {
         let rows = context.rows();
         let pruning = context.filter_estimates().costed_filters();
@@ -66,7 +68,7 @@ impl FormatScanPlanner for ParquetScanPlanner {
             rows,
             provider_startup_cost,
             provider_total_cost,
-            FormatScanPrivate::new(FormatKind::Parquet),
+            PlannedFormat::new(FormatKind::Parquet),
         );
         path.retrieved_rows = retrieved_rows;
         paths.push(path);
@@ -84,7 +86,7 @@ impl FormatScanPlanner for ParquetScanPlanner {
     fn build_plan(
         &mut self,
         context: &ForeignPlanContext<'_, LagodbConnectors>,
-    ) -> Result<ForeignPlanSpec<FormatScanPrivate>, ConnectorError> {
+    ) -> Result<ForeignPlanSpec<PlannedFormat>, ConnectorError> {
         Ok(ForeignPlanSpec::new(context.path_private().to_owned()))
     }
 }
@@ -100,11 +102,7 @@ impl ParquetScanState {
         context: StartForeignScanContext<'_, LagodbConnectors>,
         files: InputFiles,
     ) -> Result<Self, ConnectorError> {
-        let live = context.relation.live_columns();
-        let mut columns_by_attno = vec![None; context.relation.natts()];
-        for column in live.iter() {
-            columns_by_attno[(column.attno() - 1) as usize] = Some(column);
-        }
+        let attributes = context.relation.tuple_desc_handle().attributes();
         let source = ParquetBatchSource::open(
             files,
             Self::bound_filters(context.filters.iter()),
@@ -112,17 +110,16 @@ impl ParquetScanState {
                 ParquetReadPlan::bind(
                     schema,
                     context.output_layout.columns().iter().map(|output| {
-                        let column = columns_by_attno[(output.attno() - 1) as usize]
-                            .expect(
-                                "scan output refers to a live relation attribute",
-                            );
+                        let attribute = &attributes[(output.attno() - 1) as usize];
+                        // SAFETY: NameData is NUL-terminated and owned by the
+                        // live relation descriptor; scan outputs name live
+                        // attributes only.
+                        let name = unsafe {
+                            CStr::from_ptr(attribute.attname.data.as_ptr())
+                        };
                         let (oid, typmod) =
                             context.output_layout.slot_types()[output.destination()];
-                        (
-                            column.name(),
-                            PgType::new(oid, typmod),
-                            output.destination(),
-                        )
+                        (name, PgType::new(oid, typmod), output.destination())
                     }),
                     ParquetReadMode::Declared,
                 )

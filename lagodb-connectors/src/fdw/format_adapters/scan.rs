@@ -7,34 +7,13 @@ use lagodb_core::fdw::{
     ForeignSampleContext, ForeignSampleStatistics, ForeignTableMaintenanceError,
     ReScanForeignScanContext, ScanSlotWriter, StartForeignScanContext,
 };
-use lagodb_core::plan_data::PlanDataReader;
 
 use crate::error::ConnectorError;
-use crate::fdw::LagodbConnectors;
-use crate::format::{FormatKind, FormatObject};
+use crate::fdw::{LagodbConnectors, PlannedFormat};
+use crate::format::FormatObject;
 use crate::storage::InputFiles;
 
-use super::filter::{
-    FormatFilterPlanner, FormatPlannedFilter, NoPushdownFilterPlanner,
-};
-
-/// Format selection persisted in the core FDW plan envelope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FormatScanPrivate {
-    kind: FormatKind,
-}
-
-impl FormatScanPrivate {
-    #[inline]
-    pub(crate) const fn new(kind: FormatKind) -> Self {
-        Self { kind }
-    }
-
-    #[inline]
-    pub(crate) const fn kind(self) -> FormatKind {
-        self.kind
-    }
-}
+use super::filter::{FormatFilterPlanner, NoPushdownFilterPlanner};
 
 /// FDW reading capabilities of one concrete format: scan planning and
 /// execution, filter pushdown, pathkeys, and optional ANALYZE support.
@@ -52,21 +31,6 @@ pub(crate) trait FormatFdwReader: FormatObject {
         _context: &FilterPlanningContext,
     ) -> Result<Box<dyn FormatFilterPlanner>, ConnectorError> {
         Ok(Box::new(NoPushdownFilterPlanner))
-    }
-
-    /// Decode a planned predicate after the plan envelope selected this
-    /// concrete format. This is a static capability because executor plan
-    /// decoding has no relation catalog from which to rebuild configured
-    /// format state.
-    fn decode_filter(
-        kind: FormatKind,
-        _reader: &mut PlanDataReader<'_>,
-        _binding_count: usize,
-    ) -> Result<FormatPlannedFilter, ConnectorError>
-    where
-        Self: Sized,
-    {
-        Err(ConnectorError::invalid_filter_plan(kind))
     }
 
     /// Create executor state for the selected reader.
@@ -111,7 +75,7 @@ pub(crate) trait FormatScanPlanner: 'static {
     fn build_paths(
         &self,
         context: &ForeignPathContext<'_>,
-        paths: &mut ForeignPathBuilder<FormatScanPrivate>,
+        paths: &mut ForeignPathBuilder<PlannedFormat>,
     ) -> Result<(), ConnectorError>;
 
     fn supports_pathkeys(
@@ -123,7 +87,7 @@ pub(crate) trait FormatScanPlanner: 'static {
     fn build_plan(
         &mut self,
         context: &ForeignPlanContext<'_, LagodbConnectors>,
-    ) -> Result<ForeignPlanSpec<FormatScanPrivate>, ConnectorError>;
+    ) -> Result<ForeignPlanSpec<PlannedFormat>, ConnectorError>;
 }
 
 /// Per-foreign-scan state owned by the selected format reader.

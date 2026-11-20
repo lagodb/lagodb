@@ -308,7 +308,7 @@ impl<'a> SchemaCopySource<'a> {
         compression: StreamCompression,
     ) -> Result<Self, ConnectorError> {
         let decoder = StreamDecoder::new(file, compression)
-            .map_err(ConnectorError::copy_stream_io)?;
+            .map_err(ConnectorError::stream_io)?;
         Ok(Self { decoder })
     }
 }
@@ -322,7 +322,7 @@ impl CopyDataSource for SchemaCopySource<'_> {
         let read = self
             .decoder
             .read_at_least(output, min_read)
-            .map_err(ConnectorError::copy_stream_io)?;
+            .map_err(ConnectorError::stream_io)?;
         Ok(read)
     }
 }

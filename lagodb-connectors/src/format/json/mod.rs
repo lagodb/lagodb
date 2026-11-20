@@ -16,7 +16,7 @@ use super::{
     StreamCompressionOptions, StreamDecoder,
 };
 
-pub(crate) use record::{JsonColumnPlan, JsonInputValue, JsonRecordDecoder};
+pub(crate) use record::{JsonColumnPlan, JsonRecordDecoder};
 pub(crate) use stream::JsonRecordStream;
 
 /// JSON-format processor. Every non-empty line is one JSON object.
@@ -34,7 +34,7 @@ impl JsonFormat {
         options: &[FormatOption<'_>],
     ) -> Result<Self, ConnectorError> {
         if let Some(option) = options.first() {
-            return Err(ConnectorError::invalid_option(
+            return Err(ConnectorError::unknown_option(
                 option.name(),
                 "is not valid for json",
             ));
@@ -55,8 +55,8 @@ impl FormatSchemaReader for JsonFormat {
         file: &mut InputFile,
     ) -> Result<InferredSchema, ConnectorError> {
         let compression = self.compression.for_file(file);
-        let input =
-            StreamDecoder::new(file, compression).map_err(ConnectorError::json_io)?;
+        let input = StreamDecoder::new(file, compression)
+            .map_err(ConnectorError::stream_io)?;
         schema::JsonSchemaAccumulator::default().read(
             BufReader::new(input),
             ReadConfig::from_guc().json_max_record_bytes(),

@@ -1,12 +1,12 @@
 //! Format configuration, schemas, and shared file codecs.
 //!
-//! FDW capabilities and execution state live in `fdw::format_adapters`.
-//! COPY adapters reuse the file readers, writers, and predicates exposed here.
+//! FDW and COPY execution state live in `fdw::format_adapters` and
+//! `copy::format_adapters`; both reuse the readers, writers, and predicates
+//! exposed here.
 
 pub(crate) mod avro;
 mod compression;
 mod compression_options;
-mod copy;
 mod csv;
 mod delimited;
 mod delimited_schema;
@@ -27,7 +27,6 @@ pub(crate) use compression_options::{
     AvroWriteCompression, ParquetWriteCompression, StreamCompression,
     StreamCompressionOptions,
 };
-pub(crate) use copy::{FormatCopyInput, FormatCopyOutput, ResolvedCopyFormat};
 pub(crate) use csv::{CsvColumnOptions, CsvFormat, CsvOptions};
 pub(crate) use delimited::{DelimitedFormat, DelimitedOptions};
 pub(crate) use json::JsonFormat;

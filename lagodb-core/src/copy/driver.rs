@@ -108,12 +108,13 @@ impl<'statement, 'parse> CopyFromDriver<'statement, 'parse> {
     }
 
     /// Opens the source only after PostgreSQL has accepted options and columns.
-    /// Source construction errors release the prepared COPY state through Drop.
+    /// Source construction errors, including PostgreSQL ERRORs, release the
+    /// prepared COPY state through Drop.
     pub fn execute(
         mut self,
         open_source: impl FnOnce() -> Result<Box<dyn CopyDataSource>, CopyError>,
     ) -> Result<u64, CopyError> {
-        let mut source = open_source()?;
+        let mut source = self.execution.open_source(open_source)?;
         let mut source_guard = SourceGuard::new(source.as_mut());
         let state = self.execution.state;
         let bridge = self.execution.bridge();

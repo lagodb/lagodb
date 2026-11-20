@@ -119,6 +119,9 @@ unsafe extern "C-unwind" {
     fn lagodb_routed_copy_from_attnums(
         state: pg_sys::CopyFromState,
     ) -> *mut pg_sys::List;
+    fn lagodb_routed_copy_from_escontext(
+        state: pg_sys::CopyFromState,
+    ) -> *mut pg_sys::Node;
 
     fn lagodb_begin_copy_row_encoder(
         rel: pg_sys::Relation,
@@ -334,6 +337,12 @@ impl CopyBridge {
         state: pg_sys::CopyFromState,
     ) -> *mut pg_sys::List {
         unsafe { pg_guard_ffi_boundary(|| lagodb_routed_copy_from_attnums(state)) }
+    }
+
+    pub(crate) unsafe fn routed_from_escontext(
+        state: pg_sys::CopyFromState,
+    ) -> *mut pg_sys::Node {
+        unsafe { pg_guard_ffi_boundary(|| lagodb_routed_copy_from_escontext(state)) }
     }
 
     // Keep the argument mapping to lagodb_begin_routed_copy_to explicit.

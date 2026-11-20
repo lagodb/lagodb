@@ -1,6 +1,6 @@
 //! FDW capabilities for the Csv format.
 
-use lagodb_core::fdw::StartForeignScanContext;
+use lagodb_core::fdw::{ScanProjectionPolicy, StartForeignScanContext};
 use lagodb_core::handles::RelationHandle;
 
 use crate::error::ConnectorError;
@@ -9,8 +9,9 @@ use crate::format::{CsvFormat, DelimitedFormat, FormatKind};
 use crate::storage::{InputFiles, StorageOutput};
 
 use super::delimited_options::DelimitedScanOptions;
-use super::delimited_scan::{DelimitedScanPlanner, DelimitedScanState};
+use super::delimited_scan::DelimitedScanState;
 use super::delimited_write::DelimitedWriteState;
+use super::fixed_scan::FixedEstimateScanPlanner;
 use super::{
     FormatFdwReader, FormatScanPlanner, FormatScanState, FormatWriteState,
     FormatWriter,
@@ -18,7 +19,10 @@ use super::{
 
 impl FormatFdwReader for CsvFormat {
     fn planner(self: Box<Self>) -> Box<dyn FormatScanPlanner> {
-        Box::new(DelimitedScanPlanner::new(FormatKind::Csv))
+        Box::new(FixedEstimateScanPlanner::new(
+            FormatKind::Csv,
+            ScanProjectionPolicy::RequireRelationShape,
+        ))
     }
 
     fn begin(

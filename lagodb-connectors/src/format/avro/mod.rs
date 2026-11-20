@@ -1,25 +1,23 @@
 //! Avro object-container format support.
 
-mod copy;
 mod read;
+mod value_kind;
 mod write;
 
 use std::io::BufReader;
 
 use apache_avro::{Reader, Schema};
-use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 use crate::storage::InputFile;
 
 use super::{
     AvroWriteCompression, FormatKind, FormatObject, FormatOption, FormatSchemaReader,
-    InferredColumn, InferredSchema, PostgresType,
+    InferredColumn, InferredSchema,
 };
 
-pub(super) use copy::{AvroCopyDestination, AvroCopySource};
 pub(crate) use read::AvroReadColumn;
-use write::AvroValueKind;
+use value_kind::AvroValueKind;
 pub(crate) use write::{AvroDatumRow, AvroObjectWriter, AvroWritePlan};
 
 /// Avro-format processor.
@@ -37,7 +35,7 @@ impl AvroFormat {
         options: &[FormatOption<'_>],
     ) -> Result<Self, ConnectorError> {
         if let Some(option) = options.first() {
-            return Err(ConnectorError::invalid_option(
+            return Err(ConnectorError::unknown_option(
                 option.name(),
                 "is not valid for avro",
             ));
@@ -70,85 +68,20 @@ impl FormatSchemaReader for AvroFormat {
             .fields
             .iter()
             .map(|field| {
-                let postgres_type = self.postgres_type(&field.name, &field.schema)?;
+                let postgres_type = AvroValueKind::from_schema(&field.schema)
+                    .map_err(|error| match error {
+                        ConnectorError::InvalidObjectSchema { format, reason } => {
+                            ConnectorError::invalid_object_schema(
+                                format,
+                                format!("column {:?}: {reason}", field.name),
+                            )
+                        }
+                        error => error,
+                    })?
+                    .postgres_type();
                 Ok(InferredColumn::new(&field.name, postgres_type))
             })
             .collect::<Result<Vec<_>, ConnectorError>>()?;
         InferredSchema::new(self.kind(), columns)
-    }
-}
-
-impl AvroFormat {
-    fn postgres_type(
-        &self,
-        field_name: &str,
-        schema: &Schema,
-    ) -> Result<PostgresType, ConnectorError> {
-        let plain = |oid| Ok(PostgresType::new(self.kind(), oid));
-        match schema {
-            Schema::Boolean => plain(pg_sys::BOOLOID),
-            Schema::Int => plain(pg_sys::INT4OID),
-            Schema::Long => plain(pg_sys::INT8OID),
-            Schema::Float => plain(pg_sys::FLOAT4OID),
-            Schema::Double => plain(pg_sys::FLOAT8OID),
-            Schema::Bytes | Schema::Fixed(_) => plain(pg_sys::BYTEAOID),
-            Schema::String | Schema::Enum(_) => plain(pg_sys::TEXTOID),
-            Schema::Uuid => plain(pg_sys::UUIDOID),
-            Schema::Date => plain(pg_sys::DATEOID),
-            Schema::TimeMillis | Schema::TimeMicros => plain(pg_sys::TIMEOID),
-            Schema::TimestampMillis | Schema::TimestampMicros => {
-                plain(pg_sys::TIMESTAMPTZOID)
-            }
-            Schema::LocalTimestampMillis | Schema::LocalTimestampMicros => {
-                plain(pg_sys::TIMESTAMPOID)
-            }
-            Schema::Decimal(decimal) => {
-                AvroValueKind::from_schema(schema)?;
-                let precision = i32::try_from(decimal.precision).map_err(|_| {
-                    ConnectorError::invalid_object_schema(
-                        self.kind(),
-                        "Avro decimal precision exceeds PostgreSQL typmod range",
-                    )
-                })?;
-                let scale = i32::try_from(decimal.scale).map_err(|_| {
-                    ConnectorError::invalid_object_schema(
-                        self.kind(),
-                        "Avro decimal scale exceeds PostgreSQL typmod range",
-                    )
-                })?;
-                Ok(PostgresType::numeric(self.kind(), precision, scale))
-            }
-            Schema::Union(union) => {
-                let mut values = union
-                    .variants()
-                    .iter()
-                    .filter(|variant| !matches!(variant, Schema::Null));
-                let Some(value) = values.next() else {
-                    return Err(self.unsupported_type(field_name, schema));
-                };
-                if values.next().is_some() {
-                    return Err(self.unsupported_type(field_name, schema));
-                }
-                self.postgres_type(field_name, value)
-            }
-            Schema::Null
-            | Schema::Array(_)
-            | Schema::Map(_)
-            | Schema::Record(_)
-            | Schema::Ref { .. }
-            | Schema::BigDecimal
-            | Schema::Duration
-            | Schema::TimestampNanos
-            | Schema::LocalTimestampNanos => {
-                Err(self.unsupported_type(field_name, schema))
-            }
-        }
-    }
-
-    fn unsupported_type(&self, field_name: &str, schema: &Schema) -> ConnectorError {
-        ConnectorError::invalid_object_schema(
-            self.kind(),
-            format!("column {field_name:?} uses unsupported Avro schema {schema}"),
-        )
     }
 }

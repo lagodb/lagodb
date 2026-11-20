@@ -132,10 +132,6 @@ impl SqlStateError for ArrowConversionError {
 
     fn try_into_pg_report(self) -> Result<PgReportError, Self> {
         match self {
-            Self::JsonValue(error) => error
-                .try_into_pg_report()
-                .map(|report| report.contextualize("JSONB conversion error", None))
-                .map_err(Self::JsonValue),
             Self::DatumConversion(error) => error
                 .try_into_pg_report()
                 .map(|report| report.contextualize("datum conversion error", None))

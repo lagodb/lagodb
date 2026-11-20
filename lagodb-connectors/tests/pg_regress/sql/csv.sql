@@ -201,6 +201,17 @@ SELECT id,
        payload
 FROM lagodb_connectors_regress.csv_options
 ORDER BY id;
+-- As in file_fdw, one column may set both options: FORCE_NOT_NULL applies
+-- to an unquoted NULL marker and FORCE_NULL to a quoted one.
+ALTER FOREIGN TABLE lagodb_connectors_regress.csv_options
+    ALTER COLUMN force_null_col OPTIONS (ADD force_not_null 'true'),
+    ALTER COLUMN force_not_null_col OPTIONS (ADD force_null 'true');
+SELECT id,
+       force_null_col IS NULL AS forced_null,
+       force_not_null_col = '<NULL>' AS forced_not_null,
+       payload
+FROM lagodb_connectors_regress.csv_options
+ORDER BY id;
 
 CREATE FOREIGN TABLE lagodb_connectors_regress.csv_write
     (:common_columns)

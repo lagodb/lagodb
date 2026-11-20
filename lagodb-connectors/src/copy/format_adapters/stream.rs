@@ -8,25 +8,26 @@ use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 use crate::format::{
-    EmptyOutputPolicy, ObjectSetWriter, StreamCompression, StreamDecoder,
-    StreamEncoderFactory,
+    DelimitedFormat, EmptyOutputPolicy, ObjectSetWriter, StreamCompression,
+    StreamDecoder, StreamEncoderFactory,
 };
-use crate::storage::{InputFile, StorageOutput};
+use crate::storage::{InputFile, ResolvedStorageLocation, StorageOutput};
 
-use super::super::delimited::DelimitedFormat;
-use super::{FormatCopyDestination, FormatCopyOutput, ResolvedCopyFormat};
+use super::{CopyFormat, FormatCopyDestination, FormatCopyOutput};
 
-pub(super) struct StreamCopySource {
+/// Decompressed object bytes for PostgreSQL's text/CSV COPY FROM parser.
+pub(in crate::copy) struct StreamCopySource {
     decoder: StreamDecoder<InputFile>,
 }
 
 impl StreamCopySource {
-    pub(super) fn new(
-        file: InputFile,
+    /// The caller has validated that `location` names one exact object.
+    pub(in crate::copy) fn open(
+        location: &ResolvedStorageLocation,
         compression: StreamCompression,
     ) -> Result<Self, CopyError> {
-        let decoder = StreamDecoder::new(file, compression)
-            .map_err(ConnectorError::copy_stream_io)?;
+        let decoder = StreamDecoder::new(location.open_file()?, compression)
+            .map_err(ConnectorError::stream_io)?;
         Ok(Self { decoder })
     }
 }
@@ -40,7 +41,7 @@ impl CopyDataSource for StreamCopySource {
         let read = self
             .decoder
             .read_at_least(output, min_read)
-            .map_err(ConnectorError::copy_stream_io)?;
+            .map_err(ConnectorError::stream_io)?;
         Ok(read)
     }
 }
@@ -154,6 +155,6 @@ impl FormatCopyDestination for StreamCopyDestination {
     }
 
     fn postgres_options(&self, context: &CopyContext<'_>) -> *mut pg_sys::List {
-        ResolvedCopyFormat::postgres_options(context, Some(self.format))
+        CopyFormat::postgres_options(context, Some(self.format))
     }
 }

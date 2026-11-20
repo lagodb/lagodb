@@ -43,8 +43,7 @@ impl JsonWriteState {
             plan.columns()
                 .iter()
                 .map(|column| (column.name(), column.output_encoder())),
-        )
-        .map_err(ConnectorError::json_datum)?;
+        )?;
         let sources = columns
             .iter()
             .map(|column| {
@@ -76,8 +75,7 @@ impl FormatWriteState for JsonWriteState {
         });
         // SAFETY: sources and output columns were built from the same live
         // relation column sequence, and slot Datums remain live for this call.
-        let row = unsafe { self.encoder.encode_row(values) }
-            .map_err(ConnectorError::json_datum)?;
+        let row = unsafe { self.encoder.encode_row(values) };
         self.writer
             .as_mut()
             .expect("JSON writer is not used after finish")

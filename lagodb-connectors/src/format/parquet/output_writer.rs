@@ -136,14 +136,12 @@ impl ParquetOutputWriter {
 
     /// Close the final footer and upload it. COPY TO emits a valid empty
     /// Parquet container; FDW INSERT leaves an untouched prefix empty.
-    pub(crate) fn finish(&mut self, emit_empty: bool) -> Result<(), ConnectorError> {
+    pub(crate) fn finish(
+        &mut self,
+        policy: EmptyOutputPolicy,
+    ) -> Result<(), ConnectorError> {
         let Some(writer) = self.writer.take() else {
             return Ok(());
-        };
-        let policy = if emit_empty {
-            EmptyOutputPolicy::EmitFile
-        } else {
-            EmptyOutputPolicy::Skip
         };
         self.completed_bytes = writer.finish_with_bytes(policy)?;
         Ok(())

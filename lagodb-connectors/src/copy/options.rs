@@ -9,12 +9,14 @@
 use lagodb_core::copy::{CopyEndpoint, CopyOptionView, CopyStatement};
 
 use crate::error::ConnectorError;
-use crate::format::{FormatKind, ResolvedCopyFormat};
+use crate::format::FormatKind;
 use crate::storage::StoragePath;
 
-pub(crate) struct CopyCommandOptions {
-    pub(crate) server: Option<Box<str>>,
-    pub(crate) format: ResolvedCopyFormat,
+use super::format_adapters::CopyFormat;
+
+pub(super) struct CopyCommandOptions {
+    pub(super) server: Option<Box<str>>,
+    pub(super) format: CopyFormat,
 }
 
 impl CopyCommandOptions {
@@ -41,7 +43,7 @@ impl CopyCommandOptions {
         )
     }
 
-    pub(crate) fn from_statement(
+    pub(super) fn from_statement(
         statement: &CopyStatement<'_>,
         object: &StoragePath,
     ) -> Result<Self, ConnectorError> {
@@ -50,7 +52,7 @@ impl CopyCommandOptions {
             || Self::infer_format(object.key()),
             Ok::<FormatKind, ConnectorError>,
         )?;
-        let format = ResolvedCopyFormat::resolve(
+        let format = CopyFormat::resolve(
             statement.option_view(),
             format,
             object,
@@ -65,7 +67,7 @@ impl CopyCommandOptions {
 
     fn infer_format(key: &str) -> Result<FormatKind, ConnectorError> {
         FormatKind::infer_from_key(key).ok_or_else(|| {
-            ConnectorError::invalid_copy_option(
+            ConnectorError::invalid_option(
                 "format",
                 "cannot be inferred from the object suffix; specify format explicitly",
             )
@@ -88,19 +90,16 @@ impl ProviderOptions {
             match name {
                 b"server" => {
                     if options.server.is_some() {
-                        return Err(ConnectorError::invalid_copy_option(
-                            "server",
-                            "must not be specified more than once",
-                        ));
+                        return Err(ConnectorError::redundant_option("server"));
                     }
                     let value = option.value_str().map_err(|_| {
-                        ConnectorError::invalid_copy_option(
+                        ConnectorError::invalid_option(
                             "server",
                             "must be valid UTF-8",
                         )
                     })?;
                     if value.is_empty() {
-                        return Err(ConnectorError::invalid_copy_option(
+                        return Err(ConnectorError::invalid_option(
                             "server",
                             "must not be empty",
                         ));
@@ -109,13 +108,10 @@ impl ProviderOptions {
                 }
                 b"format" => {
                     if options.format.is_some() {
-                        return Err(ConnectorError::invalid_copy_option(
-                            "format",
-                            "must not be specified more than once",
-                        ));
+                        return Err(ConnectorError::redundant_option("format"));
                     }
                     let value = option.value_str().map_err(|_| {
-                        ConnectorError::invalid_copy_option(
+                        ConnectorError::invalid_option(
                             "format",
                             "must be valid UTF-8",
                         )
@@ -127,13 +123,10 @@ impl ProviderOptions {
                 }
                 b"compression" => {
                     if options.compression.is_some() {
-                        return Err(ConnectorError::invalid_copy_option(
-                            "compression",
-                            "must not be specified more than once",
-                        ));
+                        return Err(ConnectorError::redundant_option("compression"));
                     }
                     let value = option.value_str().map_err(|_| {
-                        ConnectorError::invalid_copy_option(
+                        ConnectorError::invalid_option(
                             "compression",
                             "must be valid UTF-8",
                         )

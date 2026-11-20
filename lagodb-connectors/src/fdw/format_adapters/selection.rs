@@ -3,10 +3,8 @@
 use lagodb_core::plan_data::PlanDataReader;
 
 use crate::error::ConnectorError;
-use crate::format::{
-    AvroFormat, CsvFormat, FormatKind, JsonFormat, ParquetFormat,
-    ResolvedForeignFormat, TextFormat,
-};
+use crate::format::parquet::ParquetPlannedPredicate;
+use crate::format::{FormatKind, ResolvedForeignFormat};
 
 use super::{FormatFdwReader, FormatPlannedFilter, FormatWriter};
 
@@ -38,20 +36,17 @@ impl FdwFormat {
         reader: &mut PlanDataReader<'_>,
         binding_count: usize,
     ) -> Result<FormatPlannedFilter, ConnectorError> {
+        // Executor plan decoding has no relation catalog from which to
+        // rebuild configured format state; the plan tag selects the decoder.
         match kind {
-            FormatKind::Text => {
-                TextFormat::decode_filter(kind, reader, binding_count)
-            }
-            FormatKind::Csv => CsvFormat::decode_filter(kind, reader, binding_count),
-            FormatKind::Json => {
-                JsonFormat::decode_filter(kind, reader, binding_count)
-            }
-            FormatKind::Avro => {
-                AvroFormat::decode_filter(kind, reader, binding_count)
-            }
             FormatKind::Parquet => {
-                ParquetFormat::decode_filter(kind, reader, binding_count)
+                ParquetPlannedPredicate::decode(kind, reader, binding_count)
+                    .map(|predicate| Box::new(predicate) as FormatPlannedFilter)
             }
+            FormatKind::Text
+            | FormatKind::Csv
+            | FormatKind::Json
+            | FormatKind::Avro => Err(ConnectorError::invalid_filter_plan(kind)),
         }
     }
 }

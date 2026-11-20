@@ -202,14 +202,27 @@ TO 's3://analytics/exports/2026/'
 WITH (format 'parquet');
 ```
 
-Non-default PostgreSQL COPY options remain available. For example, write a
-CSV header with:
+PostgreSQL COPY options remain available. Options that describe text or CSV
+syntax, such as `delimiter` or `header`, are valid only for those formats. For
+example, write a CSV header with:
 
 ```sql
 COPY events
 TO 's3://analytics/exports/events-with-header.csv'
 WITH (header true);
 ```
+
+`ON_ERROR` (PostgreSQL 17 and later) applies to `COPY FROM` per format:
+
+| Format | `ON_ERROR IGNORE` |
+| --- | --- |
+| text, CSV | PostgreSQL's native behavior |
+| JSON | Skips malformed or oversized NDJSON records and values that the column type's input function rejects softly, as text `COPY` does |
+| Avro, Parquet | Not allowed; only `ON_ERROR STOP` is accepted |
+
+Any other PostgreSQL error ends the statement in every format. JSON `null` and
+a missing key are SQL NULL and, as in text `COPY`, still reach the column
+type's input function, so domain constraints apply to them.
 
 `server` overrides the scheme-specific default for one object-URI `COPY`:
 

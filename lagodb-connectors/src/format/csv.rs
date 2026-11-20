@@ -137,17 +137,14 @@ impl CsvFormat {
                 "quote" => &mut quote,
                 "escape" => &mut escape,
                 _ => {
-                    return Err(ConnectorError::invalid_option(
+                    return Err(ConnectorError::unknown_option(
                         option.name(),
                         "is not valid for csv",
                     ));
                 }
             };
             if target.replace(option.value()).is_some() {
-                return Err(ConnectorError::invalid_option(
-                    option.name(),
-                    "must not be specified more than once",
-                ));
+                return Err(ConnectorError::redundant_option(option.name()));
             }
         }
 
@@ -204,13 +201,13 @@ impl CsvFormat {
     pub(crate) fn validate_column_options(
         options: &[Option<String>],
     ) -> Result<(), ConnectorError> {
-        CsvColumnOptions::parse(options)?.validate()
+        CsvColumnOptions::parse(options).map(drop)
     }
 
     pub(crate) fn validate_column_view(
         options: ForeignOptionView<'_>,
     ) -> Result<(), ConnectorError> {
-        CsvColumnOptions::parse_view(options)?.validate()
+        CsvColumnOptions::parse_view(options).map(drop)
     }
 }
 
@@ -296,30 +293,17 @@ impl CsvColumnOptions {
                 (&mut self.seen_force_not_null, &mut self.force_not_null)
             }
             _ => {
-                return Err(ConnectorError::invalid_option(
+                return Err(ConnectorError::unknown_option(
                     name,
                     "is not a supported foreign column option",
                 ));
             }
         };
         if *seen {
-            return Err(ConnectorError::invalid_option(
-                name,
-                "must not be specified more than once",
-            ));
+            return Err(ConnectorError::redundant_option(name));
         }
         *seen = true;
         *target = Self::parse_boolean(name, value)?;
-        Ok(())
-    }
-
-    fn validate(&self) -> Result<(), ConnectorError> {
-        if self.force_null && self.force_not_null {
-            return Err(ConnectorError::invalid_option(
-                "force_null/force_not_null",
-                "cannot both be true",
-            ));
-        }
         Ok(())
     }
 

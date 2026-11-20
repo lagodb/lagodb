@@ -119,6 +119,7 @@ uint64		lagodb_execute_routed_copy_from(
 void		lagodb_end_routed_copy_from(CopyFromState state);
 TupleDesc	lagodb_routed_copy_from_tuple_desc(CopyFromState state);
 List	   *lagodb_routed_copy_from_attnums(CopyFromState state);
+Node	   *lagodb_routed_copy_from_escontext(CopyFromState state);
 
 typedef struct LagodbCopyRowEncoder LagodbCopyRowEncoder;
 

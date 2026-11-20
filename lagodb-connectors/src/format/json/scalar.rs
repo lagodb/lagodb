@@ -1,11 +1,11 @@
 //! Reusable JSON scalar-string decoding storage.
 
-use std::ffi::CStr;
+use std::str;
 
 use crate::error::ConnectorError;
 
-/// Decodes a serde_json-validated string directly into retained C-string
-/// storage for PostgreSQL type input functions.
+/// Decodes a serde_json-validated string into retained storage for
+/// PostgreSQL type input functions.
 pub(super) struct JsonScalarDecoder {
     bytes: Vec<u8>,
 }
@@ -20,14 +20,14 @@ impl JsonScalarDecoder {
         raw: &[u8],
         column: &str,
         logical_line: u64,
-    ) -> Result<&'a CStr, ConnectorError> {
+    ) -> Result<&'a str, ConnectorError> {
         // JsonRecordDecoder already validated the JSON escape syntax while
         // capturing this RawValue. RawValue deliberately defers UTF-16
         // surrogate validation, so the Unicode branch below still checks that
         // one semantic condition while decoding into retained storage.
         let input = &raw[1..raw.len() - 1];
         self.bytes.clear();
-        self.bytes.reserve(input.len() + 1);
+        self.bytes.reserve(input.len());
 
         let invalid_surrogate = || {
             ConnectorError::invalid_json_value(
@@ -111,9 +111,8 @@ impl JsonScalarDecoder {
             copied = cursor;
         }
         self.bytes.extend_from_slice(&input[copied..]);
-        self.bytes.push(0);
-        // SAFETY: every decoded byte came from a serde_json-validated string,
-        // decoded NUL was rejected, and one terminator was appended above.
-        Ok(unsafe { CStr::from_bytes_with_nul_unchecked(&self.bytes) })
+        // SAFETY: undecoded bytes came from a serde_json-validated string and
+        // every escape was decoded to UTF-8 above; a decoded NUL was rejected.
+        Ok(unsafe { str::from_utf8_unchecked(&self.bytes) })
     }
 }

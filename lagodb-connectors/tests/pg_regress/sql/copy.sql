@@ -95,6 +95,18 @@ WITH (server 'lagodb_connectors_regress_s3', format 'text');
 COPY lagodb_connectors_regress.copy_error_sink
 FROM :'copy_missing_exact'
 WITH (server 'lagodb_connectors_regress_s3', format 'text', unknown_option true);
+
+-- Connector option errors: a redundant option is a syntax error, while an
+-- invalid value or an object suffix that conflicts with the format is 22023.
+COPY lagodb_connectors_regress.copy_error_sink
+FROM :'copy_missing_exact'
+WITH (server 'lagodb_connectors_regress_s3', server 'lagodb_connectors_regress_s3');
+COPY lagodb_connectors_regress.copy_error_sink
+FROM :'copy_missing_exact'
+WITH (server 'lagodb_connectors_regress_s3', format 'text', compression 'lz4');
+COPY lagodb_connectors_regress.common_source
+TO :'copy_missing_exact'
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 \set VERBOSITY default
 
 -- Native COPY follows PG query routing and target assignment semantics.
@@ -240,18 +252,72 @@ COPY lagodb_connectors_regress.copy_typmod_source TO :'copy_avro'
 WITH (server 'lagodb_connectors_regress_s3', format 'avro');
 COPY lagodb_connectors_regress.copy_typmod_source TO :'copy_parquet'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
+\set copy_avro_valid 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/typmods_valid.avro'
+\set copy_parquet_valid 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/typmods_valid.parquet'
+COPY (SELECT * FROM lagodb_connectors_regress.copy_typmod_source WHERE id = 1) TO :'copy_avro_valid'
+WITH (server 'lagodb_connectors_regress_s3', format 'avro');
+COPY (SELECT * FROM lagodb_connectors_regress.copy_typmod_source WHERE id = 1) TO :'copy_parquet_valid'
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 
--- A STOP error must leave the target empty; one format covers the common
--- statement rollback path. Each decoder retains ON_ERROR IGNORE coverage.
+-- A STOP error must leave the target empty. JSON input functions reject the
+-- text; Avro and Parquet surface the same violation from PostgreSQL's typmod
+-- coercion of their typed datums.
 \set VERBOSITY sqlstate
 COPY lagodb_connectors_regress.copy_typmod_sink FROM :'copy_json'
 WITH (server 'lagodb_connectors_regress_s3', format 'json');
+COPY lagodb_connectors_regress.copy_typmod_sink FROM :'copy_avro'
+WITH (server 'lagodb_connectors_regress_s3', format 'avro');
+COPY lagodb_connectors_regress.copy_typmod_sink FROM :'copy_parquet'
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
 \set VERBOSITY default
 SELECT count(*) AS rows_after_error FROM lagodb_connectors_regress.copy_typmod_sink;
+
+-- Valid typed datums honor the target typmods.
+COPY lagodb_connectors_regress.copy_typmod_sink FROM :'copy_avro_valid'
+WITH (server 'lagodb_connectors_regress_s3', format 'avro');
+SELECT id, payload, octet_length(padded) AS padded_bytes, amount,
+       clock = time '12:34:56.124' AS time_rounded,
+       happened = timestamp '2000-01-01' AS timestamp_rounded
+FROM lagodb_connectors_regress.copy_typmod_sink ORDER BY id;
+TRUNCATE lagodb_connectors_regress.copy_typmod_sink;
+COPY lagodb_connectors_regress.copy_typmod_sink FROM :'copy_parquet_valid'
+WITH (server 'lagodb_connectors_regress_s3', format 'parquet');
+SELECT id, payload, octet_length(padded) AS padded_bytes, amount,
+       clock = time '12:34:56.124' AS time_rounded,
+       happened = timestamp '2000-01-01' AS timestamp_rounded
+FROM lagodb_connectors_regress.copy_typmod_sink ORDER BY id;
+TRUNCATE lagodb_connectors_regress.copy_typmod_sink;
+
+-- JSON NULL and a missing key reach the type input function as text COPY's
+-- NULL does: strict inputs store SQL NULL, while domain_in checks NOT NULL.
+\set copy_json_null 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/domain_null.json'
+\set copy_json_null_value 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/domain_null_value.json'
+\set copy_json_missing 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/domain_missing.json'
+CREATE DOMAIN lagodb_connectors_regress.copy_required_text AS text NOT NULL;
+CREATE TABLE lagodb_connectors_regress.copy_domain_sink (
+    id integer, note text, required lagodb_connectors_regress.copy_required_text
+);
+COPY (SELECT 1 AS id, NULL::text AS note, 'a' AS required) TO :'copy_json_null'
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
+COPY (SELECT 2 AS id, 'b' AS note, NULL::text AS required) TO :'copy_json_null_value'
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
+COPY (SELECT 3 AS id, 'c' AS note) TO :'copy_json_missing'
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
+COPY lagodb_connectors_regress.copy_domain_sink FROM :'copy_json_null'
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
+\set VERBOSITY sqlstate
+COPY lagodb_connectors_regress.copy_domain_sink FROM :'copy_json_null_value'
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
+COPY lagodb_connectors_regress.copy_domain_sink FROM :'copy_json_missing'
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
+\set VERBOSITY default
+SELECT id, note IS NULL AS note_is_null, required
+FROM lagodb_connectors_regress.copy_domain_sink ORDER BY id;
 
 -- PostgreSQL 17 introduced ON_ERROR; _1.out is the PostgreSQL 15 and 16 output.
 SELECT current_setting('server_version_num')::int >= 170000 AS has_copy_on_error \gset
 \if :has_copy_on_error
+-- JSON skips rows whose type input reports a soft error, as text COPY does.
 SET client_min_messages = notice;
 COPY lagodb_connectors_regress.copy_typmod_sink FROM :'copy_json'
 WITH (server 'lagodb_connectors_regress_s3', format 'json', on_error ignore);
@@ -260,25 +326,47 @@ SELECT id, payload, octet_length(padded) AS padded_bytes, amount,
        clock = time '12:34:56.124' AS time_rounded,
        happened = timestamp '2000-01-01' AS timestamp_rounded
 FROM lagodb_connectors_regress.copy_typmod_sink ORDER BY id;
-TRUNCATE lagodb_connectors_regress.copy_typmod_sink;
-SET client_min_messages = notice;
+-- Avro and Parquet typmod coercion errors are hard, so these formats reject
+-- ON_ERROR IGNORE before reading the object.
+\set VERBOSITY sqlstate
 COPY lagodb_connectors_regress.copy_typmod_sink FROM :'copy_avro'
 WITH (server 'lagodb_connectors_regress_s3', format 'avro', on_error ignore);
-RESET client_min_messages;
-SELECT id, payload, octet_length(padded) AS padded_bytes, amount,
-       clock = time '12:34:56.124' AS time_rounded,
-       happened = timestamp '2000-01-01' AS timestamp_rounded
-FROM lagodb_connectors_regress.copy_typmod_sink ORDER BY id;
-TRUNCATE lagodb_connectors_regress.copy_typmod_sink;
-SET client_min_messages = notice;
 COPY lagodb_connectors_regress.copy_typmod_sink FROM :'copy_parquet'
 WITH (server 'lagodb_connectors_regress_s3', format 'parquet', on_error ignore);
+\set VERBOSITY default
+
+-- Escaped JSON strings reach varchar's soft typmod check through the codec's
+-- own buffer, and a rejected row evaluates no column default, as in
+-- PostgreSQL's text COPY.
+\set copy_json_soft 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/soft.json'
+CREATE SEQUENCE lagodb_connectors_regress.copy_soft_sequence;
+CREATE TABLE lagodb_connectors_regress.copy_soft_sink (
+    id integer, payload varchar(3),
+    seq_no bigint DEFAULT nextval('lagodb_connectors_regress.copy_soft_sequence')
+);
+COPY (
+    SELECT * FROM (VALUES (1, 'a"b'), (2, 'x"yz'), (3, 'q')) AS input (id, payload)
+) TO :'copy_json_soft'
+WITH (server 'lagodb_connectors_regress_s3', format 'json');
+SET client_min_messages = notice;
+COPY lagodb_connectors_regress.copy_soft_sink (id, payload) FROM :'copy_json_soft'
+WITH (server 'lagodb_connectors_regress_s3', format 'json', on_error ignore);
 RESET client_min_messages;
-SELECT id, payload, octet_length(padded) AS padded_bytes, amount,
-       clock = time '12:34:56.124' AS time_rounded,
-       happened = timestamp '2000-01-01' AS timestamp_rounded
-FROM lagodb_connectors_regress.copy_typmod_sink ORDER BY id;
+SELECT id, payload, seq_no FROM lagodb_connectors_regress.copy_soft_sink ORDER BY id;
+DROP TABLE lagodb_connectors_regress.copy_soft_sink;
+DROP SEQUENCE lagodb_connectors_regress.copy_soft_sequence;
+
+-- domain_in reports NOT NULL softly, so ON_ERROR IGNORE skips those rows.
+SET client_min_messages = notice;
+COPY lagodb_connectors_regress.copy_domain_sink FROM :'copy_json_null_value'
+WITH (server 'lagodb_connectors_regress_s3', format 'json', on_error ignore);
+COPY lagodb_connectors_regress.copy_domain_sink FROM :'copy_json_missing'
+WITH (server 'lagodb_connectors_regress_s3', format 'json', on_error ignore);
+RESET client_min_messages;
+SELECT count(*) AS domain_rows FROM lagodb_connectors_regress.copy_domain_sink;
 \endif
+DROP TABLE lagodb_connectors_regress.copy_domain_sink;
+DROP DOMAIN lagodb_connectors_regress.copy_required_text;
 
 \set copy_json 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/rls.json'
 \set copy_avro 's3://' :lagodb_regress_bucket '/lagodb-connectors/copy/rls.avro'

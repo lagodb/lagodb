@@ -8,17 +8,16 @@ mod write;
 use lagodb_core::expr::pushdown::FilterPlanningContext;
 use lagodb_core::fdw::StartForeignScanContext;
 use lagodb_core::handles::RelationHandle;
-use lagodb_core::plan_data::PlanDataReader;
 
 use crate::error::ConnectorError;
 use crate::fdw::LagodbConnectors;
-use crate::format::parquet::{ParquetFilterPlanner, ParquetPlannedPredicate};
-use crate::format::{FormatKind, ParquetFormat};
+use crate::format::ParquetFormat;
+use crate::format::parquet::ParquetFilterPlanner;
 use crate::storage::{InputFiles, StorageOutput};
 
 use super::{
-    FormatAnalyzer, FormatFdwReader, FormatFilterPlanner, FormatPlannedFilter,
-    FormatScanPlanner, FormatScanState, FormatWriteState, FormatWriter,
+    FormatAnalyzer, FormatFdwReader, FormatFilterPlanner, FormatScanPlanner,
+    FormatScanState, FormatWriteState, FormatWriter,
 };
 
 impl FormatFdwReader for ParquetFormat {
@@ -31,15 +30,6 @@ impl FormatFdwReader for ParquetFormat {
         context: &FilterPlanningContext,
     ) -> Result<Box<dyn FormatFilterPlanner>, ConnectorError> {
         Ok(Box::new(ParquetFilterPlanner::begin(context)?))
-    }
-
-    fn decode_filter(
-        kind: FormatKind,
-        reader: &mut PlanDataReader<'_>,
-        binding_count: usize,
-    ) -> Result<FormatPlannedFilter, ConnectorError> {
-        ParquetPlannedPredicate::decode(kind, reader, binding_count)
-            .map(|predicate| Box::new(predicate) as FormatPlannedFilter)
     }
 
     fn begin(

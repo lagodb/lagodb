@@ -36,7 +36,7 @@ where
             let mut complete = false;
             while !complete {
                 let available =
-                    self.input.fill_buf().map_err(ConnectorError::json_io)?;
+                    self.input.fill_buf().map_err(ConnectorError::stream_io)?;
                 if available.is_empty() {
                     if self.record.is_empty() {
                         return Ok(false);
@@ -83,7 +83,8 @@ where
     /// unread buffer. An I/O error remains fatal and supersedes the row error.
     fn discard_record(&mut self) -> Result<(), ConnectorError> {
         loop {
-            let available = self.input.fill_buf().map_err(ConnectorError::json_io)?;
+            let available =
+                self.input.fill_buf().map_err(ConnectorError::stream_io)?;
             if available.is_empty() {
                 return Ok(());
             }
@@ -127,7 +128,7 @@ impl JsonRecordStream {
         }
     }
 
-    pub(in crate::format) fn with_progress(
+    pub(crate) fn with_progress(
         files: InputFiles,
         compression: StreamCompressionOptions,
         max_record_bytes: NonZeroUsize,
@@ -179,7 +180,7 @@ impl JsonRecordStream {
         self.current_progress = None;
     }
 
-    pub(in crate::format) fn bytes_consumed(&self) -> u64 {
+    pub(crate) fn bytes_consumed(&self) -> u64 {
         self.completed_bytes.saturating_add(
             self.current_progress
                 .as_ref()
@@ -198,7 +199,7 @@ impl JsonRecordStream {
             ProgressReader::new(file, progress.clone()),
             compression,
         )
-        .map_err(ConnectorError::json_io)?;
+        .map_err(ConnectorError::stream_io)?;
         self.current_progress = progress;
         self.reader = Some(JsonLineReader::new(
             BufReader::new(input),

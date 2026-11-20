@@ -29,6 +29,19 @@ impl CopyFromExecution {
         CopyWriteBridge::new(&self.owner)
     }
 
+    /// Opens the provider source after PostgreSQL has prepared this state.
+    /// Like the drivers' other PostgreSQL phases, an ERROR is captured here,
+    /// so Drop ends the state outside PostgreSQL error recovery and the
+    /// original report reaches the outer utility boundary.
+    pub(super) fn open_source<S>(
+        &self,
+        open: impl FnOnce() -> Result<S, CopyError>,
+    ) -> Result<S, CopyError> {
+        PgTryBuilder::new(AssertUnwindSafe(open))
+            .catch_others(|error| Err(PgError::from_caught(error).into()))
+            .execute()
+    }
+
     fn end_state(&mut self) -> Result<(), PgError> {
         self.state_ended = true;
         unsafe {

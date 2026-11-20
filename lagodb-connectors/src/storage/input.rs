@@ -35,9 +35,12 @@ impl StorageInput {
         kind: ObjectLocationKind,
         matches: impl Fn(&str) -> bool,
     ) -> Result<Self, ConnectorError> {
-        if let Some(path) = location.local_path() {
-            return Ok(Self::Local(LocalInput::resolve(path, kind, matches)?));
-        }
+        let location = match location {
+            ResolvedStorageLocation::Local(path) => {
+                return Ok(Self::Local(LocalInput::resolve(path, kind, matches)?));
+            }
+            ResolvedStorageLocation::Object(location) => location,
+        };
         let manager = StorageManager::from_pg_gucs()?;
         match kind {
             ObjectLocationKind::Exact => {
@@ -45,7 +48,7 @@ impl StorageInput {
                 let size = exact.head()?.size;
                 return Ok(Self::Exact {
                     access: exact,
-                    key: location.object_key().into(),
+                    key: location.key().into(),
                     size,
                 });
             }

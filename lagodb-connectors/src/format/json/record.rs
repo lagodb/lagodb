@@ -1,14 +1,14 @@
 //! Shared NDJSON column binding and decoding.
 
 use std::collections::HashMap;
-use std::ffi::CStr;
 use std::ops::Range;
+use std::str;
 
 use lagodb_core::datum::{
     ColumnDatumTarget, DatumConversionError, JsonDatumEncoder, JsonDatumKind,
+    PgTextIo, PgType, SoftErrorContext,
 };
-use lagodb_core::diag::PgReportError;
-use pgrx::{PgTryBuilder, pg_sys};
+use pgrx::pg_sys;
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
@@ -22,52 +22,10 @@ enum JsonInputKind {
     Json,
 }
 
-struct PgInputPlan {
-    input_function: pg_sys::Oid,
-    type_io_param: pg_sys::Oid,
-    type_mod: i32,
-}
-
-impl PgInputPlan {
-    fn bind(type_oid: pg_sys::Oid, type_mod: i32) -> Result<Self, ConnectorError> {
-        let result = unsafe {
-            PgTryBuilder::new(|| {
-                let mut input_function = pg_sys::InvalidOid;
-                let mut type_io_param = pg_sys::InvalidOid;
-                pg_sys::getTypeInputInfo(
-                    type_oid,
-                    &mut input_function,
-                    &mut type_io_param,
-                );
-                Ok((input_function, type_io_param))
-            })
-            .catch_others(|error| Err(PgReportError::from_caught(error)))
-            .execute()
-        };
-        let (input_function, type_io_param) = result.map_err(ConnectorError::from)?;
-        Ok(Self {
-            input_function,
-            type_io_param,
-            type_mod,
-        })
-    }
-
-    unsafe fn datum(&self, value: &CStr) -> pg_sys::Datum {
-        unsafe {
-            pg_sys::OidInputFunctionCall(
-                self.input_function,
-                value.as_ptr().cast_mut(),
-                self.type_io_param,
-                self.type_mod,
-            )
-        }
-    }
-}
-
 pub(crate) struct JsonColumn {
     name: Box<str>,
     input_kind: JsonInputKind,
-    input: PgInputPlan,
+    input: PgTextIo,
     output: JsonDatumEncoder,
 }
 
@@ -80,29 +38,6 @@ impl JsonColumn {
     #[inline]
     pub(crate) const fn output_encoder(&self) -> JsonDatumEncoder {
         self.output
-    }
-
-    pub(crate) unsafe fn input_datum(&self, value: &CStr) -> pg_sys::Datum {
-        unsafe { self.input.datum(value) }
-    }
-
-    /// Convert a serde_json-validated, non-NUL byte slice through this bound
-    /// PostgreSQL input plan without an intermediate CSV field or Rust String.
-    ///
-    /// # Safety
-    ///
-    /// PostgreSQL's current memory context must be the COPY per-tuple context.
-    pub(in crate::format) unsafe fn input_bytes_datum(
-        &self,
-        value: &[u8],
-    ) -> pg_sys::Datum {
-        let length = value.len();
-        let input = unsafe { pg_sys::palloc(length + 1).cast::<u8>() };
-        unsafe {
-            std::ptr::copy_nonoverlapping(value.as_ptr(), input, length);
-            *input.add(length) = 0;
-            self.input.datum(CStr::from_ptr(input.cast()))
-        }
     }
 }
 
@@ -126,8 +61,7 @@ impl JsonColumnPlan {
                     format!("column name {name:?} is not unique"),
                 ));
             }
-            let output = JsonDatumEncoder::bind(type_oid)
-                .map_err(ConnectorError::json_datum)?;
+            let output = JsonDatumEncoder::bind(type_oid);
             let input_kind = match output.kind() {
                 JsonDatumKind::Boolean
                 | JsonDatumKind::Numeric
@@ -152,7 +86,7 @@ impl JsonColumnPlan {
             columns.push(JsonColumn {
                 name: name.into(),
                 input_kind,
-                input: PgInputPlan::bind(type_oid, type_mod)?,
+                input: PgTextIo::bind(PgType::new(type_oid, type_mod)),
                 output,
             });
         }
@@ -189,12 +123,6 @@ impl JsonColumnPlan {
 #[derive(Clone)]
 struct JsonValueRange(Range<usize>);
 
-pub(crate) enum JsonInputValue<'a> {
-    Null,
-    Bytes(&'a [u8]),
-    CStr(&'a CStr),
-}
-
 pub(crate) struct JsonRecordDecoder {
     values: Vec<Option<JsonValueRange>>,
     scalar: JsonScalarDecoder,
@@ -229,20 +157,54 @@ impl JsonRecordDecoder {
         })
     }
 
-    pub(crate) fn value<'a>(
+    /// Convert one bound column of the last decoded record through its
+    /// PostgreSQL type input function. SQL NULL also reaches that function,
+    /// as in PostgreSQL's COPY, so domain constraints apply to it. With
+    /// `soft_errors`, an input error the type reports softly is saved there
+    /// and returned as a row data error; otherwise PostgreSQL input errors
+    /// unwind.
+    ///
+    /// # Safety
+    ///
+    /// `record` is the slice passed to the last successful [`Self::decode`]
+    /// with the same plan, and `column` is that plan's column at `index`.
+    /// PostgreSQL's current memory context owns the returned datum.
+    pub(crate) unsafe fn datum(
+        &mut self,
+        record: &[u8],
+        column: &JsonColumn,
+        index: usize,
+        logical_line: u64,
+        soft_errors: Option<SoftErrorContext<'_>>,
+    ) -> Result<Option<pg_sys::Datum>, ConnectorError> {
+        let text = self.text(record, column, index, logical_line)?;
+        // SAFETY: the text is NUL-free UTF-8 and the bound codec copies it
+        // into its own buffer for this synchronous input call.
+        match unsafe { column.input.input_or_save(text, soft_errors) } {
+            Some(datum) => Ok(text.is_some().then_some(datum)),
+            None => Err(ConnectorError::invalid_json_value(
+                logical_line,
+                column.name(),
+                "value is not valid input for the column type",
+            )),
+        }
+    }
+
+    /// The column's input text, or `None` for SQL NULL.
+    fn text<'a>(
         &'a mut self,
         record: &'a [u8],
         column: &JsonColumn,
         index: usize,
         logical_line: u64,
-    ) -> Result<JsonInputValue<'a>, ConnectorError> {
+    ) -> Result<Option<&'a str>, ConnectorError> {
         let Some(range) = self.values[index].as_ref().map(|value| value.0.clone())
         else {
-            return Ok(JsonInputValue::Null);
+            return Ok(None);
         };
         let raw = &record[range];
         if raw == b"null" {
-            return Ok(JsonInputValue::Null);
+            return Ok(None);
         }
         let value = match column.input_kind {
             JsonInputKind::Json => raw,
@@ -254,7 +216,7 @@ impl JsonRecordDecoder {
                     return self
                         .scalar
                         .decode(raw, column.name(), logical_line)
-                        .map(JsonInputValue::CStr);
+                        .map(Some);
                 }
             }
             JsonInputKind::Scalar if matches!(raw, b"true" | b"false") => raw,
@@ -273,7 +235,10 @@ impl JsonRecordDecoder {
                 ));
             }
         };
-        Ok(JsonInputValue::Bytes(value))
+        // SAFETY: decode() captured this range from a serde_json RawValue,
+        // whose text is valid UTF-8 without literal NUL bytes; the quote and
+        // literal boundaries trimmed above are ASCII.
+        Ok(Some(unsafe { str::from_utf8_unchecked(value) }))
     }
 }
 

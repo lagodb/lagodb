@@ -3,14 +3,15 @@
 mod scan;
 mod write;
 
-use lagodb_core::fdw::StartForeignScanContext;
+use lagodb_core::fdw::{ScanProjectionPolicy, StartForeignScanContext};
 use lagodb_core::handles::RelationHandle;
 
 use crate::error::ConnectorError;
 use crate::fdw::LagodbConnectors;
-use crate::format::AvroFormat;
+use crate::format::{AvroFormat, FormatKind};
 use crate::storage::{InputFiles, StorageOutput};
 
+use super::fixed_scan::FixedEstimateScanPlanner;
 use super::{
     FormatFdwReader, FormatScanPlanner, FormatScanState, FormatWriteState,
     FormatWriter,
@@ -20,7 +21,10 @@ use write::AvroWriteState;
 
 impl FormatFdwReader for AvroFormat {
     fn planner(self: Box<Self>) -> Box<dyn FormatScanPlanner> {
-        Box::new(scan::AvroScanPlanner::new())
+        Box::new(FixedEstimateScanPlanner::new(
+            FormatKind::Avro,
+            ScanProjectionPolicy::AllowColumnPruning,
+        ))
     }
 
     fn begin(

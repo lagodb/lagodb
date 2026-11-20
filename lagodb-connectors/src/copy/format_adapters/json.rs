@@ -1,41 +1,37 @@
 //! Direct Datum/slot adapters for NDJSON COPY FROM and COPY TO.
 
-use std::panic::AssertUnwindSafe;
-
 use lagodb_core::copy::{
     CopyColumnLayout, CopyDatumSource, CopyError, CopyInputRow, CopyOutputRow,
     CopyRowOutcome, CopyTupleDestination,
 };
 use lagodb_core::datum::BoundJsonObjectEncoder;
-use lagodb_core::diag::PgReportError;
-use pgrx::PgTryBuilder;
 
 use crate::error::ConnectorError;
-use crate::format::json::{
-    JsonColumnPlan, JsonInputValue, JsonRecordDecoder, JsonRecordStream,
-};
+use crate::format::json::{JsonColumnPlan, JsonRecordDecoder, JsonRecordStream};
 use crate::format::{
     EmptyOutputPolicy, FormatKind, ObjectSetWriter, StreamCompression,
     StreamCompressionOptions, StreamEncoderFactory, StreamFormat,
 };
 use crate::gucs::ReadConfig;
-use crate::storage::{InputFiles, StorageOutput};
+use crate::storage::{ResolvedStorageLocation, StorageOutput};
 
 use super::{FormatCopyDestination, FormatCopyOutput};
 
 /// NDJSON-to-Datum source for PostgreSQL COPY FROM.
-pub(super) struct JsonCopySource {
+pub(in crate::copy) struct JsonCopySource {
     stream: JsonRecordStream,
     plan: JsonColumnPlan,
     decoder: JsonRecordDecoder,
 }
 
 impl JsonCopySource {
-    pub(super) fn new(
-        files: InputFiles,
+    /// The caller has validated that `location` names one exact object.
+    pub(in crate::copy) fn open(
+        location: &ResolvedStorageLocation,
         layout: &CopyColumnLayout,
         compression: StreamCompression,
     ) -> Result<Self, CopyError> {
+        let files = FormatKind::Json.input(location)?.open();
         let plan = JsonColumnPlan::bind(
             layout
                 .columns()
@@ -90,45 +86,31 @@ impl CopyDatumSource for JsonCopySource {
                 )
                 .map(CopyRowOutcome::Rejected);
         }
-        let mut active_column = 0;
-        let result = unsafe {
-            PgTryBuilder::new(AssertUnwindSafe(|| {
-                for (index, (target, column)) in
-                    row.columns().zip(self.plan.columns().iter()).enumerate()
-                {
-                    active_column = index;
-                    let datum = match self.decoder.value(
-                        record,
-                        column,
-                        index,
-                        logical_line,
-                    )? {
-                        JsonInputValue::Null => None,
-                        JsonInputValue::Bytes(value) => {
-                            Some(column.input_bytes_datum(value))
-                        }
-                        JsonInputValue::CStr(value) => {
-                            Some(column.input_datum(value))
-                        }
-                    };
-                    target.set(datum);
+        // As in PostgreSQL's text COPY, ON_ERROR IGNORE saves soft type-input
+        // errors; other PostgreSQL errors unwind to the COPY boundary.
+        let soft_errors = row.soft_errors();
+        for (index, (target, column)) in
+            row.columns().zip(self.plan.columns().iter()).enumerate()
+        {
+            // SAFETY: record was decoded above with this plan, and COPY
+            // selected its per-tuple context for this callback.
+            let datum = unsafe {
+                self.decoder
+                    .datum(record, column, index, logical_line, soft_errors)
+            };
+            match datum {
+                Ok(datum) => target.set(datum),
+                Err(error) => {
+                    return error
+                        .into_copy_row_rejection(
+                            Some(index),
+                            format!("NDJSON logical line {logical_line}"),
+                        )
+                        .map(CopyRowOutcome::Rejected);
                 }
-                Ok::<(), ConnectorError>(())
-            }))
-            .catch_others(|error| {
-                Err(ConnectorError::Postgres(PgReportError::from_caught(error)))
-            })
-            .execute()
-        };
-        match result {
-            Ok(()) => Ok(CopyRowOutcome::Row),
-            Err(error) => error
-                .into_copy_row_rejection(
-                    Some(active_column),
-                    format!("NDJSON logical line {logical_line}"),
-                )
-                .map(CopyRowOutcome::Rejected),
+            }
         }
+        Ok(CopyRowOutcome::Row)
     }
 
     fn bytes_consumed(&self) -> u64 {
@@ -185,7 +167,7 @@ impl CopyTupleDestination for JsonCopyDestination {
                 .iter()
                 .map(|column| (column.name(), column.output_encoder())),
         )
-        .map_err(ConnectorError::json_datum)?;
+        .map_err(ConnectorError::from)?;
         let output = self
             .output
             .take()
@@ -206,8 +188,9 @@ impl CopyTupleDestination for JsonCopyDestination {
             .as_mut()
             .expect("COPY TO initializes its destination before producing rows");
         let values = row.datums().map(|datum| datum.value());
-        let encoded = unsafe { ready.encoder.encode_row(values) }
-            .map_err(ConnectorError::json_datum)?;
+        // SAFETY: the bound plan and slot values come from the same COPY
+        // layout, and slot Datums remain live for this callback.
+        let encoded = unsafe { ready.encoder.encode_row(values) };
         ready.writer.write(encoded).map_err(CopyError::from)
     }
 

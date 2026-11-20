@@ -11,7 +11,7 @@ use crate::storage::{ObjectLocationKind, ResolvedStorageLocation};
 use super::format_adapters::{
     FdwFormat, FormatAnalyzer, FormatFdwReader, FormatWriter,
 };
-use super::{ResolvedTableOptions, resolve_table_options};
+use super::{PlannedFormat, ResolvedTableOptions, resolve_table_options};
 
 type ResolvedFormatParts<T> = (T, ResolvedStorageLocation);
 
@@ -39,6 +39,17 @@ impl ResolvedForeignRelation {
     #[inline]
     pub(crate) const fn kind(&self) -> FormatKind {
         self.options.format.kind()
+    }
+
+    /// Reject executor use of a plan built for a different catalog format.
+    pub(crate) fn ensure_planned(
+        &self,
+        planned: PlannedFormat,
+    ) -> Result<(), ConnectorError> {
+        if self.kind() != planned.kind() {
+            return Err(ConnectorError::plan_format_changed());
+        }
+        Ok(())
     }
 
     pub(crate) fn into_fdw_reader(self) -> Box<dyn FormatFdwReader> {
@@ -112,7 +123,7 @@ impl ResolvedForeignRelation {
             self.server_oid,
             effective_user,
         )?;
-        if location.local_path().is_some() {
+        if matches!(location, ResolvedStorageLocation::Local(_)) {
             LocalFilePolicy::require_write(effective_user)?;
         }
         Ok((FdwFormat::writer(self.options.format), location))

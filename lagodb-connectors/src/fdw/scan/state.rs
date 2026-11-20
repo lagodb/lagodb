@@ -5,7 +5,6 @@ use lagodb_core::fdw::{
     ScanSlotWriter, StartForeignScanContext,
 };
 
-use crate::error::ConnectorError;
 use crate::fdw::format_adapters::{FormatFdwReader, FormatScanState};
 use crate::storage::InputFiles;
 
@@ -28,12 +27,9 @@ impl ConnectorScanState {
     pub(crate) fn begin(
         context: BeginForeignScanContext<'_, LagodbConnectors>,
     ) -> Result<Self, ForeignScanError> {
-        let planned_format = context.private_data.kind();
         let selected = ResolvedForeignRelation::resolve(context.relation.oid())?;
+        selected.ensure_planned(*context.private_data)?;
         let format = selected.kind();
-        if format != planned_format {
-            return Err(ConnectorError::plan_format_changed().into());
-        }
         let (reader, target) =
             selected.into_scan_parts(context.effective_user_id())?;
         let files = format.input(&target)?.open();

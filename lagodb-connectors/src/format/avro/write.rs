@@ -10,7 +10,6 @@ use crate::storage::StorageOutput;
 
 pub(crate) use encoder::AvroDatumRow;
 use encoder::AvroEncoderFactory;
-pub(super) use plan::AvroValueKind;
 pub(crate) use plan::AvroWritePlan;
 
 pub(crate) struct AvroObjectWriter {
@@ -43,19 +42,18 @@ impl AvroObjectWriter {
             .write(row)
     }
 
-    pub(crate) fn finish(&mut self, emit_empty: bool) -> Result<(), ConnectorError> {
+    pub(crate) fn finish(
+        &mut self,
+        policy: EmptyOutputPolicy,
+    ) -> Result<(), ConnectorError> {
         let Some(writer) = self.writer.take() else {
             return Ok(());
         };
-        self.completed_bytes = writer.finish_with_bytes(if emit_empty {
-            EmptyOutputPolicy::EmitFile
-        } else {
-            EmptyOutputPolicy::Skip
-        })?;
+        self.completed_bytes = writer.finish_with_bytes(policy)?;
         Ok(())
     }
 
-    pub(super) fn bytes_written(&self) -> u64 {
+    pub(crate) fn bytes_written(&self) -> u64 {
         self.writer
             .as_ref()
             .map_or(self.completed_bytes, ObjectSetWriter::bytes_written)

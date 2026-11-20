@@ -15,7 +15,9 @@ use pgrx::{PgSqlErrorCode, pg_sys};
 
 use crate::CONNECTOR_FDW_NAME;
 use crate::error::ConnectorError;
-use crate::storage::{ResolvedStorageLocation, StoragePath};
+use crate::storage::{
+    ObjectLocation, ObjectUri, ResolvedStorageLocation, StoragePath,
+};
 
 pub(crate) struct ConnectorAccess;
 
@@ -37,24 +39,30 @@ impl ConnectorAccess {
         object: StoragePath,
         explicit_server: Option<&str>,
     ) -> Result<ResolvedStorageLocation, ConnectorError> {
-        let effective_user = unsafe { pg_sys::GetUserId() };
-        let StoragePath::Object(remote) = &object else {
-            if explicit_server.is_some() {
-                return Err(ConnectorError::invalid_copy_option(
+        match object {
+            StoragePath::Object(remote) => {
+                Self::resolve_object(remote, explicit_server)
+                    .map(ResolvedStorageLocation::Object)
+            }
+            StoragePath::Local(_) if explicit_server.is_some() => {
+                Err(ConnectorError::invalid_option(
                     "server",
                     "is only valid for object-storage COPY",
-                ));
+                ))
             }
-            return Ok(ResolvedStorageLocation::new(
-                object,
-                pg_sys::InvalidOid,
-                effective_user,
-            ));
-        };
+            StoragePath::Local(path) => Ok(ResolvedStorageLocation::Local(path)),
+        }
+    }
+
+    pub(crate) fn resolve_object(
+        remote: ObjectUri,
+        explicit_server: Option<&str>,
+    ) -> Result<ObjectLocation, ConnectorError> {
+        let effective_user = unsafe { pg_sys::GetUserId() };
         let server_oid = match explicit_server {
             Some(server) => {
                 let server_name = CString::new(server).map_err(|_| {
-                    ConnectorError::invalid_copy_option(
+                    ConnectorError::invalid_option(
                         "server",
                         "must not contain a NUL byte",
                     )
@@ -63,17 +71,13 @@ impl ConnectorAccess {
                     effective_user,
                     server_name.as_c_str(),
                 )?;
-                catalog.resolve_explicit(server, remote)?.oid()
+                catalog.resolve_explicit(server, &remote)?.oid()
             }
             None => Self::server_catalog(effective_user)?
-                .resolve_implicit(remote)?
+                .resolve_implicit(&remote)?
                 .oid(),
         };
-        Ok(ResolvedStorageLocation::new(
-            object,
-            server_oid,
-            effective_user,
-        ))
+        Ok(ObjectLocation::new(remote, server_oid, effective_user))
     }
 
     pub(crate) fn resolve_foreign_object(
@@ -81,25 +85,24 @@ impl ConnectorAccess {
         server_oid: pg_sys::Oid,
         effective_user: pg_sys::Oid,
     ) -> Result<ResolvedStorageLocation, ConnectorError> {
-        let StoragePath::Object(remote) = &object else {
-            Self::check_local_server(server_oid, effective_user)?;
-            return Ok(ResolvedStorageLocation::new(
-                object,
-                server_oid,
-                effective_user,
-            ));
+        let remote = match object {
+            StoragePath::Object(remote) => remote,
+            StoragePath::Local(path) => {
+                Self::check_local_server(server_oid, effective_user)?;
+                return Ok(ResolvedStorageLocation::Local(path));
+            }
         };
         let catalog = StorageServerCatalog::load_explicit_oid(
             Self::server_policy(),
             effective_user,
             server_oid,
         )?;
-        let selected = catalog.resolve_explicit_oid(server_oid, remote)?;
-        Ok(ResolvedStorageLocation::new(
-            object,
+        let selected = catalog.resolve_explicit_oid(server_oid, &remote)?;
+        Ok(ResolvedStorageLocation::Object(ObjectLocation::new(
+            remote,
             selected.oid(),
             effective_user,
-        ))
+        )))
     }
 
     pub(crate) fn resolve_for_ddl(
@@ -107,28 +110,27 @@ impl ConnectorAccess {
         server_name: &CStr,
     ) -> Result<ResolvedStorageLocation, ConnectorError> {
         let effective_user = unsafe { pg_sys::GetUserId() };
-        let StoragePath::Object(remote) = &object else {
-            LocalFilePolicy::require_read(effective_user)?;
-            let server_oid = unsafe {
-                pg_sys::get_foreign_server_oid(server_name.as_ptr(), false)
-            };
-            Self::check_local_server(server_oid, effective_user)?;
-            return Ok(ResolvedStorageLocation::new(
-                object,
-                server_oid,
-                effective_user,
-            ));
+        let remote = match object {
+            StoragePath::Object(remote) => remote,
+            StoragePath::Local(path) => {
+                LocalFilePolicy::require_read(effective_user)?;
+                let server_oid = unsafe {
+                    pg_sys::get_foreign_server_oid(server_name.as_ptr(), false)
+                };
+                Self::check_local_server(server_oid, effective_user)?;
+                return Ok(ResolvedStorageLocation::Local(path));
+            }
         };
         let catalog = Self::explicit_server_catalog(effective_user, server_name)?;
         let server_name = server_name.to_str().map_err(|_| {
             ConnectorError::invalid_option("server", "must be valid UTF-8")
         })?;
-        let selected = catalog.resolve_explicit(server_name, remote)?;
-        Ok(ResolvedStorageLocation::new(
-            object,
+        let selected = catalog.resolve_explicit(server_name, &remote)?;
+        Ok(ResolvedStorageLocation::Object(ObjectLocation::new(
+            remote,
             selected.oid(),
             effective_user,
-        ))
+        )))
     }
 
     fn server_catalog(

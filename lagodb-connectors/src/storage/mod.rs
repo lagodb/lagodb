@@ -19,6 +19,6 @@ pub(crate) use location::ObjectLocationKind;
 pub(crate) use output::{AllocatedObject, ObjectFileSuffix, StorageOutput};
 pub(crate) use path::StoragePath;
 pub(crate) use read_progress::{ProgressReader, ReadProgress};
-pub(crate) use resolved_location::ResolvedStorageLocation;
+pub(crate) use resolved_location::{ObjectLocation, ResolvedStorageLocation};
 pub(crate) use upload::{FilePublication, OutputWriter};
 pub(crate) use uri::ObjectUri;

@@ -5,8 +5,8 @@ use lagodb_core::tuple::{SlotDatumIndex, TupleSlotRow};
 
 use crate::error::ConnectorError;
 use crate::fdw::format_adapters::FormatWriteState;
-use crate::format::AvroWriteCompression;
 use crate::format::avro::{AvroDatumRow, AvroObjectWriter, AvroWritePlan};
+use crate::format::{AvroWriteCompression, EmptyOutputPolicy};
 use crate::storage::StorageOutput;
 
 pub(super) struct AvroWriteState {
@@ -56,6 +56,6 @@ impl FormatWriteState for AvroWriteState {
     }
 
     fn finish(&mut self) -> Result<(), ConnectorError> {
-        self.writer.finish(false)
+        self.writer.finish(EmptyOutputPolicy::Skip)
     }
 }

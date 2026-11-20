@@ -41,5 +41,5 @@ pub use numeric::{
 };
 pub use pg_type::{PgCompositeField, PgType};
 pub use temporal::{PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
-pub use text_io::PgTextIo;
+pub use text_io::{PgTextIo, SoftErrorContext};
 pub use varlena::DetoastedVarlena;

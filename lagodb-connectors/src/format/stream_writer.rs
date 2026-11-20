@@ -61,12 +61,12 @@ impl ObjectFileEncoderFactory for StreamEncoderFactory {
         writer: OutputWriter,
     ) -> Result<Self::Encoder, ConnectorError> {
         let mut encoder = StreamEncoder::new(writer, self.compression)
-            .map_err(ConnectorError::copy_stream_io)?;
+            .map_err(ConnectorError::stream_io)?;
         if let Some(header) = &self.header {
             encoder
                 .write_all(header)
                 .and_then(|()| encoder.write_all(b"\n"))
-                .map_err(ConnectorError::copy_stream_io)?;
+                .map_err(ConnectorError::stream_io)?;
         }
         Ok(StreamFileEncoder { encoder })
     }
@@ -86,7 +86,7 @@ impl ObjectFileEncoder for StreamFileEncoder {
         self.encoder
             .write_all(data)
             .and_then(|()| self.encoder.write_all(b"\n"))
-            .map_err(ConnectorError::copy_stream_io)?;
+            .map_err(ConnectorError::stream_io)?;
         Ok(FileWriteProgress::new(
             self.encoder.writer().bytes_written(),
         ))
@@ -97,8 +97,6 @@ impl ObjectFileEncoder for StreamFileEncoder {
     }
 
     fn finish(self) -> Result<OutputWriter, ConnectorError> {
-        self.encoder
-            .finish()
-            .map_err(ConnectorError::copy_stream_io)
+        self.encoder.finish().map_err(ConnectorError::stream_io)
     }
 }

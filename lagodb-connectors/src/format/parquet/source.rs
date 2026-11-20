@@ -150,7 +150,7 @@ impl ParquetBatchSource {
         }
     }
 
-    pub(super) fn bytes_consumed(&self) -> u64 {
+    pub(crate) fn bytes_consumed(&self) -> u64 {
         self.completed_bytes
             .saturating_add(self.progress.as_ref().map_or(0, ReadProgress::bytes))
     }

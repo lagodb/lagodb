@@ -84,6 +84,16 @@ SET payload = 'updated';
 ERROR:  0A000
 DELETE FROM lagodb_connectors_regress.foreign_dml_boundary;
 ERROR:  0A000
+-- Option errors follow PostgreSQL FDW conventions: an unknown option name is
+-- HV00D, while an invalid value for an accepted option is 22023.
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_unknown_option (id integer)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'foreign_exact_path', format 'text', unknown_option 'x');
+ERROR:  HV00D
+CREATE FOREIGN TABLE lagodb_connectors_regress.foreign_invalid_delimiter (id integer)
+SERVER lagodb_connectors_regress_s3
+OPTIONS (path :'foreign_exact_path', format 'text', delimiter 'ab');
+ERROR:  22023
 \set VERBOSITY default
 SELECT count(*) AS rows_after_rejected_dml
 FROM lagodb_connectors_regress.foreign_dml_boundary;

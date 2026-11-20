@@ -1,12 +1,11 @@
 //! FDW planning and streaming scans of Avro object containers.
 
+use std::ffi::CStr;
 use std::io::BufReader;
 
 use apache_avro::types::Value;
 use apache_avro::{Reader, Schema};
 use lagodb_core::fdw::{
-    ForeignPathBuilder, ForeignPathContext, ForeignPathKeys, ForeignPathSpec,
-    ForeignPlanContext, ForeignPlanSpec, ForeignRelSize, ForeignRelSizeContext,
     ReScanForeignScanContext, ScanOutputColumn, ScanSlotWriter,
     StartForeignScanContext,
 };
@@ -14,67 +13,10 @@ use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 use crate::fdw::LagodbConnectors;
-use crate::fdw::format_adapters::{
-    FormatScanPlanner, FormatScanPrivate, FormatScanState,
-};
+use crate::fdw::format_adapters::FormatScanState;
 use crate::format::FormatKind;
 use crate::format::avro::AvroReadColumn;
 use crate::storage::{InputFile, InputFiles};
-
-const DEFAULT_ESTIMATED_ROWS: f64 = 1_000.0;
-const DEFAULT_ESTIMATED_WIDTH: i32 = 32;
-
-pub(super) struct AvroScanPlanner {
-    rows: f64,
-}
-
-impl AvroScanPlanner {
-    pub(super) const fn new() -> Self {
-        Self {
-            rows: DEFAULT_ESTIMATED_ROWS,
-        }
-    }
-}
-
-impl FormatScanPlanner for AvroScanPlanner {
-    fn estimate(
-        &mut self,
-        _context: &ForeignRelSizeContext<'_>,
-    ) -> Result<ForeignRelSize, ConnectorError> {
-        Ok(ForeignRelSize::new(self.rows, DEFAULT_ESTIMATED_WIDTH))
-    }
-
-    fn build_paths(
-        &self,
-        _context: &ForeignPathContext<'_>,
-        paths: &mut ForeignPathBuilder<FormatScanPrivate>,
-    ) -> Result<(), ConnectorError> {
-        let mut path = ForeignPathSpec::new(
-            self.rows,
-            0.0,
-            self.rows,
-            FormatScanPrivate::new(FormatKind::Avro),
-        );
-        path.retrieved_rows = self.rows;
-        paths.push(path);
-        Ok(())
-    }
-
-    fn supports_pathkeys(
-        &self,
-        _context: &ForeignPathContext<'_>,
-        _pathkeys: &mut ForeignPathKeys,
-    ) -> Result<bool, ConnectorError> {
-        Ok(false)
-    }
-
-    fn build_plan(
-        &mut self,
-        context: &ForeignPlanContext<'_, LagodbConnectors>,
-    ) -> Result<ForeignPlanSpec<FormatScanPrivate>, ConnectorError> {
-        Ok(ForeignPlanSpec::new(context.path_private().to_owned()))
-    }
-}
 
 struct ScanColumn {
     reader: AvroReadColumn,
@@ -93,9 +35,15 @@ impl AvroScanState {
         context: StartForeignScanContext<'_, LagodbConnectors>,
         mut files: InputFiles,
     ) -> Result<Self, ConnectorError> {
-        let live = context.relation.live_columns();
-        for column in live.iter() {
-            column.name().to_str().map_err(|_| {
+        let attributes = context.relation.tuple_desc_handle().attributes();
+        for attribute in attributes
+            .iter()
+            .filter(|attribute| !attribute.attisdropped)
+        {
+            // SAFETY: NameData is NUL-terminated and owned by the live
+            // relation descriptor for this begin callback.
+            let name = unsafe { CStr::from_ptr(attribute.attname.data.as_ptr()) };
+            name.to_str().map_err(|_| {
                 ConnectorError::invalid_object_schema(
                     FormatKind::Avro,
                     "PostgreSQL column names must be valid UTF-8 for Avro",
@@ -118,25 +66,15 @@ impl AvroScanState {
                 "the Avro container writer schema must be a record",
             ));
         };
-        let mut columns_by_attno = vec![None; context.relation.natts()];
-        for column in live.iter() {
-            columns_by_attno[(column.attno() - 1) as usize] = Some(column);
-        }
         let columns = context
             .output_layout
             .columns()
             .iter()
             .copied()
             .map(|output| {
-                let relation_index = (output.attno() - 1) as usize;
-                let column = columns_by_attno[relation_index].ok_or_else(|| {
-                    ConnectorError::invalid_object_schema(
-                        FormatKind::Avro,
-                        "a planned output column is not a live relation attribute",
-                    )
-                })?;
-                let name = column
-                    .name()
+                let attribute = &attributes[(output.attno() - 1) as usize];
+                // SAFETY: as above; scan outputs name live attributes only.
+                let name = unsafe { CStr::from_ptr(attribute.attname.data.as_ptr()) }
                     .to_str()
                     .expect("all live Avro column names were validated as UTF-8");
                 let source = record
@@ -155,8 +93,8 @@ impl AvroScanState {
                     reader: AvroReadColumn::bind(
                         source,
                         &record.fields[source].schema,
-                        column.type_oid(),
-                        column.type_mod(),
+                        attribute.atttypid,
+                        attribute.atttypmod,
                     )?,
                     output,
                 })

@@ -6,19 +6,17 @@
 
 mod object_encoder;
 
-use std::ffi::{CString, NulError, c_char, c_void};
+use std::ffi::{CString, NulError, c_char};
 use std::fmt;
 
 use pgrx::pg_sys::{self, Datum};
 use pgrx::prelude::PgSqlErrorCode;
-use pgrx::varlena;
-use pgrx::{PgTryBuilder, fcinfo};
+use pgrx::{fcinfo, varlena};
 use thiserror::Error;
 
-use crate::diag::{PgError, PgReportError, SqlStateError};
+use crate::diag::{PgError, SqlStateError};
 
-use super::encoding::Utf8ServerEncoding;
-use super::error::{DatumConversionError, Utf8ServerEncodingError};
+use super::error::DatumConversionError;
 use super::output_cstring::PgOutputCString;
 use super::varlena::DetoastedVarlena;
 
@@ -69,25 +67,11 @@ pub enum JsonValueError {
     #[error("JSON text contains an interior NUL byte: {0}")]
     Nul(#[from] NulError),
 
-    #[error("PostgreSQL JSON conversion failed: {0}")]
-    Postgres(#[from] PgError),
-
-    #[error("PostgreSQL JSON input returned NULL")]
-    NullInput,
-
     #[error("PostgreSQL JSON object encoding does not support {0:?} values")]
     UnsupportedOutputKind(JsonDatumKind),
 
     #[error("PostgreSQL JSON output exceeds its buffer or representation limit")]
     OutputTooLarge,
-
-    #[error(
-        "semantic JSON conversion requires UTF-8 server encoding, found encoding {encoding}"
-    )]
-    UnsupportedServerEncoding { encoding: i32 },
-
-    #[error("JSON value is not valid UTF-8: {0}")]
-    Utf8(#[from] std::str::Utf8Error),
 }
 
 impl SqlStateError for JsonValueError {
@@ -98,32 +82,10 @@ impl SqlStateError for JsonValueError {
             Self::InvalidJsonbString => {
                 PgSqlErrorCode::ERRCODE_UNTRANSLATABLE_CHARACTER
             }
-            Self::Postgres(error) => error.sql_error_code(),
-            Self::NullInput => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
             Self::UnsupportedOutputKind(_) => {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
             }
             Self::OutputTooLarge => PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-            Self::UnsupportedServerEncoding { .. } => {
-                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
-            }
-            Self::Utf8(_) => PgSqlErrorCode::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE,
-        }
-    }
-
-    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
-        match self {
-            Self::Postgres(error) => Ok(PgReportError::from_pg_error(error)
-                .contextualize("PostgreSQL JSON conversion failed", None)),
-            error => Err(error),
-        }
-    }
-}
-
-impl From<Utf8ServerEncodingError> for JsonValueError {
-    fn from(error: Utf8ServerEncodingError) -> Self {
-        Self::UnsupportedServerEncoding {
-            encoding: error.encoding(),
         }
     }
 }
@@ -148,27 +110,6 @@ impl JsonText {
                 &[Some(Datum::from(ptr))],
             )
         }
-    }
-
-    /// Validate and own JSON text through PostgreSQL's `json_in` function.
-    pub fn parse(text: &str) -> Result<Self, JsonValueError> {
-        Utf8ServerEncoding::resolve()?;
-        let input = CString::new(text)?;
-        // This standalone parser owns its Result boundary. Datum codecs let
-        // the enclosing row/FFI boundary catch PG errors instead.
-        let datum = PgTryBuilder::new(|| {
-            // SAFETY: input is NUL-terminated and lives through the PG call.
-            Ok(unsafe { Self::input_from_cstr(input.as_ptr()) })
-        })
-        .catch_others(|error| Err(PgError::from(error)))
-        .execute()?
-        .ok_or(JsonValueError::NullInput)?;
-
-        // `json_in` returns a fresh text datum.  The semantic value keeps its
-        // own Rust allocation, so the temporary PostgreSQL allocation is no
-        // longer needed after validation.
-        unsafe { pg_sys::pfree(datum.cast_mut_ptr::<c_void>()) };
-        Ok(Self { text: text.into() })
     }
 
     /// Read a PostgreSQL `json` Datum into an owned semantic value.
@@ -227,14 +168,6 @@ impl JsonText {
     }
 }
 
-impl TryFrom<&str> for JsonText {
-    type Error = JsonValueError;
-
-    fn try_from(text: &str) -> Result<Self, Self::Error> {
-        Self::parse(text)
-    }
-}
-
 impl fmt::Display for JsonText {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -259,30 +192,6 @@ impl JsonbValue {
                 &[Some(Datum::from(ptr))],
             )
         }
-    }
-
-    /// Validate JSON text and normalize it through PostgreSQL's JSONB input
-    /// and output functions.
-    pub fn parse(text: &str) -> Result<Self, JsonValueError> {
-        Utf8ServerEncoding::resolve()?;
-        let input = CString::new(text)?;
-        // Preserve the standalone parser's Result contract without putting a
-        // catch in the shared input wrapper used by row decoding.
-        let datum = PgTryBuilder::new(|| {
-            // SAFETY: input is NUL-terminated and lives through the PG call.
-            Ok(unsafe { Self::input_from_cstr(input.as_ptr()) })
-        })
-        .catch_others(|error| Err(PgError::from(error)))
-        .execute()?
-        .ok_or(JsonValueError::NullInput)?;
-        let result = match unsafe {
-            PgOutputCString::from_function_call(pg_sys::jsonb_out, &[Some(datum)])
-        } {
-            Some(output) => Self::output_text(output).map_err(JsonValueError::from),
-            None => Err(JsonValueError::NullInput),
-        };
-        unsafe { pg_sys::pfree(datum.cast_mut_ptr::<c_void>()) };
-        Ok(Self { text: result? })
     }
 
     /// Read a PostgreSQL `jsonb` Datum into an owned semantic value without
@@ -338,14 +247,6 @@ impl JsonbValue {
         let input = CString::new(self.as_str()).map_err(PgError::from)?;
         // SAFETY: input is NUL-terminated and lives through the PG call.
         Ok(unsafe { Self::input_from_cstr(input.as_ptr()) })
-    }
-}
-
-impl TryFrom<&str> for JsonbValue {
-    type Error = JsonValueError;
-
-    fn try_from(text: &str) -> Result<Self, Self::Error> {
-        Self::parse(text)
     }
 }
 

@@ -153,7 +153,7 @@ impl ResolvedForeignFormat {
         match self {
             Self::Csv(_) => CsvFormat::validate_column_view(options),
             _ if options.iter().next().is_none() => Ok(()),
-            _ => Err(ConnectorError::invalid_option(
+            _ => Err(ConnectorError::unknown_option(
                 "foreign column option",
                 "force_null and force_not_null are only valid for csv",
             )),

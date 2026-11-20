@@ -26,17 +26,28 @@ use crate::format::FormatKind;
 /// the single PostgreSQL report.
 #[derive(Debug, Error)]
 pub(crate) enum ConnectorError {
-    #[error("invalid lagodb connectors FDW option {option:?}: {reason}")]
+    /// An option name the selected format or object does not accept.
+    #[error("invalid option {option:?}: {reason}")]
+    UnknownOption {
+        option: Box<str>,
+        reason: &'static str,
+    },
+
+    /// An accepted option name with an invalid value.
+    #[error("invalid value for option {option:?}: {reason}")]
     InvalidOption {
         option: Box<str>,
         reason: &'static str,
     },
 
-    #[error("invalid COPY option {option:?}: {reason}")]
-    InvalidCopyOption {
+    #[error("conflicting or redundant option {option:?}: {reason}")]
+    ConflictingOption {
         option: Box<str>,
         reason: &'static str,
     },
+
+    #[error("invalid path: {reason}")]
+    InvalidPath { reason: &'static str },
 
     #[error("invalid format value {value:?}")]
     InvalidFormat { value: Box<str> },
@@ -96,18 +107,11 @@ pub(crate) enum ConnectorError {
     #[error("PostgreSQL JSON conversion failed: {0}")]
     JsonDatum(#[from] JsonValueError),
 
-    #[error("NDJSON stream I/O failed: {source}")]
-    JsonIo {
-        sqlerrcode: PgSqlErrorCode,
-        #[source]
-        source: std::io::Error,
-    },
-
     #[error("failed to read an object while inferring its schema: {0}")]
     SchemaIo(#[from] std::io::Error),
 
-    #[error("COPY stream I/O failed: {source}")]
-    CopyStreamIo {
+    #[error("object stream I/O failed: {source}")]
+    StreamIo {
         sqlerrcode: PgSqlErrorCode,
         #[source]
         source: std::io::Error,
@@ -122,11 +126,13 @@ pub(crate) enum ConnectorError {
     #[error("invalid object URI: {reason}")]
     InvalidObjectUri { reason: &'static str },
 
-    #[error("COPY object format {format} is not implemented yet")]
-    CopyNotImplemented { format: FormatKind },
-
     #[error("COPY FROM for {format} supports an exact object URI only")]
     CopyFromExactOnly { format: FormatKind },
+
+    /// PostgreSQL reports its own format restriction, `only ON_ERROR STOP is
+    /// allowed in BINARY mode`, as a syntax error.
+    #[error("only ON_ERROR STOP is allowed for {format} format")]
+    CopyOnErrorUnsupported { format: FormatKind },
 
     #[error("FDW private data contains unknown format tag {wire}")]
     InvalidPlanFormat { wire: i32 },
@@ -163,9 +169,10 @@ pub(crate) enum ConnectorError {
 }
 
 impl ConnectorError {
-    /// Convert only recoverable, record-local data failures to COPY's
-    /// structured rejection path. Callers must have already separated object
-    /// I/O and schema binding from row conversion.
+    /// Convert only record-local data failures that the connector detected to
+    /// COPY's structured rejection path. A PostgreSQL error keeps its original
+    /// report, and callers must have already separated object I/O and schema
+    /// binding from row conversion.
     pub(crate) fn into_copy_row_rejection(
         self,
         column_index: Option<usize>,
@@ -216,7 +223,6 @@ impl ConnectorError {
             | Self::JsonRecordTooLarge { .. }
             | Self::JsonValue { .. } => true,
             Self::JsonDatum(error) => Self::is_data_exception(error.sql_error_code()),
-            Self::Postgres(error) => Self::is_data_exception(error.sql_error_code()),
             _ => false,
         }
     }
@@ -236,12 +242,16 @@ impl ConnectorError {
             | DatumConversionError::OutOfRange { .. }
             | DatumConversionError::InvalidInput { .. }
             | DatumConversionError::InvalidUtf8 { .. } => true,
-            // PG type input reports through the conversion error chain,
-            // rather than unwinding to COPY's outer row catch.
-            DatumConversionError::Postgres(error) => {
-                Self::is_data_exception(error.sql_error_code())
-            }
-            DatumConversionError::UnsupportedServerEncoding { .. } => false,
+            DatumConversionError::Postgres(_)
+            | DatumConversionError::UnsupportedServerEncoding { .. } => false,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn unknown_option(option: &str, reason: &'static str) -> Self {
+        Self::UnknownOption {
+            option: option.into(),
+            reason,
         }
     }
 
@@ -254,11 +264,21 @@ impl ConnectorError {
     }
 
     #[inline]
-    pub(crate) fn invalid_copy_option(option: &str, reason: &'static str) -> Self {
-        Self::InvalidCopyOption {
+    pub(crate) fn conflicting_option(option: &str, reason: &'static str) -> Self {
+        Self::ConflictingOption {
             option: option.into(),
             reason,
         }
+    }
+
+    #[inline]
+    pub(crate) fn redundant_option(option: &str) -> Self {
+        Self::conflicting_option(option, "must not be specified more than once")
+    }
+
+    #[inline]
+    pub(crate) const fn invalid_path(reason: &'static str) -> Self {
+        Self::InvalidPath { reason }
     }
 
     #[inline]
@@ -282,16 +302,6 @@ impl ConnectorError {
         Self::RowConversion {
             format,
             reason: reason.into(),
-        }
-    }
-
-    #[inline]
-    pub(crate) fn json_datum(error: JsonValueError) -> Self {
-        match error {
-            JsonValueError::Postgres(error) => {
-                Self::Postgres(PgReportError::from_pg_error(error))
-            }
-            error => Self::JsonDatum(error),
         }
     }
 
@@ -331,30 +341,20 @@ impl ConnectorError {
     }
 
     #[inline]
-    pub(crate) const fn copy_not_implemented(format: FormatKind) -> Self {
-        Self::CopyNotImplemented { format }
-    }
-
-    #[inline]
     pub(crate) const fn copy_from_exact_only(format: FormatKind) -> Self {
         Self::CopyFromExactOnly { format }
     }
 
     #[inline]
-    pub(crate) fn copy_stream_io(error: std::io::Error) -> Self {
-        let sqlerrcode = Self::source_io_sql_error_code(&error)
-            .unwrap_or(PgSqlErrorCode::ERRCODE_IO_ERROR);
-        Self::CopyStreamIo {
-            sqlerrcode,
-            source: error,
-        }
+    pub(crate) const fn copy_on_error_unsupported(format: FormatKind) -> Self {
+        Self::CopyOnErrorUnsupported { format }
     }
 
     #[inline]
-    pub(crate) fn json_io(error: std::io::Error) -> Self {
+    pub(crate) fn stream_io(error: std::io::Error) -> Self {
         let sqlerrcode = Self::source_io_sql_error_code(&error)
             .unwrap_or(PgSqlErrorCode::ERRCODE_IO_ERROR);
-        Self::JsonIo {
+        Self::StreamIo {
             sqlerrcode,
             source: error,
         }
@@ -411,12 +411,15 @@ impl ConnectorError {
 impl SqlStateError for ConnectorError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
-            Self::InvalidOption { .. } => {
+            Self::UnknownOption { .. } => {
                 PgSqlErrorCode::ERRCODE_FDW_INVALID_OPTION_NAME
             }
-            Self::InvalidCopyOption { .. } => {
+            Self::InvalidOption { .. } | Self::InvalidPath { .. } => {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
             }
+            // PostgreSQL reports duplicate DefElems through
+            // errorConflictingDefElem() as a syntax error.
+            Self::ConflictingOption { .. } => PgSqlErrorCode::ERRCODE_SYNTAX_ERROR,
             Self::InvalidFormat { .. } => {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
             }
@@ -458,14 +461,16 @@ impl SqlStateError for ConnectorError {
             },
             Self::SchemaIo(error) => Self::source_io_sql_error_code(error)
                 .unwrap_or(PgSqlErrorCode::ERRCODE_IO_ERROR),
-            Self::JsonIo { sqlerrcode, .. } => *sqlerrcode,
-            Self::CopyStreamIo { sqlerrcode, .. } => *sqlerrcode,
+            Self::StreamIo { sqlerrcode, .. } => *sqlerrcode,
             Self::Copy(error) => error.sql_error_code(),
             Self::InvalidObjectUri { .. } => {
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
             }
-            Self::CopyNotImplemented { .. } | Self::CopyFromExactOnly { .. } => {
+            Self::CopyFromExactOnly { .. } => {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
+            }
+            Self::CopyOnErrorUnsupported { .. } => {
+                PgSqlErrorCode::ERRCODE_SYNTAX_ERROR
             }
             Self::InvalidPlanFormat { .. }
             | Self::InvalidFilterPlan { .. }
@@ -512,12 +517,6 @@ impl SqlStateError for ConnectorError {
                     report.contextualize("PostgreSQL datum conversion failed", None)
                 })
                 .map_err(Self::DatumConversion),
-            Self::JsonDatum(error) => error
-                .try_into_pg_report()
-                .map(|report| {
-                    report.contextualize("PostgreSQL JSON conversion failed", None)
-                })
-                .map_err(Self::JsonDatum),
             error => Err(error),
         }
     }

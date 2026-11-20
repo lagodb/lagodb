@@ -150,7 +150,7 @@ impl ParquetTypeMapping {
     }
 
     /// Typmod enforced by the decoder, before COPY's target assignment.
-    pub(in crate::format::parquet) fn decoded_typmod(field: &Field) -> i32 {
+    pub(crate) fn decoded_typmod(field: &Field) -> i32 {
         match field.data_type() {
             DataType::Decimal128(precision, scale) => {
                 numeric_typmod(u32::from(*precision), i32::from(*scale))

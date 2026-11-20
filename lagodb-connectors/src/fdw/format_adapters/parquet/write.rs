@@ -11,8 +11,8 @@ use lagodb_core::tuple::TupleSlotRow;
 
 use crate::error::ConnectorError;
 use crate::fdw::format_adapters::FormatWriteState;
-use crate::format::ParquetWriteCompression;
 use crate::format::parquet::{ParquetOutputWriter, ParquetWritePlan};
+use crate::format::{EmptyOutputPolicy, ParquetWriteCompression};
 use crate::storage::StorageOutput;
 
 const INSERT_BATCH_SIZE: i32 = 1_000;
@@ -67,6 +67,6 @@ impl FormatWriteState for ParquetFdwWriteState {
 
     fn finish(&mut self) -> Result<(), ConnectorError> {
         self.flush_batch()?;
-        self.writer.finish(false)
+        self.writer.finish(EmptyOutputPolicy::Skip)
     }
 }

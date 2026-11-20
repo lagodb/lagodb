@@ -15,8 +15,7 @@ impl StoragePath {
             return Ok(Self::Object(ObjectUri::parse(value)?));
         }
         if value.is_empty() || value.contains('\0') {
-            return Err(ConnectorError::invalid_option(
-                "path",
+            return Err(ConnectorError::invalid_path(
                 "local paths must be nonempty and contain no NUL byte",
             ));
         }

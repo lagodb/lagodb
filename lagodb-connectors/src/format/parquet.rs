@@ -1,6 +1,5 @@
 //! Parquet configuration, shared file codecs, and predicates.
 
-mod copy;
 mod filter;
 mod output_writer;
 mod read_plan;
@@ -18,7 +17,6 @@ use super::{
     ParquetWriteCompression,
 };
 
-pub(super) use copy::{ParquetCopyDestination, ParquetCopySource};
 pub(crate) use filter::{
     ParquetBoundPredicate, ParquetFilePredicate, ParquetFilterPlanner,
     ParquetPlannedPredicate,
@@ -26,7 +24,7 @@ pub(crate) use filter::{
 pub(crate) use output_writer::ParquetOutputWriter;
 pub(crate) use read_plan::ParquetReadPlan;
 pub(crate) use source::ParquetBatchSource;
-pub(crate) use type_mapping::ParquetReadMode;
+pub(crate) use type_mapping::{ParquetReadMode, ParquetTypeMapping};
 pub(crate) use write_plan::ParquetWritePlan;
 
 /// Parquet-format processor.
@@ -44,7 +42,7 @@ impl ParquetFormat {
         options: &[FormatOption<'_>],
     ) -> Result<Self, ConnectorError> {
         if let Some(option) = options.first() {
-            return Err(ConnectorError::invalid_option(
+            return Err(ConnectorError::unknown_option(
                 option.name(),
                 "is not valid for parquet",
             ));

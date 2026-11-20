@@ -9,16 +9,11 @@ mod temporal;
 
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
-use std::panic::AssertUnwindSafe;
 use std::{slice, str};
 
-use pgrx::PgTryBuilder;
 use pgrx::pg_sys::{self, JsonbIteratorToken as Token, jbvType};
 
 use crate::datum::varlena::DetoastedVarlena;
-use crate::diag::PgError;
-
-use super::JsonbValue;
 
 pub use numeric::JsonbNumeric;
 pub use temporal::JsonbTemporalParser;
@@ -37,41 +32,6 @@ pub enum JsonbRef<'a> {
 pub struct JsonbReader;
 
 impl JsonbReader {
-    /// Cold adapter for a buffered semantic value, which already owns JSON
-    /// text. Live tuple writes use `read` and never take this text path.
-    /// Keep the checked adapter's Result contract and release its temporary
-    /// input datum after either a visitor error or a caught PG error.
-    ///
-    /// # Safety
-    /// Has the backend/encoding/context requirements of `read`.
-    pub unsafe fn read_owned<R, E>(
-        value: &JsonbValue,
-        visit: impl for<'a> FnOnce(JsonbRef<'a>) -> Result<R, E>,
-    ) -> Result<R, E>
-    where
-        E: From<PgError>,
-    {
-        let mut input = None;
-        let result = PgTryBuilder::new(AssertUnwindSafe(|| {
-            // SAFETY: the caller establishes the backend/encoding/context
-            // contract. Capture input errors at this operation's boundary too.
-            let datum = unsafe { value.to_datum_checked() }
-                .map_err(E::from)?
-                .expect("jsonb_in returns non-NULL");
-            input = Some(datum);
-            // SAFETY: input stays live until the visitor and its borrows end.
-            unsafe { Self::read(datum, visit) }
-        }))
-        .catch_others(|error| Err(PgError::from(error).into()))
-        .execute();
-        if let Some(datum) = input {
-            // SAFETY: jsonb_in allocated this datum; read released all borrows
-            // on both normal return and unwinding to the operation boundary.
-            unsafe { pg_sys::pfree(datum.cast_mut_ptr()) };
-        }
-        result
-    }
-
     /// Visit a non-NULL JSONB datum without exposing borrowed storage outside
     /// its detoast lifetime. PG errors unwind through the visitor to the caller.
     ///

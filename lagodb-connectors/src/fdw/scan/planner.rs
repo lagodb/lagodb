@@ -10,8 +10,7 @@ use lagodb_core::fdw::{
 
 use crate::fdw::format_adapters::FormatScanPlanner;
 
-use super::super::{LagodbConnectors, ResolvedForeignRelation};
-use super::plan_private::ConnectorScanPrivate;
+use super::super::{LagodbConnectors, PlannedFormat, ResolvedForeignRelation};
 use super::state::ConnectorScanState;
 
 /// Planner state contains the selected format reader's scan planner. The
@@ -23,7 +22,7 @@ pub(crate) struct ConnectorScanPlanner {
 
 impl FdwScan for LagodbConnectors {
     type PlannerState = ConnectorScanPlanner;
-    type PrivateData = ConnectorScanPrivate;
+    type PrivateData = PlannedFormat;
     type State = ConnectorScanState;
 
     fn init_planner(

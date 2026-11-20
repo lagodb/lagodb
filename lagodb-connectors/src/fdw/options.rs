@@ -114,10 +114,7 @@ impl<'a> RawTableOptions<'a> {
         value: T,
     ) -> Result<(), ConnectorError> {
         if target.replace(value).is_some() {
-            return Err(ConnectorError::invalid_option(
-                name,
-                "must not be specified more than once",
-            ));
+            return Err(ConnectorError::redundant_option(name));
         }
         Ok(())
     }

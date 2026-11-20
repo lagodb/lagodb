@@ -15,7 +15,7 @@ use pgrx::pg_sys;
 use crate::error::ConnectorError;
 use crate::format::FormatKind;
 
-pub(super) struct ParquetTypeMapping;
+pub(crate) struct ParquetTypeMapping;
 
 pub(crate) use read::ParquetReadMode;
 

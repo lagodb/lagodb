@@ -42,7 +42,7 @@ impl TextFormat {
         let mut builder = DelimitedOptionsBuilder::default();
         for option in options.iter().copied() {
             if !builder.consume(option)? {
-                return Err(ConnectorError::invalid_option(
+                return Err(ConnectorError::unknown_option(
                     option.name(),
                     "is not valid for text",
                 ));

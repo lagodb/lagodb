@@ -1299,10 +1299,16 @@ LagodbCopyFromExecutor(CopyFromState cstate,
 							 rejection_location != NULL ?
 							 errdetail("input location: %s", rejection_location) : 0,
 							 rejection_column >= 0 ?
-							 errdetail_log("input column index: %d", rejection_column) : 0,
-							 LAGODB_PG17_GE ?
-							 errhint("use ON_ERROR IGNORE to skip format conversion errors") : 0));
+							 errdetail_log("input column index: %d", rejection_column) : 0));
 #if LAGODB_PG17_GE
+
+				/*
+				 * A source that saved a soft input error stopped converting this
+				 * row before returning.  As in CopyFrom() below, resetting
+				 * error_occurred prepares ErrorSaveContext for the next row
+				 * because ON_ERROR IGNORE does not request error details.
+				 */
+				cstate->escontext->error_occurred = false;
 				cstate->num_errors++;
 				if (cstate->opts.log_verbosity == COPY_LOG_VERBOSITY_VERBOSE)
 					ereport(NOTICE,
@@ -2348,6 +2354,20 @@ List *
 lagodb_routed_copy_from_attnums(CopyFromState state)
 {
 	return state->attnumlist;
+}
+
+/*
+ * BeginCopyFrom() allocates the ErrorSaveContext only when ON_ERROR is not
+ * STOP, so NULL means that input errors are hard.
+ */
+Node *
+lagodb_routed_copy_from_escontext(CopyFromState state)
+{
+#if LAGODB_PG17_GE
+	return (Node *) state->escontext;
+#else
+	return NULL;
+#endif
 }
 
 /* LAGODB END */

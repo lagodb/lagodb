@@ -10,44 +10,72 @@ use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 
-use super::{InputFile, StoragePath};
+use super::{InputFile, ObjectUri};
 
-pub(crate) struct ResolvedStorageLocation {
+/// A local server path, or an object URI bound to the storage server and
+/// user whose profile authorizes it.
+pub(crate) enum ResolvedStorageLocation {
+    Local(Box<str>),
+    Object(ObjectLocation),
+}
+
+pub(crate) struct ObjectLocation {
+    uri: ObjectUri,
     server_oid: pg_sys::Oid,
     effective_user: pg_sys::Oid,
-    object: StoragePath,
 }
 
 impl ResolvedStorageLocation {
+    pub(crate) fn open_file(&self) -> Result<InputFile, ConnectorError> {
+        match self {
+            Self::Local(path) => {
+                InputFile::local(Path::new(&**path)).map_err(ConnectorError::from)
+            }
+            Self::Object(object) => object
+                .acquire_object_access_from_pg_gucs()?
+                .open()
+                .map(|file| InputFile::object(file, object.key()))
+                .map_err(ConnectorError::from),
+        }
+    }
+}
+
+impl ObjectLocation {
     pub(crate) fn new(
-        object: StoragePath,
+        uri: ObjectUri,
         server_oid: pg_sys::Oid,
         effective_user: pg_sys::Oid,
     ) -> Self {
         Self {
-            object,
+            uri,
             server_oid,
             effective_user,
         }
     }
 
-    pub(crate) fn path(&self) -> &StoragePath {
-        &self.object
+    pub(crate) fn key(&self) -> &str {
+        self.uri.key()
+    }
+
+    pub(crate) fn normalized_prefix(&self) -> String {
+        let key = self.uri.key();
+        if key.ends_with('/') {
+            key.to_owned()
+        } else {
+            format!("{key}/")
+        }
     }
 
     pub(crate) fn acquire_object_access(
         &self,
         manager: &StorageManager,
     ) -> Result<ObjectAccess, ConnectorError> {
-        let StoragePath::Object(object) = &self.object else {
-            unreachable!("object-store access is requested only for remote locations")
-        };
         manager
             .acquire_object_access::<StorageProfileConfig>(
                 self.server_oid,
                 self.effective_user,
-                object.bucket(),
-                object.key(),
+                self.uri.bucket(),
+                self.uri.key(),
             )
             .map_err(ConnectorError::storage_acquire)
     }
@@ -57,47 +85,14 @@ impl ResolvedStorageLocation {
         manager: &StorageManager,
         prefix: &str,
     ) -> Result<ObjectPrefixAccess, ConnectorError> {
-        let StoragePath::Object(object) = &self.object else {
-            unreachable!("object-store access is requested only for remote locations")
-        };
         manager
             .acquire_prefix_access::<StorageProfileConfig>(
                 self.server_oid,
                 self.effective_user,
-                object.bucket(),
+                self.uri.bucket(),
                 prefix,
             )
             .map_err(ConnectorError::storage_acquire)
-    }
-
-    pub(crate) fn local_path(&self) -> Option<&str> {
-        match &self.object {
-            StoragePath::Local(path) => Some(path),
-            StoragePath::Object(_) => None,
-        }
-    }
-
-    pub(crate) fn open_file(&self) -> Result<InputFile, ConnectorError> {
-        if let Some(path) = self.local_path() {
-            return InputFile::local(Path::new(path)).map_err(ConnectorError::from);
-        }
-        self.acquire_object_access_from_pg_gucs()?
-            .open()
-            .map(|file| InputFile::object(file, self.object_key()))
-            .map_err(ConnectorError::from)
-    }
-
-    pub(crate) fn object_key(&self) -> &str {
-        self.object.key()
-    }
-
-    pub(crate) fn normalized_prefix(&self) -> String {
-        let key = self.object.key();
-        if key.ends_with('/') {
-            key.to_owned()
-        } else {
-            format!("{key}/")
-        }
     }
 
     pub(crate) fn acquire_object_access_from_pg_gucs(

@@ -149,11 +149,4 @@ impl PostgresType {
             format,
         }
     }
-
-    pub(crate) fn numeric(format: FormatKind, precision: i32, scale: i32) -> Self {
-        let typmod = ((precision << 16) | (scale & 0x7ff))
-            + i32::try_from(std::mem::size_of::<i32>())
-                .expect("i32 size fits in i32");
-        Self::with_typmod(format, pg_sys::NUMERICOID, typmod)
-    }
 }

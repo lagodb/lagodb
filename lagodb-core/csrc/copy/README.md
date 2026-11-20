@@ -79,17 +79,22 @@ their memory-context and row-encoding contract.
 
 Typed input reports format conversion failures as structured row rejections.
 The fork alone applies PostgreSQL `ON_ERROR` policy and owns skipped/processed
-counts. A rejection carries its original SQLSTATE, so `ON_ERROR STOP` does not
-collapse numeric, datetime, encoding, and other class-22 failures into one
-generic text-input error. PostgreSQL 15 and 16 have no `ON_ERROR` option, so
-every rejection there ends the statement with its SQLSTATE. Sources also expose a monotonic physical-byte
-counter; the fork updates `PROGRESS_COPY_BYTES_PROCESSED` after every callback
-outcome, including rejected and final reads. Each accepted typed row reports
-the materialized pass-by-reference Datum footprint through the same callback,
-so PostgreSQL's existing multi-insert byte limit remains effective without a
-second datum traversal. Schema, object I/O, provider-state, and internal
-conversion failures remain fatal and cross the single typed callback error
-boundary.
+counts. Under `ON_ERROR IGNORE`, a source may pass the state's
+`ErrorSaveContext` to PostgreSQL's soft-error type input, as text COPY does; it
+then stops converting the row and returns a rejection, which the fork handles
+before evaluating defaults. A source never catches a hard PostgreSQL error,
+because only a (sub)transaction abort may resume after one. A rejection
+carries its original SQLSTATE, so `ON_ERROR STOP` does not collapse numeric,
+datetime, encoding, and other class-22 failures into one generic text-input
+error. PostgreSQL 15 and 16 have no `ON_ERROR` option, so every rejection
+there ends the statement with its SQLSTATE. Sources also expose a monotonic
+physical-byte counter; the fork updates `PROGRESS_COPY_BYTES_PROCESSED` after
+every callback outcome, including rejected and final reads. Each accepted
+typed row reports the materialized pass-by-reference Datum footprint through
+the same callback, so PostgreSQL's existing multi-insert byte limit remains
+effective without a second datum traversal. Schema, object I/O,
+provider-state, and internal conversion failures remain fatal and cross the
+single typed callback error boundary.
 
 COPY TO similarly selects PostgreSQL byte encoding or a typed slot
 destination once per execution. No format or storage-provider identity appears

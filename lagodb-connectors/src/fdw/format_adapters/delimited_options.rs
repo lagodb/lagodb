@@ -1,5 +1,7 @@
 //! Relation-dependent COPY options assembled once at FDW scan startup.
 
+use std::ffi::CStr;
+
 use lagodb_core::fdw::ColumnRequirements;
 use lagodb_core::handles::RelationHandle;
 use lagodb_core::storage::foreign::ForeignOptionView;
@@ -25,15 +27,12 @@ impl DelimitedScanOptions {
         requirements: &ColumnRequirements,
     ) -> Result<(), ConnectorError> {
         if !requirements.needs_all_columns() {
-            let columns = relation.live_columns();
-            let mut columns_by_attno = vec![None; relation.natts()];
-            for column in columns.iter() {
-                columns_by_attno[(column.attno() - 1) as usize] = Some(column);
-            }
-            let selected = requirements
-                .user_columns()
-                .filter_map(|attno| columns_by_attno[(attno - 1) as usize])
-                .map(|column| column.name());
+            let attributes = relation.tuple_desc_handle().attributes();
+            // SAFETY: planner requirements name live attributes; NameData is
+            // NUL-terminated and owned by the live relation descriptor.
+            let selected = requirements.user_columns().map(|attno| unsafe {
+                CStr::from_ptr(attributes[(attno - 1) as usize].attname.data.as_ptr())
+            });
             // An empty selection must still emit the option: omitting it
             // would request conversion of all columns.
             self.options = DelimitedOptions::append_identifier_list_option(

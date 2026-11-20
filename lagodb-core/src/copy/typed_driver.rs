@@ -13,7 +13,10 @@ use super::context::{
 };
 use super::pg::CopyToShutdown;
 use super::typed_callback::{TypedDestinationGuard, TypedSourceGuard};
-use super::{CopyColumnLayout, CopyDatumSource, CopyError, CopyTupleDestination, pg};
+use super::{
+    CopyColumnLayout, CopyDatumSource, CopyError, CopyOnError, CopyTupleDestination,
+    pg,
+};
 
 pub struct TypedCopyFromSpec<'statement, 'parse> {
     statement: &'statement CopyStatement<'statement>,
@@ -80,12 +83,14 @@ impl<'statement, 'parse> TypedCopyFromDriver<'statement, 'parse> {
         })
     }
 
-    /// Constructs a source bound to PostgreSQL's accepted column layout before
-    /// starting the executor. Drop releases the COPY state if construction fails.
+    /// Constructs a source bound to PostgreSQL's accepted column layout and
+    /// `ON_ERROR` choice before starting the executor. Construction errors,
+    /// including PostgreSQL ERRORs, release the COPY state through Drop.
     pub fn execute(
         mut self,
         open_source: impl FnOnce(
             &CopyColumnLayout,
+            CopyOnError,
         ) -> Result<Box<dyn CopyDatumSource>, CopyError>,
     ) -> Result<u64, CopyError> {
         let state = self.execution.state;
@@ -98,8 +103,18 @@ impl<'statement, 'parse> TypedCopyFromDriver<'statement, 'parse> {
                 pg::CopyBridge::routed_from_attnums(state),
             )
         }?;
-        let mut source = open_source(&layout)?;
-        let mut source_guard = TypedSourceGuard::install(source.as_mut(), layout);
+        // SAFETY: begin prepared a live COPY state.
+        let soft_errors = unsafe { pg::CopyBridge::routed_from_escontext(state) };
+        let on_error = if soft_errors.is_null() {
+            CopyOnError::Stop
+        } else {
+            CopyOnError::Ignore
+        };
+        let mut source = self
+            .execution
+            .open_source(|| open_source(&layout, on_error))?;
+        let mut source_guard =
+            TypedSourceGuard::install(source.as_mut(), layout, soft_errors);
         let source_context = source_guard.callback_context();
         let result = unsafe {
             PgTryBuilder::new(AssertUnwindSafe(|| {
@@ -204,15 +219,24 @@ impl<'statement, 'parse, 'destination>
                 pg::CopyBridge::routed_to_attnums(state),
             )
         };
-        let destination_guard = match layout.and_then(|layout| {
-            TypedDestinationGuard::install(spec.destination, layout)
-        }) {
-            Ok(guard) => guard,
+        // The destination binds its output plan through PostgreSQL catalogs.
+        // Capture those errors like the other phases, so the state ends below
+        // before this function returns and the preparation is disposed.
+        let destination = spec.destination;
+        let initialized = layout.and_then(|layout| {
+            PgTryBuilder::new(AssertUnwindSafe(|| destination.initialize(&layout)))
+                .catch_others(|error| Err(PgError::from_caught(error).into()))
+                .execute()
+                .map(|()| layout)
+        });
+        let layout = match initialized {
+            Ok(layout) => layout,
             Err(error) => {
                 let _ = Self::end_state(state, CopyToShutdown::Abort);
                 return Err(error);
             }
         };
+        let destination_guard = TypedDestinationGuard::install(destination, layout);
 
         Ok(Self {
             state,

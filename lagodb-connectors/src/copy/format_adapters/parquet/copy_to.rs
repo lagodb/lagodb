@@ -1,6 +1,5 @@
 //! Tuple-slot-to-Parquet destination for PostgreSQL COPY TO.
 
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use lagodb_arrow::BoundDatumBuffer;
@@ -9,16 +8,13 @@ use lagodb_core::copy::{
     CopyColumnLayout, CopyError, CopyOutputRow, CopyTupleDestination,
 };
 use lagodb_core::datum::PgType;
-use lagodb_core::diag::PgReportError;
-use pgrx::PgTryBuilder;
 
 use crate::error::ConnectorError;
-use crate::format::{FormatKind, ParquetWriteCompression};
+use crate::format::parquet::{ParquetOutputWriter, ParquetWritePlan};
+use crate::format::{EmptyOutputPolicy, FormatKind, ParquetWriteCompression};
 use crate::storage::StorageOutput;
 
-use super::super::super::copy::{FormatCopyDestination, FormatCopyOutput};
-use super::super::output_writer::ParquetOutputWriter;
-use super::super::write_plan::ParquetWritePlan;
+use super::super::{FormatCopyDestination, FormatCopyOutput};
 
 const COPY_TO_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
@@ -51,7 +47,7 @@ impl ReadyParquetCopyDestination {
 
     fn finish(&mut self) -> Result<(), ConnectorError> {
         self.flush_batch()?;
-        self.writer.finish(true)
+        self.writer.finish(EmptyOutputPolicy::EmitFile)
     }
 
     fn bytes_written(&self) -> u64 {
@@ -60,14 +56,14 @@ impl ReadyParquetCopyDestination {
 }
 
 /// COPY TO destination initialized from PostgreSQL's actual output TupleDesc.
-pub(in crate::format) struct ParquetCopyDestination {
+pub(in crate::copy) struct ParquetCopyDestination {
     output: Option<StorageOutput>,
     compression: ParquetWriteCompression,
     ready: Option<ReadyParquetCopyDestination>,
 }
 
 impl ParquetCopyDestination {
-    pub(in crate::format) fn new(
+    pub(in crate::copy) fn new(
         output: StorageOutput,
         compression: ParquetWriteCompression,
     ) -> Self {
@@ -88,21 +84,15 @@ impl CopyTupleDestination for ParquetCopyDestination {
             )
             .into());
         }
-        let plan = PgTryBuilder::new(AssertUnwindSafe(|| {
-            ParquetWritePlan::bind(layout.columns().iter().enumerate().map(
-                |(index, column)| {
-                    (
-                        column.name(),
-                        PgType::new(column.type_oid(), column.type_mod()),
-                        index,
-                    )
-                },
-            ))
-        }))
-        .catch_others(|error| {
-            Err(ConnectorError::Postgres(PgReportError::from_caught(error)))
-        })
-        .execute()?;
+        let plan = ParquetWritePlan::bind(layout.columns().iter().enumerate().map(
+            |(index, column)| {
+                (
+                    column.name(),
+                    PgType::new(column.type_oid(), column.type_mod()),
+                    index,
+                )
+            },
+        ))?;
         let schema = Arc::clone(plan.schema());
         let buffer = plan.into_datum_buffer()?;
         let output = self

@@ -4,75 +4,17 @@ use std::io;
 
 use lagodb_core::copy::{CopyDataSource, CopyError};
 use lagodb_core::fdw::{
-    CopyDocumentSource, CopyFromScan, ForeignPathBuilder, ForeignPathContext,
-    ForeignPathKeys, ForeignPathSpec, ForeignPlanContext, ForeignPlanSpec,
-    ForeignRelSize, ForeignRelSizeContext, ReScanForeignScanContext,
-    ScanProjectionPolicy, ScanSlotWriter, StartForeignScanContext,
+    CopyDocumentSource, CopyFromScan, ReScanForeignScanContext, ScanSlotWriter,
+    StartForeignScanContext,
 };
 use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 use crate::fdw::LagodbConnectors;
-use crate::format::{FormatKind, StreamCompressionOptions, StreamDecoder};
+use crate::format::{StreamCompressionOptions, StreamDecoder};
 use crate::storage::{InputFile, InputFiles};
 
-use super::{FormatScanPlanner, FormatScanPrivate, FormatScanState};
-
-const DEFAULT_ESTIMATED_ROWS: f64 = 1_000.0;
-const DEFAULT_ESTIMATED_WIDTH: i32 = 32;
-
-pub(super) struct DelimitedScanPlanner {
-    kind: FormatKind,
-}
-
-impl DelimitedScanPlanner {
-    pub(super) const fn new(kind: FormatKind) -> Self {
-        Self { kind }
-    }
-}
-
-impl FormatScanPlanner for DelimitedScanPlanner {
-    fn estimate(
-        &mut self,
-        _context: &ForeignRelSizeContext<'_>,
-    ) -> Result<ForeignRelSize, ConnectorError> {
-        Ok(ForeignRelSize::new(
-            DEFAULT_ESTIMATED_ROWS,
-            DEFAULT_ESTIMATED_WIDTH,
-        ))
-    }
-
-    fn build_paths(
-        &self,
-        _context: &ForeignPathContext<'_>,
-        paths: &mut ForeignPathBuilder<FormatScanPrivate>,
-    ) -> Result<(), ConnectorError> {
-        paths.push(ForeignPathSpec::new(
-            DEFAULT_ESTIMATED_ROWS,
-            0.0,
-            DEFAULT_ESTIMATED_ROWS,
-            FormatScanPrivate::new(self.kind),
-        ));
-        Ok(())
-    }
-
-    fn supports_pathkeys(
-        &self,
-        _context: &ForeignPathContext<'_>,
-        _pathkeys: &mut ForeignPathKeys,
-    ) -> Result<bool, ConnectorError> {
-        Ok(false)
-    }
-
-    fn build_plan(
-        &mut self,
-        context: &ForeignPlanContext<'_, LagodbConnectors>,
-    ) -> Result<ForeignPlanSpec<FormatScanPrivate>, ConnectorError> {
-        let mut plan = ForeignPlanSpec::new(context.path_private().to_owned());
-        plan.projection_policy = ScanProjectionPolicy::RequireRelationShape;
-        Ok(plan)
-    }
-}
+use super::FormatScanState;
 
 pub(super) struct DelimitedScanState {
     decoder: CopyFromScan,
@@ -151,7 +93,7 @@ impl CopyDocumentSource for DelimitedObjectSource {
         let file = file?;
         let compression = self.compression.for_file(&file);
         let decoder = StreamDecoder::new(file, compression)
-            .map_err(ConnectorError::copy_stream_io)?;
+            .map_err(ConnectorError::stream_io)?;
         self.decoder = Some(decoder);
         Ok(true)
     }
@@ -170,13 +112,13 @@ impl CopyDataSource for DelimitedObjectSource {
         min_read: usize,
     ) -> Result<usize, CopyError> {
         let decoder = self.decoder.as_mut().ok_or_else(|| {
-            ConnectorError::copy_stream_io(io::Error::other(
+            ConnectorError::stream_io(io::Error::other(
                 "COPY parser requested bytes without an active object",
             ))
         })?;
         let read = decoder
             .read_at_least(output, min_read)
-            .map_err(ConnectorError::copy_stream_io)?;
+            .map_err(ConnectorError::stream_io)?;
         Ok(read)
     }
 }

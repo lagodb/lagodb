@@ -71,24 +71,12 @@ impl StorageOutput {
         kind: ObjectLocationKind,
         prefix_target_file_bytes: impl FnOnce() -> NonZeroU64,
     ) -> Result<Self, ConnectorError> {
-        if let Some(path) = location.local_path() {
-            if !Path::new(path).is_absolute() {
-                return Err(PgReportError::from_message(
-                    PgSqlErrorCode::ERRCODE_INVALID_NAME,
-                    "relative path not allowed for local file output",
-                )
-                .into());
+        let location = match location {
+            ResolvedStorageLocation::Local(path) => {
+                return Self::resolve_local(path, kind, prefix_target_file_bytes);
             }
-            return Ok(match kind {
-                ObjectLocationKind::Exact => Self::LocalExact {
-                    path: Some(PathBuf::from(path)),
-                },
-                ObjectLocationKind::Prefix => Self::LocalPrefix {
-                    keys: PartitionedKeyGenerator::new(path.to_owned()),
-                    target_file_bytes: prefix_target_file_bytes(),
-                },
-            });
-        }
+            ResolvedStorageLocation::Object(location) => location,
+        };
         let manager = StorageManager::from_pg_gucs()?;
         match kind {
             ObjectLocationKind::Exact => Ok(Self::Exact {
@@ -103,6 +91,29 @@ impl StorageOutput {
                 })
             }
         }
+    }
+
+    fn resolve_local(
+        path: &str,
+        kind: ObjectLocationKind,
+        prefix_target_file_bytes: impl FnOnce() -> NonZeroU64,
+    ) -> Result<Self, ConnectorError> {
+        if !Path::new(path).is_absolute() {
+            return Err(PgReportError::from_message(
+                PgSqlErrorCode::ERRCODE_INVALID_NAME,
+                "relative path not allowed for local file output",
+            )
+            .into());
+        }
+        Ok(match kind {
+            ObjectLocationKind::Exact => Self::LocalExact {
+                path: Some(PathBuf::from(path)),
+            },
+            ObjectLocationKind::Prefix => Self::LocalPrefix {
+                keys: PartitionedKeyGenerator::new(path.to_owned()),
+                target_file_bytes: prefix_target_file_bytes(),
+            },
+        })
     }
 
     /// PostgreSQL opens and truncates an exact local COPY file before running

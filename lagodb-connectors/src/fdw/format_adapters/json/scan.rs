@@ -1,83 +1,26 @@
 //! Native NDJSON Foreign Table scan.
 
 use std::ffi::CStr;
-use std::panic::AssertUnwindSafe;
 
-use lagodb_core::diag::PgReportError;
 use lagodb_core::fdw::{
-    ForeignPathBuilder, ForeignPathContext, ForeignPathKeys, ForeignPathSpec,
-    ForeignPlanContext, ForeignPlanSpec, ForeignRelSize, ForeignRelSizeContext,
-    ReScanForeignScanContext, ScanOutputColumn, ScanProjectionPolicy, ScanSlotWriter,
+    ReScanForeignScanContext, ScanOutputColumn, ScanSlotWriter,
     StartForeignScanContext,
 };
-use pgrx::{PgTryBuilder, pg_sys};
+use pgrx::pg_sys;
 
 use crate::error::ConnectorError;
 use crate::fdw::LagodbConnectors;
-use crate::fdw::format_adapters::{
-    FormatScanPlanner, FormatScanPrivate, FormatScanState,
-};
-use crate::format::json::{
-    JsonColumnPlan, JsonInputValue, JsonRecordDecoder, JsonRecordStream,
-};
+use crate::fdw::format_adapters::FormatScanState;
+use crate::format::json::{JsonColumnPlan, JsonRecordDecoder, JsonRecordStream};
 use crate::format::{FormatKind, StreamCompressionOptions};
 use crate::gucs::ReadConfig;
 use crate::storage::InputFiles;
-
-const DEFAULT_ESTIMATED_ROWS: f64 = 1_000.0;
-const DEFAULT_ESTIMATED_WIDTH: i32 = 32;
-
-pub(super) struct JsonScanPlanner;
-
-impl FormatScanPlanner for JsonScanPlanner {
-    fn estimate(
-        &mut self,
-        _context: &ForeignRelSizeContext<'_>,
-    ) -> Result<ForeignRelSize, ConnectorError> {
-        Ok(ForeignRelSize::new(
-            DEFAULT_ESTIMATED_ROWS,
-            DEFAULT_ESTIMATED_WIDTH,
-        ))
-    }
-
-    fn build_paths(
-        &self,
-        _context: &ForeignPathContext<'_>,
-        paths: &mut ForeignPathBuilder<FormatScanPrivate>,
-    ) -> Result<(), ConnectorError> {
-        paths.push(ForeignPathSpec::new(
-            DEFAULT_ESTIMATED_ROWS,
-            0.0,
-            DEFAULT_ESTIMATED_ROWS,
-            FormatScanPrivate::new(FormatKind::Json),
-        ));
-        Ok(())
-    }
-
-    fn supports_pathkeys(
-        &self,
-        _context: &ForeignPathContext<'_>,
-        _pathkeys: &mut ForeignPathKeys,
-    ) -> Result<bool, ConnectorError> {
-        Ok(false)
-    }
-
-    fn build_plan(
-        &mut self,
-        context: &ForeignPlanContext<'_, LagodbConnectors>,
-    ) -> Result<ForeignPlanSpec<FormatScanPrivate>, ConnectorError> {
-        let mut plan = ForeignPlanSpec::new(context.path_private().to_owned());
-        plan.projection_policy = ScanProjectionPolicy::RequireRelationShape;
-        Ok(plan)
-    }
-}
 
 pub(super) struct JsonScanState {
     stream: JsonRecordStream,
     plan: JsonColumnPlan,
     decoder: JsonRecordDecoder,
     outputs: Box<[ScanOutputColumn]>,
-    c_string: Vec<u8>,
 }
 
 impl JsonScanState {
@@ -86,28 +29,25 @@ impl JsonScanState {
         files: InputFiles,
         compression: StreamCompressionOptions,
     ) -> Result<Self, ConnectorError> {
-        let live = context.relation.live_columns();
-        let mut columns_by_attno = vec![None; context.relation.natts()];
-        for column in live.iter() {
-            column.name().to_str().map_err(|_| {
-                ConnectorError::invalid_object_schema(
-                    FormatKind::Json,
-                    "PostgreSQL column names must be valid UTF-8 for JSON",
-                )
-            })?;
-            columns_by_attno[(column.attno() - 1) as usize] = Some(column);
-        }
+        let attributes = context.relation.tuple_desc_handle().attributes();
         let outputs = context.output_layout.columns().to_vec().into_boxed_slice();
-        let fields = outputs.iter().map(|output| {
-            let index = (output.attno() - 1) as usize;
-            let column = columns_by_attno[index]
-                .expect("a scan output column always names a live attribute");
-            let name = column
-                .name()
-                .to_str()
-                .expect("all live JSON column names were validated as UTF-8");
-            (name, column.type_oid(), column.type_mod())
-        });
+        // The relation-shaped scan outputs every live attribute.
+        let fields = outputs
+            .iter()
+            .map(|output| {
+                let attribute = &attributes[(output.attno() - 1) as usize];
+                // SAFETY: NameData is NUL-terminated and owned by the live
+                // relation descriptor for this begin callback.
+                let name = unsafe { CStr::from_ptr(attribute.attname.data.as_ptr()) };
+                let name = name.to_str().map_err(|_| {
+                    ConnectorError::invalid_object_schema(
+                        FormatKind::Json,
+                        "PostgreSQL column names must be valid UTF-8 for JSON",
+                    )
+                })?;
+                Ok((name, attribute.atttypid, attribute.atttypmod))
+            })
+            .collect::<Result<Vec<_>, ConnectorError>>()?;
         let plan = JsonColumnPlan::bind(fields)?;
         let max_record_bytes = ReadConfig::from_guc().json_max_record_bytes();
         Ok(Self {
@@ -115,7 +55,6 @@ impl JsonScanState {
             decoder: JsonRecordDecoder::new(plan.len()),
             plan,
             outputs,
-            c_string: Vec::new(),
         })
     }
 }
@@ -129,52 +68,32 @@ impl FormatScanState for JsonScanState {
             return Ok(false);
         };
         self.decoder.decode(&self.plan, record, logical_line)?;
-        let result = PgTryBuilder::new(AssertUnwindSafe(|| {
-            // SAFETY: outputs were copied from this scan's Begin-time
-            // layout and every destination is written exactly once.
-            let mut writer = unsafe { output.datum_writer() };
-            for (index, (column, destination)) in self
-                .plan
-                .columns()
-                .iter()
-                .zip(self.outputs.iter().copied())
-                .enumerate()
-            {
-                let value =
-                    self.decoder.value(record, column, index, logical_line)?;
-                match value {
-                    JsonInputValue::Null => unsafe {
-                        writer.write(destination, pg_sys::Datum::from(0), true);
-                    },
-                    JsonInputValue::Bytes(value) => {
-                        self.c_string.clear();
-                        self.c_string.extend_from_slice(value);
-                        self.c_string.push(0);
-                        // SAFETY: serde_json validation excludes literal
-                        // NUL bytes and this state appended one terminator.
-                        let value = unsafe {
-                            CStr::from_bytes_with_nul_unchecked(&self.c_string)
-                        };
-                        // SAFETY: the input plan was bound to this exact
-                        // destination OID and typmod at Begin.
-                        let datum = unsafe { column.input_datum(value) };
-                        unsafe { writer.write(destination, datum, false) };
-                    }
-                    JsonInputValue::CStr(value) => {
-                        // SAFETY: the decoder's reusable buffer is valid
-                        // through this synchronous input-function call.
-                        let datum = unsafe { column.input_datum(value) };
-                        unsafe { writer.write(destination, datum, false) };
-                    }
-                }
+        // SAFETY: outputs were copied from this scan's Begin-time layout and
+        // every destination is written exactly once.
+        let mut writer = unsafe { output.datum_writer() };
+        for (index, (column, destination)) in self
+            .plan
+            .columns()
+            .iter()
+            .zip(self.outputs.iter().copied())
+            .enumerate()
+        {
+            // SAFETY: record was decoded above with this plan, and
+            // ForeignNext selected the per-tuple context for this callback.
+            // PG input errors unwind to the core scan callback boundary.
+            let datum = unsafe {
+                self.decoder
+                    .datum(record, column, index, logical_line, None)
+            }?;
+            // SAFETY: the input codec was bound to this destination's type.
+            unsafe {
+                writer.write(
+                    destination,
+                    datum.unwrap_or(pg_sys::Datum::from(0)),
+                    datum.is_none(),
+                );
             }
-            Ok::<(), ConnectorError>(())
-        }))
-        .catch_others(|error| {
-            Err(ConnectorError::Postgres(PgReportError::from_caught(error)))
-        })
-        .execute();
-        result?;
+        }
         Ok(true)
     }
 

@@ -7,9 +7,14 @@ use lagodb_core::fdw::{
     ModifySlot,
 };
 
+use lagodb_core::handles::RelationHandle;
+use pgrx::pg_sys;
+
 use crate::error::ConnectorError;
+use crate::fdw::ResolvedForeignRelation;
 use crate::fdw::format_adapters::FormatWriteState;
 use crate::format::FormatKind;
+use crate::gucs::WriteConfig;
 
 pub(crate) struct ConnectorModifyState {
     format: FormatKind,
@@ -17,8 +22,21 @@ pub(crate) struct ConnectorModifyState {
 }
 
 impl ConnectorModifyState {
-    pub(crate) fn new(format: FormatKind, inner: Box<dyn FormatWriteState>) -> Self {
-        Self { format, inner }
+    /// Open the relation's output and bind the selected format writer once
+    /// for both planned modify and COPY/partition-routed INSERT.
+    pub(crate) fn begin(
+        selected: ResolvedForeignRelation,
+        relation: &RelationHandle<'_>,
+        effective_user: pg_sys::Oid,
+    ) -> Result<Self, ConnectorError> {
+        let format = selected.kind();
+        let (writer, target) = selected.into_write_parts(effective_user)?;
+        let output =
+            format.output(&target, || WriteConfig::from_guc().target_file_bytes())?;
+        Ok(Self {
+            format,
+            inner: writer.begin(relation, output)?,
+        })
     }
 }
 

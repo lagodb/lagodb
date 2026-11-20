@@ -4,7 +4,7 @@ use pgrx::{AnyNumeric, pg_sys};
 
 use super::{
     Decimal128NumericCodec, DecimalCodecError, MAX_NDIGITS, NumericExternal,
-    numeric_recv_external, receive_numeric_wire_datum,
+    receive_numeric_wire, receive_numeric_wire_datum,
 };
 
 impl Decimal128NumericCodec {
@@ -15,14 +15,19 @@ impl Decimal128NumericCodec {
     /// `AnyNumeric::try_from(&str)` and `From<i128>` implementations use,
     /// which is the dominant cost of decimal columns on million-row scans.
     ///
-    /// `numeric_recv` also runs `apply_typmod`, so a value that does not fit
-    /// `NUMERIC(precision, scale)` is reported as
-    /// [`DecimalCodecError::ValueOutOfRange`] rather than silently truncated.
+    /// A value that does not fit `NUMERIC(precision, scale)` is reported as
+    /// [`DecimalCodecError::ValueOutOfRange`] before `numeric_recv`, whose
+    /// `apply_typmod` would reject it with a hard ERROR. Other PG errors
+    /// unwind to the enclosing provider/FFI boundary.
     pub fn decode(&self, unscaled: i128) -> Result<AnyNumeric, DecimalCodecError> {
+        self.check_precision(unscaled)?;
         let external = NumericExternal::from_decimal128(unscaled, self.scale);
-        // SAFETY: only callable from a PostgreSQL backend thread; see the
-        // safety section on `numeric_recv_external`.
-        unsafe { numeric_recv_external(&external, self.typmod(), self) }
+        let mut wire = [0u8; 8 + MAX_NDIGITS * 2];
+        let len = external.wire_byte_len();
+        external.write_be_bytes(&mut wire[..len]);
+        // SAFETY: the codec produced a complete numeric_recv wire value that
+        // satisfies this typmod; decoding runs on a PostgreSQL backend thread.
+        Ok(unsafe { receive_numeric_wire(&mut wire[..len], self.typmod()) })
     }
 
     /// Decode directly into the current memory context without an AnyNumeric

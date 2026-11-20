@@ -93,10 +93,8 @@ pub enum DecimalCodecError {
     )]
     ScaleOutOfRange { precision: u32, scale: u32 },
 
-    /// `numeric_recv` rejected the value, e.g. because it exceeds the typmod
-    /// `(precision, scale)` constraint. The message is the PostgreSQL ereport
-    /// text. Other categories of `ereport(ERROR, ...)` (OOM, query cancel,
-    /// internal errors, ...) are *not* mapped here; they propagate.
+    /// The value does not fit the codec's `(precision, scale)` contract.
+    /// The codec detects this itself; PostgreSQL ERRORs are never mapped here.
     #[error(
         "Decimal128 value out of range for NUMERIC({precision}, {scale}): {message}"
     )]
@@ -106,9 +104,9 @@ pub enum DecimalCodecError {
         message: String,
     },
 
-    /// `numeric_recv` rejected the wire bytes as malformed. This indicates a
-    /// codec bug rather than a data error and is surfaced as its own variant
-    /// so the caller can react accordingly (typically: log + abort).
+    /// A PostgreSQL NUMERIC binary representation is malformed. This
+    /// indicates a codec bug rather than a data error and is surfaced as its
+    /// own variant so the caller can react accordingly (typically: abort).
     #[error(
         "Decimal128 codec produced an invalid NUMERIC binary representation: {message}"
     )]
@@ -281,8 +279,8 @@ fn decimal_digit_count(mut value: u128) -> u32 {
 /// pgrx's `AnyNumeric::try_from(&str)` and `From<i128>` fall back to for
 /// out-of-`i64` values.
 ///
-/// The struct is `Copy` and the constructor is two integer comparisons, so
-/// reconstructing it per cell from a `PrimitiveType::Decimal { precision,
+/// The struct is `Copy` and the constructor is two integer comparisons plus
+/// one bounded power of ten, so reconstructing it per cell from a `PrimitiveType::Decimal { precision,
 /// scale }` is effectively free. Hoisting it to a per-column extractor plan
 /// in `IcebergScan::scan_begin` is the cleaner architectural shape (build a
 /// `Vec<ColumnExtractor>` once, then dispatch per-cell without re-reading
@@ -292,6 +290,8 @@ fn decimal_digit_count(mut value: u128) -> u32 {
 pub struct Decimal128NumericCodec {
     precision: u32,
     scale: u32,
+    /// Largest unscaled magnitude with `precision` digits, `10^precision - 1`.
+    max_unscaled: i128,
 }
 
 impl Decimal128NumericCodec {
@@ -318,7 +318,11 @@ impl Decimal128NumericCodec {
         // `numeric_recv` dscale bound, but assert it explicitly so future
         // changes cannot silently widen the constructor.
         debug_assert!(scale <= NUMERIC_DSCALE_MASK as u32);
-        Ok(Self { precision, scale })
+        Ok(Self {
+            precision,
+            scale,
+            max_unscaled: 10_i128.pow(precision) - 1,
+        })
     }
 
     pub fn precision(&self) -> u32 {
@@ -457,13 +461,19 @@ impl Decimal128NumericCodec {
         } else {
             unscaled
         };
-        let limit = 10_i128.pow(self.precision) - 1;
-        if !(-limit..=limit).contains(&unscaled) {
-            return Err(
-                self.value_out_of_range("numeric value exceeds decimal precision")
-            );
-        }
+        self.check_precision(unscaled)?;
         Ok(unscaled)
+    }
+
+    /// Rejects an unscaled coefficient with more than `precision` digits,
+    /// which is exactly the value `numeric_recv`'s `apply_typmod` would reject
+    /// for this codec's `dscale == scale` wire value.
+    fn check_precision(&self, unscaled: i128) -> Result<(), DecimalCodecError> {
+        if (-self.max_unscaled..=self.max_unscaled).contains(&unscaled) {
+            Ok(())
+        } else {
+            Err(self.value_out_of_range("numeric value exceeds decimal precision"))
+        }
     }
 
     fn accumulate_numeric_digits(
@@ -545,73 +555,8 @@ impl Decimal128NumericCodec {
     }
 }
 
-/// Calls `numeric_recv` with a stack-built `StringInfo` and converts the
-/// returned datum into an owned `AnyNumeric`.
-///
-/// Error policy: only the two SQL states that `numeric_recv` itself produces
-/// for malformed input or a typmod-violating value are mapped to
-/// [`DecimalCodecError`]. Other categories (`ERRCODE_OUT_OF_MEMORY`,
-/// `ERRCODE_QUERY_CANCELED`, internal errors, ...) are *not* swallowed; they
-/// re-raise so the surrounding query aborts with the original SQL state.
-///
-/// # Safety
-///
-/// `numeric_recv` reads from the `StringInfo` it is handed and may call
-/// `ereport(ERROR, ...)`. The pgrx-wrapped `DirectFunctionCall3Coll` converts
-/// that longjmp into Rust unwind; `PgTryBuilder` maps only the two data errors
-/// above into a Rust `Result`. Callers must invoke this on a PostgreSQL backend
-/// thread, where pgrx datum APIs are valid.
-unsafe fn numeric_recv_external(
-    external: &NumericExternal,
-    typmod: i32,
-    codec: &Decimal128NumericCodec,
-) -> Result<AnyNumeric, DecimalCodecError> {
-    use pgrx::PgTryBuilder;
-    use pgrx::pg_sys::{errcodes::PgSqlErrorCode, panic::CaughtError};
-
-    let external = *external; // Copy; closure becomes UnwindSafe.
-
-    PgTryBuilder::new(move || {
-        // Build StringInfoData on the call stack: numeric_recv only reads
-        // it, and palloc'ing per-row would defeat the optimization.
-        let len = external.wire_byte_len();
-        let mut buf = [0u8; 8 + MAX_NDIGITS * 2];
-        external.write_be_bytes(&mut buf[..len]);
-        // SAFETY: the buffer contains a complete numeric_recv external value
-        // and the caller guarantees execution on a PostgreSQL backend thread.
-        Ok(unsafe { receive_numeric_wire(&mut buf[..len], typmod) })
-    })
-    // Keep this handler noncapturing: catch_when allocates a dispatch map,
-    // and capturing precision/scale would allocate a boxed closure per value.
-    .catch_others(|error| {
-        let CaughtError::PostgresError(ref report) = error else {
-            error.rethrow();
-        };
-        match report.sql_error_code() {
-            code @ (PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE
-            | PgSqlErrorCode::ERRCODE_INVALID_BINARY_REPRESENTATION) => {
-                Err((code, report.message().to_owned()))
-            }
-            // Rethrow inside the handler, before PgTryBuilder flushes PG's
-            // error state on a handled error. Preserve the original cause.
-            _ => error.rethrow(),
-        }
-    })
-    .execute()
-    .map_err(|(code, message)| {
-        if code == PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE {
-            codec.value_out_of_range(message)
-        } else {
-            // The handler returns only the two SQLSTATEs matched above.
-            DecimalCodecError::InvalidBinaryRepresentation { message }
-        }
-    })
-}
-
 /// Invoke PostgreSQL's binary NUMERIC receiver for one complete external wire
-/// value. Error capture belongs to the caller because bounded Decimal128
-/// decoding maps two data errors into [`DecimalCodecError`], while aggregate
-/// finalization preserves every PostgreSQL error as a [`crate::diag::PgReportError`].
+/// value. PG errors unwind to the caller's enclosing provider/FFI boundary.
 ///
 /// # Safety
 ///

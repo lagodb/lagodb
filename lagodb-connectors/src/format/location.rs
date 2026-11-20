@@ -15,27 +15,46 @@ impl FormatKind {
         self,
         path: &StoragePath,
     ) -> Result<ObjectLocationKind, ConnectorError> {
-        let StoragePath::Object(object) = path else {
-            return Ok(if path.key().ends_with('/') {
-                ObjectLocationKind::Prefix
-            } else {
-                ObjectLocationKind::Exact
-            });
-        };
-        let key = object.key();
+        match path {
+            StoragePath::Local(path) => Ok(Self::local_location_kind(path)),
+            StoragePath::Object(object) => self.object_location_kind(object.key()),
+        }
+    }
+
+    pub(crate) fn resolved_location_kind(
+        self,
+        location: &ResolvedStorageLocation,
+    ) -> Result<ObjectLocationKind, ConnectorError> {
+        match location {
+            ResolvedStorageLocation::Local(path) => {
+                Ok(Self::local_location_kind(path))
+            }
+            ResolvedStorageLocation::Object(object) => {
+                self.object_location_kind(object.key())
+            }
+        }
+    }
+
+    fn local_location_kind(path: &str) -> ObjectLocationKind {
+        if path.ends_with('/') {
+            ObjectLocationKind::Prefix
+        } else {
+            ObjectLocationKind::Exact
+        }
+    }
+
+    fn object_location_kind(
+        self,
+        key: &str,
+    ) -> Result<ObjectLocationKind, ConnectorError> {
+        // Format resolution has already rejected stream-compression suffixes
+        // on Parquet and Avro objects, for both FDW options and COPY.
         match Self::infer_from_key(key) {
-            Some(found) if found != self => Err(ConnectorError::invalid_option(
-                "path",
+            Some(found) if found != self => Err(ConnectorError::invalid_path(
                 "object suffix conflicts with the selected format",
             )),
-            Some(_) if self.matches_object_key(key) && !key.ends_with('/') => {
-                Ok(ObjectLocationKind::Exact)
-            }
-            Some(_) => Err(ConnectorError::invalid_option(
-                "path",
-                "stream compression suffixes are not valid for Parquet or Avro objects",
-            )),
-            _ => Ok(ObjectLocationKind::Prefix),
+            Some(_) => Ok(ObjectLocationKind::Exact),
+            None => Ok(ObjectLocationKind::Prefix),
         }
     }
 
@@ -43,9 +62,11 @@ impl FormatKind {
         self,
         location: &ResolvedStorageLocation,
     ) -> Result<StorageInput, ConnectorError> {
-        StorageInput::resolve(location, self.location_kind(location.path())?, |key| {
-            self.matches_object_key(key)
-        })
+        StorageInput::resolve(
+            location,
+            self.resolved_location_kind(location)?,
+            |key| self.matches_object_key(key),
+        )
     }
 
     pub(crate) fn output(
@@ -55,7 +76,7 @@ impl FormatKind {
     ) -> Result<StorageOutput, ConnectorError> {
         StorageOutput::resolve(
             location,
-            self.location_kind(location.path())?,
+            self.resolved_location_kind(location)?,
             prefix_target_file_bytes,
         )
     }

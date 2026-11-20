@@ -51,6 +51,7 @@ fn ffi_text(value: &str) -> CString {
 struct TypedSourceContext {
     source: SourcePointer,
     layout: CopyColumnLayout,
+    soft_errors: *mut pg_sys::Node,
     rejection: Option<OwnedRejection>,
 }
 
@@ -71,9 +72,12 @@ impl<'a> TypedSourceGuard<'a> {
         typed_source_callback
     }
 
+    /// `soft_errors` is the COPY state's `ErrorSaveContext`, or null when
+    /// input errors are hard; it outlives the routed execute/end lifetime.
     pub(super) fn install(
         source: &'a mut dyn CopyDatumSource,
         layout: CopyColumnLayout,
+        soft_errors: *mut pg_sys::Node,
     ) -> Self {
         // SAFETY: the guard retains the exclusive borrow until finalization.
         // The C executor receives a pointer to this context only for its
@@ -87,6 +91,7 @@ impl<'a> TypedSourceGuard<'a> {
             context: TypedSourceContext {
                 source,
                 layout,
+                soft_errors,
                 rejection: None,
             },
             finished: false,
@@ -130,11 +135,11 @@ impl<'a> TypedDestinationGuard<'a> {
         typed_destination_callback
     }
 
+    /// `destination` has been initialized for `layout` by the driver.
     pub(super) fn install(
         destination: &'a mut dyn CopyTupleDestination,
         layout: CopyColumnLayout,
-    ) -> Result<Self, CopyError> {
-        destination.initialize(&layout)?;
+    ) -> Self {
         // SAFETY: identical lifetime and synchronous callback contract to the
         // typed source guard above.
         let destination = unsafe {
@@ -142,14 +147,14 @@ impl<'a> TypedDestinationGuard<'a> {
                 destination as *mut (dyn CopyTupleDestination + 'a),
             )
         };
-        Ok(Self {
+        Self {
             context: TypedDestinationContext {
                 destination,
                 layout,
             },
             finished: false,
             _lifetime: PhantomData,
-        })
+        }
     }
 
     pub(super) fn callback_context(&mut self) -> NonNull<c_void> {
@@ -198,10 +203,17 @@ unsafe extern "C-unwind" fn typed_source_callback(
     let context = unsafe { &mut *context.cast::<TypedSourceContext>() };
     context.rejection = None;
     // SAFETY: the derived executor passes the live arrays for the descriptor
-    // used to build context.layout before installing this callback.
+    // used to build context.layout before installing this callback, and the
+    // guard's soft_errors belongs to the same live COPY state.
     let mut row_bytes = 0;
     let row = unsafe {
-        CopyInputRow::from_raw(values, nulls, &context.layout, &mut row_bytes)
+        CopyInputRow::from_raw(
+            values,
+            nulls,
+            &context.layout,
+            &mut row_bytes,
+            context.soft_errors,
+        )
     };
     // SAFETY: the guard retains exclusive access to the source while the
     // synchronous callback uses its erased-lifetime pointer.

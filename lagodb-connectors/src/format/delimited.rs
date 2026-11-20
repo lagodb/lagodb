@@ -59,10 +59,7 @@ impl<'a> DelimitedOptionsBuilder<'a> {
             _ => return Ok(false),
         };
         if target.replace(option.value()).is_some() {
-            return Err(ConnectorError::invalid_option(
-                option.name(),
-                "must not be specified more than once",
-            ));
+            return Err(ConnectorError::redundant_option(option.name()));
         }
         Ok(true)
     }

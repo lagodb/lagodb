@@ -1,14 +1,11 @@
 //! Relation-bound PostgreSQL Datum-to-JSON object encoding.
 
 use std::ffi::{CString, c_char};
-use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 
+use pgrx::PgMemoryContexts;
 use pgrx::pg_sys::ffi::pg_guard_ffi_boundary;
 use pgrx::pg_sys::{self, Datum};
-use pgrx::{PgMemoryContexts, PgTryBuilder};
-
-use crate::diag::PgError;
 
 use super::{JsonDatumKind, JsonValueError};
 
@@ -84,22 +81,16 @@ struct JsonEncodeBuffer {
 
 impl JsonDatumEncoder {
     /// Bind PostgreSQL's JSON category and output function once for a type.
-    pub fn bind(type_oid: pg_sys::Oid) -> Result<Self, JsonValueError> {
-        let (category, output_function) = unsafe {
-            PgTryBuilder::new(|| {
-                let mut output_function = pg_sys::InvalidOid;
-                // Even valid type OIDs require syscache lookups whose cache
-                // entries/resource-owner bookkeeping can allocate and ERROR.
-                // This hand-declared C call needs a guard to turn longjmp into
-                // Rust unwind before PgTryBuilder can capture it as a Result.
-                let category = pg_guard_ffi_boundary(|| {
-                    lagodb_json_categorize_type(type_oid, &mut output_function)
-                });
-                Ok((category, output_function))
+    /// Catalog errors unwind to the enclosing provider/FFI boundary.
+    pub fn bind(type_oid: pg_sys::Oid) -> Self {
+        let mut output_function = pg_sys::InvalidOid;
+        // Even valid type OIDs require syscache lookups that can ERROR. This
+        // hand-declared C call needs a guard to turn longjmp into Rust unwind.
+        let category = unsafe {
+            pg_guard_ffi_boundary(|| {
+                lagodb_json_categorize_type(type_oid, &mut output_function)
             })
-            .catch_others(|error| Err(PgError::from(error)))
-            .execute()
-        }?;
+        };
         let category = match category {
             LAGODB_JSON_CATEGORY_BOOL => JsonDatumCategory::Boolean,
             LAGODB_JSON_CATEGORY_NUMERIC => JsonDatumCategory::Numeric,
@@ -117,10 +108,10 @@ impl JsonDatumEncoder {
             LAGODB_JSON_CATEGORY_CAST => JsonDatumCategory::Cast,
             other => unreachable!("unknown LagoDB JSON category {other}"),
         };
-        Ok(Self {
+        Self {
             category,
             output_function,
-        })
+        }
     }
 
     #[inline]
@@ -187,7 +178,8 @@ impl BoundJsonObjectEncoder {
         })
     }
 
-    /// Encode one row through the complete Begin-time plan.
+    /// Encode one row through the complete Begin-time plan. PG errors from
+    /// output functions unwind to the enclosing provider/FFI boundary.
     ///
     /// # Safety
     ///
@@ -197,30 +189,24 @@ impl BoundJsonObjectEncoder {
     pub unsafe fn encode_row(
         &mut self,
         values: impl ExactSizeIterator<Item = Option<Datum>>,
-    ) -> Result<&[u8], JsonValueError> {
+    ) -> &[u8] {
         self.buffer.reset();
         if self.columns.is_empty() {
             self.buffer.append_byte(b'{');
         }
-        let result = PgTryBuilder::new(AssertUnwindSafe(|| {
-            for (column, value) in self.columns.iter().zip(values) {
-                self.buffer.append_prefix(column);
-                match value {
-                    None => self.buffer.append_bytes(b"null"),
-                    Some(datum) => {
-                        // SAFETY: required by this method's bound-row
-                        // contract and established for this column above.
-                        unsafe { self.buffer.append_datum(column.encoder, datum) };
-                    }
+        for (column, value) in self.columns.iter().zip(values) {
+            self.buffer.append_prefix(column);
+            match value {
+                None => self.buffer.append_bytes(b"null"),
+                Some(datum) => {
+                    // SAFETY: required by this method's bound-row contract and
+                    // established for this column above.
+                    unsafe { self.buffer.append_datum(column.encoder, datum) };
                 }
             }
-            self.buffer.append_byte(b'}');
-            Ok::<(), JsonValueError>(())
-        }))
-        .catch_others(|error| Err(JsonValueError::Postgres(PgError::from(error))))
-        .execute();
-        result?;
-        Ok(self.buffer.as_bytes())
+        }
+        self.buffer.append_byte(b'}');
+        self.buffer.as_bytes()
     }
 }
 
