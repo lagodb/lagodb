@@ -1,7 +1,7 @@
 //! Read admission before binding Arrow's representation codecs.
 
 use arrow_schema::{DataType, Field};
-use lagodb_arrow::{BoundDatumPlan, PgColumnType};
+use lagodb_arrow::{BoundDatumPlan, CellRule, PgColumnType};
 use lagodb_core::datum::{PgType, numeric_typmod};
 use pgrx::pg_sys;
 
@@ -17,8 +17,11 @@ pub(crate) enum ParquetReadMode {
     /// Inference maps strings to text; a json/jsonb target is explicitly declared.
     ///
     /// This mode intentionally adopts a producer contract: files must preserve
-    /// declared string lengths, temporal precision and valid, NUL-free json/jsonb
-    /// text, including recursive members. Neither a declaration nor schema
+    /// declared string lengths, `character(n)` values blank-padded to `n`
+    /// characters as PostgreSQL stores them, temporal precision and valid,
+    /// NUL-free json/jsonb text, including recursive members. Query offload
+    /// exposes such values to the query engine as declared, and bpchar
+    /// predicates assume the padding. Neither a declaration nor schema
     /// admission validates existing file contents. Supplying violating data is
     /// outside this contract; reads do not promise to detect it. Do not add
     /// per-value validation solely because the file is external. COPY has a
@@ -57,7 +60,7 @@ impl ParquetTypeMapping {
         Ok(plan)
     }
 
-    fn check_read_field(
+    pub(in crate::format::parquet) fn check_read_field(
         field: &Field,
         target: PgType,
         mode: ParquetReadMode,
@@ -73,7 +76,7 @@ impl ParquetTypeMapping {
                 ),
             ));
         }
-        Self::check_array_type(target)?;
+        Self::check_array_type(target).require()?;
         if let Some(element) = target.element() {
             let DataType::List(child) = field.data_type() else {
                 return Err(Self::incompatible(field, target));
@@ -86,7 +89,7 @@ impl ParquetTypeMapping {
             let DataType::Struct(children) = field.data_type() else {
                 return Err(Self::incompatible(field, target));
             };
-            let attributes = Self::composite_fields(target)?;
+            let attributes = Self::composite_fields(target)?.require()?;
             if children.len() != attributes.len() {
                 return Err(Self::incompatible(field, target));
             }
@@ -115,8 +118,19 @@ impl ParquetTypeMapping {
         {
             return Err(Self::incompatible(field, target));
         }
-        if PgColumnType::from_pg_type(target.oid).is_none() {
+        let Some(column_type) = PgColumnType::from_pg_type(target.oid) else {
             return Err(Self::incompatible(field, target));
+        };
+        // Datum and columnar reads admit one leaf pairing. jsonb text is a
+        // provider representation the datum codec reads through text I/O;
+        // every other leaf follows Arrow's (Arrow, PostgreSQL) rule, which
+        // also pairs zone-aware timestamps with timestamptz only.
+        if column_type == PgColumnType::Jsonb {
+            if !matches!(field.data_type(), DataType::Utf8 | DataType::LargeUtf8) {
+                return Err(Self::incompatible(field, target));
+            }
+        } else {
+            CellRule::resolve(field.data_type(), column_type)?;
         }
         // Declared scans restore producer-constrained strings and timestamps;
         // COPY members cannot inherit that foreign-table contract. Decimal

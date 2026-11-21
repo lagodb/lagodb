@@ -1,9 +1,11 @@
-//! Iceberg split weights and bounded-lookback bin packing.
+//! Iceberg split weights over the shared bounded-lookback bin packer.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 use iceberg_lite::scan::FileScanTask;
 use iceberg_lite::spec::DataFileFormat;
+use lagodb_arrow::scan::WeightedBinPacker;
 use serde::{Deserialize, Serialize};
 
 use super::super::ScanError;
@@ -17,8 +19,8 @@ const DEFAULT_OPEN_FILE_COST: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TaskGrouping {
-    target_size: u64,
-    lookback: usize,
+    target_size: NonZeroU64,
+    lookback: NonZeroUsize,
     open_file_cost: u64,
 }
 
@@ -89,12 +91,14 @@ impl TaskGrouping {
                 "{LOOKBACK_PROPERTY}={lookback_u64} exceeds this platform"
             ))
         })?;
-        if target_size == 0 || lookback == 0 {
+        let (Some(target_size), Some(lookback)) =
+            (NonZeroU64::new(target_size), NonZeroUsize::new(lookback))
+        else {
             return Err(ScanError::ParallelScanConfiguration(
                 "split target size and planning lookback must be greater than zero"
                     .to_owned(),
             ));
-        }
+        };
         Ok(Self {
             target_size,
             lookback,
@@ -120,8 +124,7 @@ impl TaskGrouping {
         self,
         tasks: &[FileScanTask],
     ) -> Result<GroupedTaskRanges, ScanError> {
-        let mut bins = VecDeque::<TaskBin>::new();
-        let mut groups = Vec::new();
+        let mut packer = WeightedBinPacker::new(self.target_size, self.lookback);
         let mut ranges = Vec::new();
         self.for_each_range(tasks, |task, range| {
             let range_id = u32::try_from(ranges.len()).map_err(|_| {
@@ -131,45 +134,16 @@ impl TaskGrouping {
             })?;
             let weight = self.range_weight(task, range.length);
             ranges.push(range);
-            if let Some(bin) = bins
-                .iter_mut()
-                .find(|bin| bin.weight.saturating_add(weight) <= self.target_size)
-            {
-                bin.push(range_id, weight);
-                return Ok(());
-            }
-            let mut bin = TaskBin::default();
-            bin.push(range_id, weight);
-            bins.push_back(bin);
-            if bins.len() > self.lookback {
-                let largest = bins
-                    .iter()
-                    .enumerate()
-                    .fold(None, |largest, (index, bin)| match largest {
-                        Some((_, weight)) if weight >= bin.weight => largest,
-                        _ => Some((index, bin.weight)),
-                    })
-                    .map(|(index, _)| index)
-                    .expect("a bin was added immediately above");
-                groups.push(
-                    bins.remove(largest)
-                        .expect("largest bin index came from this deque")
-                        .tasks,
-                );
-            }
+            packer.push(range_id, weight);
             Ok(())
         })?;
-        groups.extend(bins.into_iter().map(|bin| bin.tasks));
+        let mut groups = packer.finish();
         if groups.is_empty() {
-            groups.push(Vec::new());
+            groups.push(Box::default());
         }
         Ok(GroupedTaskRanges {
             ranges: ranges.into_boxed_slice(),
-            groups: groups
-                .into_iter()
-                .map(Vec::into_boxed_slice)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+            groups: groups.into_boxed_slice(),
         })
     }
 
@@ -190,7 +164,7 @@ impl TaskGrouping {
                 task.length
             };
             if task.data_file_format != DataFileFormat::Parquet
-                || effective_length <= self.target_size
+                || effective_length <= self.target_size.get()
             {
                 visit(
                     task,
@@ -211,7 +185,7 @@ impl TaskGrouping {
             })?;
             let mut start = task.start;
             while start < end {
-                let length = self.target_size.min(end - start);
+                let length = self.target_size.get().min(end - start);
                 visit(
                     task,
                     TaskRange {
@@ -270,18 +244,5 @@ impl GroupedTaskRanges {
 
     pub(crate) fn range_count(&self) -> usize {
         self.ranges.len()
-    }
-}
-
-#[derive(Default)]
-struct TaskBin {
-    weight: u64,
-    tasks: Vec<u32>,
-}
-
-impl TaskBin {
-    fn push(&mut self, range_id: u32, weight: u64) {
-        self.weight = self.weight.saturating_add(weight);
-        self.tasks.push(range_id);
     }
 }

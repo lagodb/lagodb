@@ -12,7 +12,7 @@ mod relation;
 mod scan;
 
 pub(crate) use options::{ResolvedTableOptions, resolve_table_options};
-use plan_private::PlannedFormat;
+pub(crate) use plan_private::PlannedFormat;
 pub(crate) use provider::LagodbConnectors;
 pub(crate) use relation::ResolvedForeignRelation;
 

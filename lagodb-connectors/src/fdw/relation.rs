@@ -97,6 +97,19 @@ impl ResolvedForeignRelation {
         Ok((FdwFormat::reader(self.options.format), location))
     }
 
+    /// The object location readable by `effective_user`, for readers that
+    /// bypass the FDW format adapters.
+    pub(crate) fn into_read_location(
+        self,
+        effective_user: pg_sys::Oid,
+    ) -> Result<ResolvedStorageLocation, ConnectorError> {
+        ConnectorAccess::resolve_foreign_object(
+            self.options.object,
+            self.server_oid,
+            effective_user,
+        )
+    }
+
     pub(crate) fn into_analyze_parts(
         self,
         effective_user: pg_sys::Oid,

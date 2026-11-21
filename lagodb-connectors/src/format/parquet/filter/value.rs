@@ -1,436 +1,304 @@
-//! PostgreSQL comparison semantics and bound scalar values.
+//! Planned comparison value types and their file-independent bound values.
 //!
-//! Exact pushdown is intentionally limited to boolean equality, integer and
-//! bounded-decimal comparisons, and collation-compatible strings. Arrow's
-//! floating comparison uses IEEE total ordering (including distinct signed
-//! zero), which is not PostgreSQL's equality semantics; temporal values also
-//! require PostgreSQL epoch/infinity normalization. Comparisons on those types
-//! remain local quals until an exact representation is implemented.
+//! A [`ValueType`] is persisted with the plan and states how a PostgreSQL
+//! value decodes against the column's declared Parquet contract. Decoding
+//! yields a logical [`BoundValue`]; each file then lowers it to its own
+//! physical representation (see `lower`).
 
-use std::sync::Arc;
-
-use arrow_array::{
-    Array, ArrayRef, BooleanArray, Decimal128Array, Int16Array, Int32Array,
-    Int64Array, LargeStringArray, Scalar, StringArray,
-};
-use arrow_ord::cmp;
-use arrow_schema::{ArrowError, DataType};
+use lagodb_arrow::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};
 use lagodb_core::datum::{
-    Decimal128ComparisonValue, Decimal128Semantics, Utf8ServerEncoding,
+    Decimal128ComparisonValue, Decimal128Semantics, DetoastedVarlena,
 };
-use lagodb_core::expr::{
-    ColumnRef, PgComparisonIdentity, PgComparisonKind, PgComparisonSignature,
-    PgTextComparisonSemantics, RuntimeValue, RuntimeValueSpec,
-};
+use lagodb_core::expr::{PgBpcharSemantics, PgBpcharValue, RuntimeValue};
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
-use pgrx::{FromDatum, PgBuiltInOids, PgOid, pg_sys};
+use pgrx::datum::Uuid as PgUuid;
+use pgrx::{FromDatum, pg_sys};
+use serde::{Deserialize, Serialize};
 
 use crate::error::ConnectorError;
 use crate::format::FormatKind;
 
-const OP_EQ: i32 = 0;
-const OP_NOT_EQ: i32 = 1;
-const OP_LT: i32 = 2;
-const OP_LE: i32 = 3;
-const OP_GT: i32 = 4;
-const OP_GE: i32 = 5;
+use super::float::FloatComparison;
+use super::integer::{IntegerOutOfRange, IntegerWidth};
+use super::operator::ComparisonOperator;
 
 const VALUE_BOOL: i32 = 0;
-const VALUE_I32: i32 = 1;
-const VALUE_I64: i32 = 2;
-const VALUE_STRING: i32 = 3;
-const VALUE_DECIMAL128: i32 = 4;
-const VALUE_I16: i32 = 5;
+const VALUE_INTEGER: i32 = 1;
+const VALUE_FLOAT4: i32 = 2;
+const VALUE_FLOAT8: i32 = 3;
+const VALUE_FLOAT4_ON_FLOAT8: i32 = 4;
+const VALUE_FLOAT8_ON_FLOAT4: i32 = 5;
+const VALUE_DECIMAL128: i32 = 6;
+const VALUE_STRING: i32 = 7;
+const VALUE_BPCHAR: i32 = 8;
+const VALUE_BINARY: i32 = 9;
+const VALUE_UUID: i32 = 10;
+const VALUE_DATE: i32 = 11;
+const VALUE_TIMESTAMP: i32 = 12;
 
-#[derive(Clone, Copy)]
-pub(super) enum ComparisonOperator {
-    Eq,
-    NotEq,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-}
-
-impl ComparisonOperator {
-    pub(super) const fn kind(self) -> PgComparisonKind {
-        match self {
-            Self::Eq => PgComparisonKind::Equal,
-            Self::NotEq => PgComparisonKind::NotEqual,
-            Self::Lt => PgComparisonKind::Less,
-            Self::Le => PgComparisonKind::LessEqual,
-            Self::Gt => PgComparisonKind::Greater,
-            Self::Ge => PgComparisonKind::GreaterEqual,
-        }
-    }
-
-    pub(super) const fn sql(self) -> &'static str {
-        match self {
-            Self::Eq => "=",
-            Self::NotEq => "<>",
-            Self::Lt => "<",
-            Self::Le => "<=",
-            Self::Gt => ">",
-            Self::Ge => ">=",
-        }
-    }
-
-    pub(super) fn from_oid(oid: pg_sys::Oid) -> Option<Self> {
-        let signature = PgComparisonSignature::for_operator(oid)?;
-        // This is Parquet's operator-family allowlist. PostgreSQL normalization
-        // already guarantees compatibility between the selected signature and
-        // the comparison operands.
-        match (signature.left_type(), signature.right_type()) {
-            (pg_sys::BOOLOID, pg_sys::BOOLOID)
-            | (pg_sys::INT2OID, pg_sys::INT2OID)
-            | (pg_sys::INT4OID, pg_sys::INT4OID)
-            | (pg_sys::INT8OID, pg_sys::INT8OID)
-            | (pg_sys::NUMERICOID, pg_sys::NUMERICOID)
-            | (pg_sys::TEXTOID, pg_sys::TEXTOID) => {}
-            _ => return None,
-        }
-        Some(match signature.kind() {
-            PgComparisonKind::Equal => Self::Eq,
-            PgComparisonKind::NotEqual => Self::NotEq,
-            PgComparisonKind::Less => Self::Lt,
-            PgComparisonKind::LessEqual => Self::Le,
-            PgComparisonKind::Greater => Self::Gt,
-            PgComparisonKind::GreaterEqual => Self::Ge,
-        })
-    }
-
-    pub(super) const fn mirrored(self) -> Self {
-        match self {
-            Self::Lt => Self::Gt,
-            Self::Le => Self::Ge,
-            Self::Gt => Self::Lt,
-            Self::Ge => Self::Le,
-            Self::Eq | Self::NotEq => self,
-        }
-    }
-
-    pub(super) const fn negated(self) -> Self {
-        match self {
-            Self::Eq => Self::NotEq,
-            Self::NotEq => Self::Eq,
-            Self::Lt => Self::Ge,
-            Self::Le => Self::Gt,
-            Self::Gt => Self::Le,
-            Self::Ge => Self::Lt,
-        }
-    }
-
-    pub(super) const fn tag(self) -> i32 {
-        match self {
-            Self::Eq => OP_EQ,
-            Self::NotEq => OP_NOT_EQ,
-            Self::Lt => OP_LT,
-            Self::Le => OP_LE,
-            Self::Gt => OP_GT,
-            Self::Ge => OP_GE,
-        }
-    }
-
-    pub(super) fn from_tag(tag: i32) -> Result<Self, ConnectorError> {
-        match tag {
-            OP_EQ => Ok(Self::Eq),
-            OP_NOT_EQ => Ok(Self::NotEq),
-            OP_LT => Ok(Self::Lt),
-            OP_LE => Ok(Self::Le),
-            OP_GT => Ok(Self::Gt),
-            OP_GE => Ok(Self::Ge),
-            _ => Err(ConnectorError::invalid_filter_plan(FormatKind::Parquet)),
-        }
-    }
-
-    pub(super) fn evaluate(
-        self,
-        column: &dyn Array,
-        scalar: &Scalar<ArrayRef>,
-    ) -> Result<BooleanArray, ArrowError> {
-        match self {
-            Self::Eq => cmp::eq(&column, scalar),
-            Self::NotEq => cmp::neq(&column, scalar),
-            Self::Lt => cmp::lt(&column, scalar),
-            Self::Le => cmp::lt_eq(&column, scalar),
-            Self::Gt => cmp::gt(&column, scalar),
-            Self::Ge => cmp::gt_eq(&column, scalar),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
+/// How a PostgreSQL comparison value binds against a declared column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ValueType {
     Bool,
-    I16,
-    I32,
-    I64,
-    String,
+    /// Any built-in integer value against a column of this physical width.
+    Integer(IntegerWidth),
+    Float4,
+    Float8,
+    /// `float84` operators widen the real value exactly.
+    Float4OnFloat8,
+    /// `float48` operators widen the real column; binding rounds the value.
+    Float8OnFloat4,
     Decimal128(Decimal128Semantics),
+    String,
+    /// A `bpchar` value padded at bind time to a `character(n)` column width.
+    Bpchar(PgBpcharSemantics),
+    Binary,
+    Uuid,
+    Date,
+    /// `timestamp` or `timestamptz`, both microseconds since the Unix epoch.
+    Timestamp,
+}
+
+/// File-independent comparison value.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) enum BoundValue {
+    Bool(bool),
+    I16(i16),
+    I32(i32),
+    I64(i64),
+    F32(f32),
+    F64(f64),
+    Decimal128 {
+        coefficient: i128,
+        #[serde(with = "decimal_semantics")]
+        semantics: Decimal128Semantics,
+    },
+    String(Box<str>),
+    Binary(Box<[u8]>),
+    /// Days since the Unix epoch.
+    Date32(i32),
+    /// Microseconds since the Unix epoch.
+    Timestamp(i64),
+}
+
+/// One decoded comparison value before the comparison is bound.
+pub(super) enum DecodedValue {
+    Value(BoundValue),
+    Float(FloatComparison),
+    OutsideFinite(Decimal128ComparisonValue),
+    OutsideInteger(IntegerOutOfRange),
+    /// A `bpchar` value wider than its column, which no stored value equals.
+    OutsideWidth,
+    /// An infinite temporal value. Only Conservative plans carry temporal
+    /// comparisons, so binding widens such a leaf to TRUE.
+    Unrepresentable,
 }
 
 impl ValueType {
+    /// Operators whose semantics this value type implements.
     pub(super) const fn accepts_operator(self, operator: ComparisonOperator) -> bool {
-        !matches!(self, Self::Bool)
-            || matches!(operator, ComparisonOperator::Eq | ComparisonOperator::NotEq)
-    }
-
-    pub(super) fn for_comparison(
-        column: &ColumnRef,
-        value: &RuntimeValueSpec,
-        opno: pg_sys::Oid,
-        opcollid: pg_sys::Oid,
-        inputcollid: pg_sys::Oid,
-        utf8: Option<Utf8ServerEncoding>,
-    ) -> Option<(Self, ComparisonOperator)> {
-        let declared = PgOid::from(column.declared_type.type_oid);
-        let effective = PgOid::from(column.value_type.type_oid);
-        let value_oid = PgOid::from(value.value_type.type_oid);
-        let operator = ComparisonOperator::from_oid(opno)?;
-        let value_type = match (declared, effective, value_oid) {
-            (
-                PgOid::BuiltIn(PgBuiltInOids::BOOLOID),
-                PgOid::BuiltIn(PgBuiltInOids::BOOLOID),
-                PgOid::BuiltIn(PgBuiltInOids::BOOLOID),
-            ) if matches!(
-                operator,
-                ComparisonOperator::Eq | ComparisonOperator::NotEq
-            ) =>
-            {
-                Self::Bool
+        match self {
+            Self::Bool | Self::Bpchar(_) => {
+                matches!(operator, ComparisonOperator::Eq | ComparisonOperator::NotEq)
             }
-            (
-                PgOid::BuiltIn(PgBuiltInOids::INT2OID),
-                PgOid::BuiltIn(PgBuiltInOids::INT2OID),
-                PgOid::BuiltIn(PgBuiltInOids::INT2OID),
-            ) => Self::I16,
-            (
-                PgOid::BuiltIn(PgBuiltInOids::INT4OID),
-                PgOid::BuiltIn(PgBuiltInOids::INT4OID),
-                PgOid::BuiltIn(PgBuiltInOids::INT4OID),
-            ) => Self::I32,
-            (
-                PgOid::BuiltIn(PgBuiltInOids::INT8OID),
-                PgOid::BuiltIn(PgBuiltInOids::INT8OID),
-                PgOid::BuiltIn(PgBuiltInOids::INT8OID),
-            ) => Self::I64,
-            (
-                PgOid::BuiltIn(PgBuiltInOids::NUMERICOID),
-                PgOid::BuiltIn(PgBuiltInOids::NUMERICOID),
-                PgOid::BuiltIn(PgBuiltInOids::NUMERICOID),
-            ) => Self::Decimal128(Decimal128Semantics::for_storage_comparison(
-                column.declared_type,
-                column.value_type,
-                value.value_type,
-            )?),
-            (
-                PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID),
-                PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID),
-                PgOid::BuiltIn(PgBuiltInOids::TEXTOID | PgBuiltInOids::VARCHAROID),
-            ) => Self::String,
-            _ => return None,
-        };
-
-        let value_type = match value_type {
-            Self::Bool | Self::I16 | Self::I32 | Self::I64 | Self::Decimal128(_)
-                if opcollid == pg_sys::Oid::INVALID
-                    && inputcollid == pg_sys::Oid::INVALID =>
-            {
-                Some(value_type)
-            }
-            Self::String => {
-                utf8?;
-                let kind = operator.kind();
-                unsafe {
-                    PgTextComparisonSemantics::for_comparison(
-                        PgComparisonIdentity {
-                            opno,
-                            opcollid,
-                            inputcollid,
-                        },
-                        kind,
-                    )
-                }
-                .map(|_| value_type)
-            }
-            _ => None,
-        }?;
-        Some((value_type, operator))
+            _ => true,
+        }
     }
 
     pub(super) fn encode(self, writer: &mut PlanDataWriter) {
         match self {
             Self::Bool => writer.append_i32(VALUE_BOOL),
-            Self::I16 => writer.append_i32(VALUE_I16),
-            Self::I32 => writer.append_i32(VALUE_I32),
-            Self::I64 => writer.append_i32(VALUE_I64),
-            Self::String => writer.append_i32(VALUE_STRING),
+            Self::Integer(width) => {
+                writer.append_i32(VALUE_INTEGER).append_i32(width.tag())
+            }
+            Self::Float4 => writer.append_i32(VALUE_FLOAT4),
+            Self::Float8 => writer.append_i32(VALUE_FLOAT8),
+            Self::Float4OnFloat8 => writer.append_i32(VALUE_FLOAT4_ON_FLOAT8),
+            Self::Float8OnFloat4 => writer.append_i32(VALUE_FLOAT8_ON_FLOAT4),
             Self::Decimal128(semantics) => writer
                 .append_i32(VALUE_DECIMAL128)
                 .append_i32(i32::from(semantics.precision()))
                 .append_i32(i32::from(semantics.scale())),
+            Self::String => writer.append_i32(VALUE_STRING),
+            Self::Bpchar(semantics) => writer
+                .append_i32(VALUE_BPCHAR)
+                .append_i32(semantics.typmod()),
+            Self::Binary => writer.append_i32(VALUE_BINARY),
+            Self::Uuid => writer.append_i32(VALUE_UUID),
+            Self::Date => writer.append_i32(VALUE_DATE),
+            Self::Timestamp => writer.append_i32(VALUE_TIMESTAMP),
         };
     }
 
     pub(super) fn decode_plan(
         reader: &mut PlanDataReader<'_>,
     ) -> Result<Self, ConnectorError> {
-        match reader.read_i32()? {
-            VALUE_BOOL => Ok(Self::Bool),
-            VALUE_I16 => Ok(Self::I16),
-            VALUE_I32 => Ok(Self::I32),
-            VALUE_I64 => Ok(Self::I64),
-            VALUE_STRING => Ok(Self::String),
+        let invalid = || ConnectorError::invalid_filter_plan(FormatKind::Parquet);
+        Ok(match reader.read_i32()? {
+            VALUE_BOOL => Self::Bool,
+            VALUE_INTEGER => Self::Integer(
+                IntegerWidth::from_tag(reader.read_i32()?).ok_or_else(invalid)?,
+            ),
+            VALUE_FLOAT4 => Self::Float4,
+            VALUE_FLOAT8 => Self::Float8,
+            VALUE_FLOAT4_ON_FLOAT8 => Self::Float4OnFloat8,
+            VALUE_FLOAT8_ON_FLOAT4 => Self::Float8OnFloat4,
             VALUE_DECIMAL128 => {
-                let encoded_precision = reader.read_i32()?;
-                let encoded_scale = reader.read_i32()?;
-                let semantics = u8::try_from(encoded_precision)
+                let precision = reader.read_i32()?;
+                let scale = reader.read_i32()?;
+                let semantics = u8::try_from(precision)
                     .ok()
-                    .and_then(|precision| {
-                        let scale = i8::try_from(encoded_scale).ok()?;
+                    .zip(i8::try_from(scale).ok())
+                    .and_then(|(precision, scale)| {
                         Decimal128Semantics::new(precision, scale)
                     })
-                    .ok_or_else(|| {
-                        ConnectorError::invalid_filter_plan(FormatKind::Parquet)
-                    })?;
-                Ok(Self::Decimal128(semantics))
+                    .ok_or_else(invalid)?;
+                Self::Decimal128(semantics)
             }
-            _ => Err(ConnectorError::invalid_filter_plan(FormatKind::Parquet)),
-        }
+            VALUE_STRING => Self::String,
+            VALUE_BPCHAR => Self::Bpchar(
+                PgBpcharSemantics::for_typmod(reader.read_i32()?)
+                    .ok_or_else(invalid)?,
+            ),
+            VALUE_BINARY => Self::Binary,
+            VALUE_UUID => Self::Uuid,
+            VALUE_DATE => Self::Date,
+            VALUE_TIMESTAMP => Self::Timestamp,
+            _ => return Err(invalid()),
+        })
     }
 
     /// # Safety
     ///
-    /// `value` must be a live, non-NULL PostgreSQL datum for the binding
-    /// callback. This method validates its catalog OID before interpreting the
-    /// datum and copies pass-by-reference strings into Rust-owned storage.
+    /// `value` must be a live, non-NULL PostgreSQL datum of the planned value
+    /// type for this call. Pass-by-reference values are copied into
+    /// Rust-owned storage.
     pub(super) unsafe fn decode(
         self,
         value: RuntimeValue,
     ) -> Result<DecodedValue, ConnectorError> {
         let datum = unsafe { value.datum() };
         let type_oid = value.metadata().value_type.type_oid;
-        let decoded = match (self, type_oid) {
-            (Self::Bool, pg_sys::BOOLOID) => DecodedValue::Scalar(BoundValue::Bool(
-                unsafe { bool::from_datum(datum, false) }
-                    .ok_or_else(|| ConnectorError::invalid_filter_datum(type_oid))?,
+        let invalid = || ConnectorError::invalid_filter_datum(type_oid);
+        Ok(match self {
+            Self::Bool => DecodedValue::Value(BoundValue::Bool(
+                unsafe { bool::from_datum(datum, false) }.ok_or_else(invalid)?,
             )),
-            (Self::I16, pg_sys::INT2OID) => DecodedValue::Scalar(BoundValue::I16(
-                unsafe { i16::from_datum(datum, false) }
-                    .ok_or_else(|| ConnectorError::invalid_filter_datum(type_oid))?,
+            Self::Integer(width) => {
+                let value = match type_oid {
+                    pg_sys::INT2OID => {
+                        unsafe { i16::from_datum(datum, false) }.map(i64::from)
+                    }
+                    pg_sys::INT4OID => {
+                        unsafe { i32::from_datum(datum, false) }.map(i64::from)
+                    }
+                    pg_sys::INT8OID => unsafe { i64::from_datum(datum, false) },
+                    _ => None,
+                }
+                .ok_or_else(invalid)?;
+                match width.narrow(value) {
+                    Ok(value) => DecodedValue::Value(value),
+                    Err(outside) => DecodedValue::OutsideInteger(outside),
+                }
+            }
+            Self::Float4 => DecodedValue::Float(FloatComparison::F32(
+                unsafe { f32::from_datum(datum, false) }.ok_or_else(invalid)?,
             )),
-            (Self::I32, pg_sys::INT4OID) => DecodedValue::Scalar(BoundValue::I32(
-                unsafe { i32::from_datum(datum, false) }
-                    .ok_or_else(|| ConnectorError::invalid_filter_datum(type_oid))?,
+            Self::Float8 => DecodedValue::Float(FloatComparison::F64(
+                unsafe { f64::from_datum(datum, false) }.ok_or_else(invalid)?,
             )),
-            (Self::I64, pg_sys::INT8OID) => DecodedValue::Scalar(BoundValue::I64(
-                unsafe { i64::from_datum(datum, false) }
-                    .ok_or_else(|| ConnectorError::invalid_filter_datum(type_oid))?,
-            )),
-            (Self::String, pg_sys::TEXTOID | pg_sys::VARCHAROID) => {
-                DecodedValue::Scalar(BoundValue::String(
-                    // ValueType::String can only be persisted when the planner
-                    // holds Utf8ServerEncoding, so this bind does not repeat
-                    // the statement-invariant server-encoding check.
-                    unsafe { String::from_datum(datum, false) }
-                        .ok_or_else(|| {
-                            ConnectorError::invalid_filter_datum(type_oid)
-                        })?
-                        .into_boxed_str(),
+            Self::Float4OnFloat8 => {
+                DecodedValue::Float(FloatComparison::F64(f64::from(
+                    unsafe { f32::from_datum(datum, false) }.ok_or_else(invalid)?,
+                )))
+            }
+            Self::Float8OnFloat4 => {
+                DecodedValue::Float(FloatComparison::DoubleOnFloat(
+                    unsafe { f64::from_datum(datum, false) }.ok_or_else(invalid)?,
                 ))
             }
-            (Self::Decimal128(semantics), pg_sys::NUMERICOID) => {
+            Self::Decimal128(semantics) => {
                 match unsafe { semantics.codec().encode_comparison_datum(datum) }? {
                     Decimal128ComparisonValue::Finite(coefficient) => {
-                        DecodedValue::Scalar(BoundValue::Decimal128 {
+                        DecodedValue::Value(BoundValue::Decimal128 {
                             coefficient,
                             semantics,
                         })
                     }
-                    Decimal128ComparisonValue::NegativeInfinity => {
-                        DecodedValue::OutsideFinite(
-                            Decimal128ComparisonValue::NegativeInfinity,
-                        )
-                    }
-                    special @ (Decimal128ComparisonValue::PositiveInfinity
-                    | Decimal128ComparisonValue::NaN) => {
-                        DecodedValue::OutsideFinite(special)
-                    }
+                    special => DecodedValue::OutsideFinite(special),
                 }
             }
-            _ => {
-                return Err(ConnectorError::invalid_filter_plan(FormatKind::Parquet));
+            // A persisted String or Bpchar plan proves that the planner held
+            // Utf8ServerEncoding; binding does not repeat that check.
+            Self::String => DecodedValue::Value(BoundValue::String(
+                unsafe { String::from_datum(datum, false) }
+                    .ok_or_else(invalid)?
+                    .into_boxed_str(),
+            )),
+            Self::Bpchar(semantics) => match unsafe { semantics.canonicalize(datum) }
+            {
+                PgBpcharValue::Canonical(canonical) => {
+                    DecodedValue::Value(BoundValue::String(
+                        unsafe { String::from_datum(canonical.as_datum(), false) }
+                            .ok_or_else(invalid)?
+                            .into_boxed_str(),
+                    ))
+                }
+                PgBpcharValue::OutsideWidth => DecodedValue::OutsideWidth,
+            },
+            Self::Binary => {
+                let bytes = unsafe { DetoastedVarlena::from_datum(datum) };
+                DecodedValue::Value(BoundValue::Binary(bytes.bytes().into()))
             }
-        };
-        Ok(decoded)
+            Self::Uuid => {
+                let uuid = unsafe { PgUuid::from_datum(datum, false) }
+                    .ok_or_else(invalid)?;
+                DecodedValue::Value(BoundValue::Binary(
+                    uuid.as_bytes().as_slice().into(),
+                ))
+            }
+            Self::Date => {
+                let days =
+                    unsafe { i32::from_datum(datum, false) }.ok_or_else(invalid)?;
+                Some(days)
+                    .filter(|days| !matches!(*days, i32::MIN | i32::MAX))
+                    .and_then(pg_epoch_days_to_unix_days)
+                    .map_or(DecodedValue::Unrepresentable, |days| {
+                        DecodedValue::Value(BoundValue::Date32(days))
+                    })
+            }
+            Self::Timestamp => {
+                let micros =
+                    unsafe { i64::from_datum(datum, false) }.ok_or_else(invalid)?;
+                Some(micros)
+                    .filter(|micros| !matches!(*micros, i64::MIN | i64::MAX))
+                    .and_then(pg_epoch_micros_to_unix_micros)
+                    .map_or(DecodedValue::Unrepresentable, |micros| {
+                        DecodedValue::Value(BoundValue::Timestamp(micros))
+                    })
+            }
+        })
     }
 }
 
-#[derive(Clone)]
-pub(super) enum BoundValue {
-    Bool(bool),
-    I16(i16),
-    I32(i32),
-    I64(i64),
-    String(Box<str>),
-    Decimal128 {
-        coefficient: i128,
-        semantics: Decimal128Semantics,
-    },
-}
+/// Worker transport of decimal semantics as their precision and scale.
+mod decimal_semantics {
+    use lagodb_core::datum::Decimal128Semantics;
+    use serde::de::Error;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-pub(super) enum DecodedValue {
-    Scalar(BoundValue),
-    OutsideFinite(Decimal128ComparisonValue),
-}
+    pub(super) fn serialize<S: Serializer>(
+        semantics: &Decimal128Semantics,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        (semantics.precision(), semantics.scale()).serialize(serializer)
+    }
 
-impl BoundValue {
-    pub(super) fn scalar(
-        &self,
-        data_type: &DataType,
-    ) -> Result<Scalar<ArrayRef>, ConnectorError> {
-        let array: ArrayRef = match (self, data_type) {
-            (Self::Bool(value), DataType::Boolean) => {
-                Arc::new(BooleanArray::from(vec![*value]))
-            }
-            (Self::I16(value), DataType::Int16) => {
-                Arc::new(Int16Array::from(vec![*value]))
-            }
-            (Self::I32(value), DataType::Int32) => {
-                Arc::new(Int32Array::from(vec![*value]))
-            }
-            (Self::I64(value), DataType::Int64) => {
-                Arc::new(Int64Array::from(vec![*value]))
-            }
-            (Self::String(value), DataType::Utf8) => {
-                Arc::new(StringArray::from(vec![value.as_ref()]))
-            }
-            (Self::String(value), DataType::LargeUtf8) => {
-                Arc::new(LargeStringArray::from(vec![value.as_ref()]))
-            }
-            (
-                Self::Decimal128 {
-                    coefficient,
-                    semantics,
-                },
-                DataType::Decimal128(precision, scale),
-            ) if *precision == semantics.precision()
-                && *scale == semantics.scale() =>
-            {
-                Arc::new(
-                    Decimal128Array::from(vec![*coefficient])
-                        .with_precision_and_scale(*precision, *scale)?,
-                )
-            }
-            _ => {
-                return Err(ConnectorError::invalid_object_schema(
-                    FormatKind::Parquet,
-                    format!(
-                        "a pushed predicate value is incompatible with Parquet type {data_type}"
-                    ),
-                ));
-            }
-        };
-        Ok(Scalar::new(array))
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Decimal128Semantics, D::Error> {
+        let (precision, scale) = <(u8, i8)>::deserialize(deserializer)?;
+        Decimal128Semantics::new(precision, scale)
+            .ok_or_else(|| D::Error::custom("invalid Decimal128 precision or scale"))
     }
 }

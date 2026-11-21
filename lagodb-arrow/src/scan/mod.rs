@@ -6,10 +6,12 @@
 
 mod adapter;
 mod export;
+mod packing;
 mod parallel;
 mod provider;
 
 pub use adapter::TableScanAdapter;
+pub use packing::WeightedBinPacker;
 pub use parallel::{
     TableScanWorkerAdapter, TableScanWorkerProvider, WorkerSourcePayload,
     WorkerStreamOptions,

@@ -1,5 +1,6 @@
 //! Parquet configuration, shared file codecs, and predicates.
 
+mod columnar;
 mod filter;
 mod output_writer;
 mod read_plan;
@@ -17,13 +18,15 @@ use super::{
     ParquetWriteCompression,
 };
 
+pub(crate) use columnar::{DeclaredColumn, ParquetColumnarPlan};
 pub(crate) use filter::{
     ParquetBoundPredicate, ParquetFilePredicate, ParquetFilterPlanner,
-    ParquetPlannedPredicate,
+    ParquetPlannedPredicate, ParquetRuntimePlanner,
 };
 pub(crate) use output_writer::ParquetOutputWriter;
 pub(crate) use read_plan::ParquetReadPlan;
-pub(crate) use source::ParquetBatchSource;
+pub(crate) use schema::ParquetFooter;
+pub(crate) use source::{ParquetBatchSource, ParquetSplit, ParquetSplits};
 pub(crate) use type_mapping::{ParquetReadMode, ParquetTypeMapping};
 pub(crate) use write_plan::ParquetWritePlan;
 
@@ -33,6 +36,10 @@ pub(crate) struct ParquetFormat {
 }
 
 impl ParquetFormat {
+    /// Planner startup cost of a Parquet scan: footer reads and reader setup,
+    /// shared by foreign scans and query offload.
+    pub(crate) const SCAN_STARTUP_COST: f64 = 100.0;
+
     pub(crate) const fn write_compression(&self) -> ParquetWriteCompression {
         self.write_compression
     }

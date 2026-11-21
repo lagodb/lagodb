@@ -1,7 +1,7 @@
 //! Adapt shared Parquet predicates to the FDW planning contract.
 
+use lagodb_core::expr::RuntimeValueBindings;
 use lagodb_core::expr::pushdown::{FilterBindResult, FilterPlan, PredicateFragment};
-use lagodb_core::expr::{PushdownCosting, RuntimeValueBindings};
 use lagodb_core::fdw::ForeignFilterExplainValues;
 use lagodb_core::plan_data::PlanDataWriter;
 
@@ -17,13 +17,9 @@ impl FormatFilterPlanner for ParquetFilterPlanner {
         &mut self,
         fragment: &PredicateFragment,
     ) -> Result<FilterPlan<FormatPlannedFilter>, ConnectorError> {
-        let Some(predicate) = self.plan_filter(fragment) else {
-            return Ok(FilterPlan::Unsupported);
-        };
-        Ok(FilterPlan::exact(
-            Box::new(predicate),
-            PushdownCosting::StatisticsPruning,
-        ))
+        Ok(self
+            .plan_filter(fragment)?
+            .map(|predicate| Box::new(predicate) as FormatPlannedFilter))
     }
 }
 

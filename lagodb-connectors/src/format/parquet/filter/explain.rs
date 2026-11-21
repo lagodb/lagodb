@@ -1,11 +1,12 @@
 //! Planning-time Parquet predicate descriptions.
 
 use std::ffi::{CStr, CString};
+use std::fmt::Write;
 
 use lagodb_core::expr::RuntimeValueId;
 use pgrx::pg_sys;
 
-use super::{PlannedColumn, PlannedNode};
+use super::plan::{PlannedColumn, PlannedNode};
 
 impl PlannedColumn {
     fn write_explain(&self, output: &mut String) {
@@ -29,6 +30,8 @@ impl PlannedNode {
     ) {
         output.push('(');
         match self {
+            Self::AlwaysTrue => output.push_str("true"),
+            Self::AlwaysFalse => output.push_str("false"),
             Self::Comparison {
                 operator,
                 column,
@@ -41,6 +44,11 @@ impl PlannedNode {
                 output.push(' ');
                 output.push_str(values(*value));
             }
+            Self::BooleanTest { kind, column } => {
+                column.write_explain(output);
+                write!(output, " IS {kind}")
+                    .expect("writing to a String cannot fail");
+            }
             Self::IsNull(column) => {
                 column.write_explain(output);
                 output.push_str(" IS NULL");
@@ -48,6 +56,27 @@ impl PlannedNode {
             Self::IsNotNull(column) => {
                 column.write_explain(output);
                 output.push_str(" IS NOT NULL");
+            }
+            Self::IsNan(column) => {
+                column.write_explain(output);
+                output.push_str(" = 'NaN'");
+            }
+            Self::IsNotNan(column) => {
+                column.write_explain(output);
+                output.push_str(" <> 'NaN'");
+            }
+            Self::StartsWith { column, prefix } => {
+                output.push_str("starts_with(");
+                column.write_explain(output);
+                output.push_str(", ");
+                output.push_str(values(*prefix));
+                output.push(')');
+            }
+            Self::InSet { column, set, .. } => {
+                column.write_explain(output);
+                output.push_str(" = ANY (");
+                output.push_str(values(*set));
+                output.push(')');
             }
             Self::And(children) => {
                 Self::write_explain_children(output, values, children, " AND ");

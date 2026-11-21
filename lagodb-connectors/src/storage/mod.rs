@@ -13,7 +13,7 @@ mod resolved_location;
 mod upload;
 mod uri;
 
-pub(crate) use input::{InputFiles, StorageInput};
+pub(crate) use input::{InputFiles, InputInventory, StorageInput};
 pub(crate) use input_file::InputFile;
 pub(crate) use location::ObjectLocationKind;
 pub(crate) use output::{AllocatedObject, ObjectFileSuffix, StorageOutput};

@@ -16,14 +16,13 @@ use crate::fdw::format_adapters::{
     FormatBoundFilter, FormatScanPlanner, FormatScanState,
 };
 use crate::fdw::{LagodbConnectors, PlannedFormat};
-use crate::format::FormatKind;
 use crate::format::parquet::{
     ParquetBatchSource, ParquetBoundPredicate, ParquetReadMode, ParquetReadPlan,
 };
+use crate::format::{FormatKind, ParquetFormat};
 use crate::storage::InputFiles;
 
 const UNANALYZED_FALLBACK_PAGES: pg_sys::BlockNumber = 10;
-const PARQUET_STARTUP_COST: f64 = 100.0;
 
 pub(super) struct ParquetScanPlanner {
     base_tuples: f64,
@@ -58,7 +57,8 @@ impl FormatScanPlanner for ParquetScanPlanner {
         let rows = context.rows();
         let pruning = context.filter_estimates().costed_filters();
         let retrieved_rows = (self.base_tuples * pruning.selectivity).max(rows);
-        let provider_startup_cost = PARQUET_STARTUP_COST + pruning.startup_cost;
+        let provider_startup_cost =
+            ParquetFormat::SCAN_STARTUP_COST + pruning.startup_cost;
         // PostgreSQL initializes planner cost GUCs before invoking FDW callbacks.
         let seq_page_cost = unsafe { pg_sys::seq_page_cost };
         let provider_total_cost = provider_startup_cost

@@ -56,7 +56,12 @@ impl LagodbConnectors {
 
     pub(crate) fn relation_uses_connectors(relation_oid: pg_sys::Oid) -> bool {
         let table = unsafe { &*pg_sys::GetForeignTable(relation_oid) };
-        let server = unsafe { &*pg_sys::GetForeignServer(table.serverid) };
+        Self::owns_server(table.serverid)
+    }
+
+    /// Whether a valid foreign server belongs to this wrapper.
+    pub(crate) fn owns_server(server_oid: pg_sys::Oid) -> bool {
+        let server = unsafe { &*pg_sys::GetForeignServer(server_oid) };
         let provider_oid = unsafe {
             pg_sys::get_foreign_data_wrapper_oid(Self::NAME.as_ptr(), true)
         };

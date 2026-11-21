@@ -1,6 +1,7 @@
 //! LagoDB connector extension entry point.
 //!
-//! [`copy`] and [`fdw`] adapt PostgreSQL execution, [`access`] resolves catalog
+//! [`copy`] and [`fdw`] adapt PostgreSQL execution, [`query_offload`] serves
+//! Parquet foreign tables to the query engine, [`access`] resolves catalog
 //! bindings and privileges, [`format`] owns schemas and shared file codecs,
 //! and [`storage`] owns file discovery, I/O, and publication.
 
@@ -11,6 +12,7 @@ mod error;
 mod fdw;
 mod format;
 mod gucs;
+mod query_offload;
 mod storage;
 
 use std::ffi::CStr;
@@ -30,6 +32,7 @@ extern "C-unwind" fn _PG_init() {
     gucs::init();
     copy::register();
     fdw::register_ddl_hooks();
+    query_offload::register();
     let identity = ProviderIdentity::foreign_data_wrapper(
         c"lagodb",
         c"lagodb_connectors",
