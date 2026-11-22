@@ -71,10 +71,9 @@ impl WorkerSource {
     pub(super) fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let payload: WorkerPayload = WorkerPayload::codec().deserialize(bytes)?;
         let relation_oid = pg_sys::Oid::from(payload.relation_oid);
-        // A parallel worker takes its own relation lock before reading any
-        // catalog state and keeps it to transaction end, as PostgreSQL's
-        // `ExecGetRangeTableRelation` does, so the relation stays protected
-        // if the leader exits first.
+        // `ExecGetRangeTableRelation` has already acquired this backend's
+        // local scan-relation lock. This reopen reads the TupleDesc and retains
+        // its additional AccessShareLock count until transaction end.
         let relation = RelationGuard::open_table_retain_lock(
             relation_oid,
             pg_sys::AccessShareLock as pg_sys::LOCKMODE,

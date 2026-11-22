@@ -143,9 +143,10 @@ impl ReopenPlan {
     pub(super) fn file_io(&self) -> Result<FileIO, Error> {
         match self {
             Self::Managed { relation_oid } => {
-                // PostgreSQL parallel workers take their own local relation
-                // lock even after joining the leader's lock group, so the
-                // relation remains protected if the leader exits first.
+                // The CustomScan executor already holds this backend's local
+                // scan-relation lock. This reopen only constructs the storage
+                // context; the returned FileIO retains no relation pointer, so
+                // dropping the guard releases its additional lock count.
                 let relation = RelationGuard::open_table(
                     *relation_oid,
                     pg_sys::AccessShareLock as pg_sys::LOCKMODE,
