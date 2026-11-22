@@ -1,10 +1,15 @@
 //! Cached PostgreSQL type input/output functions for text representations.
 
 use std::cell::{RefCell, RefMut};
+#[cfg(feature = "pg15")]
+use std::convert::Infallible;
 use std::ffi::c_char;
 use std::marker::PhantomData;
-use std::ptr::{self, NonNull};
+use std::ptr;
 use std::str;
+
+#[cfg(not(feature = "pg15"))]
+use std::ptr::NonNull;
 
 use pgrx::pg_sys;
 
@@ -16,20 +21,39 @@ use crate::backend::OwnedBackendContext;
 /// caller's operation, such as COPY with `ON_ERROR IGNORE`. Copies share the
 /// context; PostgreSQL writes it only during synchronous input calls, so input
 /// errors saved here do not unwind.
+#[cfg(not(feature = "pg15"))]
 #[derive(Clone, Copy)]
 pub struct SoftErrorContext<'a> {
     node: NonNull<pg_sys::Node>,
     _owner: PhantomData<&'a pg_sys::Node>,
 }
 
+/// PostgreSQL 15 has no soft-error input context. Keep the lifetime-bearing
+/// handle in the common typed-input API without storing a node that this
+/// version can never pass to an input function.
+#[cfg(feature = "pg15")]
+#[derive(Clone, Copy)]
+pub struct SoftErrorContext<'a> {
+    never: Infallible,
+    _owner: PhantomData<&'a pg_sys::Node>,
+}
+
 impl SoftErrorContext<'_> {
     /// # Safety
     /// A non-null `node` is a live `ErrorSaveContext` for the returned lifetime.
+    #[cfg(not(feature = "pg15"))]
     pub(crate) unsafe fn from_raw(node: *mut pg_sys::Node) -> Option<Self> {
         NonNull::new(node).map(|node| Self {
             node,
             _owner: PhantomData,
         })
+    }
+
+    /// PostgreSQL 15 callers always supply NULL because COPY has no
+    /// `ErrorSaveContext`, so this version can never construct the handle.
+    #[cfg(feature = "pg15")]
+    pub(crate) unsafe fn from_raw(_node: *mut pg_sys::Node) -> Option<Self> {
+        None
     }
 }
 
@@ -151,15 +175,15 @@ impl PgTextIo {
         .then_some(result)
     }
 
-    /// The routed COPY bridge supplies an `ErrorSaveContext` only for
-    /// `ON_ERROR`, which PostgreSQL 17 introduced.
+    /// PostgreSQL 15 has neither `ErrorSaveContext` nor
+    /// `InputFunctionCallSafe`, so its handle is uninhabited.
     #[cfg(feature = "pg15")]
     unsafe fn input_safe(
         &self,
         _text: *mut c_char,
-        _errors: SoftErrorContext<'_>,
+        errors: SoftErrorContext<'_>,
     ) -> Option<pg_sys::Datum> {
-        unreachable!("PostgreSQL 15 has no ErrorSaveContext to supply")
+        match errors.never {}
     }
 
     /// PostgreSQL input functions may write into their argument, as
