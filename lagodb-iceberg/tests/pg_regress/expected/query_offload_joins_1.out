@@ -1,5 +1,8 @@
 -- query_offload_joins.sql
 -- Integrated serial join semantics and capability-boundary coverage.
+-- _1.out is the PostgreSQL 17 output: it prints the sublink kind but has no
+-- right semi join. _2.out is the PostgreSQL 15 and 16 output: it also uses
+-- the older generic SubPlan rendering.
 DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 SET lagodb.query_batch_rows = 2;
@@ -1232,9 +1235,9 @@ ANALYZE query_offload_join_right;
 SET enable_nestloop = off;
 SET enable_mergejoin = off;
 SET lagodb.query_offload_mode = 'off';
--- PostgreSQL 15 to 17 have no JOIN_RIGHT_SEMI; _1.out is their output. On
--- PostgreSQL 18 the native plan must choose it, or the offloaded plan below no
--- longer covers the normalization.
+-- PostgreSQL 15 to 17 have no JOIN_RIGHT_SEMI; their alternate outputs use a
+-- hash semi join. On PostgreSQL 18 the native plan must choose a right semi
+-- join, or the offloaded plan below no longer covers the normalization.
 EXPLAIN (COSTS OFF)
 SELECT r.id
 FROM query_offload_join_right AS r
