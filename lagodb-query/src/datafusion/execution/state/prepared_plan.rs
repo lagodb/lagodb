@@ -170,6 +170,7 @@ impl PhysicalPlanPreparation<'_> {
             .with_config(self.limits.session_config(1))
             .with_runtime_env(Arc::clone(&self.environment))
             .with_default_features()
+            .with_query_planner(QuerySessionRules::query_planner())
             .build();
         let session = SessionContext::new_with_state(
             QuerySessionRules::new(self.fragment, self.limits).apply(state),

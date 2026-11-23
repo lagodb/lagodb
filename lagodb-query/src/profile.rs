@@ -51,6 +51,36 @@ impl ExecutionProfile {
     }
 }
 
+/// What a hash join partition whose build outgrows its `hash_mem` share runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashJoinFallback {
+    /// Sort both inputs into a sort-merge join.
+    SortMerge,
+    /// Split both inputs by a hash of their keys and hash-join groups of
+    /// buckets, splitting a bucket over `hash_mem` again.
+    HybridHash,
+}
+
+impl HashJoinFallback {
+    /// Hash bits one split of a hybrid hash join takes, so its buckets per
+    /// split; planning prices the splits a build needs by them.
+    pub(crate) const HYBRID_HASH_BUCKET_BITS: u32 = 12;
+
+    /// The `lagodb.query_offload_batched_hash_join` setting, also the form a
+    /// parallel bootstrap and the plan codec carry.
+    pub const fn from_hybrid_hash(enabled: bool) -> Self {
+        if enabled {
+            Self::HybridHash
+        } else {
+            Self::SortMerge
+        }
+    }
+
+    pub const fn is_hybrid_hash(self) -> bool {
+        matches!(self, Self::HybridHash)
+    }
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ExecutionProfileError {
     #[error("query maximum batch rows {value} is outside the supported range")]

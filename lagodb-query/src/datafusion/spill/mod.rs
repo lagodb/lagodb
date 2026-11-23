@@ -6,6 +6,14 @@
 //! tuplestores, so these streams are always ready and never wait on a waker.
 //! Interrupts are checked once per chunk because a merge phase can run for a
 //! long time without polling a table scan.
+//!
+//! [`indexed`] stores LagoDB's own bucketed runs in the same files.
+
+mod indexed;
+
+pub(in crate::datafusion) use indexed::{
+    BucketChunks, BucketRun, BucketRunFormat, BucketRunWriter,
+};
 
 use std::io::{self, Write};
 use std::pin::Pin;
@@ -25,7 +33,8 @@ use pgrx::pg_sys;
 use super::error::QueryExecutionError;
 
 /// Matches PostgreSQL's 32-block merge read-ahead (`MERGE_BUFFER_SIZE`).
-const SPILL_CHUNK_BYTES: usize = 32 * pg_sys::BLCKSZ as usize;
+pub(in crate::datafusion) const SPILL_CHUNK_BYTES: usize =
+    32 * pg_sys::BLCKSZ as usize;
 
 /// Creates DataFusion spill files through PostgreSQL's temporary-file layer.
 pub(super) struct PgTempFileFactory;
@@ -46,12 +55,7 @@ impl PgTempFileFactory {
 
 impl TempFileFactory for PgTempFileFactory {
     fn create_temp_file(&self, _description: &str) -> Result<Arc<dyn SpillFile>> {
-        BackendTempFile::check_interrupts()?;
-        let file = PgTempFile::create().map_err(BackendTempFile::external)?;
-        Ok(Arc::new(PgSpillFile(Arc::new(BackendTempFile {
-            file,
-            written: AtomicU64::new(0),
-        }))))
+        Ok(Arc::new(PgSpillFile(Arc::new(BackendTempFile::create()?))))
     }
 }
 
@@ -69,10 +73,24 @@ unsafe impl Send for BackendTempFile {}
 unsafe impl Sync for BackendTempFile {}
 
 impl BackendTempFile {
+    fn create() -> Result<Self> {
+        Self::check_interrupts()?;
+        let file = PgTempFile::create().map_err(Self::external)?;
+        Ok(Self {
+            file,
+            written: AtomicU64::new(0),
+        })
+    }
+
+    /// Bytes appended so far.
+    fn written(&self) -> u64 {
+        self.written.load(Ordering::Relaxed)
+    }
+
     /// Append at the end of the file. A spill file has one writer at a time.
     fn append(&self, bytes: &[u8]) -> Result<()> {
         Self::check_interrupts()?;
-        let offset = self.written.load(Ordering::Relaxed);
+        let offset = self.written();
         self.file.write_at(bytes, offset).map_err(Self::external)?;
         self.written
             .store(offset + bytes.len() as u64, Ordering::Relaxed);
@@ -92,6 +110,26 @@ impl BackendTempFile {
         }
         chunk.truncate(read);
         Ok(Some(Bytes::from(chunk)))
+    }
+
+    /// Fill `buffer` from `offset`, which with its length lies within the
+    /// written bytes.
+    fn read_exact_at(&self, buffer: &mut [u8], offset: u64) -> Result<()> {
+        Self::check_interrupts()?;
+        let mut filled = 0;
+        while filled < buffer.len() {
+            let read = self
+                .file
+                .read_at(&mut buffer[filled..], offset + filled as u64)
+                .map_err(Self::external)?;
+            if read == 0 {
+                return Err(DataFusionError::Internal(
+                    "spill file ended inside a written range".to_owned(),
+                ));
+            }
+            filled += read;
+        }
+        Ok(())
     }
 
     /// Spill I/O can run on a spawned task, which must not unwind. A held
@@ -116,7 +154,7 @@ struct PgSpillFile(Arc<BackendTempFile>);
 
 impl SpillFile for PgSpillFile {
     fn size(&self) -> Option<u64> {
-        Some(self.0.written.load(Ordering::Relaxed))
+        Some(self.0.written())
     }
 
     fn read_stream(

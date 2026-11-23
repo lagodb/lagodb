@@ -4,6 +4,7 @@ use std::fmt::{self, Debug, Formatter};
 use std::sync::{Arc, Mutex};
 
 use arrow_array::RecordBatch;
+use datafusion::arrow::compute::concat_batches;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::utils::memory::{
     RecordBatchMemoryCounter, estimate_memory_size,
@@ -44,15 +45,15 @@ impl StagedBuild {
 
     /// Keep `batch`, returning whether a hash table can still hold the input.
     ///
-    /// The table is sized by the same formula `HashJoinExec` reserves with. A
-    /// batch that does not fit stays uncharged: the caller stops here and hands
-    /// everything to a sort, which reserves for itself.
+    /// A batch that does not fit stays uncharged: the caller stops here and
+    /// hands everything to a path that reserves for itself.
     pub(super) fn push(&mut self, batch: RecordBatch) -> Result<bool> {
         let batch_bytes = self.counter.count_batch(&batch);
         let total_rows = self.rows + batch.num_rows();
         let total_bytes = self.batch_bytes + batch_bytes;
-        let needed = total_bytes + estimate_memory_size::<(u64, u64)>(total_rows, 0)?;
-        if self.reserve(needed)? {
+        let needed =
+            Self::table_bytes(total_bytes, total_rows, self.batches.len() + 1)?;
+        if Self::try_resize_within(&self.reservation, needed, self.limit_bytes)? {
             self.rows = total_rows;
             self.batch_bytes = total_bytes;
             self.batches.push((batch, batch_bytes));
@@ -63,11 +64,34 @@ impl StagedBuild {
         Ok(false)
     }
 
-    fn reserve(&self, needed: usize) -> Result<bool> {
-        if needed > self.limit_bytes {
+    /// Peak bytes of a hash table over `count` batches holding `bytes` and
+    /// `rows`: the batches, the single batch they are concatenated into when
+    /// there are several, and the index sized by the formula `HashJoinExec`
+    /// reserves with. The inputs' bytes bound the concatenated copy.
+    pub(super) fn table_bytes(
+        bytes: usize,
+        rows: usize,
+        count: usize,
+    ) -> Result<usize> {
+        let copy = if count > 1 { bytes } else { 0 };
+        Ok(bytes + copy + Self::index_bytes(rows)?)
+    }
+
+    fn index_bytes(rows: usize) -> Result<usize> {
+        estimate_memory_size::<(u64, u64)>(rows, 0)
+    }
+
+    /// Resize `reservation` to `needed` bytes if they stay within `limit` and
+    /// the pool grants them; a refusal is an answer, not an error.
+    pub(super) fn try_resize_within(
+        reservation: &MemoryReservation,
+        needed: usize,
+        limit: usize,
+    ) -> Result<bool> {
+        if needed > limit {
             return Ok(false);
         }
-        match self.reservation.try_resize(needed) {
+        match reservation.try_resize(needed) {
             Ok(()) => Ok(true),
             Err(error)
                 if matches!(
@@ -79,6 +103,32 @@ impl StagedBuild {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Concatenate the kept batches within the reservation `push` made for the
+    /// copy, release the originals, and yield the single batch as `replay`.
+    ///
+    /// TODO(datafusion-hash-join-concat): DataFusion 55's `HashJoinExec`
+    /// concatenates its build batches without reserving the copy
+    /// (apache/datafusion#25496, fixed in 56.0.0). Arrow returns a lone array
+    /// as a slice, so a single handed-over batch leaves the join nothing to
+    /// copy. Once the join reserves the copy itself, replay the batches
+    /// unchanged; `push` still counts the copy because the join cannot spill.
+    /// Recheck on every DataFusion upgrade.
+    pub(super) fn into_coalesced(
+        mut self,
+    ) -> Result<impl Stream<Item = Result<RecordBatch>> + Send + 'static> {
+        if self.batches.len() > 1 {
+            let schema = self.batches[0].0.schema();
+            let batch =
+                concat_batches(&schema, self.batches.iter().map(|(batch, _)| batch))?;
+            let bytes = RecordBatchMemoryCounter::new().count_batch(&batch);
+            self.batches = vec![(batch, bytes)];
+            self.batch_bytes = bytes;
+            self.reservation
+                .resize(bytes + Self::index_bytes(self.rows)?);
+        }
+        Ok(self.replay())
     }
 
     /// Yield the kept batches, returning each one's bytes as its consumer

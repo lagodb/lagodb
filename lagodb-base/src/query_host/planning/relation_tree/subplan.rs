@@ -234,6 +234,9 @@ impl RelationTreePlanner {
             JoinType::LeftSemi
         };
         let null_aware = lifted.anti && is_in;
+        // NOT IN hashes the subquery as PostgreSQL's hashed SubPlan does, and
+        // its join spills like any other, whether or not PostgreSQL itself
+        // would hash this SubPlan within hash_mem.
         if null_aware && keys.len() != 1 {
             return None;
         }

@@ -31,14 +31,14 @@ arrow-ord = "59.2.0"
 arrow-schema = { version = "59.2.0", features = ["serde", "canonical_extension_types"] }
 arrow-select = "59.2.0"
 arrow-string = "59.2.0"
-datafusion = { version = "=55.0.0", default-features = false }
+datafusion = { version = "=55.3.0", default-features = false }
 datafusion-distributed = {
     git = "https://github.com/lagodb/datafusion-distributed.git",
-    rev = "e09e50a8d4fdfc4a8d5329daa3798e148351c6be",
+    rev = "305d893abb065f33acf6980c40fd4dae78e4d77e",
     default-features = false,
     features = ["grpc"],
 }
-datafusion-proto = { version = "=55.0.0", default-features = false }
+datafusion-proto = { version = "=55.3.0", default-features = false }
 pgrx = { version = "=0.19.2" }
 pgrx-pg-sys = { version = "=0.19.2" }
 pgrx-tests = { version = "=0.19.2" }

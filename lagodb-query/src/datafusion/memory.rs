@@ -21,10 +21,10 @@ use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use datafusion_distributed::BroadcastExec;
 
-use crate::ExecutionProfile;
+use crate::{ExecutionProfile, HashJoinFallback};
 
 use super::error::QueryExecutionError;
-use super::join_planning::AdaptiveHashJoinExec;
+use super::join_planning::{AdaptiveHashJoinExec, JoinMemoryPolicy};
 use super::spill::PgTempFileFactory;
 
 mod worker;
@@ -128,6 +128,7 @@ pub struct QueryExecutionLimits {
     hash_memory_bytes: usize,
     execution: ExecutionProfile,
     spill_enabled: bool,
+    hash_join_fallback: HashJoinFallback,
 }
 
 impl QueryExecutionLimits {
@@ -136,6 +137,7 @@ impl QueryExecutionLimits {
         hash_memory_bytes: usize,
         execution: ExecutionProfile,
         spill_enabled: bool,
+        hash_join_fallback: HashJoinFallback,
     ) -> Result<Self, QueryExecutionError> {
         if work_mem_bytes == 0 || hash_memory_bytes == 0 {
             return Err(QueryExecutionError::InvalidLimits);
@@ -145,6 +147,7 @@ impl QueryExecutionLimits {
             hash_memory_bytes,
             execution,
             spill_enabled,
+            hash_join_fallback,
         ))
     }
 
@@ -155,12 +158,14 @@ impl QueryExecutionLimits {
         hash_memory_bytes: usize,
         execution: ExecutionProfile,
         spill_enabled: bool,
+        hash_join_fallback: HashJoinFallback,
     ) -> Self {
         Self {
             work_mem_bytes,
             hash_memory_bytes,
             execution,
             spill_enabled,
+            hash_join_fallback,
         }
     }
 
@@ -179,6 +184,18 @@ impl QueryExecutionLimits {
 
     pub(super) const fn spill_enabled(self) -> bool {
         self.spill_enabled
+    }
+
+    pub(super) const fn hash_join_fallback(self) -> HashJoinFallback {
+        self.hash_join_fallback
+    }
+
+    pub(super) const fn join_policy(self) -> JoinMemoryPolicy {
+        JoinMemoryPolicy {
+            hash_memory_bytes: self.hash_memory_bytes,
+            work_mem_bytes: self.work_mem_bytes,
+            fallback: self.hash_join_fallback,
+        }
     }
 
     fn sort_merge_reservation_bytes(self) -> usize {
@@ -261,10 +278,11 @@ impl QueryExecutionLimits {
             // CollectLeft builds one table every partition probes; other joins
             // run under `AdaptiveHashJoinExec`.
             (self.hash_memory_bytes, 1)
-        } else if node.is::<AdaptiveHashJoinExec>() {
-            // A partition that falls back sorts both inputs, and the plan does
-            // not show those Sorts.
-            (self.work_mem_bytes, 2 * partitions)
+        } else if let Some(join) = node.downcast_ref::<AdaptiveHashJoinExec>() {
+            // A partition whose build overflows sorts both inputs, or holds one
+            // bucket run per input beside a table within its `hash_mem` share;
+            // the plan shows neither.
+            (self.work_mem_bytes, 2 * join.build_partitions())
         } else if let Some(aggregate) = node.downcast_ref::<AggregateExec>() {
             if aggregate.group_expr().is_true_no_grouping() {
                 (self.work_mem_bytes, partitions)
@@ -275,6 +293,13 @@ impl QueryExecutionLimits {
             (self.work_mem_bytes, 1)
         } else if node.is::<BroadcastExec>() {
             // One cached build feeds every consumer task.
+            //
+            // TODO(distributed-broadcast-backpressure): the fork's queue has
+            // no backpressure: it keeps each batch until every reader has read
+            // it and grows its reservation without asking the pool, so a build
+            // that outruns its slowest reader holds more than this. Bounding
+            // that queue is a change to the fork; recheck on every fork
+            // update.
             (self.hash_memory_bytes, 1)
         } else if node.is::<SortExec>()
             || node.is::<SortMergeJoinExec>()
@@ -312,6 +337,14 @@ impl QueryExecutionLimits {
             // ResourcesExhausted where PostgreSQL's soft `work_mem` would
             // continue. See apache/datafusion#25851 and #26987; recheck on every
             // DataFusion upgrade.
+            //
+            // TODO(datafusion-repartition-spill): a non-order-preserving
+            // RepartitionExec shares one SpillPool per output partition among
+            // its input tasks; concurrent writers can leave two open files while
+            // the reader polls only the first, so a parallel stage that
+            // reshuffles under memory pressure can hang. Reachable only on the
+            // parallel path. apache/datafusion#24883 is fixed for 56.0.0 and not
+            // backported to 55.x; recheck on every DataFusion upgrade.
             Arc::new(SortFloorPool {
                 inner: FairSpillPool::new(bytes),
                 sort_floor_bytes: self.sort_merge_reservation_bytes(),
@@ -325,9 +358,11 @@ impl QueryExecutionLimits {
     fn disk_manager(self) -> DiskManagerBuilder {
         if self.spill_enabled {
             // TODO(datafusion-nlj-fallback): a temp-file disk manager also
-            // enables NestedLoopJoin's fallback, which reruns its left child
-            // without reset and loses rows under a finished CollectLeft build.
-            // apache/datafusion#24676 is fixed on main but not in 55.0.0;
+            // enables NestedLoopJoin's memory-limited fallback, which
+            // re-executes its build child. Every LagoDB leaf refuses that (a
+            // scan, a broadcast or a work id opens once), so the query fails
+            // instead of spilling. apache/datafusion#24676/#24677 (with
+            // #24745/#24746 and #22641/#24675) fix the fallback in 56.0.0;
             // recheck on every DataFusion upgrade.
             PgTempFileFactory::disk_manager(self.work_mem_bytes)
         } else {

@@ -9,7 +9,7 @@ use lagodb_query::ExecutionProfile;
 use lagodb_query::datafusion::DataFusionPlanAdmission;
 use lagodb_query::plan::{
     CostingContext, PlanCost, PlannedTableScan, QueryCostEstimator, ScanCostTable,
-    TableScanFilterExplain,
+    SpillCosting, TableScanFilterExplain,
 };
 use pgrx::pg_sys;
 
@@ -141,8 +141,12 @@ impl QueryPathInstallation {
                     .iter()
                     .map(|scan| scan.input.estimated_rows)
                     .collect::<Vec<_>>();
-                let spill_sort_memory_bytes =
-                    settings.spill.then(WorkMemBudget::bytes);
+                let spill = settings.spill.then(|| {
+                    SpillCosting::new(
+                        WorkMemBudget::bytes(),
+                        settings.hash_join_fallback,
+                    )
+                });
                 let cpu_cost_multiplier = settings.cpu_cost_multiplier;
                 let context = CostingContext::try_new(
                     settings.execution,
@@ -151,7 +155,7 @@ impl QueryPathInstallation {
                     unsafe { pg_sys::seq_page_cost },
                     pg_sys::BLCKSZ as usize,
                     settings.setup_cost,
-                    spill_sort_memory_bytes,
+                    spill,
                 )
                 .map_err(QueryHostError::invalid_plan)?;
                 QueryCostEstimator::new(

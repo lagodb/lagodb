@@ -243,8 +243,8 @@ DEALLOCATE query_offload_explain_scoped;
 RESET plan_cache_mode;
 
 -- PostgreSQL pulls up this LATERAL subquery. The unparameterized offload
--- becomes a Nested Loop inner and must restart its null-aware hash join on
--- each rescan. Its lifted SubPlan's local column stays a column in EXPLAIN.
+-- becomes a Nested Loop inner and must restart its NOT IN join on each
+-- rescan. Its lifted SubPlan's local column stays a column in EXPLAIN.
 CREATE TEMP TABLE query_offload_explain_outer (id integer);
 INSERT INTO query_offload_explain_outer VALUES (1), (2);
 SET enable_hashjoin = off;

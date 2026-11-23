@@ -46,6 +46,10 @@ impl ParallelSession {
             .with_config(config)
             .with_runtime_env(environment)
             .with_default_features()
+            // The default static task count is required: only static planning
+            // moves a parallel scan out of the head stage. A dynamic task count
+            // can leave it there, and the leader would then execute its own
+            // scan, which holds no source work.
             .with_distributed_option_extension(DistributedConfig::default())
             .with_distributed_worker_resolver(ParallelWorkerResolver::planning(
                 worker_cap as u32,
@@ -70,6 +74,7 @@ impl ParallelSession {
             .with_distributed_compression(None)?
             // A parallel scan accepts no dynamic filter.
             .with_distributed_remote_dynamic_filters(false)?
+            .with_query_planner(QuerySessionRules::query_planner())
             .with_distributed_planner()
             .build();
         Ok(SessionContext::new_with_state(

@@ -18,6 +18,8 @@ pub(super) struct ParallelBootstrap {
     pub hash_memory_bytes: u64,
     #[prost(bool, tag = "7")]
     pub spill_enabled: bool,
+    #[prost(bool, tag = "8")]
+    pub hybrid_hash_join: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]

@@ -2,24 +2,42 @@
 
 mod adaptive;
 mod estimates;
+mod hybrid_hash;
+mod null_sensitive;
 mod sort_merge;
 mod staged_build;
 mod statistics;
 mod strategy;
 
 pub(in crate::datafusion) use self::adaptive::AdaptiveHashJoinExec;
+pub(in crate::datafusion) use self::null_sensitive::NullSensitiveAntiJoinExec;
 
 use std::sync::Arc;
 
+use datafusion::execution::context::QueryPlanner;
 use datafusion::execution::session_state::{SessionState, SessionStateBuilder};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::operator_statistics::StatisticsRegistry;
 
 use self::estimates::PlanEstimates;
+use self::null_sensitive::{
+    LagoQueryPlanner, NullSensitiveBuildSideRule, NullSensitiveProbeRule,
+};
 use self::statistics::PlanStatisticsProvider;
 use self::strategy::JoinStrategyRule;
 use super::memory::QueryExecutionLimits;
+use crate::HashJoinFallback;
 use crate::plan::QueryFragment;
+
+/// Budgets and overflow policy shared by every adaptive join of one execution.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::datafusion) struct JoinMemoryPolicy {
+    /// `hash_mem` of the whole task, not of one partition.
+    pub(in crate::datafusion) hash_memory_bytes: usize,
+    /// Bound of each input's in-memory bucket run.
+    pub(in crate::datafusion) work_mem_bytes: usize,
+    pub(in crate::datafusion) fallback: HashJoinFallback,
+}
 
 /// Query-specific session rules shared by serial and parallel planning.
 pub(in crate::datafusion) struct QuerySessionRules<'a> {
@@ -52,8 +70,7 @@ impl<'a> QuerySessionRules<'a> {
                 .cloned()
                 .collect()
         });
-        let physical_rules = (estimates.is_some() && self.limits.spill_enabled())
-            .then(|| self.physical_rules(&state));
+        let physical_rules = estimates.is_some().then(|| self.physical_rules(&state));
 
         let mut builder = SessionStateBuilder::new_from_existing(state);
         if let Some(rules) = optimizer_rules {
@@ -70,8 +87,19 @@ impl<'a> QuerySessionRules<'a> {
         builder.build()
     }
 
-    /// The strategy rule needs JoinSelection's final build side, and must run
-    /// before EnsureRequirements adds the distribution each join mode requires.
+    /// The physical planner of every LagoDB session. A session installs it
+    /// before the distributed planner, which wraps the planner it finds.
+    pub(in crate::datafusion) fn query_planner() -> Arc<dyn QueryPlanner + Send + Sync>
+    {
+        Arc::new(LagoQueryPlanner)
+    }
+
+    /// The build-side and strategy rules need JoinSelection's build sides,
+    /// and must run before EnsureRequirements adds the distribution each join
+    /// mode requires. A NULL-sensitive anti join exists only in a fragment
+    /// that joins, and its build side is restored first, so the strategy rule
+    /// sees the final one. The probe rule removes a repartition that
+    /// EnsureRequirements adds, so it runs right after it.
     fn physical_rules(
         &self,
         state: &SessionState,
@@ -81,10 +109,18 @@ impl<'a> QuerySessionRules<'a> {
             .iter()
             .position(|rule| rule.name() == "join_selection")
             .expect("the default physical optimizer includes JoinSelection");
-        rules.insert(
-            join_selection + 1,
-            Arc::new(JoinStrategyRule::new(self.limits.hash_memory_bytes())),
-        );
+        rules.insert(join_selection + 1, Arc::new(NullSensitiveBuildSideRule));
+        if self.limits.spill_enabled() {
+            rules.insert(
+                join_selection + 2,
+                Arc::new(JoinStrategyRule::new(self.limits.join_policy())),
+            );
+        }
+        let ensure_requirements = rules
+            .iter()
+            .position(|rule| rule.name() == "EnsureRequirements")
+            .expect("the default physical optimizer includes EnsureRequirements");
+        rules.insert(ensure_requirements + 1, Arc::new(NullSensitiveProbeRule));
         rules
     }
 }

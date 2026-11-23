@@ -17,13 +17,37 @@ use prost::Message;
 
 use super::catalog::WorkerSourceCatalog;
 use super::scan_exec::ParallelTableScanExec;
+use crate::HashJoinFallback;
 use crate::datafusion::integer_abs::PgIntegerAbsUdf;
-use crate::datafusion::join_planning::AdaptiveHashJoinExec;
+use crate::datafusion::join_planning::{
+    AdaptiveHashJoinExec, JoinMemoryPolicy, NullSensitiveAntiJoinExec,
+};
 use crate::datafusion::pg_arithmetic::{
     PgArithmeticOperator, PgIntegerArithmeticUdf,
 };
 use crate::datafusion::{real_sum, udaf_by_name};
+use crate::plan::NullSensitiveAntiMode;
 use lagodb_core::query_contract::ScanId;
+
+/// Every plan node this codec owns, tagged by kind: the adaptive join and the
+/// NULL-sensitive anti join both have one child.
+#[derive(Clone, PartialEq, Message)]
+struct LagoPlanProto {
+    #[prost(oneof = "lago_plan::Node", tags = "1, 2, 3")]
+    node: Option<lago_plan::Node>,
+}
+
+mod lago_plan {
+    #[derive(Clone, PartialEq, prost::Oneof)]
+    pub(super) enum Node {
+        #[prost(message, tag = "1")]
+        ParallelScan(super::ParallelScanProto),
+        #[prost(message, tag = "2")]
+        AdaptiveHashJoin(super::AdaptiveHashJoinProto),
+        #[prost(message, tag = "3")]
+        NullSensitiveAntiJoin(super::NullSensitiveAntiJoinProto),
+    }
+}
 
 #[derive(Clone, PartialEq, Message)]
 struct ParallelScanProto {
@@ -47,6 +71,17 @@ struct WorkAssignmentProto {
 struct AdaptiveHashJoinProto {
     #[prost(uint64, tag = "1")]
     hash_memory_bytes: u64,
+    #[prost(uint64, tag = "2")]
+    work_mem_bytes: u64,
+    #[prost(bool, tag = "3")]
+    hybrid_hash: bool,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct NullSensitiveAntiJoinProto {
+    /// `x IS NULL OR x NOT IN`, or else `x NOT IN`.
+    #[prost(bool, tag = "1")]
+    null_or_not_in: bool,
 }
 
 /// User codec installed at position one after the fork's distributed codec.
@@ -65,31 +100,67 @@ impl fmt::Debug for LagoPhysicalCodec {
     }
 }
 
+impl ParallelScanProto {
+    fn encode_plan(scan: &ParallelTableScanExec) -> Result<Self> {
+        let schema =
+            protobuf::Schema::try_from(scan.schema().as_ref()).map_err(|error| {
+                proto_error(format!("failed to encode parallel scan schema: {error}"))
+            })?;
+        Ok(Self {
+            scan: scan.scan().index() as u64,
+            schema: Some(schema),
+            assignments: scan
+                .assignments()
+                .iter()
+                .map(|assignment| WorkAssignmentProto {
+                    work_ids: assignment.to_vec(),
+                })
+                .collect(),
+            maximum_batch_rows: scan.maximum_batch_rows(),
+        })
+    }
+}
+
 impl AdaptiveHashJoinProto {
     fn decode_plan(
-        buf: &[u8],
+        self,
         join: &Arc<dyn ExecutionPlan>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let proto = Self::decode(buf).map_err(|error| {
-            proto_error(format!("failed to decode adaptive hash join: {error}"))
-        })?;
-        // Leader and workers share this build and platform; the u64 field
-        // carries a `usize` written by `encode_plan`.
-        AdaptiveHashJoinExec::try_new(
-            Arc::clone(join),
-            proto.hash_memory_bytes as usize,
-        )
-        .map(|plan| Arc::new(plan) as Arc<dyn ExecutionPlan>)
+        // Leader and workers share this build and platform; the u64 fields
+        // carry the `usize` values written by `encode_plan`.
+        let policy = JoinMemoryPolicy {
+            hash_memory_bytes: self.hash_memory_bytes as usize,
+            work_mem_bytes: self.work_mem_bytes as usize,
+            fallback: HashJoinFallback::from_hybrid_hash(self.hybrid_hash),
+        };
+        AdaptiveHashJoinExec::try_new(Arc::clone(join), policy)
+            .map(|plan| Arc::new(plan) as Arc<dyn ExecutionPlan>)
     }
 
-    fn encode_plan(join: &AdaptiveHashJoinExec, buf: &mut Vec<u8>) -> Result<()> {
+    fn encode_plan(join: &AdaptiveHashJoinExec) -> Self {
+        let policy = join.policy();
         Self {
-            hash_memory_bytes: join.hash_memory_bytes() as u64,
+            hash_memory_bytes: policy.hash_memory_bytes as u64,
+            work_mem_bytes: policy.work_mem_bytes as u64,
+            hybrid_hash: policy.fallback.is_hybrid_hash(),
         }
-        .encode(buf)
-        .map_err(|error| {
-            proto_error(format!("failed to encode adaptive hash join: {error}"))
-        })
+    }
+}
+
+impl NullSensitiveAntiJoinProto {
+    fn decode_plan(self, join: &Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+        let mode = if self.null_or_not_in {
+            NullSensitiveAntiMode::NullOrNotIn
+        } else {
+            NullSensitiveAntiMode::NotIn
+        };
+        Arc::new(NullSensitiveAntiJoinExec::new(mode, Arc::clone(join)))
+    }
+
+    fn encode_plan(join: &NullSensitiveAntiJoinExec) -> Self {
+        Self {
+            null_or_not_in: join.mode() == NullSensitiveAntiMode::NullOrNotIn,
+        }
     }
 }
 
@@ -103,33 +174,14 @@ impl LagoPhysicalCodec {
             sources: Some(sources),
         }
     }
-}
 
-impl PhysicalExtensionCodec for LagoPhysicalCodec {
-    fn try_decode(
+    /// The u64 fields carry same-platform `usize` values written by
+    /// `ParallelScanProto::encode_plan`.
+    fn decode_scan(
         &self,
-        buf: &[u8],
-        inputs: &[Arc<dyn ExecutionPlan>],
+        proto: ParallelScanProto,
         ctx: &TaskContext,
-        _proto_converter: &dyn PhysicalProtoConverterExtension,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        // The two nodes this codec owns differ by arity: the scan is a leaf and
-        // the adaptive join has its hash join as the only child.
-        match inputs {
-            [] => {}
-            [join] => return AdaptiveHashJoinProto::decode_plan(buf, join),
-            _ => {
-                return Err(proto_error(format!(
-                    "LagoDB physical codec received {} inputs",
-                    inputs.len(),
-                )));
-            }
-        }
-        let proto = ParallelScanProto::decode(buf).map_err(|error| {
-            proto_error(format!("failed to decode parallel table scan: {error}"))
-        })?;
-        // The u64 field carries a same-platform `usize` written by
-        // `try_encode`.
         let scan = ScanId::from_index(proto.scan as usize);
         let schema = proto
             .schema
@@ -161,6 +213,36 @@ impl PhysicalExtensionCodec for LagoPhysicalCodec {
         )
         .map(|plan| Arc::new(plan) as Arc<dyn ExecutionPlan>)
     }
+}
+
+impl PhysicalExtensionCodec for LagoPhysicalCodec {
+    fn try_decode(
+        &self,
+        buf: &[u8],
+        inputs: &[Arc<dyn ExecutionPlan>],
+        ctx: &TaskContext,
+        _proto_converter: &dyn PhysicalProtoConverterExtension,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let proto = LagoPlanProto::decode(buf).map_err(|error| {
+            proto_error(format!("failed to decode LagoDB plan node: {error}"))
+        })?;
+        match (proto.node, inputs) {
+            (Some(lago_plan::Node::ParallelScan(scan)), []) => {
+                self.decode_scan(scan, ctx)
+            }
+            (Some(lago_plan::Node::AdaptiveHashJoin(join)), [input]) => {
+                join.decode_plan(input)
+            }
+            (Some(lago_plan::Node::NullSensitiveAntiJoin(join)), [input]) => {
+                Ok(join.decode_plan(input))
+            }
+            (None, _) => Err(proto_error("LagoDB plan node is empty")),
+            _ => Err(proto_error(format!(
+                "LagoDB plan node does not take {} inputs",
+                inputs.len(),
+            ))),
+        }
+    }
 
     fn try_encode(
         &self,
@@ -168,35 +250,27 @@ impl PhysicalExtensionCodec for LagoPhysicalCodec {
         buf: &mut Vec<u8>,
         _proto_converter: &dyn PhysicalProtoConverterExtension,
     ) -> Result<()> {
-        if let Some(join) = node.downcast_ref::<AdaptiveHashJoinExec>() {
-            return AdaptiveHashJoinProto::encode_plan(join, buf);
-        }
-        let Some(scan) = node.downcast_ref::<ParallelTableScanExec>() else {
+        let node = if let Some(join) = node.downcast_ref::<AdaptiveHashJoinExec>() {
+            lago_plan::Node::AdaptiveHashJoin(AdaptiveHashJoinProto::encode_plan(
+                join,
+            ))
+        } else if let Some(join) = node.downcast_ref::<NullSensitiveAntiJoinExec>() {
+            lago_plan::Node::NullSensitiveAntiJoin(
+                NullSensitiveAntiJoinProto::encode_plan(join),
+            )
+        } else if let Some(scan) = node.downcast_ref::<ParallelTableScanExec>() {
+            lago_plan::Node::ParallelScan(ParallelScanProto::encode_plan(scan)?)
+        } else {
             return Err(DataFusionError::NotImplemented(format!(
                 "LagoDB physical codec does not encode {}",
                 node.name(),
             )));
         };
-        let schema =
-            protobuf::Schema::try_from(scan.schema().as_ref()).map_err(|error| {
-                proto_error(format!("failed to encode parallel scan schema: {error}"))
-            })?;
-        ParallelScanProto {
-            scan: scan.scan().index() as u64,
-            schema: Some(schema),
-            assignments: scan
-                .assignments()
-                .iter()
-                .map(|assignment| WorkAssignmentProto {
-                    work_ids: assignment.to_vec(),
-                })
-                .collect(),
-            maximum_batch_rows: scan.maximum_batch_rows(),
-        }
-        .encode(buf)
-        .map_err(|error| {
-            proto_error(format!("failed to encode parallel table scan: {error}"))
-        })
+        LagoPlanProto { node: Some(node) }
+            .encode(buf)
+            .map_err(|error| {
+                proto_error(format!("failed to encode LagoDB plan node: {error}"))
+            })
     }
 
     fn try_decode_udf(&self, name: &str, buf: &[u8]) -> Result<Arc<ScalarUDF>> {

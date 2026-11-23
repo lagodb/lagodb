@@ -12,6 +12,7 @@ use datafusion::physical_plan::operator_statistics::{
 };
 
 use super::estimates::PlanEstimates;
+use super::null_sensitive::NullSensitiveAntiJoinExec;
 use crate::datafusion::parallel::ParallelTableScanExec;
 use crate::datafusion::table_scan::ExternalTableScanExec;
 
@@ -31,6 +32,7 @@ impl PlanStatisticsProvider {
     /// rows, corresponds to no relation-tree node.
     fn is_relation_operator(plan: &dyn ExecutionPlan) -> bool {
         plan.is::<HashJoinExec>()
+            || plan.is::<NullSensitiveAntiJoinExec>()
             || plan.is::<NestedLoopJoinExec>()
             || plan.is::<FilterExec>()
             || plan

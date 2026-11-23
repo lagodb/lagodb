@@ -69,9 +69,10 @@ impl ScalarSemantics {
             // lowered to exact NaN tests before reaching this domain.
             // DataFusion 55's IN-list skips that normalization and compares
             // float bits, so `f IN (0.0)` misses -0 rows. This is an
-            // upstream-owned defect, not worked around here; it is fixed by
-            // https://github.com/apache/datafusion/pull/25186 (merged after
-            // DataFusion 55) and recorded in docs/query-offload-semantics.md.
+            // upstream-owned defect, not worked around here; it is fixed on
+            // main by https://github.com/apache/datafusion/pull/25186, which
+            // DataFusion 55.3 does not include, and recorded in
+            // docs/query-offload-semantics.md.
             | pg_sys::FLOAT4OID
             | pg_sys::FLOAT8OID => {
                 !matches!(self, Self::Integer)

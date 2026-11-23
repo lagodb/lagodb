@@ -14,7 +14,7 @@ use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::filter_pushdown::{
     FilterDescription, FilterPushdownPhase,
 };
-use datafusion::physical_plan::joins::HashJoinExec;
+use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
 };
@@ -26,10 +26,16 @@ use datafusion::physical_plan::{
 };
 use futures::{StreamExt, TryStreamExt, stream};
 
+use super::JoinMemoryPolicy;
+use super::hybrid_hash::HybridHashJoin;
 use super::sort_merge::sort_merge_join;
 use super::staged_build::{StagedBuild, StagedInputExec};
+use crate::HashJoinFallback;
 
 /// Per-partition plans that replaced the hash join, kept for their metrics.
+/// A partition adds one sort-merge join, or with the hybrid join one per
+/// group it could not hash at any level of splitting. They hold no rows: each
+/// input stream is taken when the plan runs.
 type FallbackPlans = Arc<Mutex<Vec<Arc<dyn ExecutionPlan>>>>;
 
 /// Runs one fixed `HashJoinExec`, deciding per partition whether it can hash.
@@ -38,9 +44,11 @@ type FallbackPlans = Arc<Mutex<Vec<Arc<dyn ExecutionPlan>>>>;
 /// batching at run time for the same reason an estimate cannot: the build size
 /// is only known once read. This node reads the build partition first, under
 /// its even share of the task's `hash_mem`. When it fits, the hash join runs on
-/// those batches. When it does not, both inputs go through spillable sorts into
-/// a sort-merge join. The probe side is still unread at that point, so each
-/// input is read exactly once and the plan never changes.
+/// those batches. When it does not, the policy's [`HashJoinFallback`] decides:
+/// both inputs go through spillable sorts into a sort-merge join, or through
+/// bucket runs into hash joins over groups of buckets ([`HybridHashJoin`]). The
+/// probe side is still unread at that point, so each input is read exactly once
+/// and the plan never changes.
 ///
 /// The join stays a child so that planners keep recognizing it, and so that
 /// the protobuf codec carries it. This node never executes that child's own
@@ -50,30 +58,32 @@ type FallbackPlans = Arc<Mutex<Vec<Arc<dyn ExecutionPlan>>>>;
 ///
 /// Only a join whose partitions are independent can take this path. A
 /// CollectLeft join with several probe partitions shares one build and stays a
-/// plain hash join.
+/// plain hash join, unless a `NullSensitiveAntiJoinExec` runs it as one
+/// partition over all of its probe.
 ///
-/// Recheck three `HashJoinExec` behaviors on every DataFusion upgrade, because
+/// Recheck four `HashJoinExec` behaviors on every DataFusion upgrade, because
 /// a change to them need not fail loudly here: `builder()` keeps the dynamic
-/// filter when it replaces the children, the filter's consumer is found by
-/// walking the probe input, and an empty build finishes without polling the
-/// probe. Delete this node once DataFusion ships a hash join that spills.
+/// filter when it replaces the children, `reset_state()` drops it with the
+/// build, the filter's consumer is found by walking the probe input, and an
+/// empty build finishes without polling the probe. Delete this node once
+/// DataFusion ships a hash join that spills.
 #[derive(Debug)]
 pub(in crate::datafusion) struct AdaptiveHashJoinExec {
     join: Arc<dyn ExecutionPlan>,
-    /// `hash_mem` of the whole task, not of one partition.
-    hash_memory_bytes: usize,
+    policy: JoinMemoryPolicy,
     properties: Arc<PlanProperties>,
     metrics: ExecutionPlanMetricsSet,
     fallback_plans: FallbackPlans,
 }
 
 impl AdaptiveHashJoinExec {
-    /// `join` must be a `HashJoinExec` that is not null-aware. Output order is
-    /// dropped because a sort-merge partition does not keep the probe order;
-    /// equivalences and partitioning hold for either algorithm.
+    /// `join` must be a `HashJoinExec`. LagoDB plans no null-aware one, which
+    /// a sort-merge join could not express. Output order is dropped because a
+    /// sort-merge partition does not keep the probe order; equivalences and
+    /// partitioning hold for either algorithm.
     pub(in crate::datafusion) fn try_new(
         join: Arc<dyn ExecutionPlan>,
-        hash_memory_bytes: usize,
+        policy: JoinMemoryPolicy,
     ) -> Result<Self> {
         if !join.is::<HashJoinExec>() {
             return Err(DataFusionError::Internal(format!(
@@ -81,6 +91,31 @@ impl AdaptiveHashJoinExec {
                 join.name(),
             )));
         }
+        Ok(Self::running(
+            join,
+            policy,
+            ExecutionPlanMetricsSet::new(),
+            Arc::default(),
+        ))
+    }
+
+    /// Run `join`, a run-time plan of this node's join, under this node's
+    /// policy, with its metrics and fallback plans reported here.
+    pub(super) fn with_join(&self, join: HashJoinExec) -> Self {
+        Self::running(
+            Arc::new(join),
+            self.policy,
+            self.metrics.clone(),
+            Arc::clone(&self.fallback_plans),
+        )
+    }
+
+    fn running(
+        join: Arc<dyn ExecutionPlan>,
+        policy: JoinMemoryPolicy,
+        metrics: ExecutionPlanMetricsSet,
+        fallback_plans: FallbackPlans,
+    ) -> Self {
         let child = join.properties();
         let mut equivalences = child.eq_properties.clone();
         equivalences.clear_orderings();
@@ -90,17 +125,32 @@ impl AdaptiveHashJoinExec {
             child.emission_type,
             child.boundedness,
         );
-        Ok(Self {
+        Self {
             join,
-            hash_memory_bytes,
+            policy,
             properties: Arc::new(properties),
-            metrics: ExecutionPlanMetricsSet::new(),
-            fallback_plans: Arc::default(),
-        })
+            metrics,
+            fallback_plans,
+        }
     }
 
-    pub(in crate::datafusion) const fn hash_memory_bytes(&self) -> usize {
-        self.hash_memory_bytes
+    pub(in crate::datafusion) const fn policy(&self) -> JoinMemoryPolicy {
+        self.policy
+    }
+
+    pub(super) fn join(&self) -> &HashJoinExec {
+        Self::hash_join(&self.join)
+    }
+
+    /// Partitions that each read a build of their own, and split `hash_mem`
+    /// between them. A CollectLeft join builds once: the serial join has one
+    /// partition, and `NullSensitiveAntiJoinExec` runs its join as one
+    /// partition over every probe partition.
+    pub(in crate::datafusion) fn build_partitions(&self) -> usize {
+        match self.join().partition_mode() {
+            PartitionMode::CollectLeft => 1,
+            _ => self.properties.partitioning.partition_count(),
+        }
     }
 
     fn hash_join(join: &Arc<dyn ExecutionPlan>) -> &HashJoinExec {
@@ -172,7 +222,7 @@ impl ExecutionPlan for AdaptiveHashJoinExec {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(Arc::new(Self::try_new(
             children.swap_remove(0),
-            self.hash_memory_bytes,
+            self.policy,
         )?))
     }
 
@@ -210,7 +260,7 @@ impl ExecutionPlan for AdaptiveHashJoinExec {
                 if !node.is::<HashJoinExec>() {
                     return Ok(Transformed::no(node));
                 }
-                let adaptive = Self::try_new(node, self.hash_memory_bytes)?;
+                let adaptive = Self::try_new(node, self.policy)?;
                 Ok(Transformed::new(
                     Arc::new(adaptive) as Arc<dyn ExecutionPlan>,
                     true,
@@ -235,8 +285,10 @@ impl ExecutionPlan for AdaptiveHashJoinExec {
             join: Arc::clone(&self.join),
             partition,
             context,
-            build_limit_bytes: self.hash_memory_bytes
-                / self.properties.partitioning.partition_count(),
+            policy: self.policy,
+            build_limit_bytes: self.policy.hash_memory_bytes
+                / self.build_partitions(),
+            metrics: self.metrics.clone(),
             fallback_partitions,
             fallback_plans: Arc::clone(&self.fallback_plans),
         };
@@ -260,21 +312,73 @@ impl ExecutionPlan for AdaptiveHashJoinExec {
 }
 
 /// One partition of an [`AdaptiveHashJoinExec`] from its first build batch.
-struct PartitionRun {
+pub(super) struct PartitionRun {
     join: Arc<dyn ExecutionPlan>,
     partition: usize,
     context: Arc<TaskContext>,
+    policy: JoinMemoryPolicy,
     build_limit_bytes: usize,
+    metrics: ExecutionPlanMetricsSet,
     fallback_partitions: Count,
     fallback_plans: FallbackPlans,
+}
+
+/// Build input read under the partition's `hash_mem` share.
+pub(super) enum StagedInput {
+    /// Every batch, coalesced for a hash table.
+    Fits(SendableRecordBatchStream),
+    /// The staged batches followed by the unread rest.
+    Overflows(SendableRecordBatchStream),
 }
 
 impl PartitionRun {
     async fn execute(
         self,
-        mut build: SendableRecordBatchStream,
+        build: SendableRecordBatchStream,
         probe: SendableRecordBatchStream,
     ) -> Result<SendableRecordBatchStream> {
+        let build = match self.stage(build).await? {
+            StagedInput::Fits(build) => return self.hash(build, probe),
+            StagedInput::Overflows(build) => build,
+        };
+        self.fallback_partitions.add(1);
+        match self.policy.fallback {
+            HashJoinFallback::SortMerge => self.sort_merge(build, probe),
+            HashJoinFallback::HybridHash => {
+                HybridHashJoin::execute(self, build, probe).await
+            }
+        }
+    }
+
+    pub(super) fn join(&self) -> &HashJoinExec {
+        AdaptiveHashJoinExec::hash_join(&self.join)
+    }
+
+    pub(super) const fn partition(&self) -> usize {
+        self.partition
+    }
+
+    pub(super) fn context(&self) -> &Arc<TaskContext> {
+        &self.context
+    }
+
+    pub(super) const fn policy(&self) -> JoinMemoryPolicy {
+        self.policy
+    }
+
+    pub(super) const fn build_limit_bytes(&self) -> usize {
+        self.build_limit_bytes
+    }
+
+    pub(super) const fn metrics(&self) -> &ExecutionPlanMetricsSet {
+        &self.metrics
+    }
+
+    /// Read `build` until it ends or outgrows the partition's share.
+    pub(super) async fn stage(
+        &self,
+        mut build: SendableRecordBatchStream,
+    ) -> Result<StagedInput> {
         let reservation =
             MemoryConsumer::new(format!("AdaptiveHashJoinBuild[{}]", self.partition))
                 .register(self.context.memory_pool());
@@ -283,22 +387,25 @@ impl PartitionRun {
         while let Some(batch) = build.next().await.transpose()? {
             if !stage.push(batch)? {
                 let input = stage.replay().chain(build);
-                let build = RecordBatchStreamAdapter::new(schema, input);
-                return self.sort_merge(Box::pin(build), probe);
+                return Ok(StagedInput::Overflows(Box::pin(
+                    RecordBatchStreamAdapter::new(schema, input),
+                )));
             }
         }
-        let build = RecordBatchStreamAdapter::new(schema, stage.replay());
-        self.hash(Box::pin(build), probe)
+        let input = stage.into_coalesced()?;
+        Ok(StagedInput::Fits(Box::pin(RecordBatchStreamAdapter::new(
+            schema, input,
+        ))))
     }
 
     /// Continue the planned join on the staged batches. Its properties, metrics
     /// and dynamic filter all carry over.
     fn hash(
-        self,
+        &self,
         build: SendableRecordBatchStream,
         probe: SendableRecordBatchStream,
     ) -> Result<SendableRecordBatchStream> {
-        let join = AdaptiveHashJoinExec::hash_join(&self.join);
+        let join = self.join();
         let build = StagedInputExec::opened(Arc::clone(join.left()), build);
         let probe = StagedInputExec::opened(Arc::clone(join.right()), probe);
         join.builder()
@@ -307,20 +414,18 @@ impl PartitionRun {
                 Arc::new(probe),
             ])?
             .build()?
-            .execute(self.partition, self.context)
+            .execute(self.partition, Arc::clone(&self.context))
     }
 
-    /// Replace this partition's join. A serial dynamic filter simply stays
-    /// unset, so the probe scan reads everything.
-    fn sort_merge(
-        self,
+    /// Join `build` and `probe` by sort-merge instead. A serial dynamic filter
+    /// simply stays unset, so the probe scan reads everything.
+    pub(super) fn sort_merge(
+        &self,
         build: SendableRecordBatchStream,
         probe: SendableRecordBatchStream,
     ) -> Result<SendableRecordBatchStream> {
-        self.fallback_partitions.add(1);
-        let join = AdaptiveHashJoinExec::hash_join(&self.join);
         let plan = sort_merge_join(
-            join,
+            self.join(),
             Arc::new(StagedInputExec::single_partition(build)),
             Arc::new(StagedInputExec::single_partition(probe)),
         )?;
@@ -328,6 +433,6 @@ impl PartitionRun {
             .lock()
             .expect("no code panics while holding the fallback plans")
             .push(Arc::clone(&plan));
-        plan.execute(0, self.context)
+        plan.execute(0, Arc::clone(&self.context))
     }
 }

@@ -7,5 +7,5 @@ mod profile;
 
 pub use profile::{
     DEFAULT_MAXIMUM_BATCH_ROWS, ExecutionProfile, ExecutionProfileError,
-    MAXIMUM_BATCH_ROWS_LIMIT,
+    HashJoinFallback, MAXIMUM_BATCH_ROWS_LIMIT,
 };

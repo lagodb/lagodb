@@ -3,7 +3,7 @@
 //! Only leaf bindings differ: planning uses schemas and typed runtime values;
 //! execution uses bound providers, evaluated values and PostgreSQL UDF state.
 
-use datafusion::common::{Column, DataFusionError, NullEquality};
+use datafusion::common::{Column, DataFusionError};
 use datafusion::logical_expr::logical_plan::builder::LogicalPlanBuilderOptions;
 use datafusion::logical_expr::{
     Expr, JoinType as DataFusionJoinType, LogicalPlan, LogicalPlanBuilder, lit,
@@ -16,6 +16,7 @@ use crate::plan::{ExecutionExpr, JoinType, QueryNode, SortDirection};
 
 use super::DataFusionPlanError;
 use super::expression::DataFusionExpressionCompiler;
+use super::null_sensitive::NullSensitiveAntiJoin;
 use super::runtime_value::LimitWindow;
 
 pub(in crate::datafusion) struct DataFusionLogicalPlanCompiler<'a> {
@@ -129,6 +130,24 @@ impl<'a> DataFusionLogicalPlanCompiler<'a> {
             QueryNode::Join(join) => {
                 let left = self.node(join.left())?;
                 let right = self.node(join.right())?.build()?;
+                if let Some(mode) = join.null_sensitive_anti_mode() {
+                    let [key] = join.keys() else {
+                        return Err(DataFusionError::Plan(
+                            "NULL-sensitive anti join requires exactly one key"
+                                .to_owned(),
+                        )
+                        .into());
+                    };
+                    return Ok(LogicalPlanBuilder::from(
+                        NullSensitiveAntiJoin::plan(
+                            mode,
+                            left.build()?,
+                            right,
+                            expressions.compile(&key.left().expression())?,
+                            expressions.compile(&key.right().expression())?,
+                        ),
+                    ));
+                }
                 let mut on = Vec::with_capacity(
                     join.keys().len() + usize::from(join.on_filter().is_some()),
                 );
@@ -154,26 +173,6 @@ impl<'a> DataFusionLogicalPlanCompiler<'a> {
                 {
                     on.push(lit(true));
                 }
-                if join.null_aware() {
-                    return Self::null_aware_anti_join(left, right, &on);
-                }
-                if join.mark_filter().is_some_and(|filter| filter.anti()) {
-                    let [equality] = on.as_slice() else {
-                        return Err(DataFusionError::Plan(
-                            "anti Mark join requires exactly one key".to_owned(),
-                        )
-                        .into());
-                    };
-                    // LeftMark itself emits a non-null boolean. Extending
-                    // its match condition with an inner-key NULL match is
-                    // what preserves NOT IN's UNKNOWN result for non-null
-                    // outer keys; the immediate filter below then inverts
-                    // that closed mark while retaining outer NULL rows.
-                    let inner_null = expressions
-                        .compile(&join.keys()[0].right().expression())?
-                        .is_null();
-                    on = vec![equality.clone().or(inner_null)];
-                }
                 let left_projection = join.mark_filter().map(|_| {
                     left.schema()
                         .columns()
@@ -197,7 +196,9 @@ impl<'a> DataFusionLogicalPlanCompiler<'a> {
                         .last()
                         .cloned()
                         .expect("LeftMark always appends its mark column");
-                    let mark = Expr::Column(mark_column).eq(lit(!filter.anti()));
+                    // An anti Mark is a NULL-sensitive anti join above, so
+                    // this mark is the `x IN (subquery)` test itself.
+                    let mark = Expr::Column(mark_column);
                     let outer_null = expressions
                         .compile(&ExecutionExpr::Column(filter.null_test()))?
                         .is_null();
@@ -312,30 +313,6 @@ impl<'a> DataFusionLogicalPlanCompiler<'a> {
             JoinType::LeftAnti => DataFusionJoinType::LeftAnti,
             JoinType::LeftMark => DataFusionJoinType::LeftMark,
         }
-    }
-
-    /// DataFusion's NOT IN contract requires a filter-based, single-key
-    /// LeftAnti join with the logical plan's null-aware flag enabled.
-    fn null_aware_anti_join(
-        left: LogicalPlanBuilder,
-        right: LogicalPlan,
-        on: &[Expr],
-    ) -> Result<LogicalPlanBuilder, DataFusionPlanError> {
-        let [predicate] = on else {
-            return Err(DataFusionError::Plan(
-                "null-aware anti join requires exactly one key".to_owned(),
-            )
-            .into());
-        };
-        left.join_detailed_with_options(
-            right,
-            DataFusionJoinType::LeftAnti,
-            (Vec::<Column>::new(), Vec::<Column>::new()),
-            Some(predicate.clone()),
-            NullEquality::NullEqualsNothing,
-            true,
-        )
-        .map_err(Into::into)
     }
 
     /// Physical result names belong to PostgreSQL slot positions, not semantic

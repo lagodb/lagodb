@@ -25,7 +25,9 @@ pub use expression::{
     ScalarFunctionNotation,
 };
 pub(in crate::plan) use expression_validation::PlanExpressionValidator;
-pub use join::{JoinKey, JoinNode, JoinType, MarkFilter, RelationValueRef};
+pub use join::{
+    JoinKey, JoinNode, JoinType, MarkFilter, NullSensitiveAntiMode, RelationValueRef,
+};
 pub use limit::{LimitEstimate, LimitNode};
 pub use ordering::SortDirection;
 pub use project::{ProjectExpr, ProjectNode};

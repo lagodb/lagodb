@@ -11,7 +11,7 @@ mod table_scan_filter;
 pub use codec::{QueryPlanData, QueryPlanDataError};
 pub use costing::{
     CostingContext, PlanCost, PlanEstimate, QueryCostError, QueryCostEstimator,
-    ScanCostTable,
+    ScanCostTable, SpillCosting,
 };
 pub use explain::{
     PlanExplainNode, PlanExplainProperty, PlanExplainRelation, PlanExplainValue,
@@ -21,10 +21,11 @@ pub use ir::{
     BooleanTestKind, CaseWhen, ComparisonKind, Decimal128Semantics, DecimalOperator,
     DistinctExpr, DistinctNode, ExecutionExpr, ExecutionScalarRepr, FilterNode,
     FixedDecimalType, GroupExpr, JoinKey, JoinNode, JoinType, LimitEstimate,
-    LimitNode, MarkFilter, PostgresEvalExpr, PostgresEvalInput,
-    PostgresExprVolatility, ProjectExpr, ProjectNode, QueryFragment, QueryNode,
-    QueryPlanError, RelationValueRef, ScalarFunctionKind, ScalarFunctionNotation,
-    ScalarSemantics, ScanNode, SortDirection, SortExpr, SortNode,
+    LimitNode, MarkFilter, NullSensitiveAntiMode, PostgresEvalExpr,
+    PostgresEvalInput, PostgresExprVolatility, ProjectExpr, ProjectNode,
+    QueryFragment, QueryNode, QueryPlanError, RelationValueRef, ScalarFunctionKind,
+    ScalarFunctionNotation, ScalarSemantics, ScanNode, SortDirection, SortExpr,
+    SortNode,
 };
 pub use lagodb_core::query_contract::OutputId;
 pub use layout::{QueryTupleLayout, QueryTupleSlot};

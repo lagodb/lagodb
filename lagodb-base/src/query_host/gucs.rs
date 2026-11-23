@@ -5,7 +5,8 @@
 
 use lagodb_query::datafusion::QueryExecutionLimits;
 use lagodb_query::{
-    DEFAULT_MAXIMUM_BATCH_ROWS, ExecutionProfile, MAXIMUM_BATCH_ROWS_LIMIT,
+    DEFAULT_MAXIMUM_BATCH_ROWS, ExecutionProfile, HashJoinFallback,
+    MAXIMUM_BATCH_ROWS_LIMIT,
 };
 use pgrx::{GucContext, GucFlags, GucRegistry, GucSetting, PostgresGucEnum, pg_sys};
 
@@ -25,6 +26,8 @@ static QUERY_OFFLOAD_PARALLEL_MIN_SCAN_ROWS: GucSetting<i32> =
 static QUERY_OFFLOAD_PARALLEL_QUEUE_SIZE: GucSetting<i32> =
     GucSetting::<i32>::new(8 * 1_024 * 1_024);
 static QUERY_OFFLOAD_SPILL: GucSetting<bool> = GucSetting::<bool>::new(true);
+static QUERY_OFFLOAD_BATCHED_HASH_JOIN: GucSetting<bool> =
+    GucSetting::<bool>::new(true);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PostgresGucEnum)]
 pub(super) enum QueryOffloadMode {
@@ -40,12 +43,15 @@ impl QueryOffloadMode {
 }
 
 /// Settings read when one offload path is costed and encoded into its plan.
+/// `hash_join_fallback` only prices the path: execution reads the setting
+/// again, as it does `spill`.
 #[derive(Clone, Copy)]
 pub(super) struct QueryPlanSettings {
     pub(super) execution: ExecutionProfile,
     pub(super) setup_cost: f64,
     pub(super) cpu_cost_multiplier: f64,
     pub(super) spill: bool,
+    pub(super) hash_join_fallback: HashJoinFallback,
 }
 
 impl QueryPlanSettings {
@@ -58,7 +64,12 @@ impl QueryPlanSettings {
             setup_cost: QUERY_OFFLOAD_SETUP_COST.get(),
             cpu_cost_multiplier: QUERY_OFFLOAD_CPU_COST_MULTIPLIER.get(),
             spill: QUERY_OFFLOAD_SPILL.get(),
+            hash_join_fallback: Self::hash_join_fallback(),
         }
+    }
+
+    fn hash_join_fallback() -> HashJoinFallback {
+        HashJoinFallback::from_hybrid_hash(QUERY_OFFLOAD_BATCHED_HASH_JOIN.get())
     }
 }
 
@@ -66,6 +77,7 @@ impl QueryPlanSettings {
 #[derive(Clone, Copy)]
 pub(super) struct QueryExecutionSettings {
     pub(super) spill: bool,
+    pub(super) hash_join_fallback: HashJoinFallback,
     pub(super) parallel_min_scan_rows: f64,
     pub(super) parallel_queue_size: usize,
 }
@@ -74,6 +86,7 @@ impl QueryExecutionSettings {
     pub(super) fn current() -> Self {
         Self {
             spill: QUERY_OFFLOAD_SPILL.get(),
+            hash_join_fallback: QueryPlanSettings::hash_join_fallback(),
             parallel_min_scan_rows: f64::from(
                 QUERY_OFFLOAD_PARALLEL_MIN_SCAN_ROWS.get(),
             ),
@@ -100,6 +113,7 @@ impl QueryExecutionSettings {
             hash_memory_bytes,
             execution,
             self.spill,
+            self.hash_join_fallback,
         )
         .map_err(QueryHostError::from)
     }
@@ -181,6 +195,14 @@ pub(super) fn define() {
         c"Allow query offload operators to spill to PostgreSQL temporary files",
         c"When off, query offload never writes spill files and its memory has no limit, so a large query can exhaust server memory and restart every backend.",
         &QUERY_OFFLOAD_SPILL,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_bool_guc(
+        c"lagodb.query_offload_batched_hash_join",
+        c"Let an offloaded hash join that outgrows hash_mem keep hashing in bucket groups",
+        c"When off, such a join sorts both inputs into a sort-merge join instead. Has no effect when lagodb.query_offload_spill is off.",
+        &QUERY_OFFLOAD_BATCHED_HASH_JOIN,
         GucContext::Suset,
         GucFlags::default(),
     );

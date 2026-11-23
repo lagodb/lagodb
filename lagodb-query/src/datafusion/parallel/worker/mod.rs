@@ -21,12 +21,12 @@ use super::transport::{
     ParallelChannelResolver, ParallelRuntime, RunRole, RunSignal, RunWatch,
     ServerStreams, StreamContext, TransportRegion, WakerSet,
 };
-use crate::ExecutionProfile;
 use crate::datafusion::error::QueryExecutionError;
 use crate::datafusion::memory::{
     ParticipantMemoryRecorder, QueryExecutionLimits, TaskMemoryPool,
 };
 use crate::datafusion::scan_callbacks::WorkerTableScanSource;
+use crate::{ExecutionProfile, HashJoinFallback};
 
 /// Drive a restored PG parallel worker through the upstream gRPC service.
 ///
@@ -68,6 +68,7 @@ pub unsafe fn run_parallel_worker<H: ParallelWorkerHost + 'static>(
         bootstrap.hash_memory_bytes as usize,
         ExecutionProfile::restore(bootstrap.maximum_batch_rows as usize),
         bootstrap.spill_enabled,
+        HashJoinFallback::from_hybrid_hash(bootstrap.hybrid_hash_join),
     );
     let sources = WorkerRun::resolve_sources(&host, &bootstrap, &inventory)?;
     let source_host: Arc<dyn ParallelWorkerHost> = host.clone();

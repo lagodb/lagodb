@@ -219,6 +219,7 @@ impl ParallelRun {
             source_inventory_bytes: source_inventory.byte_len() as u64,
             hash_memory_bytes: limits.hash_memory_bytes() as u64,
             spill_enabled: limits.spill_enabled(),
+            hybrid_hash_join: limits.hash_join_fallback().is_hybrid_hash(),
         }
         .encode_to_vec();
         let layout =

@@ -204,9 +204,16 @@ impl ParallelTableScanExec {
         let variants = (0..event.task_count)
             .map(|task| scan.task_plan(task, event.task_count))
             .collect::<Result<Vec<_>>>();
+        // The leader's scan holds no source, so only a task variant on a
+        // worker can read it: upstream then never leaves it in the head stage.
         Some(variants.and_then(|variants| {
-            DistributedLeafExec::try_new(Arc::clone(event.plan), variants)
-                .map(|leaf| ScaleUpLeafNodeEventResponse::new(Arc::new(leaf)))
+            DistributedLeafExec::try_new(Arc::clone(event.plan), variants).map(
+                |leaf| {
+                    ScaleUpLeafNodeEventResponse::new(Arc::new(
+                        leaf.with_worker_only_original(),
+                    ))
+                },
+            )
         }))
     }
 }

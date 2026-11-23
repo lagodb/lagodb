@@ -39,8 +39,11 @@ impl ParallelTableScanStream {
         }
     }
 
+    /// Ends the stream on a cancel or terminate. Any other pending interrupt,
+    /// such as a ProcSignalBarrier, is serviced by the reactor once the poll
+    /// returns, and the scan goes on.
     fn poll_cancellation(&mut self) -> Option<Poll<Option<Result<RecordBatch>>>> {
-        if self.host.interrupt() != ParallelInterrupt::None {
+        if self.host.interrupt() == ParallelInterrupt::Abort {
             self.finished = true;
             let primary = QueryExecutionError::interrupted();
             let error = match self.reader.close() {

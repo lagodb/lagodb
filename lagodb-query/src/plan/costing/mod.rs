@@ -10,7 +10,7 @@ pub use scan_costs::ScanCostTable;
 use lagodb_core::query_contract::ScanId;
 use pgrx::pg_sys;
 
-use crate::ExecutionProfile;
+use crate::{ExecutionProfile, HashJoinFallback};
 
 use super::ir::{
     AggregateNode, DistinctNode, FilterNode, JoinNode, LimitNode, ProjectNode,
@@ -73,7 +73,29 @@ pub struct CostingContext {
     sequential_page_cost: f64,
     block_size: usize,
     engine_setup_cost: f64,
-    spill_sort_memory_bytes: Option<usize>,
+    spill: Option<SpillCosting>,
+}
+
+/// What an operator that outgrows its memory continues with, when spilling is
+/// on.
+#[derive(Debug, Clone, Copy)]
+pub struct SpillCosting {
+    sort_memory_bytes: usize,
+    hash_join_fallback: HashJoinFallback,
+}
+
+impl SpillCosting {
+    /// `sort_memory_bytes` is the memory of one sort; a hash join whose build
+    /// outgrows `hash_mem` continues as `hash_join_fallback`.
+    pub const fn new(
+        sort_memory_bytes: usize,
+        hash_join_fallback: HashJoinFallback,
+    ) -> Self {
+        Self {
+            sort_memory_bytes,
+            hash_join_fallback,
+        }
+    }
 }
 
 impl CostingContext {
@@ -84,8 +106,7 @@ impl CostingContext {
     /// startup of every offload path for constructing the DataFusion execution
     /// state.
     ///
-    /// `spill_sort_memory_bytes` is the memory of one sort when a hash join can
-    /// continue as a sort-merge join, `None` when it cannot.
+    /// `spill` is `None` when operators may not spill.
     pub fn try_new(
         execution: ExecutionProfile,
         cpu_tuple_cost: f64,
@@ -93,7 +114,7 @@ impl CostingContext {
         sequential_page_cost: f64,
         block_size: usize,
         engine_setup_cost: f64,
-        spill_sort_memory_bytes: Option<usize>,
+        spill: Option<SpillCosting>,
     ) -> Result<Self, QueryCostError> {
         Self::validate_component("cpu_tuple_cost", cpu_tuple_cost)?;
         Self::validate_component("cpu_operator_cost", cpu_operator_cost)?;
@@ -109,7 +130,7 @@ impl CostingContext {
             sequential_page_cost,
             block_size,
             engine_setup_cost,
-            spill_sort_memory_bytes,
+            spill,
         })
     }
 
@@ -175,8 +196,12 @@ impl CostingContext {
         } else {
             1.0
         };
-        let pages = bytes / self.block_size as f64;
-        comparisons + 2.0 * pages * passes * self.sequential_page_cost
+        comparisons + 2.0 * passes * self.page_cost(input)
+    }
+
+    /// Sequential page I/O of writing or reading all of `input` once.
+    fn page_cost(self, input: PlanEstimate) -> f64 {
+        input.byte_size() / self.block_size as f64 * self.sequential_page_cost
     }
 }
 

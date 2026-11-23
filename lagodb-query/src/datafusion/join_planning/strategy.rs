@@ -9,25 +9,28 @@ use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
 
+use super::JoinMemoryPolicy;
 use super::adaptive::AdaptiveHashJoinExec;
+use super::null_sensitive::NullSensitiveAntiJoinExec;
 
 /// Puts hash joins under [`AdaptiveHashJoinExec`] once JoinSelection has chosen
 /// each join's mode and build side, neither of which this rule changes.
 ///
 /// A Partitioned join and the single-partition serial join have one build per
 /// partition. A CollectLeft join with several probe partitions does not, and
-/// stays a plain hash join.
+/// stays a plain hash join, except under [`NullSensitiveAntiJoinExec`], which
+/// runs its join as one partition.
 ///
 /// EnsureRequirements runs afterwards and adds the repartitions and coalesces
 /// each mode needs.
 #[derive(Debug)]
 pub(super) struct JoinStrategyRule {
-    hash_memory_bytes: usize,
+    policy: JoinMemoryPolicy,
 }
 
 impl JoinStrategyRule {
-    pub(super) const fn new(hash_memory_bytes: usize) -> Self {
-        Self { hash_memory_bytes }
+    pub(super) const fn new(policy: JoinMemoryPolicy) -> Self {
+        Self { policy }
     }
 
     fn place(
@@ -35,13 +38,20 @@ impl JoinStrategyRule {
         node: Arc<dyn ExecutionPlan>,
         config: &ConfigOptions,
     ) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
+        if let Some(anti) = node.downcast_ref::<NullSensitiveAntiJoinExec>() {
+            // The serial join is already adaptive from its own visit.
+            if !anti.join().is::<HashJoinExec>() {
+                return Ok(Transformed::no(node));
+            }
+            let join = self.adaptive(Arc::clone(anti.join()))?.data;
+            return Ok(Transformed::yes(Arc::new(NullSensitiveAntiJoinExec::new(
+                anti.mode(),
+                join,
+            ))));
+        }
         let Some(join) = node.downcast_ref::<HashJoinExec>() else {
             return Ok(Transformed::no(node));
         };
-        // Sort-merge join cannot express a null-aware anti join.
-        if join.null_aware {
-            return Ok(Transformed::no(node));
-        }
         match join.partition_mode() {
             PartitionMode::Partitioned => self.adaptive(node),
             PartitionMode::CollectLeft if config.execution.target_partitions == 1 => {
@@ -55,7 +65,7 @@ impl JoinStrategyRule {
         &self,
         join: Arc<dyn ExecutionPlan>,
     ) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
-        let adaptive = AdaptiveHashJoinExec::try_new(join, self.hash_memory_bytes)?;
+        let adaptive = AdaptiveHashJoinExec::try_new(join, self.policy)?;
         Ok(Transformed::yes(Arc::new(adaptive)))
     }
 }

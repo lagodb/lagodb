@@ -79,6 +79,17 @@ impl MarkFilter {
     }
 }
 
+/// The NULL-sensitive anti SubPlan a join implements. The subquery's rows
+/// decide each outer row only together with whether the subquery returned any
+/// row and any NULL key, which an ordinary anti join does not read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum NullSensitiveAntiMode {
+    /// `x NOT IN (subquery)`.
+    NotIn,
+    /// `x IS NULL OR x NOT IN (subquery)`.
+    NullOrNotIn,
+}
+
 /// A value one join input emits: a storage column, or a grouping output of
 /// an aggregate input. An output carries its value type, which only the
 /// aggregate node's facts otherwise hold.
@@ -189,18 +200,14 @@ impl JoinKey {
             | pg_sys::UUIDOID
             // For floats, DataFusion 55's hash and key comparator fold -0 into
             // +0 and keep NaN payloads apart, an accepted engine difference
-            // from PostgreSQL's float4eq/float8eq. Two upstream-owned
-            // DataFusion 55 defects are recorded in
-            // docs/query-offload-semantics.md and are not worked around here:
-            // - A small build side is pushed to the probe scan as an
-            //   IN-list dynamic filter, which compares float bits and drops
-            //   probe rows whose key is the other-signed zero. Fixed by
-            //   https://github.com/apache/datafusion/pull/25186.
-            // - The sort-merge semi/anti/mark fallback compares keys at
-            //   batch boundaries with `partial_cmp().unwrap()` and panics on
-            //   NaN. Fixed by https://github.com/apache/datafusion/pull/25134
-            //   (https://github.com/apache/datafusion/issues/25133).
-            // Both fixes were merged after DataFusion 55.
+            // from PostgreSQL's float4eq/float8eq. One upstream-owned defect
+            // of DataFusion 55.3 is recorded in
+            // docs/query-offload-semantics.md and is not worked around here:
+            // a small build side is pushed to the probe scan as an IN-list
+            // dynamic filter, which compares float bits and drops probe rows
+            // whose key is the other-signed zero. It is fixed on main by
+            // https://github.com/apache/datafusion/pull/25186, which 55.3
+            // does not include.
             | pg_sys::FLOAT4OID
             | pg_sys::FLOAT8OID => {
                 value_type.typmod == -1 && value_type.collation == pg_sys::InvalidOid
@@ -378,6 +385,20 @@ impl JoinNode {
     #[inline]
     pub const fn mark_filter(&self) -> Option<MarkFilter> {
         self.mark_filter
+    }
+
+    /// The NULL-sensitive anti SubPlan this join implements, if any: a
+    /// null-aware anti join, or an anti Mark join, whose validated filter ORs
+    /// the inverted mark with the outer key's NULL test.
+    #[inline]
+    pub const fn null_sensitive_anti_mode(&self) -> Option<NullSensitiveAntiMode> {
+        if self.null_aware {
+            return Some(NullSensitiveAntiMode::NotIn);
+        }
+        match self.mark_filter {
+            Some(filter) if filter.anti => Some(NullSensitiveAntiMode::NullOrNotIn),
+            _ => None,
+        }
     }
 
     /// Rows passing the equi keys before the join-level residual is applied.

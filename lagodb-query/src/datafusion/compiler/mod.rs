@@ -5,6 +5,7 @@ mod arithmetic;
 mod decimal;
 mod expression;
 mod logical;
+mod null_sensitive;
 mod plan;
 mod runtime_value;
 
@@ -12,6 +13,7 @@ use datafusion::common::DataFusionError;
 use pgrx::pg_sys;
 
 pub(super) use logical::DataFusionLogicalPlanCompiler;
+pub(super) use null_sensitive::NullSensitiveAntiJoin;
 pub(super) use plan::DataFusionPlanCompiler;
 
 #[derive(Debug, thiserror::Error)]
