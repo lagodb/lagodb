@@ -53,7 +53,7 @@ impl CompositeDatumCodec {
             .as_datum()
             .cast_mut_ptr::<pg_sys::HeapTupleHeaderData>();
         let mut tuple = pg_sys::HeapTupleData {
-            t_len: value.full_varlena_bytes().len() as u32,
+            t_len: value.total_len() as u32,
             t_self: pg_sys::ItemPointerData::default(),
             t_tableOid: pg_sys::InvalidOid,
             t_data: header,

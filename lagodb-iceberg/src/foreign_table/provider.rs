@@ -7,6 +7,7 @@ use lagodb_core::fdw::{
     ForeignImportSchemaContext, ForeignValidationError, register_analyze,
     register_import_schema, register_modify, register_scan,
 };
+use lagodb_core::handles::search_syscache1;
 use lagodb_core::pg_fdw;
 use lagodb_core::storage::foreign::ForeignOptionView;
 use pgrx::pg_sys;
@@ -51,35 +52,19 @@ impl LagodbIceberg {
         if wrapper.fdwhandler == pg_sys::InvalidOid {
             return false;
         }
-        let tuple = unsafe {
-            pg_sys::SearchSysCache1(
-                pg_sys::SysCacheIdentifier::PROCOID as i32,
-                pg_sys::Datum::from(wrapper.fdwhandler),
-            )
-        };
-        let mut module_is_null = false;
-        let module_datum = unsafe {
-            pg_sys::SysCacheGetAttr(
-                pg_sys::SysCacheIdentifier::PROCOID as i32,
-                tuple,
-                pg_sys::Anum_pg_proc_probin as i16,
-                &mut module_is_null,
-            )
-        };
-        if module_is_null {
-            unsafe { pg_sys::ReleaseSysCache(tuple) };
+        let tuple = search_syscache1(
+            pg_sys::SysCacheIdentifier::PROCOID as i32,
+            pg_sys::Datum::from(wrapper.fdwhandler),
+        )
+        .expect("foreign-data wrapper handler must have a pg_proc entry");
+        let Some(module_datum) = tuple.get_attr(pg_sys::Anum_pg_proc_probin as i16)
+        else {
             return false;
-        }
-        // `prosrc` is a NOT NULL catalog column.
-        let mut symbol_is_null = false;
-        let symbol_datum = unsafe {
-            pg_sys::SysCacheGetAttr(
-                pg_sys::SysCacheIdentifier::PROCOID as i32,
-                tuple,
-                pg_sys::Anum_pg_proc_prosrc as i16,
-                &mut symbol_is_null,
-            )
         };
+        // `prosrc` is a NOT NULL catalog column.
+        let symbol_datum = tuple
+            .get_attr(pg_sys::Anum_pg_proc_prosrc as i16)
+            .expect("pg_proc.prosrc must not be NULL");
         let module = unsafe {
             pg_sys::text_to_cstring(module_datum.cast_mut_ptr::<pg_sys::text>())
         };
@@ -91,7 +76,6 @@ impl LagodbIceberg {
         unsafe {
             pg_sys::pfree(module.cast());
             pg_sys::pfree(symbol.cast());
-            pg_sys::ReleaseSysCache(tuple);
         }
         matches
     }

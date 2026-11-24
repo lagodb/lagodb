@@ -8,7 +8,7 @@ use lagodb_core::storage::foreign::{
     ObjectAccess, ObjectPrefixAccess, StorageManager,
 };
 use lagodb_storage::StorageError;
-use pgrx::pg_sys;
+use pgrx::check_for_interrupts;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ConnectorError;
@@ -102,7 +102,7 @@ impl StorageInput {
         // first object for format-specific schema inference.
         let mut listing = access.listing(LIST_PAGE_SIZE)?;
         loop {
-            pg_sys::check_for_interrupts!();
+            check_for_interrupts();
             let Some(entries) = listing.next_page()? else {
                 break;
             };
@@ -116,7 +116,7 @@ impl StorageInput {
             }
         }
         drop(listing);
-        pg_sys::check_for_interrupts!();
+        check_for_interrupts();
         members.sort_unstable_by(|left, right| left.key.cmp(&right.key));
         Ok(Self::new(InputMembers::ObjectPrefix {
             access,

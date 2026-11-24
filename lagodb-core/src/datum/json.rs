@@ -8,17 +8,18 @@ mod object_encoder;
 
 use std::ffi::{CString, NulError, c_char};
 use std::fmt;
+use std::str;
 
+use pgrx::fcinfo;
 use pgrx::pg_sys::{self, Datum};
 use pgrx::prelude::PgSqlErrorCode;
-use pgrx::{fcinfo, varlena};
 use thiserror::Error;
 
 use crate::diag::{PgError, SqlStateError};
 
 use super::error::DatumConversionError;
 use super::output_cstring::PgOutputCString;
-use super::varlena::DetoastedVarlena;
+use super::varlena::{DetoastedVarlena, PackedDetoastedVarlena};
 
 pub use object_encoder::{BoundJsonObjectEncoder, JsonDatumEncoder};
 
@@ -112,36 +113,24 @@ impl JsonText {
         }
     }
 
-    /// Read a PostgreSQL `json` Datum into an owned semantic value.
+    /// Read a non-NULL PostgreSQL `json` Datum into an owned semantic value.
     ///
     /// # Safety
     ///
-    /// `datum` must be a valid PostgreSQL `json` Datum and PostgreSQL must be
-    /// running on the current backend thread. The semantic JSON conversion
-    /// contract requires a UTF-8 server encoding; callers must validate that
-    /// capability once while binding the relation/column conversion plan.
-    pub(crate) unsafe fn from_datum(
-        datum: Datum,
-        is_null: bool,
-    ) -> Result<Option<Self>, DatumConversionError> {
-        if is_null {
-            return Ok(None);
+    /// `datum` must be a valid, non-NULL PostgreSQL `json` Datum and PostgreSQL
+    /// must be running on the current backend thread. The semantic JSON
+    /// conversion contract requires a UTF-8 server encoding; callers must
+    /// validate that capability once while binding the relation/column
+    /// conversion plan.
+    pub(crate) unsafe fn from_datum(datum: Datum) -> Self {
+        // SAFETY: `datum` is a live `json` varlena on the backend thread.
+        let value = unsafe { PackedDetoastedVarlena::from_datum(datum) };
+        // SAFETY: plan binding validated `PG_UTF8` once, and PostgreSQL's
+        // `json` type guarantees valid UTF-8 in a UTF-8 database.
+        let text = unsafe { str::from_utf8_unchecked(value.bytes()) };
+        Self {
+            text: Box::from(text),
         }
-
-        let original = datum.cast_mut_ptr::<pg_sys::varlena>();
-        let detoasted = unsafe { pg_sys::pg_detoast_datum_packed(original) };
-        let text = unsafe { varlena::text_to_rust_str(detoasted) }
-            .map(str::to_owned)
-            .map_err(|_| DatumConversionError::InvalidUtf8 {
-                target: pg_sys::JSONOID,
-            });
-        if detoasted != original {
-            unsafe { pg_sys::pfree(detoasted.cast()) };
-        }
-        let text = text?;
-        Ok(Some(Self {
-            text: text.into_boxed_str(),
-        }))
     }
 
     #[inline]
@@ -194,46 +183,37 @@ impl JsonbValue {
         }
     }
 
-    /// Read a PostgreSQL `jsonb` Datum into an owned semantic value without
-    /// passing through `serde_json::Value`.
+    /// Read a non-NULL PostgreSQL `jsonb` Datum into an owned semantic value
+    /// without passing through `serde_json::Value`.
     ///
     /// `jsonb_out` preserves PostgreSQL's numeric spelling and does not impose
     /// serde_json's recursion limit.
     ///
     /// # Safety
     ///
-    /// `datum` must be a valid PostgreSQL `jsonb` Datum and PostgreSQL must be
-    /// running on the current backend thread. The semantic JSONB conversion
-    /// contract requires a UTF-8 server encoding; callers must validate that
-    /// capability once while binding the relation/column conversion plan.
-    pub(crate) unsafe fn from_datum(
-        datum: Datum,
-        is_null: bool,
-    ) -> Result<Option<Self>, DatumConversionError> {
-        if is_null {
-            return Ok(None);
-        }
-
+    /// `datum` must be a valid, non-NULL PostgreSQL `jsonb` Datum and
+    /// PostgreSQL must be running on the current backend thread. The semantic
+    /// JSONB conversion contract requires a UTF-8 server encoding; callers must
+    /// validate that capability once while binding the relation/column
+    /// conversion plan.
+    pub(crate) unsafe fn from_datum(datum: Datum) -> Self {
+        // SAFETY: `datum` is a live `jsonb` varlena on the backend thread.
         let detoasted = unsafe { DetoastedVarlena::from_datum(datum) };
+        // SAFETY: `jsonb_out` is a strict built-in output function and never
+        // returns SQL NULL for a non-NULL `jsonb` datum.
         let output = unsafe {
             PgOutputCString::from_function_call(
                 pg_sys::jsonb_out,
                 &[Some(detoasted.as_datum())],
             )
         }
-        .ok_or(DatumConversionError::InvalidInput {
-            target: pg_sys::JSONBOID,
-        })?;
-        let text = Self::output_text(output).map_err(|_| {
-            DatumConversionError::InvalidUtf8 {
-                target: pg_sys::JSONBOID,
-            }
-        })?;
-        Ok(Some(Self { text }))
-    }
-
-    fn output_text(output: PgOutputCString) -> Result<Box<str>, std::str::Utf8Error> {
-        output.as_cstr().to_str().map(Box::<str>::from)
+        .expect("jsonb_out must return a cstring for a non-NULL jsonb datum");
+        // SAFETY: plan binding validated `PG_UTF8` once, and `jsonb_out` emits
+        // valid UTF-8 in a UTF-8 database.
+        let text = unsafe { str::from_utf8_unchecked(output.as_cstr().to_bytes()) };
+        Self {
+            text: Box::from(text),
+        }
     }
 
     #[inline]

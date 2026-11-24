@@ -8,6 +8,8 @@ use pgrx::pg_sys::RVROption::RVR_MISSING_OK;
 use pgrx::{PgTryBuilder, pg_sys};
 
 use crate::diag::{PgError, PgReportError};
+#[cfg(feature = "pg15")]
+use crate::handles::HeapTupleRef;
 
 pub fn get_namespace_oid(
     nspname: &CStr,
@@ -73,8 +75,8 @@ pub fn get_extension_schema(extension: pg_sys::Oid) -> pg_sys::Oid {
         let schema = if tuple.is_null() {
             pg_sys::InvalidOid
         } else {
-            (*pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_extension>())
-                .extnamespace
+            let tuple = HeapTupleRef::from_raw(tuple);
+            tuple.form::<pg_sys::FormData_pg_extension>().extnamespace
         };
         pg_sys::systable_endscan(scan);
         pg_sys::table_close(relation, lock);

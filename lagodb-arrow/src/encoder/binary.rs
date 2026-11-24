@@ -7,7 +7,7 @@ use arrow_array::ArrayRef;
 use arrow_array::builder::{
     ArrayBuilder, FixedSizeBinaryBuilder, LargeBinaryBuilder,
 };
-use lagodb_core::datum::DetoastedVarlena;
+use lagodb_core::datum::PackedDetoastedVarlena;
 use pgrx::pg_sys;
 
 use super::ColumnBuilder;
@@ -34,7 +34,7 @@ impl BinaryEncoder {
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {
-        let guard = unsafe { DetoastedVarlena::from_datum(datum) };
+        let guard = unsafe { PackedDetoastedVarlena::from_datum(datum) };
         let bytes = guard.bytes();
         self.builder.append_value(bytes);
         Ok(bytes.len())
@@ -76,7 +76,7 @@ impl FixedBinaryEncoder {
         &mut self,
         datum: pg_sys::Datum,
     ) -> ArrowConversionResult<usize> {
-        let guard = unsafe { DetoastedVarlena::from_datum(datum) };
+        let guard = unsafe { PackedDetoastedVarlena::from_datum(datum) };
         let bytes = guard.bytes();
         if bytes.len() != self.len {
             return Err(ArrowConversionError::IncompatibleColumnType(

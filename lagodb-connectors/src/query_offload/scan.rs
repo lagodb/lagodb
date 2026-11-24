@@ -9,7 +9,7 @@ use std::sync::{Mutex, MutexGuard};
 use arrow_schema::SchemaRef;
 use lagodb_arrow::scan::WeightedBinPacker;
 use lagodb_core::runtime_api::TableScanTaskMetrics;
-use pgrx::pg_sys;
+use pgrx::{check_for_interrupts, pg_sys};
 use serde::{Deserialize, Serialize};
 
 use crate::format::FormatKind;
@@ -117,7 +117,7 @@ impl BoundScan {
         let input = planned.input.get();
         let mut rows = 0_u64;
         for index in 0..input.member_count() {
-            pg_sys::check_for_interrupts!();
+            check_for_interrupts();
             let file = input.open_member(index)?;
             rows = rows.saturating_add(ParquetFooter::read(&file)?.num_rows()?);
         }

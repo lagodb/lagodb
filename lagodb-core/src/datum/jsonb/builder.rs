@@ -313,7 +313,7 @@ impl<'a> JsonbBuilder<'a> {
         let ptr = unsafe { pg_sys::palloc(len.max(1)).cast::<u8>() };
         let bytes = unsafe { slice::from_raw_parts_mut(ptr, len) };
         const HEX: &[u8; 16] = b"0123456789abcdef";
-        for (pair, byte) in bytes.chunks_exact_mut(2).zip(value) {
+        for (pair, byte) in bytes.as_chunks_mut::<2>().0.iter_mut().zip(value) {
             pair[0] = HEX[(byte >> 4) as usize];
             pair[1] = HEX[(byte & 15) as usize];
         }

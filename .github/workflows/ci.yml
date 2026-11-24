@@ -115,6 +115,7 @@ jobs:
             build-essential \
             ca-certificates \
             clang \
+            llvm \
             curl \
             bison \
             flex \

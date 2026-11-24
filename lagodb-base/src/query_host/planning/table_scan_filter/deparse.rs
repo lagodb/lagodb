@@ -4,7 +4,6 @@ use std::ffi::{CString, c_void};
 use std::ptr;
 
 use lagodb_core::expr::explain::deparse_and_join;
-use lagodb_core::expr::pg::expression_tree_mutator;
 use pgrx::{pg_guard, pg_sys};
 
 use crate::query_host::error::QueryHostError;
@@ -79,7 +78,7 @@ impl<'a> FilterDeparser<'a> {
         node: *mut pg_sys::Node,
         context: *mut c_void,
     ) -> *mut pg_sys::Node {
-        // expression_tree_mutator calls the callback for absent child nodes.
+        // PostgreSQL calls the mutator for absent child nodes.
         if node.is_null() {
             return ptr::null_mut();
         }
@@ -110,6 +109,12 @@ impl<'a> FilterDeparser<'a> {
         if tag == pg_sys::NodeTag::T_Param {
             deparser.missing_binding = true;
         }
-        unsafe { expression_tree_mutator(node, FilterDeparser::rewrite, context) }
+        unsafe {
+            pg_sys::expression_tree_mutator(
+                node,
+                Some(FilterDeparser::rewrite),
+                context,
+            )
+        }
     }
 }

@@ -17,7 +17,7 @@ resolver = "2"
 version = "0.1.0"
 license = "Apache-2.0"
 edition = "2024"
-rust-version = "1.97.1"
+rust-version = "1.99.1"
 description = "LagoDB: Lakehouse database built on PostgreSQL."
 homepage = "https://github.com/lagodb/lagodb"
 repository = "https://github.com/lagodb/lagodb"
@@ -39,9 +39,10 @@ datafusion-distributed = {
     features = ["grpc"],
 }
 datafusion-proto = { version = "=55.3.0", default-features = false }
-pgrx = { version = "=0.19.2" }
-pgrx-pg-sys = { version = "=0.19.2" }
-pgrx-tests = { version = "=0.19.2" }
+pgrx = { version = "=0.20.1" }
+pgrx-pg-config = { version = "=0.20.1" }
+pgrx-pg-sys = { version = "=0.20.1" }
+pgrx-tests = { version = "=0.20.1" }
 prost = "0.14.1"
 hyper-util = { version = "0.1.16", default-features = false, features = ["tokio"] }
 tonic = { version = "0.14.1", features = ["transport"] }

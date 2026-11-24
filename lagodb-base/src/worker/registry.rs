@@ -3,8 +3,8 @@
 use std::ffi::{CStr, c_char};
 
 use lagodb_core::catalog;
-use lagodb_core::handles::search_syscache1;
-use pgrx::{IntoDatum, pg_sys};
+use lagodb_core::handles::{search_syscache1, search_syscache3};
+use pgrx::pg_sys;
 
 use super::catalog::{
     CatalogName, NewWorkerRegistration, WorkerCatalog, WorkerId,
@@ -70,10 +70,7 @@ pub(crate) fn database_is_template(database_oid: u32) -> bool {
     )
     .expect("current database must have a pg_database syscache entry");
     // SAFETY: DATABASEOID pins this pg_database tuple until `tuple` is dropped.
-    unsafe {
-        (*(pg_sys::GETSTRUCT(tuple.as_raw()) as pg_sys::Form_pg_database))
-            .datistemplate
-    }
+    unsafe { tuple.form::<pg_sys::FormData_pg_database>().datistemplate }
 }
 
 pub(crate) fn load_if_runtime_installed()
@@ -212,56 +209,40 @@ fn resolve_entrypoint(
     let argument_vector = unsafe {
         pg_sys::buildoidvector(argument_types.as_ptr(), argument_types.len() as i32)
     };
-    let tuple = unsafe {
-        pg_sys::SearchSysCache3(
-            pg_sys::SysCacheIdentifier::PROCNAMEARGSNSP as i32,
-            pg_sys::Datum::from(function_name.as_ptr() as usize),
-            pg_sys::Datum::from(argument_vector as usize),
-            pg_sys::Datum::from(schema_oid),
-        )
-    };
+    let tuple = search_syscache3(
+        pg_sys::SysCacheIdentifier::PROCNAMEARGSNSP as i32,
+        pg_sys::Datum::from(function_name.as_ptr() as usize),
+        pg_sys::Datum::from(argument_vector as usize),
+        pg_sys::Datum::from(schema_oid),
+    );
     unsafe { pg_sys::pfree(argument_vector.cast()) };
-    if tuple.is_null() {
+    let Some(tuple) = tuple else {
         return Ok(None);
-    }
-    // SAFETY: PROCNAMEARGSNSP returned a pinned pg_proc tuple that remains
-    // live until ReleaseSysCache below.
-    let procedure = unsafe { &*(pg_sys::GETSTRUCT(tuple) as pg_sys::Form_pg_proc) };
+    };
+    // SAFETY: PROCNAMEARGSNSP pins a pg_proc tuple until `tuple` is dropped.
+    let procedure = unsafe { tuple.form::<pg_sys::FormData_pg_proc>() };
     let matches = WorkerEntrypointContract::accepts(procedure);
     let function_oid = matches.then_some(procedure.oid);
-    // SAFETY: tuple is the pinned syscache tuple returned above.
-    unsafe { pg_sys::ReleaseSysCache(tuple) };
     Ok(function_oid)
 }
 
 fn validate_entrypoint(
     function_oid: pg_sys::Oid,
 ) -> WorkerResult<(CatalogName, CatalogName)> {
-    let tuple = unsafe {
-        pg_sys::SearchSysCache1(
-            pg_sys::SysCacheIdentifier::PROCOID as i32,
-            function_oid
-                .into_datum()
-                .expect("Oid has a Datum representation"),
-        )
-    };
-    if tuple.is_null() {
-        return Err(WorkerError::EntryPointMissing);
-    }
-    // SAFETY: PROCOID returned a pinned pg_proc tuple that remains live until
-    // ReleaseSysCache below.
-    let procedure = unsafe { &*(pg_sys::GETSTRUCT(tuple) as pg_sys::Form_pg_proc) };
+    let tuple = search_syscache1(
+        pg_sys::SysCacheIdentifier::PROCOID as i32,
+        pg_sys::Datum::from(function_oid),
+    )
+    .ok_or(WorkerError::EntryPointMissing)?;
+    // SAFETY: PROCOID pins a pg_proc tuple until `tuple` is dropped.
+    let procedure = unsafe { tuple.form::<pg_sys::FormData_pg_proc>() };
     if !WorkerEntrypointContract::accepts(procedure) {
-        // SAFETY: tuple is the pinned syscache tuple returned above.
-        unsafe { pg_sys::ReleaseSysCache(tuple) };
         return Err(WorkerError::InvalidEntryPointSignature);
     }
     // SAFETY: procedure is a live pg_proc tuple and pronamespace is its valid
     // namespace OID. PostgreSQL returns a palloc'd copy or NULL.
     let namespace = unsafe { pg_sys::get_namespace_name(procedure.pronamespace) };
     if namespace.is_null() {
-        // SAFETY: tuple is the pinned syscache tuple returned above.
-        unsafe { pg_sys::ReleaseSysCache(tuple) };
         return Err(WorkerError::EntryPointSchemaMissing);
     }
     // SAFETY: namespace is the live, NUL-terminated result from
@@ -272,9 +253,6 @@ fn validate_entrypoint(
     // SAFETY: pg_proc.proname is a PostgreSQL-produced NameData value and is
     // therefore NUL-terminated within its fixed-width buffer.
     let function_name = unsafe { CatalogName::from_name_data(procedure.proname) };
-    // SAFETY: tuple is the pinned syscache tuple returned above, and all data
-    // needed after release has been copied into owned values.
-    unsafe { pg_sys::ReleaseSysCache(tuple) };
     Ok((schema_name, function_name))
 }
 

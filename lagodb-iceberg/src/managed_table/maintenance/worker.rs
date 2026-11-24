@@ -11,6 +11,7 @@ use lagodb_core::table_maintenance::{
     TableMaintenanceBudget, TableMaintenanceCommandTime, TableMaintenanceMode,
     TableMaintenanceOptions, TableMaintenanceRequest,
 };
+use pgrx::check_for_interrupts;
 use pgrx::datum::Internal;
 use pgrx::prelude::*;
 
@@ -158,7 +159,7 @@ fn run(worker_context: &WorkerContext<'_>) -> WorkerSchedule {
 
     for candidate in candidates.iter().take(policy.max_tables) {
         worker_context.process_config_reload_if_pending();
-        pg_sys::check_for_interrupts!();
+        check_for_interrupts();
         match WorkerTransaction::run(|| maintain_relation(candidate)) {
             Ok(
                 MaintenanceAttempt::Completed | MaintenanceAttempt::StaleCandidate,
@@ -191,7 +192,7 @@ fn run(worker_context: &WorkerContext<'_>) -> WorkerSchedule {
                 ));
             }
         }
-        pg_sys::check_for_interrupts!();
+        check_for_interrupts();
     }
 
     WorkerTransaction::run(next_worker_schedule).unwrap_or_else(|error| {

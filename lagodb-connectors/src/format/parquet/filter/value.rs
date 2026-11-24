@@ -7,7 +7,7 @@
 
 use lagodb_arrow::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};
 use lagodb_core::datum::{
-    Decimal128ComparisonValue, Decimal128Semantics, DetoastedVarlena,
+    Decimal128ComparisonValue, Decimal128Semantics, PackedDetoastedVarlena,
 };
 use lagodb_core::expr::{PgBpcharSemantics, PgBpcharValue, RuntimeValue};
 use lagodb_core::plan_data::{PlanDataReader, PlanDataWriter};
@@ -247,7 +247,7 @@ impl ValueType {
                 PgBpcharValue::OutsideWidth => DecodedValue::OutsideWidth,
             },
             Self::Binary => {
-                let bytes = unsafe { DetoastedVarlena::from_datum(datum) };
+                let bytes = unsafe { PackedDetoastedVarlena::from_datum(datum) };
                 DecodedValue::Value(BoundValue::Binary(bytes.bytes().into()))
             }
             Self::Uuid => {

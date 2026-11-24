@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use lagodb_storage::StorageError;
-use pgrx::pg_sys;
+use pgrx::check_for_interrupts;
 
 use crate::error::ConnectorError;
 
@@ -38,7 +38,7 @@ impl LocalInput {
                 )
             })?;
             for entry in entries {
-                pg_sys::check_for_interrupts!();
+                check_for_interrupts();
                 let entry = entry.map_err(StorageError::from)?;
                 let file_type = entry.file_type().map_err(StorageError::from)?;
                 if file_type.is_dir() {

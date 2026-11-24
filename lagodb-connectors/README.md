@@ -1,6 +1,6 @@
 # LagoDB Connectors
 
-[![Rust](https://img.shields.io/badge/rust-1.97.1%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.99.1%2B-blue.svg)](https://www.rust-lang.org)
 [![PostgreSQL](https://img.shields.io/badge/postgresql-15%20%7C%2016%20%7C%2017%20%7C%2018-blue.svg)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE)
 
@@ -333,6 +333,6 @@ inherits the other side's server.
 
 ## Requirements
 
-- **Rust**: 1.97.1 or later
+- **Rust**: 1.99.1 or later
 - **PostgreSQL**: 15, 16, 17 or 18
-- **pgrx**: 0.19.2
+- **pgrx**: 0.20.1

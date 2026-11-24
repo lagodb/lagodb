@@ -206,9 +206,11 @@ impl<'a> PayloadView<'a> {
         descriptor: (usize, usize),
     ) -> Result<impl ExactSizeIterator<Item = u32> + 'a, ScanError> {
         let bytes = self.slice(descriptor)?;
-        Ok(bytes.chunks_exact(size_of::<u32>()).map(|value| {
-            u32::from_le_bytes(value.try_into().expect("four-byte chunk"))
-        }))
+        Ok(bytes
+            .as_chunks::<{ size_of::<u32>() }>()
+            .0
+            .iter()
+            .map(|&value| u32::from_le_bytes(value)))
     }
 
     fn decode_binary<T: DeserializeOwned>(

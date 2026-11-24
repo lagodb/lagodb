@@ -2,7 +2,7 @@ use std::ffi::{c_int, c_long};
 use std::os::fd::RawFd;
 use std::time::Instant;
 
-use pgrx::pg_sys;
+use pgrx::{check_for_interrupts, pg_sys};
 use ureq::unversioned::transport::NextTimeout;
 use ureq::unversioned::transport::time::Duration;
 use ureq::{Error, Timeout};
@@ -67,7 +67,7 @@ impl PostgresWait {
             if occurred & pg_sys::WL_LATCH_SET as c_int != 0 {
                 // SAFETY: MyLatch is initialized for the lifetime of the backend.
                 unsafe { pg_sys::ResetLatch(pg_sys::MyLatch) };
-                pg_sys::check_for_interrupts!();
+                check_for_interrupts();
             }
             if occurred & socket_event != 0 {
                 return Ok(());

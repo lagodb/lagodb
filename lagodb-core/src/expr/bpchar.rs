@@ -18,7 +18,7 @@ use super::{
     ExprType, PgComparisonIdentity, PgComparisonKind, PgComparisonSignature,
     PgTextComparisonSemantics,
 };
-use crate::datum::DetoastedVarlena;
+use crate::datum::PackedDetoastedVarlena;
 
 /// Proof that a value compares by canonical bytes padded to `character(n)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -50,7 +50,7 @@ impl PgBpcharSemantics {
 
     /// Reconstruct the semantics from a persisted typmod.
     pub fn for_typmod(typmod: i32) -> Option<Self> {
-        (typmod > pg_sys::VARHDRSZ as i32).then_some(Self { typmod })
+        (typmod > pg_sys::VARHDRSZ).then_some(Self { typmod })
     }
 
     /// Prove a built-in `bpchar = bpchar` or `bpchar <> bpchar` comparison
@@ -91,7 +91,7 @@ impl PgBpcharSemantics {
     /// The declared width `n` in characters.
     #[inline]
     pub const fn width(self) -> i32 {
-        self.typmod - pg_sys::VARHDRSZ as i32
+        self.typmod - pg_sys::VARHDRSZ
     }
 
     /// Whether a `bpchar` value fits this width, so that some padded value
@@ -103,7 +103,7 @@ impl PgBpcharSemantics {
     /// non-NULL `bpchar` datum.
     pub unsafe fn admits(self, datum: Datum) -> bool {
         // SAFETY: required by this method's contract.
-        let source = unsafe { DetoastedVarlena::from_datum(datum) };
+        let source = unsafe { PackedDetoastedVarlena::from_datum(datum) };
         // SAFETY: `source` is a live detoasted bpchar on this backend thread.
         unsafe { self.admits_detoasted(&source) }
     }
@@ -121,7 +121,7 @@ impl PgBpcharSemantics {
     /// non-NULL `bpchar` datum that stays live for the returned value.
     pub unsafe fn canonicalize(self, datum: Datum) -> PgBpcharValue {
         // SAFETY: required by this method's contract.
-        let source = unsafe { DetoastedVarlena::from_datum(datum) };
+        let source = unsafe { PackedDetoastedVarlena::from_datum(datum) };
         // SAFETY: `source` is a live detoasted bpchar on this backend thread.
         if !unsafe { self.admits_detoasted(&source) } {
             return PgBpcharValue::OutsideWidth;
@@ -144,7 +144,7 @@ impl PgBpcharSemantics {
 
     /// `bpcharlen` counts characters without trailing blanks, which a stored
     /// value of this width has at most `n` of.
-    unsafe fn admits_detoasted(self, source: &DetoastedVarlena) -> bool {
+    unsafe fn admits_detoasted(self, source: &PackedDetoastedVarlena) -> bool {
         // SAFETY: `source` is a detoasted bpchar; bpcharlen returns int4.
         let length = unsafe {
             fcinfo::direct_function_call_as_datum(
@@ -161,7 +161,7 @@ impl PgBpcharSemantics {
 /// A canonical `bpchar` datum that may alias its detoasted source.
 #[must_use]
 pub struct PgCanonicalBpchar {
-    source: DetoastedVarlena,
+    source: PackedDetoastedVarlena,
     canonical: Datum,
 }
 

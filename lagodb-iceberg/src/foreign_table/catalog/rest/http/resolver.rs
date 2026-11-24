@@ -1,7 +1,7 @@
 use std::fmt;
 
 use http::Uri;
-use pgrx::pg_sys;
+use pgrx::check_for_interrupts;
 use ureq::Error;
 use ureq::config::Config;
 use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
@@ -39,7 +39,7 @@ impl Resolver for PostgresResolver {
         // The system getaddrinfo call is deliberately blocking and outside the
         // REST deadline, matching PostgreSQL's pg_getaddrinfo_all(). Deliver a
         // pending cancel only after getaddrinfo returns.
-        pg_sys::check_for_interrupts!();
+        check_for_interrupts();
         result
     }
 }

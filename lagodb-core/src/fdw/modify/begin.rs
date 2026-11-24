@@ -196,7 +196,7 @@ impl<P: FdwModify> ForeignModifyStateWrapper<P> {
         let relation = unsafe { (*rinfo).ri_RelationDesc };
         let estate = unsafe { (*mtstate).ps.state };
         let relation_context =
-            unsafe { ForeignModifyRelationContext::from_raw(relation) }?;
+            unsafe { ForeignModifyRelationContext::from_raw(relation) };
         if !P::capabilities(&relation_context)?.supports_insert() {
             return Err(ForeignModifyError::unsupported(
                 "foreign provider does not support INSERT",

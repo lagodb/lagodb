@@ -121,10 +121,7 @@ impl StorageServerCatalog {
         while let Some(tuple) = scan.get_next()? {
             // SAFETY: the tuple comes from pg_foreign_server and remains live
             // until the next scan call.
-            let form = unsafe {
-                &*(pg_sys::GETSTRUCT(tuple.as_raw())
-                    as pg_sys::Form_pg_foreign_server)
-            };
+            let form = unsafe { tuple.form::<pg_sys::FormData_pg_foreign_server>() };
             if let Some(route) = Self::load_route(policy, effective_user, form.oid)? {
                 routes.push(route);
             }

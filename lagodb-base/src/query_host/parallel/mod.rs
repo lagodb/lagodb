@@ -16,7 +16,7 @@ use lagodb_query::datafusion::{
     InterruptHoldState, ParallelExecutionHost, ParallelInterrupt, ParallelWorkerHost,
     ParallelWorkers, WorkerTableScanCallbacks,
 };
-use pgrx::{PgSqlErrorCode, pg_sys};
+use pgrx::{PgSqlErrorCode, check_for_interrupts, pg_sys};
 
 use super::table_scan_registry::TableScanRegistry;
 use workers::{PgParallelWorkers, WorkerMapping};
@@ -205,9 +205,7 @@ impl ParallelExecutionHost for PgParallelHost {
     }
 
     fn process_interrupts(&self) -> Result<(), PgReportError> {
-        Self::capture(|| {
-            pgrx::check_for_interrupts!();
-        })
+        Self::capture(check_for_interrupts)
     }
 }
 

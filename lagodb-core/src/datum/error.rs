@@ -19,8 +19,6 @@ pub enum DatumConversionError {
     InvalidInput { target: Oid },
     /// The bound semantic conversion requires UTF-8 server encoding.
     UnsupportedServerEncoding { encoding: i32 },
-    /// A PostgreSQL text datum was not valid UTF-8 for the semantic Cell API.
-    InvalidUtf8 { target: Oid },
     /// PostgreSQL raised an error while parsing or constructing a datum.
     Postgres(PgError),
 }
@@ -96,11 +94,6 @@ impl fmt::Display for DatumConversionError {
                 "semantic UTF-8 conversion requires UTF-8 server encoding, found encoding {}",
                 encoding
             ),
-            Self::InvalidUtf8 { target } => write!(
-                f,
-                "PostgreSQL datum for target type {} is not valid UTF-8",
-                u32::from(*target)
-            ),
             Self::Postgres(error) => error.fmt(f),
         }
     }
@@ -145,9 +138,6 @@ impl SqlStateError for DatumConversionError {
             }
             Self::UnsupportedServerEncoding { .. } => {
                 PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
-            }
-            Self::InvalidUtf8 { .. } => {
-                PgSqlErrorCode::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE
             }
             Self::Postgres(error) => error.sql_error_code(),
         }

@@ -11,7 +11,7 @@ use datafusion::physical_plan::RecordBatchStream;
 use futures::Stream;
 use lagodb_core::diag::PgReportError;
 use lagodb_core::query_contract::ScanId;
-use pgrx::pg_sys;
+use pgrx::check_for_interrupts;
 
 use super::ExternalTableScanExec;
 use super::metrics::ScanExecMetrics;
@@ -120,7 +120,7 @@ impl Stream for ExternalTableScanStream {
         mut self: Pin<&mut Self>,
         _context: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        pg_sys::check_for_interrupts!();
+        check_for_interrupts();
         if self.finished {
             return Poll::Ready(None);
         }

@@ -5,7 +5,7 @@
 //! from PostgreSQL `Datum`.
 
 use bytes::Bytes;
-use pgrx::pg_sys::{self, Datum, Oid, bytea};
+use pgrx::pg_sys::{self, Datum, Oid};
 use pgrx::prelude::{Date, Interval, Time, Timestamp, TimestampWithTimeZone};
 use pgrx::{AnyNumeric, FromDatum, IntoDatum, PgBuiltInOids, PgOid, datum::Uuid};
 use std::ffi::CStr;
@@ -14,6 +14,7 @@ use std::fmt;
 use super::error::DatumConversionError;
 use super::json::{JsonText, JsonbValue};
 use super::output_cstring::PgOutputCString;
+use super::varlena::PackedDetoastedVarlena;
 
 /// A non-owning view into UTF-8 string data.
 ///
@@ -138,11 +139,13 @@ impl Cell {
             return Ok(None);
         }
         let cell = match typoid {
-            pg_sys::JSONOID => unsafe { JsonText::from_datum(datum, false) }
-                .map(|value| value.map(Cell::Json))?,
-            pg_sys::JSONBOID => unsafe { JsonbValue::from_datum(datum, false) }
-                .map(|value| value.map(Cell::Jsonb))?,
-            _ => unsafe { Self::from_standard_datum(datum, false, typoid) }
+            pg_sys::JSONOID => {
+                Some(Cell::Json(unsafe { JsonText::from_datum(datum) }))
+            }
+            pg_sys::JSONBOID => {
+                Some(Cell::Jsonb(unsafe { JsonbValue::from_datum(datum) }))
+            }
+            _ => unsafe { Self::from_standard_datum(datum, typoid) }
                 .ok_or(DatumConversionError::InvalidInput { target: typoid })
                 .map(Some)?,
         };
@@ -154,17 +157,8 @@ impl Cell {
     ///
     /// JSON and JSONB are intentionally handled by
     /// [`Self::from_polymorphic_datum_checked`], because their conversions
-    /// have a structured error path and require the row codec's encoding
-    /// capability check.
-    unsafe fn from_standard_datum(
-        datum: Datum,
-        is_null: bool,
-        typoid: Oid,
-    ) -> Option<Self> {
-        if is_null {
-            return None;
-        }
-
+    /// require the row codec's encoding capability check.
+    unsafe fn from_standard_datum(datum: Datum, typoid: Oid) -> Option<Self> {
         unsafe {
             let oid = PgOid::from(typoid);
             match oid {
@@ -223,12 +217,11 @@ impl Cell {
                     Interval::from_datum(datum, false).map(Cell::Interval)
                 }
                 PgOid::BuiltIn(PgBuiltInOids::BYTEAOID) => {
-                    let ptr = datum.cast_mut_ptr::<bytea>();
-                    // SAFETY: ptr is valid for a BYTEAOID datum supplied by
-                    // PostgreSQL, and this copy completes before the source
-                    // slot can be reused.
-                    let slice = pgrx::varlena::varlena_to_byte_slice(ptr);
-                    Some(Cell::Bytea(Bytes::copy_from_slice(slice)))
+                    // SAFETY: `datum` is a valid non-NULL BYTEAOID varlena on
+                    // the active backend thread; the copy completes before the
+                    // guard releases any detoasted allocation.
+                    let value = PackedDetoastedVarlena::from_datum(datum);
+                    Some(Cell::Bytea(Bytes::copy_from_slice(value.bytes())))
                 }
                 PgOid::BuiltIn(PgBuiltInOids::UUIDOID) => {
                     Uuid::from_datum(datum, false).map(Cell::Uuid)

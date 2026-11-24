@@ -248,7 +248,7 @@ impl ScalarSemantics {
                     pg_sys::TEXTOID => value_type.typmod == -1,
                     pg_sys::VARCHAROID => {
                         value_type.typmod == -1
-                            || value_type.typmod >= pg_sys::VARHDRSZ as i32
+                            || value_type.typmod >= pg_sys::VARHDRSZ
                     }
                     _ => PgBpcharSemantics::for_type(value_type).is_some(),
                 };

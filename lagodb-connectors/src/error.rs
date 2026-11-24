@@ -240,8 +240,7 @@ impl ConnectorError {
         match error {
             DatumConversionError::IncompatibleType { .. }
             | DatumConversionError::OutOfRange { .. }
-            | DatumConversionError::InvalidInput { .. }
-            | DatumConversionError::InvalidUtf8 { .. } => true,
+            | DatumConversionError::InvalidInput { .. } => true,
             DatumConversionError::Postgres(_)
             | DatumConversionError::UnsupportedServerEncoding { .. } => false,
         }

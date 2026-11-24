@@ -7,7 +7,7 @@ use std::ptr::{self, NonNull};
 use std::time::Instant;
 
 use lagodb_storage::{SocketInterest, SocketWait, SocketWaitContext};
-use pgrx::pg_sys;
+use pgrx::{check_for_interrupts, pg_sys};
 
 use crate::backend::{BackendLatch, BackendProcess};
 
@@ -92,7 +92,7 @@ impl SocketWait for PostgresSocketWait {
                 }
                 // A canceling interrupt unwinds through ClientIo::Drop and poisons
                 // the connection; a benign one returns and leaves it reusable.
-                pg_sys::check_for_interrupts!();
+                check_for_interrupts();
             }
             if occurred & event_set.socket_event() != 0 {
                 return Ok(());

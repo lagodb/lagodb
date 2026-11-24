@@ -183,9 +183,7 @@ impl Supervisor {
         while let Some(tuple) = scan.get_next()? {
             // SAFETY: the tuple remains valid until the next scan call and
             // FormData_pg_database fixed fields are available through GETSTRUCT.
-            let database = unsafe {
-                &*(pg_sys::GETSTRUCT(tuple.as_raw()) as pg_sys::Form_pg_database)
-            };
+            let database = unsafe { tuple.form::<pg_sys::FormData_pg_database>() };
             let database_oid = database.oid.to_u32();
             live.insert(database_oid);
             if !database.datistemplate {

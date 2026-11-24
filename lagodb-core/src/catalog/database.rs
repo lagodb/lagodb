@@ -49,9 +49,7 @@ impl LockedDatabase {
             };
             // SAFETY: DATABASEOID returned a live pg_database tuple whose
             // fixed fields remain valid for the lifetime of `tuple`.
-            let form = unsafe {
-                &*(pg_sys::GETSTRUCT(tuple.as_raw()) as pg_sys::Form_pg_database)
-            };
+            let form = unsafe { tuple.form::<pg_sys::FormData_pg_database>() };
             return Ok(Some(Self {
                 oid: candidate,
                 is_template: form.datistemplate,

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use iceberg_lite::spec::{ManifestContentType, Snapshot, TableMetadata};
 use iceberg_lite::table::Table;
+use pgrx::check_for_interrupts;
 
 use crate::error::IcebergError;
 use crate::managed_table::{ManagedResult, ManagedTableError};
@@ -68,7 +69,7 @@ impl IcebergReachabilityPlanner {
             .collect();
         let mut candidates = HashMap::new();
         for snapshot in before.metadata().snapshots() {
-            pgrx::pg_sys::check_for_interrupts!();
+            check_for_interrupts();
             if !retained_ids.contains(&snapshot.snapshot_id()) {
                 self.seed_snapshot_candidates(before, snapshot, &mut candidates)?;
                 Self::visit_statistics(
@@ -146,7 +147,7 @@ impl IcebergReachabilityPlanner {
             {
                 break;
             }
-            pgrx::pg_sys::check_for_interrupts!();
+            check_for_interrupts();
             Self::visit_statistics(
                 after.metadata(),
                 snapshot.snapshot_id(),
@@ -272,7 +273,7 @@ impl IcebergReachabilityPlanner {
         let manifest_list =
             snapshot.load_manifest_list(table.file_io(), &table.metadata_ref())?;
         for manifest_file in manifest_list.entries() {
-            pgrx::pg_sys::check_for_interrupts!();
+            check_for_interrupts();
             candidates
                 .entry(manifest_file.manifest_path.clone())
                 .or_insert(CandidateKind::Manifest);
@@ -314,7 +315,7 @@ impl IcebergReachabilityPlanner {
         let manifest_list =
             snapshot.load_manifest_list(table.file_io(), &table.metadata_ref())?;
         for manifest_file in manifest_list.entries() {
-            pgrx::pg_sys::check_for_interrupts!();
+            check_for_interrupts();
             visit(&manifest_file.manifest_path);
             if !self
                 .visited_manifests

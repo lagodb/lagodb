@@ -1,9 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use pgrx::pg_sys;
-
-use super::bgworker::check_for_interrupts;
+use pgrx::{check_for_interrupts, pg_sys};
 
 static SIGHUP_RECEIVED: AtomicBool = AtomicBool::new(false);
 

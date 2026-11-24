@@ -471,14 +471,7 @@ impl IcebergAlterTableMoveAllGuard {
             )?;
 
             while let Some(tuple) = scan.get_next()? {
-                let form = unsafe {
-                    pg_sys::GETSTRUCT(tuple.as_raw()) as pg_sys::Form_pg_class
-                };
-                if form.is_null() {
-                    continue;
-                }
-
-                let class = unsafe { &*form };
+                let class = unsafe { tuple.form::<pg_sys::FormData_pg_class>() };
                 if class.relam == iceberg_am_oid
                     && Self::objtype_matches_relkind(objtype, class.relkind)
                 {

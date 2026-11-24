@@ -83,8 +83,8 @@ impl<'a> NumericSendValue<'a> {
         let mut exact = true;
         // Decimal exponent of the last retained group in the coefficient.
         let mut trailing = 0i32;
-        for (index, group) in self.digits.chunks_exact(2).enumerate() {
-            let group = u64::from(u16::from_be_bytes([group[0], group[1]]));
+        for (index, &group) in self.digits.as_chunks::<2>().0.iter().enumerate() {
+            let group = u64::from(u16::from_be_bytes(group));
             let exponent = (self.weight - index as i32) * DECIMAL_DIGITS_PER_GROUP
                 + i32::from(scale);
             if exponent <= -DECIMAL_DIGITS_PER_GROUP {

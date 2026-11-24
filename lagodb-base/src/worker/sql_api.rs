@@ -4,7 +4,7 @@ use std::ffi::CStr;
 
 use lagodb_core::diag::{PgReportError, ReportableError};
 use pgrx::prelude::*;
-use pgrx::{pg_getarg, pg_getarg_datum_raw};
+use pgrx::{pg_get_nullable_datum, pg_getarg};
 
 use crate::ensure_runtime_preloaded;
 
@@ -104,7 +104,9 @@ AS '@MODULE_PATHNAME@', '@FUNCTION_NAME@';
         // bytes while producing a palloc'd, NUL-terminated copy.
         let extension_name_ptr = unsafe {
             pg_sys::text_to_cstring(
-                pg_getarg_datum_raw(fcinfo, 0).cast_mut_ptr::<pg_sys::text>(),
+                pg_get_nullable_datum(fcinfo, 0)
+                    .value
+                    .cast_mut_ptr::<pg_sys::text>(),
             )
         };
         // SAFETY: text_to_cstring returned a live, NUL-terminated allocation.

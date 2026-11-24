@@ -19,6 +19,7 @@ use iceberg_lite::writer::file_writer::location_generator::{
 use iceberg_lite::writer::file_writer::rolling_writer::RollingFileWriterBuilder;
 use iceberg_lite::writer::{IcebergWriter, IcebergWriterBuilder};
 use parquet::file::properties::WriterProperties;
+use pgrx::check_for_interrupts;
 
 use crate::error::IcebergError;
 use crate::managed_table::{ManagedResult, ManagedTableError};
@@ -59,7 +60,7 @@ impl RewriteGroupWriter {
 
         let mut writer = Self::writer(table, group, scan_schema, writer_properties)?;
         for batch in scan.to_arrow_with_tasks(tasks)? {
-            pgrx::pg_sys::check_for_interrupts!();
+            check_for_interrupts();
             writer.write(batch?)?;
         }
         Ok(writer.close()?)

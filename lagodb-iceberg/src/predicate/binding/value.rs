@@ -2,7 +2,7 @@
 
 use iceberg_lite::spec::Datum;
 use lagodb_arrow::pg_epoch_days_to_unix_days;
-use lagodb_core::datum::{Decimal128ComparisonValue, DetoastedVarlena};
+use lagodb_core::datum::{Decimal128ComparisonValue, PackedDetoastedVarlena};
 use lagodb_core::expr::{PgBpcharValue, RuntimeValue};
 use pgrx::{FromDatum, datum::Uuid as PgUuid};
 use uuid::Uuid;
@@ -41,7 +41,7 @@ impl IcebergFilterBinder<'_> {
                 ))))
             }
             PlannedValueType::Binary | PlannedValueType::FixedBinary(_) => {
-                let guard = unsafe { DetoastedVarlena::from_datum(datum) };
+                let guard = unsafe { PackedDetoastedVarlena::from_datum(datum) };
                 let bytes = guard.bytes();
                 let literal = match value_type {
                     PlannedValueType::FixedBinary(width) => {

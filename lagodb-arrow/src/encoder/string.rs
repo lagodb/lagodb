@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use arrow_array::ArrayRef;
 use arrow_array::builder::{ArrayBuilder, StringBuilder};
-use lagodb_core::datum::DetoastedVarlena;
+use lagodb_core::datum::PackedDetoastedVarlena;
 use pgrx::pg_sys;
 
 use super::ColumnBuilder;
@@ -31,7 +31,7 @@ impl Utf8Encoder {
     /// `bpchar`, or `json` varlena Datum. The bound PG_UTF8 server-encoding
     /// invariant must also hold.
     pub(crate) unsafe fn append_text(&mut self, datum: pg_sys::Datum) -> usize {
-        let guard = unsafe { DetoastedVarlena::from_datum(datum) };
+        let guard = unsafe { PackedDetoastedVarlena::from_datum(datum) };
         // SAFETY: the bound writer established the PG_UTF8 server-encoding
         // contract before any row was appended, and PostgreSQL's text-family
         // input boundary guarantees these bytes are valid in that encoding.

@@ -40,9 +40,7 @@ impl RenameColumnTarget {
         // Keep the pg_class tuple pinned through diagnostic construction and
         // native permission checks. Returning an error releases the guard
         // before the callback reports it; a native ERROR releases it by unwind.
-        let class = unsafe {
-            &*pg_sys::GETSTRUCT(tuple.as_raw()).cast::<pg_sys::FormData_pg_class>()
-        };
+        let class = unsafe { tuple.form::<pg_sys::FormData_pg_class>() };
         let relation_name = unsafe { CStr::from_ptr(class.relname.data.as_ptr()) };
 
         if class.reloftype != pg_sys::InvalidOid {
@@ -168,8 +166,7 @@ impl RelationCatalogEntry {
         let tuple =
             search_syscache1(pg_sys::SysCacheIdentifier::RELOID as _, oid.into())?;
         // SAFETY: RELOID pins this pg_class tuple until `tuple` is dropped.
-        let class =
-            unsafe { &*(pg_sys::GETSTRUCT(tuple.as_raw()) as pg_sys::Form_pg_class) };
+        let class = unsafe { tuple.form::<pg_sys::FormData_pg_class>() };
         Some(Self::from_class(class))
     }
 
@@ -207,8 +204,7 @@ impl RelationCatalogEntry {
 
         // SAFETY: the tuple comes from a live scan of pg_class, and its fixed
         // fields remain valid until the scan advances or is dropped.
-        let class =
-            unsafe { &*(pg_sys::GETSTRUCT(tuple.as_raw()) as pg_sys::Form_pg_class) };
+        let class = unsafe { tuple.form::<pg_sys::FormData_pg_class>() };
         Ok(Some(Self::from_class(class)))
     }
 

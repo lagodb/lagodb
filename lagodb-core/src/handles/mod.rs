@@ -74,7 +74,7 @@ pub use scan::{
     ScanKeyEntry, ScanKeyIter, TBMIterateResultHandle, TableScanDescHandle,
 };
 pub use syscache::{
-    SysCacheTuple, SysCacheTupleCopy, search_syscache_copy, search_syscache1,
+    SysCacheTuple, search_syscache1, search_syscache2, search_syscache3,
 };
 pub use tuple::{
     HeapTupleGuard, HeapTupleRef, ItemPointer, TupleTableSlotHandle, ValidItemPointer,

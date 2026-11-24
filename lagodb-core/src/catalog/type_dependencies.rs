@@ -53,9 +53,7 @@ impl TypeDependencies {
             )?;
             while let Some(tuple) = scan.get_next()? {
                 // SAFETY: the scan pins a pg_depend tuple with this fixed layout.
-                let dependency = unsafe {
-                    &*pg_sys::GETSTRUCT(tuple.as_raw()).cast::<DependencyForm>()
-                };
+                let dependency = unsafe { tuple.form::<DependencyForm>() };
                 if dependency.classid == pg_sys::TypeRelationId {
                     pending.push(dependency.objid);
                 } else if dependency.classid == pg_sys::RelationRelationId {

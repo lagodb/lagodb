@@ -6,7 +6,9 @@ use std::slice;
 use std::str;
 
 use apache_avro::Schema;
-use lagodb_core::datum::{DetoastedVarlena, PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};
+use lagodb_core::datum::{
+    PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF, PackedDetoastedVarlena,
+};
 use pgrx::datum::USECS_PER_DAY;
 use pgrx::pg_sys;
 
@@ -170,12 +172,12 @@ impl AvroValueKind {
             }
             Self::Bytes => {
                 // SAFETY: required by this method's bound bytea contract.
-                let value = unsafe { DetoastedVarlena::from_datum(datum) };
+                let value = unsafe { PackedDetoastedVarlena::from_datum(datum) };
                 output.write_bytes(value.bytes());
             }
             Self::String => {
                 // SAFETY: required by this method's bound text contract.
-                let value = unsafe { DetoastedVarlena::from_datum(datum) };
+                let value = unsafe { PackedDetoastedVarlena::from_datum(datum) };
                 // SAFETY: plan construction validated PG_UTF8 once before any
                 // text-family Datum can reach this encoder.
                 let value = unsafe { str::from_utf8_unchecked(value.bytes()) };

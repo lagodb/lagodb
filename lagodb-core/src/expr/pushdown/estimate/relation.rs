@@ -9,6 +9,7 @@ use pgrx::{error, pg_sys};
 use crate::expr::contract::PushdownCosting;
 use crate::expr::pg::expr_list;
 use crate::expr::pushdown::RowFilter;
+use crate::handles::{HeapTupleRef, search_syscache3};
 
 use super::{FilterEstimate, PruningEstimate, StatisticsPruningEstimate};
 
@@ -204,19 +205,15 @@ impl RelationFilterEstimator {
         let hooked = unsafe { pg_sys::get_relation_stats_hook }
             .is_some_and(|hook| unsafe { hook(self.root, rte, attno, &mut vardata) });
         if !hooked {
-            let tuple = unsafe {
-                pg_sys::SearchSysCache3(
-                    pg_sys::SysCacheIdentifier::STATRELATTINH as c_int,
-                    pg_sys::Datum::from((*rte).relid),
-                    pg_sys::Datum::from(attno),
-                    pg_sys::Datum::from(false),
-                )
-            };
-            let correlation = Self::tuple_correlation(tuple);
-            if !tuple.is_null() {
-                unsafe { pg_sys::ReleaseSysCache(tuple) };
-            }
-            return correlation;
+            let tuple = search_syscache3(
+                pg_sys::SysCacheIdentifier::STATRELATTINH as c_int,
+                pg_sys::Datum::from(unsafe { (*rte).relid }),
+                pg_sys::Datum::from(attno),
+                pg_sys::Datum::from(false),
+            );
+            return tuple
+                .as_ref()
+                .and_then(|tuple| Self::tuple_correlation(tuple.as_tuple_ref()));
         }
         // The hook took control of acquiring a stats tuple. As in
         // `brincostestimate`, a tuple it supplies must come with a freefunc,
@@ -228,21 +225,20 @@ impl RelationFilterEstimator {
         let Some(release) = vardata.freefunc else {
             error!("no function provided to release variable stats with");
         };
-        let correlation = Self::tuple_correlation(tuple);
+        // SAFETY: `tuple` is non-null and remains live until `release` below.
+        let correlation =
+            Self::tuple_correlation(unsafe { HeapTupleRef::from_raw(tuple) });
         unsafe { release(tuple) };
         correlation
     }
 
     /// The correlation slot of one `pg_statistic` tuple, if it has one.
-    fn tuple_correlation(tuple: pg_sys::HeapTuple) -> Option<f64> {
-        if tuple.is_null() {
-            return None;
-        }
+    fn tuple_correlation(tuple: HeapTupleRef<'_>) -> Option<f64> {
         let mut slot = pg_sys::AttStatsSlot::default();
         let found = unsafe {
             pg_sys::get_attstatsslot(
                 &mut slot,
-                tuple,
+                tuple.as_raw(),
                 pg_sys::STATISTIC_KIND_CORRELATION as c_int,
                 pg_sys::InvalidOid,
                 pg_sys::ATTSTATSSLOT_NUMBERS as c_int,

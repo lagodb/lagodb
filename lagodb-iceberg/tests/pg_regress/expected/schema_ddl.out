@@ -399,6 +399,15 @@ ALTER TABLE schema_evolution_t DROP COLUMN IF EXISTS maybe_bad;
 ERROR:  ALTER TABLE DROP COLUMN IF EXISTS is not supported for Iceberg relations
 ALTER TABLE schema_evolution_t DROP COLUMN body CASCADE;
 ERROR:  ALTER TABLE DROP COLUMN CASCADE is not supported for Iceberg relations
+-- Renaming a column on a missing relation must leave PG's native ERROR / NOTICE intact.
+ALTER TABLE schema_evolution_missing_t RENAME COLUMN id TO renamed_id;
+ERROR:  relation "schema_evolution_missing_t" does not exist
+SET client_min_messages = notice;
+ALTER TABLE IF EXISTS schema_evolution_missing_t RENAME COLUMN id TO renamed_id;
+NOTICE:  relation "schema_evolution_missing_t" does not exist, skipping
+RESET client_min_messages;
+ALTER FOREIGN TABLE schema_evolution_missing_t RENAME COLUMN id TO renamed_id;
+ERROR:  relation "schema_evolution_missing_t" does not exist
 DROP TABLE schema_evolution_savepoint_t;
 DROP TABLE schema_evolution_epoch_t;
 DROP TABLE schema_evolution_part_root_t;

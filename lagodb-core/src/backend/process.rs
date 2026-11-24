@@ -2,7 +2,7 @@
 
 use core::ffi::c_int;
 
-use pgrx::pg_sys;
+use pgrx::{check_for_interrupts, pg_sys};
 
 use crate::diag::PgReportError;
 
@@ -50,9 +50,7 @@ impl BackendProcess {
     /// Service pending interrupts, returning a cancel as a value so callers on
     /// a spawned runtime task do not unwind through it.
     pub fn check_interrupts() -> Result<(), PgReportError> {
-        PgReportError::capture(|| {
-            pg_sys::check_for_interrupts!();
-        })
+        PgReportError::capture(check_for_interrupts)
     }
 
     /// Run PostgreSQL's registered process-exit callbacks and terminate the

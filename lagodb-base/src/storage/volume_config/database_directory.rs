@@ -79,9 +79,7 @@ impl DatabaseDirectoryPolicy {
 
         // SAFETY: the tuple comes from a live SnapshotSelf scan of pg_database;
         // its fixed fields remain valid until the scan advances or is dropped.
-        let database = unsafe {
-            &*(pg_sys::GETSTRUCT(tuple.as_raw()) as pg_sys::Form_pg_database)
-        };
+        let database = unsafe { tuple.form::<pg_sys::FormData_pg_database>() };
         Ok(database.dattablespace)
     }
 }

@@ -8,7 +8,7 @@ use iceberg_lite::metadata_columns::{
 };
 use iceberg_lite::scan::ArrowRecordBatchIterator;
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
-use pgrx::pg_sys;
+use pgrx::check_for_interrupts;
 
 use crate::error::{IcebergError, IcebergResult};
 
@@ -36,7 +36,7 @@ impl Iterator for InterruptibleArrowBatches {
     type Item = Result<RecordBatch, IcebergError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        pg_sys::check_for_interrupts!();
+        check_for_interrupts();
         self.0.next().map(|batch| batch.map_err(IcebergError::from))
     }
 }

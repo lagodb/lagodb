@@ -26,7 +26,7 @@ use datafusion::logical_expr::{
 };
 use lagodb_arrow::{PgDatumArrayBuilder, PgDatumArrayReader};
 use lagodb_core::diag::PgReportError;
-use pgrx::{PgTryBuilder, pg_sys};
+use pgrx::{PgTryBuilder, check_for_interrupts, pg_sys};
 
 use crate::plan::PostgresEvalExpr;
 use state::PgExprState;
@@ -106,7 +106,7 @@ impl PgExprUdf {
         &self,
         arguments: ScalarFunctionArgs,
     ) -> DataFusionResult<ColumnarValue> {
-        pg_sys::check_for_interrupts!();
+        check_for_interrupts();
         let state = self
             .state
             .get_or_init(|| unsafe { self.runtime.initialize(&self.expression) })

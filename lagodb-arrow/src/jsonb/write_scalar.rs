@@ -312,9 +312,9 @@ impl ScalarWriter {
         }
         scratch.clear();
         scratch.reserve(value.len() / 2);
-        for pair in value.as_bytes().chunks_exact(2) {
-            let high = char::from(pair[0]).to_digit(16).ok_or_else(invalid)?;
-            let low = char::from(pair[1]).to_digit(16).ok_or_else(invalid)?;
+        for &[high, low] in value.as_bytes().as_chunks::<2>().0 {
+            let high = char::from(high).to_digit(16).ok_or_else(invalid)?;
+            let low = char::from(low).to_digit(16).ok_or_else(invalid)?;
             scratch.push((high * 16 + low) as u8);
         }
         Ok(())

@@ -30,7 +30,7 @@ pub struct NumericTypmod {
 ///
 /// PostgreSQL stores scale as an 11-bit signed value.
 pub fn numeric_typmod(precision: u32, scale: i32) -> i32 {
-    (((precision as i32) << 16) | (scale & 0x7FF)) + pg_sys::VARHDRSZ as i32
+    (((precision as i32) << 16) | (scale & 0x7FF)) + pg_sys::VARHDRSZ
 }
 
 /// Decodes precision and scale from a PostgreSQL NUMERIC type modifier.
@@ -39,11 +39,11 @@ pub fn numeric_typmod(precision: u32, scale: i32) -> i32 {
 /// supports negative NUMERIC scales, so the scale is sign-extended from the
 /// lower 11 bits.
 pub fn numeric_precision_scale(typmod: i32) -> Option<NumericTypmod> {
-    if typmod < pg_sys::VARHDRSZ as i32 {
+    if typmod < pg_sys::VARHDRSZ {
         return None;
     }
 
-    let adjusted = typmod - pg_sys::VARHDRSZ as i32;
+    let adjusted = typmod - pg_sys::VARHDRSZ;
     let precision = ((adjusted >> 16) & 0xFFFF) as u32;
     let scale = ((adjusted & 0x7FF) ^ 1024) - 1024;
     Some(NumericTypmod { precision, scale })
@@ -480,15 +480,19 @@ impl Decimal128NumericCodec {
         &self,
         bytes: &[u8],
     ) -> Result<i128, DecimalCodecError> {
-        bytes.chunks_exact(2).try_fold(0i128, |coefficient, digit| {
-            let digit = i128::from(u16::from_be_bytes([digit[0], digit[1]]));
-            coefficient
-                .checked_mul(NBASE)
-                .and_then(|value| value.checked_add(digit))
-                .ok_or_else(|| {
-                    self.value_out_of_range("numeric value exceeds Decimal128")
-                })
-        })
+        bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .try_fold(0i128, |coefficient, &digit| {
+                let digit = i128::from(u16::from_be_bytes(digit));
+                coefficient
+                    .checked_mul(NBASE)
+                    .and_then(|value| value.checked_add(digit))
+                    .ok_or_else(|| {
+                        self.value_out_of_range("numeric value exceeds Decimal128")
+                    })
+            })
     }
 
     /// Accumulates `digits / 10^decimal_places` without first materializing
@@ -500,7 +504,7 @@ impl Decimal128NumericCodec {
         bytes: &[u8],
         decimal_places: u32,
     ) -> Result<i128, DecimalCodecError> {
-        let digits = bytes.chunks_exact(2);
+        let (digits, _) = bytes.as_chunks::<2>();
         let group_places = decimal_places / DEC_DIGITS;
         let digit_places = decimal_places % DEC_DIGITS;
         let retained = digits
@@ -514,8 +518,8 @@ impl Decimal128NumericCodec {
             })?;
 
         let mut coefficient = 0i128;
-        for (index, digit) in digits.enumerate() {
-            let digit = i128::from(u16::from_be_bytes([digit[0], digit[1]]));
+        for (index, &digit) in digits.iter().enumerate() {
+            let digit = i128::from(u16::from_be_bytes(digit));
             if index >= retained {
                 if digit != 0 {
                     return Err(self.value_out_of_range(

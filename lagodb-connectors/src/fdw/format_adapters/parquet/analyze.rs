@@ -8,7 +8,7 @@ use lagodb_core::fdw::{
 };
 use lagodb_core::handles::HeapTupleGuard;
 use pgrx::memcxt::PgMemoryContexts;
-use pgrx::pg_sys;
+use pgrx::{check_for_interrupts, pg_sys};
 
 use crate::error::ConnectorError;
 use crate::fdw::format_adapters::FormatAnalyzer;
@@ -98,7 +98,7 @@ impl ParquetAnalyzer {
             let Some(batch) = batch else {
                 break;
             };
-            pg_sys::check_for_interrupts!();
+            check_for_interrupts();
             for row in 0..batch.num_rows() {
                 let destination = if context.len() < target_rows {
                     Some(context.len())

@@ -1,7 +1,6 @@
 //! PostgreSQL planner callbacks for foreign INSERT/UPDATE/DELETE.
 
 use core::ffi::c_int;
-use core::ptr;
 
 use pgrx::pg_guard;
 use pgrx::pg_sys;
@@ -51,12 +50,8 @@ pub(crate) unsafe extern "C-unwind" fn add_foreign_update_targets<P: FdwModify>(
 pub(crate) unsafe extern "C-unwind" fn is_foreign_rel_updatable<P: FdwModify>(
     relation: pg_sys::Relation,
 ) -> c_int {
-    let result = (|| {
-        let context = unsafe { ForeignModifyRelationContext::from_raw(relation) }?;
-        P::capabilities(&context)
-    })();
-
-    match result {
+    let context = unsafe { ForeignModifyRelationContext::from_raw(relation) };
+    match P::capabilities(&context) {
         Ok(capabilities) => capabilities.flags(),
         Err(error) => error
             .with_provider_phase::<P>(ForeignModifyPhase::Capabilities)
@@ -75,20 +70,14 @@ pub(crate) unsafe extern "C-unwind" fn plan_foreign_modify<P: FdwModify>(
     subplan_index: c_int,
 ) -> *mut pg_sys::List {
     let result = (|| {
-        let operation =
-            unsafe { validate_modify_plan(plan, result_relation, subplan_index) }?;
-        let rte = unsafe { planner_rte(root, result_relation)? };
+        let operation = unsafe { modify_operation(plan) }?;
+        let rte = unsafe { pg_sys::planner_rt_fetch!(result_relation, root).get() };
         let relation =
             unsafe { pg_sys::relation_open((*rte).relid, pg_sys::NoLock as i32) };
-        if relation.is_null() {
-            return Err(ForeignModifyError::framework(
-                "PlanForeignModify could not open the result relation",
-            ));
-        }
 
         let result = (|| {
             let relation_context =
-                unsafe { ForeignModifyRelationContext::from_raw(relation) }?;
+                unsafe { ForeignModifyRelationContext::from_raw(relation) };
             let capabilities = P::capabilities(&relation_context)?;
             if !capabilities.supports(operation) {
                 return Err(ForeignModifyError::unsupported(
@@ -96,7 +85,7 @@ pub(crate) unsafe extern "C-unwind" fn plan_foreign_modify<P: FdwModify>(
                 ));
             }
             let updated_columns =
-                unsafe { updated_columns(plan, operation, subplan_index)? };
+                unsafe { updated_columns(plan, operation, subplan_index) };
             let context = unsafe {
                 ForeignModifyPlanContext::from_raw(
                     plan,
@@ -162,23 +151,10 @@ pub(crate) unsafe extern "C-unwind" fn plan_foreign_modify<P: FdwModify>(
     }
 }
 
-/// Validate the ModifyTable entry corresponding to this result relation before
-/// provider code sees any planner data.
-unsafe fn validate_modify_plan(
+/// Resolve the operation and reject modify features outside framework v1.
+unsafe fn modify_operation(
     plan: *mut pg_sys::ModifyTable,
-    result_relation: pg_sys::Index,
-    subplan_index: c_int,
 ) -> Result<ForeignModifyOperation, ForeignModifyError> {
-    if plan.is_null() || subplan_index < 0 {
-        return Err(ForeignModifyError::framework(
-            "PlanForeignModify received an invalid plan or subplan index",
-        ));
-    }
-    if unsafe { (*plan).plan.type_ } != pg_sys::NodeTag::T_ModifyTable {
-        return Err(ForeignModifyError::framework(
-            "PlanForeignModify received a non-ModifyTable plan",
-        ));
-    }
     let operation = ForeignModifyOperation::from_pg(unsafe { (*plan).operation })?;
     if unsafe { (*plan).onConflictAction }
         != pg_sys::OnConflictAction::ONCONFLICT_NONE
@@ -195,88 +171,31 @@ unsafe fn validate_modify_plan(
             "FDW framework v1 does not support partition movement, MERGE, or direct modify",
         ));
     }
-    let result_relations = unsafe { (*plan).resultRelations };
-    if result_relations.is_null()
-        || subplan_index >= unsafe { pg_sys::list_length(result_relations) }
-        || unsafe {
-            pg_sys::list_nth_int(result_relations, subplan_index) as pg_sys::Index
-        } != result_relation
-    {
-        return Err(ForeignModifyError::framework(
-            "PlanForeignModify result relation does not match its subplan index",
-        ));
-    }
-    if unsafe { (*plan).plan.lefttree }.is_null() {
-        return Err(ForeignModifyError::framework(
-            "PlanForeignModify has no modify subplan",
-        ));
-    }
     Ok(operation)
-}
-
-unsafe fn planner_rte(
-    root: *mut pg_sys::PlannerInfo,
-    result_relation: pg_sys::Index,
-) -> Result<*mut pg_sys::RangeTblEntry, ForeignModifyError> {
-    if root.is_null() || result_relation == 0 {
-        return Err(ForeignModifyError::framework(
-            "PlanForeignModify has no planner root or result relation",
-        ));
-    }
-    let rte = unsafe { pg_sys::planner_rt_fetch(result_relation, root) };
-    if rte.is_null() || unsafe { (*rte).relid == pg_sys::InvalidOid } {
-        return Err(ForeignModifyError::framework(
-            "PlanForeignModify result relation has no catalog relation",
-        ));
-    }
-    Ok(rte)
 }
 
 unsafe fn updated_columns(
     plan: *mut pg_sys::ModifyTable,
     operation: ForeignModifyOperation,
     subplan_index: c_int,
-) -> Result<Box<[pg_sys::AttrNumber]>, ForeignModifyError> {
+) -> Box<[pg_sys::AttrNumber]> {
     if matches!(
         operation,
         ForeignModifyOperation::Insert | ForeignModifyOperation::Delete
     ) {
-        return Ok(Vec::new().into_boxed_slice());
+        return Vec::new().into_boxed_slice();
     }
-    let lists = unsafe { (*plan).updateColnosLists };
-    if !lists.is_null() && unsafe { pg_sys::list_length(lists) } <= subplan_index {
-        return Err(ForeignModifyError::framework(
-            "UPDATE modify plan column-list index is outside its plan list",
-        ));
-    }
-    let columns = if lists.is_null() {
-        ptr::null_mut()
-    } else {
-        (unsafe { pg_sys::list_nth(lists, subplan_index) }) as *mut pg_sys::List
-    };
-    if columns.is_null() {
-        return Err(ForeignModifyError::framework(
-            "UPDATE modify plan has no update column list",
-        ));
-    }
+    let columns =
+        (unsafe { pg_sys::list_nth((*plan).updateColnosLists, subplan_index) })
+            as *mut pg_sys::List;
     let length = unsafe { pg_sys::list_length(columns) };
-    if length < 0 {
-        return Err(ForeignModifyError::framework(
-            "UPDATE modify plan has a negative update column count",
-        ));
-    }
     let mut result = Vec::with_capacity(length as usize);
     for index in 0..length {
         let attno =
             unsafe { pg_sys::list_nth_int(columns, index) } as pg_sys::AttrNumber;
-        if attno <= 0 || result.contains(&attno) {
-            return Err(ForeignModifyError::framework(
-                "UPDATE modify plan has an invalid or duplicate update column",
-            ));
-        }
         result.push(attno);
     }
-    Ok(result.into_boxed_slice())
+    result.into_boxed_slice()
 }
 
 /// Analyze target-table system columns used by the modify `RETURNING` list.

@@ -18,17 +18,14 @@ pub struct ForeignModifyRelationContext<'a> {
 }
 
 impl<'a> ForeignModifyRelationContext<'a> {
-    pub(crate) unsafe fn from_raw(
-        relation: pg_sys::Relation,
-    ) -> Result<Self, ForeignModifyError> {
-        if relation.is_null() {
-            return Err(ForeignModifyError::framework(
-                "foreign modify callback received a NULL relation",
-            ));
-        }
-        Ok(Self {
+    /// # Safety
+    ///
+    /// `relation` must be the live relation supplied by the PostgreSQL FDW
+    /// callback for the lifetime of this context.
+    pub(crate) unsafe fn from_raw(relation: pg_sys::Relation) -> Self {
+        Self {
             relation: unsafe { RelationHandle::from_raw(relation) },
-        })
+        }
     }
 
     #[inline]
@@ -263,6 +260,11 @@ pub struct ForeignModifyPlanContext<'a> {
 }
 
 impl<'a> ForeignModifyPlanContext<'a> {
+    /// # Safety
+    ///
+    /// All pointers and indexes must come from the same live
+    /// `PlanForeignModify` callback. `updated_columns` must remain live for the
+    /// context's lifetime.
     pub(crate) unsafe fn from_raw(
         plan: *mut pg_sys::ModifyTable,
         relation: pg_sys::Relation,
@@ -271,30 +273,13 @@ impl<'a> ForeignModifyPlanContext<'a> {
         operation: ForeignModifyOperation,
         updated_columns: &'a [pg_sys::AttrNumber],
     ) -> Result<Self, ForeignModifyError> {
-        if plan.is_null() || relation.is_null() || subplan_index < 0 {
-            return Err(ForeignModifyError::framework(
-                "PlanForeignModify received an incomplete planner context",
-            ));
-        }
         let returning_lists = unsafe { (*plan).returningLists };
         let returning = if returning_lists.is_null() {
             ptr::null_mut()
-        } else if unsafe { pg_sys::list_length(returning_lists) } <= subplan_index {
-            return Err(ForeignModifyError::framework(
-                "PlanForeignModify returning-list index is outside its plan list",
-            ));
         } else {
             (unsafe { pg_sys::list_nth(returning_lists, subplan_index) })
                 as *mut pg_sys::List
         };
-        let with_check_lists = unsafe { (*plan).withCheckOptionLists };
-        if !with_check_lists.is_null()
-            && unsafe { pg_sys::list_length(with_check_lists) } <= subplan_index
-        {
-            return Err(ForeignModifyError::framework(
-                "PlanForeignModify WCO-list index is outside its plan list",
-            ));
-        }
         let return_requirements =
             if matches!(operation, ForeignModifyOperation::Delete) {
                 // returningLists is PostgreSQL's final per-result-relation

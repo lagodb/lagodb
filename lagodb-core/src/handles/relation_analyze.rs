@@ -71,10 +71,8 @@ impl RelationHandle<'_> {
             })?;
             // SAFETY: the pinned tuple is a pg_statistic_ext row, whose fixed
             // fields through stxkeys are never NULL.
-            let statistics = unsafe {
-                &*pg_sys::GETSTRUCT(tuple.as_raw())
-                    .cast::<pg_sys::FormData_pg_statistic_ext>()
-            };
+            let statistics =
+                unsafe { tuple.form::<pg_sys::FormData_pg_statistic_ext>() };
             let target = if statistics.stxstattarget >= 0 {
                 statistics.stxstattarget
             } else {

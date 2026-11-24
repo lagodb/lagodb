@@ -192,6 +192,16 @@ impl<'a> HeapTupleRef<'a> {
         self.inner.as_ptr()
     }
 
+    /// Borrow the fixed-width catalog form stored in this tuple.
+    ///
+    /// # Safety
+    ///
+    /// `T` must be the fixed-width form type for the tuple's catalog relation.
+    #[inline]
+    pub unsafe fn form<T>(self) -> &'a T {
+        unsafe { &*pg_sys::GETSTRUCT!(self.inner.as_ptr()).get().cast::<T>() }
+    }
+
     #[inline]
     pub(crate) fn item_pointer_data(&self) -> pg_sys::ItemPointerData {
         unsafe { self.inner.as_ref().t_self }

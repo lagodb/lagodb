@@ -4,7 +4,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::os::fd::AsRawFd;
 use std::time::Duration as StdDuration;
 
-use pgrx::pg_sys;
+use pgrx::{check_for_interrupts, pg_sys};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use ureq::Error;
 use ureq::config::Config;
@@ -187,7 +187,7 @@ impl Transport for PgTcpTransport {
                     )?;
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-                    pg_sys::check_for_interrupts!();
+                    check_for_interrupts();
                 }
                 Err(error) => return Err(Error::Io(error)),
             }
@@ -211,7 +211,7 @@ impl Transport for PgTcpTransport {
                     )?;
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-                    pg_sys::check_for_interrupts!();
+                    check_for_interrupts();
                 }
                 Err(error) => return Err(Error::Io(error)),
             }

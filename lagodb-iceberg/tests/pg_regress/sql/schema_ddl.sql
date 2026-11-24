@@ -326,6 +326,12 @@ ALTER TABLE schema_evolution_t ALTER COLUMN id SET NOT NULL;
 ALTER TABLE schema_evolution_t ALTER COLUMN id SET DEFAULT 1;
 ALTER TABLE schema_evolution_t DROP COLUMN IF EXISTS maybe_bad;
 ALTER TABLE schema_evolution_t DROP COLUMN body CASCADE;
+-- Renaming a column on a missing relation must leave PG's native ERROR / NOTICE intact.
+ALTER TABLE schema_evolution_missing_t RENAME COLUMN id TO renamed_id;
+SET client_min_messages = notice;
+ALTER TABLE IF EXISTS schema_evolution_missing_t RENAME COLUMN id TO renamed_id;
+RESET client_min_messages;
+ALTER FOREIGN TABLE schema_evolution_missing_t RENAME COLUMN id TO renamed_id;
 
 DROP TABLE schema_evolution_savepoint_t;
 DROP TABLE schema_evolution_epoch_t;

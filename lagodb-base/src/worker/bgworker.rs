@@ -181,14 +181,3 @@ pub(super) enum DynamicWorkerStartResult {
 pub(super) fn timestamp_ms() -> i64 {
     unsafe { pg_sys::GetCurrentTimestamp() / 1_000 }
 }
-
-pub(super) fn check_for_interrupts() {
-    // SAFETY: called from a PostgreSQL backend with no runtime LWLock guard or
-    // other Rust-owned resource crossing a possible PostgreSQL ERROR. This is
-    // the Rust equivalent of CHECK_FOR_INTERRUPTS().
-    unsafe {
-        if (&raw const pg_sys::InterruptPending).read_volatile() != 0 {
-            pg_sys::ProcessInterrupts();
-        }
-    }
-}
