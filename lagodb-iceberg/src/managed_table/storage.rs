@@ -10,8 +10,33 @@ use lagodb_core::storage::service::{BackendStorageService, StorageEndpoint};
 use lagodb_core::storage::tablespace::{TablespaceStorage, TablespaceStorageBinding};
 use lagodb_storage::StagingPathResolver;
 
+use crate::error::{IcebergError, IcebergResult};
 use crate::managed_table::{ManagedResult, ManagedTableError};
 use crate::storage::{LocalStorage, ObjectStorage};
+
+/// Typed view of a managed-table [`FileIO`] recovered at maintenance boundaries
+/// where upstream `iceberg-lite::Table` has erased the concrete storage type.
+pub(in crate::managed_table) enum ManagedFileIoBackend<'a> {
+    Local(&'a LocalStorage),
+    Object(&'a ObjectStorage),
+}
+
+impl<'a> ManagedFileIoBackend<'a> {
+    pub(in crate::managed_table) fn from_file_io(
+        file_io: &'a FileIO,
+    ) -> IcebergResult<Self> {
+        let storage = file_io.storage().as_any();
+        if let Some(local) = storage.downcast_ref::<LocalStorage>() {
+            Ok(Self::Local(local))
+        } else if let Some(object) = storage.downcast_ref::<ObjectStorage>() {
+            Ok(Self::Object(object))
+        } else {
+            Err(IcebergError::InvariantViolated(
+                "managed Iceberg FileIO uses an unknown storage implementation",
+            ))
+        }
+    }
+}
 
 /// Storage context for an AM relation and its PostgreSQL tablespace policy.
 ///
@@ -137,9 +162,8 @@ impl StorageContext {
         staging_resolver: StagingPathResolver,
     ) -> ManagedResult<Self> {
         let storage = Arc::new(ObjectStorage::new(
-            opts.effective_base_uri(),
             opts.volume_id(),
-            opts.object_namespace(),
+            opts.route().clone(),
             storage_service,
             staging_resolver,
         ));

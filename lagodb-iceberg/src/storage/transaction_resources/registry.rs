@@ -1,10 +1,14 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::mem;
 use std::rc::Rc;
 
+use lagodb_core::diag::PgReportError;
 use lagodb_core::resource::CommittedCleanup;
-use lagodb_core::transaction::{self, TransactionResource};
+use lagodb_core::transaction::{self, TransactionResource, TransactionResult};
 use lagodb_storage::ObjectLocation;
 use pgrx::pg_sys;
+use pgrx::prelude::PgSqlErrorCode;
 
 use crate::error::{IcebergError, IcebergResult};
 
@@ -102,9 +106,15 @@ impl MetadataResourceRegistry {
         Ok(attempt.resources)
     }
 
+    fn has_pending(&self) -> bool {
+        self.active_attempt.is_some()
+            || !self.promoted.is_empty()
+            || !self.cleanup_required.is_empty()
+    }
+
     fn drain_top_level(&mut self) -> (Vec<StorageResource>, Vec<StorageResource>) {
-        let promoted = std::mem::take(&mut self.promoted);
-        let mut cleanup_required = std::mem::take(&mut self.cleanup_required);
+        let promoted = mem::take(&mut self.promoted);
+        let mut cleanup_required = mem::take(&mut self.cleanup_required);
         if let Some(active) = self.active_attempt.take() {
             cleanup_required.extend(active.resources.into_iter().rev());
         }
@@ -118,10 +128,36 @@ struct TopLevelResources {
     cleanup_metadata: Vec<StorageResource>,
 }
 
+impl TopLevelResources {
+    fn is_empty(&self) -> bool {
+        self.transaction.is_empty()
+            && self.promoted_metadata.is_empty()
+            && self.cleanup_metadata.is_empty()
+    }
+
+    fn execute_commit_cleanup(self) {
+        for resource in self
+            .transaction
+            .into_iter()
+            .map(|entry| entry.resource)
+            .chain(self.promoted_metadata)
+        {
+            resource.on_commit();
+        }
+        for resource in self.cleanup_metadata {
+            let _ = resource.on_abort(CleanupContext::TransactionEnd);
+        }
+    }
+}
+
 #[derive(Debug)]
 struct StorageResourceRegistry {
     entries: Vec<TrackedResource>,
     metadata: MetadataResourceRegistry,
+    /// Stable state handles for active staged/uploaded objects, independent of
+    /// `entries` / `metadata` Vec positions across savepoint rollbacks and
+    /// metadata-attempt promotions.
+    staged_objects: HashMap<ObjectLocation, Rc<Cell<ObjectFileState>>>,
 }
 
 impl StorageResourceRegistry {
@@ -129,10 +165,12 @@ impl StorageResourceRegistry {
         Self {
             entries: Vec::new(),
             metadata: MetadataResourceRegistry::new(),
+            staged_objects: HashMap::new(),
         }
     }
 
     fn track(&mut self, resource: StorageResource) {
+        self.index_resource(&resource);
         if let Some(attempt) = self.metadata.active_attempt.as_mut() {
             attempt.resources.push(resource);
             return;
@@ -145,6 +183,30 @@ impl StorageResourceRegistry {
             nest_level,
             resource,
         });
+    }
+
+    fn index_resource(&mut self, resource: &StorageResource) {
+        if let StorageResource::ObjectFile {
+            location, state, ..
+        } = resource
+        {
+            self.staged_objects
+                .entry(location.clone())
+                .or_insert_with(|| Rc::clone(state));
+        }
+    }
+
+    fn unindex_resource(&mut self, resource: &StorageResource) {
+        if let StorageResource::ObjectFile {
+            location, state, ..
+        } = resource
+            && self
+                .staged_objects
+                .get(location)
+                .is_some_and(|indexed| Rc::ptr_eq(indexed, state))
+        {
+            self.staged_objects.remove(location);
+        }
     }
 
     fn begin_metadata_attempt(&mut self) -> IcebergResult<MetadataAttemptId> {
@@ -162,89 +224,59 @@ impl StorageResourceRegistry {
         &mut self,
         id: MetadataAttemptId,
     ) -> IcebergResult<Vec<StorageResource>> {
-        self.metadata.take_attempt(id)
-    }
-
-    fn current_write_resources(&self) -> impl Iterator<Item = &StorageResource> {
-        self.metadata
-            .active_attempt
-            .iter()
-            .flat_map(|attempt| attempt.resources.iter())
-            .chain(self.entries.iter().map(|entry| &entry.resource))
-    }
-
-    fn current_write_resources_mut(
-        &mut self,
-    ) -> impl Iterator<Item = &mut StorageResource> {
-        self.metadata
-            .active_attempt
-            .iter_mut()
-            .flat_map(|attempt| attempt.resources.iter_mut())
-            .chain(self.entries.iter_mut().map(|entry| &mut entry.resource))
+        let resources = self.metadata.take_attempt(id)?;
+        for resource in &resources {
+            self.unindex_resource(resource);
+        }
+        Ok(resources)
     }
 
     fn ensure_object_file_staged(
         &self,
         location: &ObjectLocation,
-    ) -> std::result::Result<(), String> {
-        for resource in self.current_write_resources() {
-            if let StorageResource::ObjectFile {
-                location: tracked_location,
-                state,
-                ..
-            } = resource
-                && tracked_location == location
-            {
-                return match state {
-                    ObjectFileState::Staged => Ok(()),
-                    ObjectFileState::Uploaded => Err(format!(
-                        "object '{}' is already in Uploaded state; \
-                         duplicate finalize_write?",
-                        location,
-                    )),
-                };
-            }
+    ) -> IcebergResult<()> {
+        let Some(state) = self.staged_objects.get(location) else {
+            return Err(IcebergError::InvariantViolated(
+                "object finalize_write called without a staged resource entry",
+            ));
+        };
+        match state.get() {
+            ObjectFileState::Staged => Ok(()),
+            ObjectFileState::Uploaded => Err(IcebergError::InvariantViolated(
+                "object finalize_write called for an already uploaded resource",
+            )),
         }
-        Err(format!(
-            "no staged entry found for '{}'; \
-             finalize_write called without a prior writer() registration",
-            location,
-        ))
     }
 
     fn mark_object_file_uploaded(
         &mut self,
         location: &ObjectLocation,
-    ) -> std::result::Result<(), String> {
-        for resource in self.current_write_resources_mut() {
-            if let StorageResource::ObjectFile {
-                location: tracked_location,
-                state,
-                ..
-            } = resource
-                && tracked_location == location
-            {
-                if *state == ObjectFileState::Staged {
-                    *state = ObjectFileState::Uploaded;
-                    return Ok(());
-                } else {
-                    return Err(format!(
-                        "object '{}' is already Uploaded; state machine error",
-                        location,
-                    ));
-                }
+    ) -> IcebergResult<()> {
+        let Some(state) = self.staged_objects.get(location) else {
+            return Err(IcebergError::InvariantViolated(
+                "object upload completion called without a staged resource entry",
+            ));
+        };
+        match state.get() {
+            ObjectFileState::Staged => {
+                state.set(ObjectFileState::Uploaded);
+                Ok(())
             }
+            ObjectFileState::Uploaded => Err(IcebergError::InvariantViolated(
+                "object upload completion called for an already uploaded resource",
+            )),
         }
-        Err(format!(
-            "no entry found for '{}' during mark_uploaded",
-            location,
-        ))
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.entries.is_empty() || self.metadata.has_pending()
     }
 
     fn drain_top_level(&mut self) -> TopLevelResources {
+        self.staged_objects.clear();
         let (promoted_metadata, cleanup_metadata) = self.metadata.drain_top_level();
         TopLevelResources {
-            transaction: std::mem::take(&mut self.entries),
+            transaction: mem::take(&mut self.entries),
             promoted_metadata,
             cleanup_metadata,
         }
@@ -264,16 +296,13 @@ impl StorageResourceRegistry {
         &mut self,
         nest_level: i32,
     ) -> Vec<TrackedResource> {
-        let mut aborted = Vec::new();
-        let mut kept = Vec::new();
-        for entry in self.entries.drain(..) {
-            if entry.nest_level >= nest_level {
-                aborted.push(entry);
-            } else {
-                kept.push(entry);
-            }
+        let aborted: Vec<TrackedResource> = self
+            .entries
+            .extract_if(.., |entry| entry.nest_level >= nest_level)
+            .collect();
+        for entry in &aborted {
+            self.unindex_resource(&entry.resource);
         }
-        self.entries = kept;
         aborted
     }
 }
@@ -286,7 +315,6 @@ thread_local! {
 #[derive(Debug)]
 pub(super) struct StorageTransactionResource {
     inner: RefCell<StorageResourceRegistry>,
-    nest_level: Cell<i32>,
 }
 
 impl StorageTransactionResource {
@@ -299,7 +327,6 @@ impl StorageTransactionResource {
 
             let resource = Rc::new(Self {
                 inner: RefCell::new(StorageResourceRegistry::new()),
-                nest_level: Cell::new(TOP_LEVEL_NEST_LEVEL),
             });
             transaction::register_resource(
                 Rc::clone(&resource) as Rc<dyn TransactionResource>
@@ -371,31 +398,24 @@ impl StorageTransactionResource {
 
     pub(super) fn ensure_object_file_staged(
         location: &ObjectLocation,
-    ) -> std::result::Result<(), String> {
+    ) -> IcebergResult<()> {
         CURRENT.with(|slot| {
             let slot = slot.borrow();
-            let resource = slot.as_ref().ok_or_else(|| {
-                format!(
-                    "storage transaction resource registry not initialized; \
-                     finalize_write called without a prior writer() for '{}'",
-                    location,
-                )
-            })?;
+            let resource = slot.as_ref().ok_or(IcebergError::InvariantViolated(
+                "storage transaction resource registry not initialized before finalize_write",
+            ))?;
             resource.inner.borrow().ensure_object_file_staged(location)
         })
     }
 
     pub(super) fn mark_object_file_uploaded(
         location: &ObjectLocation,
-    ) -> std::result::Result<(), String> {
+    ) -> IcebergResult<()> {
         CURRENT.with(|slot| {
             let slot = slot.borrow();
-            let resource = slot.as_ref().ok_or_else(|| {
-                format!(
-                    "storage transaction resource registry not initialized during mark_uploaded for '{}'",
-                    location,
-                )
-            })?;
+            let resource = slot.as_ref().ok_or(IcebergError::InvariantViolated(
+                "storage transaction resource registry not initialized during upload completion",
+            ))?;
             resource
                 .inner
                 .borrow_mut()
@@ -406,38 +426,34 @@ impl StorageTransactionResource {
 
 impl TransactionResource for StorageTransactionResource {
     fn nest_level(&self) -> i32 {
-        self.nest_level.get()
+        TOP_LEVEL_NEST_LEVEL
     }
 
-    fn set_nest_level(&self, level: i32) {
-        self.nest_level.set(level);
+    fn set_nest_level(&self, _level: i32) {}
+
+    fn on_pre_prepare(&self) -> TransactionResult<()> {
+        if !self.inner.borrow().has_pending() {
+            return Ok(());
+        }
+        Err(PgReportError::from_message(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "cannot prepare a transaction with pending external-object cleanup",
+        ))
     }
 
     fn on_commit(&self) {
         let resources = self.inner.borrow_mut().drain_top_level();
-        for resource in resources
-            .transaction
-            .into_iter()
-            .map(|entry| entry.resource)
-            .chain(resources.promoted_metadata)
-        {
-            resource.on_commit();
-        }
-        // Physical post-commit deletion runs after lock release, as the
-        // transaction resource contract requires.
-        let cleanup_metadata = resources.cleanup_metadata;
-        if !cleanup_metadata.is_empty() {
-            CommittedCleanup::defer(move || {
-                for resource in cleanup_metadata {
-                    let _ = resource.on_abort(CleanupContext::TransactionEnd);
-                }
-            });
-        }
         CURRENT.with(|slot| *slot.borrow_mut() = None);
+        // Physical post-commit deletion (including staging-file unlinks) runs
+        // after lock release, as the transaction resource contract requires.
+        if !resources.is_empty() {
+            CommittedCleanup::defer(move || resources.execute_commit_cleanup());
+        }
     }
 
     fn on_abort(&self) {
         let resources = self.inner.borrow_mut().drain_top_level();
+        CURRENT.with(|slot| *slot.borrow_mut() = None);
         for resource in resources
             .transaction
             .into_iter()
@@ -447,11 +463,10 @@ impl TransactionResource for StorageTransactionResource {
         {
             let _ = resource.on_abort(CleanupContext::TransactionEnd);
         }
-        CURRENT.with(|slot| *slot.borrow_mut() = None);
     }
 
     fn on_prepare(&self) {
-        // Detach backend-local bookkeeping without commit/abort file cleanup.
+        // PRE_PREPARE accepted only an empty registry; release the backend reference.
         CURRENT.with(|slot| *slot.borrow_mut() = None);
     }
 

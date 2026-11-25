@@ -9,7 +9,6 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 
 use crate::managed_table::storage::StorageContext;
 use crate::managed_table::{ManagedResult, ManagedTableError};
-use crate::storage::object_uri::resolve_object_uri;
 
 use super::local_storage::LocalTableRoot;
 use crate::managed_table::options::LOCATION_OPTION_DEF;
@@ -147,13 +146,17 @@ impl ManagedTableLocation {
         tablespace: &TablespaceStorageBinding,
         location: &str,
     ) -> ManagedResult<ObjectTreeTarget> {
-        let object_key_offset =
-            resolve_object_uri(tablespace.effective_base_uri(), location).map_err(
-                |error| ManagedTableError::InvalidManagedTableLocation {
-                    location: location.to_owned(),
-                    reason: error.to_string(),
-                },
-            )?;
+        let object_key_offset = tablespace
+            .route()
+            .resolve_key_offset(location)
+            .ok_or_else(|| ManagedTableError::InvalidManagedTableLocation {
+                location: location.to_owned(),
+                reason: format!(
+                    "object URI {:?} is outside storage root {:?}",
+                    location,
+                    tablespace.effective_base_uri(),
+                ),
+            })?;
         ObjectTreeTarget::new(
             tablespace.volume_id(),
             tablespace.object_namespace(),

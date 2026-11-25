@@ -15,8 +15,10 @@
 //! object methods returning [`IcebergResult<T>`].
 
 use std::error::Error as StdError;
+use std::io;
 
 use iceberg_lite::catalog::rest::{RestError, RestErrorKind};
+use iceberg_lite::{Error as IcebergLiteError, ErrorKind as IcebergLiteErrorKind};
 use lagodb_core::diag::{PgError, PgReportError, SqlStateError};
 use lagodb_storage::{StorageError, StorageErrorKind};
 use pgrx::prelude::PgSqlErrorCode;
@@ -70,12 +72,12 @@ pub enum IcebergError {
     NumericError(#[from] pgrx::datum::numeric_support::error::Error),
 
     #[error("iceberg error: {0}")]
-    IcebergLiteError(#[from] iceberg_lite::Error),
+    IcebergLiteError(#[from] IcebergLiteError),
 
     #[error("Iceberg schema evolution conflict: {source}")]
     SchemaEvolutionConflict {
         #[source]
-        source: iceberg_lite::Error,
+        source: IcebergLiteError,
     },
 
     #[error("arrow error: {0}")]
@@ -187,9 +189,17 @@ impl From<PgReportError> for IcebergError {
 pub type IcebergResult<T> = Result<T, IcebergError>;
 
 impl IcebergError {
-    pub fn schema_evolution_conflict(source: iceberg_lite::Error) -> Self {
+    pub fn schema_evolution_conflict(source: IcebergLiteError) -> Self {
         Self::SchemaEvolutionConflict { source }
     }
+}
+
+pub(crate) fn storage_error_to_iceberg_lite(error: StorageError) -> IcebergLiteError {
+    let kind = match error.kind() {
+        StorageErrorKind::Unsupported => IcebergLiteErrorKind::FeatureUnsupported,
+        _ => IcebergLiteErrorKind::IoError,
+    };
+    IcebergLiteError::new(kind, error.to_string()).with_source(error)
 }
 
 fn storage_sql_error_code(error: &StorageError) -> PgSqlErrorCode {
@@ -217,55 +227,75 @@ fn storage_sql_error_code(error: &StorageError) -> PgSqlErrorCode {
     }
 }
 
-fn iceberg_lite_sql_error_code(error: &iceberg_lite::Error) -> PgSqlErrorCode {
-    if let Some(rest_error) = error
-        .source()
-        .and_then(|source| source.downcast_ref::<RestError>())
-    {
-        return match rest_error.kind() {
-            RestErrorKind::Unauthenticated => {
-                PgSqlErrorCode::ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION
-            }
-            RestErrorKind::Forbidden => {
-                PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE
-            }
-            RestErrorKind::CommitConflict | RestErrorKind::Conflict => {
-                PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
-            }
-            RestErrorKind::RateLimited => {
-                PgSqlErrorCode::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED
-            }
-            RestErrorKind::Server
-            | RestErrorKind::Client
-            | RestErrorKind::CommitStateUnknown
-            | RestErrorKind::Unexpected => PgSqlErrorCode::ERRCODE_FDW_ERROR,
-        };
+fn iceberg_lite_sql_error_code(error: &IcebergLiteError) -> PgSqlErrorCode {
+    let mut current = error.source();
+    while let Some(source) = current {
+        if let Some(rest_error) = source.downcast_ref::<RestError>() {
+            return match rest_error.kind() {
+                RestErrorKind::Unauthenticated => {
+                    PgSqlErrorCode::ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION
+                }
+                RestErrorKind::Forbidden => {
+                    PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE
+                }
+                RestErrorKind::CommitConflict | RestErrorKind::Conflict => {
+                    PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
+                }
+                RestErrorKind::RateLimited => {
+                    PgSqlErrorCode::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED
+                }
+                RestErrorKind::Server
+                | RestErrorKind::Client
+                | RestErrorKind::CommitStateUnknown
+                | RestErrorKind::Unexpected => PgSqlErrorCode::ERRCODE_FDW_ERROR,
+            };
+        }
+        if let Some(storage_error) = source.downcast_ref::<StorageError>() {
+            return storage_sql_error_code(storage_error);
+        }
+        if let Some(io_error) = source.downcast_ref::<io::Error>()
+            && let Some(storage_error) = io_error
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<StorageError>())
+        {
+            return storage_sql_error_code(storage_error);
+        }
+        current = source.source();
     }
 
-    use iceberg_lite::ErrorKind;
     match error.kind() {
-        ErrorKind::FeatureUnsupported => {
+        IcebergLiteErrorKind::FeatureUnsupported => {
             PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED
         }
         // Object-store / file IO failure surfacing from the scan or writer.
-        ErrorKind::IoError => PgSqlErrorCode::ERRCODE_IO_ERROR,
+        IcebergLiteErrorKind::IoError => PgSqlErrorCode::ERRCODE_IO_ERROR,
         // Unparseable or corrupted Iceberg metadata / data files.
-        ErrorKind::DataInvalid => PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
+        IcebergLiteErrorKind::DataInvalid => PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
         // Optimistic catalog commit lost the race to a concurrent update;
         // matches how managed-transaction commit conflicts are classified so the
         // executor can retry.
-        ErrorKind::CatalogCommitConflicts => {
+        IcebergLiteErrorKind::CatalogCommitConflicts => {
             PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
         }
         // Optimistic row-level validation found concurrent data changes. The
         // same Iceberg commit must not be retried transparently; PostgreSQL
         // aborts the transaction and lets the client rebuild it.
-        ErrorKind::DataConflict => PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE,
-        ErrorKind::TableNotFound => PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE,
-        ErrorKind::TableAlreadyExists => PgSqlErrorCode::ERRCODE_DUPLICATE_TABLE,
-        ErrorKind::NamespaceNotFound => PgSqlErrorCode::ERRCODE_INVALID_SCHEMA_NAME,
-        ErrorKind::NamespaceAlreadyExists => PgSqlErrorCode::ERRCODE_DUPLICATE_SCHEMA,
-        ErrorKind::PreconditionFailed => {
+        IcebergLiteErrorKind::DataConflict => {
+            PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
+        }
+        IcebergLiteErrorKind::TableNotFound => {
+            PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE
+        }
+        IcebergLiteErrorKind::TableAlreadyExists => {
+            PgSqlErrorCode::ERRCODE_DUPLICATE_TABLE
+        }
+        IcebergLiteErrorKind::NamespaceNotFound => {
+            PgSqlErrorCode::ERRCODE_INVALID_SCHEMA_NAME
+        }
+        IcebergLiteErrorKind::NamespaceAlreadyExists => {
+            PgSqlErrorCode::ERRCODE_DUPLICATE_SCHEMA
+        }
+        IcebergLiteErrorKind::PreconditionFailed => {
             PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
         }
         // `Unexpected` and any future `#[non_exhaustive]` kind: an opaque

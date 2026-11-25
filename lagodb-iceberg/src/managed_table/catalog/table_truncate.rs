@@ -10,7 +10,7 @@ use super::metadata_table::IcebergMetadata;
 use crate::managed_table::ManagedResult;
 use crate::managed_table::storage::StorageContext;
 use crate::managed_table::transaction::ManagedTransaction;
-use crate::storage::transaction_resources::register_table_dir_created;
+use crate::storage::register_table_dir_created;
 
 pub(crate) struct ManagedTableTruncate;
 

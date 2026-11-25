@@ -46,6 +46,13 @@ impl StorageVolumeRoute {
         &self.effective_base_uri
     }
 
+    pub fn scheme(&self) -> &str {
+        self.effective_base_uri
+            .split_once("://")
+            .expect("validated effective base URI contains a scheme")
+            .0
+    }
+
     pub fn effective_root_key(&self) -> &str {
         self.effective_base_uri
             .split_once("://")
@@ -54,6 +61,23 @@ impl StorageVolumeRoute {
             .split_once('/')
             .expect("validated effective base URI contains a root key")
             .1
+    }
+
+    /// Resolve an object URI or volume-rooted relative key to its
+    /// namespace-relative, volume-rooted key byte offset within `uri`.
+    pub fn resolve_key_offset(&self, uri: &str) -> Option<usize> {
+        let root = self.effective_root_key();
+        if uri.contains("://") {
+            let suffix = uri.strip_prefix(&self.effective_base_uri)?;
+            if !suffix.starts_with('/') || suffix.len() == 1 {
+                return None;
+            }
+            return Some(self.effective_base_uri.len() - root.len());
+        }
+
+        uri.strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('/') && suffix.len() > 1)
+            .then_some(0)
     }
 
     fn validate(&self) -> Result<(), StorageVolumeRouteError> {
@@ -88,5 +112,47 @@ impl StorageVolumeRoute {
             return Err(StorageVolumeRouteError::InvalidRoot);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_route() -> StorageVolumeRoute {
+        StorageVolumeRoute::new("my-lake", "s3://my-lake/lagodb/7").unwrap()
+    }
+
+    #[test]
+    fn resolves_scheme_and_strips_effective_root() {
+        let route = test_route();
+        assert_eq!(route.scheme(), "s3");
+
+        let uri = "s3://my-lake/lagodb/7/metadata/v1.json";
+        let offset = route.resolve_key_offset(uri).unwrap();
+        assert_eq!(&uri[offset..], "lagodb/7/metadata/v1.json");
+    }
+
+    #[test]
+    fn rejects_root_and_foreign_uris() {
+        let route = test_route();
+        assert_eq!(route.resolve_key_offset("s3://my-lake/lagodb/7"), None);
+        assert_eq!(route.resolve_key_offset("s3://my-lake/lagodb/7/"), None);
+        assert_eq!(
+            route.resolve_key_offset("s3://my-lake/lagodb/70/file"),
+            None
+        );
+        assert_eq!(route.resolve_key_offset("gs://my-lake/lagodb/7/file"), None);
+    }
+
+    #[test]
+    fn accepts_only_volume_rooted_relative_key() {
+        let route = test_route();
+        assert_eq!(
+            route.resolve_key_offset("lagodb/7/metadata/v1.json"),
+            Some(0)
+        );
+        assert_eq!(route.resolve_key_offset("metadata/v1.json"), None);
+        assert_eq!(route.resolve_key_offset(""), None);
     }
 }

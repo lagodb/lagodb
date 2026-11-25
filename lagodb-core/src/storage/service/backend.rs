@@ -16,9 +16,9 @@ use std::sync::Arc;
 
 use crate::storage::foreign::StorageIdentity;
 use lagodb_storage::{
-    ListSession, ObjectInfo, StagingFile, StagingPathResolver, StorageClient,
-    StorageError, StorageFile, StorageProbeResult, StorageResult, StoreConfig,
-    UploadInfo,
+    ListSession, ObjectInfo, ObjectLocation, StagingFile, StagingPathResolver,
+    StorageClient, StorageError, StorageFile, StorageProbeResult, StorageResult,
+    StoreConfig, UploadInfo,
 };
 
 use super::StorageEndpoint;
@@ -140,27 +140,36 @@ impl BackendStorageService {
         bucket: &str,
         key: &str,
     ) -> StorageResult<StagingFile> {
-        let client = self.acquire_client()?;
+        let location = self.object_location(bucket, key)?;
         StagingFile::create_with_fd_policy(
             resolver,
-            client.backend_identity(),
-            bucket,
-            key,
+            &location,
             &PostgresExternalFdPolicy,
         )
+    }
+
+    pub fn stage_object(
+        &self,
+        resolver: &StagingPathResolver,
+        bucket: &str,
+        key: &str,
+    ) -> StorageResult<(StagingFile, ObjectLocation)> {
+        let location = self.object_location(bucket, key)?;
+        let staging = StagingFile::create_with_fd_policy(
+            resolver,
+            &location,
+            &PostgresExternalFdPolicy,
+        )?;
+        Ok((staging, location))
     }
 
     pub fn object_location(
         &self,
         bucket: &str,
         key: &str,
-    ) -> StorageResult<lagodb_storage::ObjectLocation> {
+    ) -> StorageResult<ObjectLocation> {
         let client = self.acquire_client()?;
-        lagodb_storage::ObjectLocation::new(
-            client.backend_identity().clone(),
-            bucket,
-            key,
-        )
+        ObjectLocation::new(client.backend_identity().clone(), bucket, key)
     }
 
     pub fn delete(&self, bucket: &str, key: &str) -> StorageResult<()> {

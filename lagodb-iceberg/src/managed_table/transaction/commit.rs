@@ -23,9 +23,7 @@ use crate::managed_table::maintenance::{
     PreparedVacuum, VacuumAttemptResult, VacuumCommitAttempt,
 };
 use crate::managed_table::{ManagedResult, ManagedTableError};
-use crate::storage::transaction_resources::{
-    MetadataMaterializationAttempt, register_canceled_files_for_commit,
-};
+use crate::storage::{MetadataMaterializationAttempt, PostCommitFileDeleteBatch};
 use crate::write::TxTableCommitPlan;
 
 use super::{ManagedTransaction, TableCommitInput};
@@ -233,7 +231,7 @@ impl<'a> TableCommitCoordinator<'a> {
         if let Some(vacuum) = published.vacuum {
             vacuum.complete(self.relid, &self.file_io, self.commit_started)?;
         }
-        register_canceled_files_for_commit(
+        PostCommitFileDeleteBatch::register_canceled_files(
             self.file_io,
             self.plan.canceled_created_paths,
         );

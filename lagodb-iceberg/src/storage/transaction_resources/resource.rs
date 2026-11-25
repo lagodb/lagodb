@@ -1,4 +1,7 @@
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::{fmt, fs, io};
 
 use iceberg_lite::io::FileIO;
 use lagodb_core::diag::report_warning;
@@ -34,12 +37,12 @@ pub(super) enum StorageResource {
         location: ObjectLocation,
         staging_path: PathBuf,
         service: BackendStorageService,
-        state: ObjectFileState,
+        state: Rc<Cell<ObjectFileState>>,
     },
 }
 
-impl std::fmt::Debug for StorageResource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for StorageResource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CreatedLocalFile { path } => f
                 .debug_struct("CreatedLocalFile")
@@ -58,7 +61,7 @@ impl std::fmt::Debug for StorageResource {
                 .debug_struct("ObjectFile")
                 .field("location", location)
                 .field("staging_path", staging_path)
-                .field("state", state)
+                .field("state", &state.get())
                 .finish(),
         }
     }
@@ -66,28 +69,21 @@ impl std::fmt::Debug for StorageResource {
 
 impl StorageResource {
     pub(super) fn on_commit(self) {
-        match self {
-            Self::ObjectFile {
-                ref staging_path,
-                state: ObjectFileState::Uploaded,
-                ..
-            } => {
-                let _ = Self::unlink_file(staging_path);
-            }
-            Self::ObjectFile {
-                ref location,
-                ref staging_path,
-                state: ObjectFileState::Staged,
-                ..
-            } => {
+        if let Self::ObjectFile {
+            location,
+            staging_path,
+            state,
+            ..
+        } = self
+        {
+            if state.get() == ObjectFileState::Staged {
                 report_warning(format_args!(
                     "committing staged object file '{}' before upload completed; removing staging file '{}'",
                     location,
                     staging_path.display()
                 ));
-                let _ = Self::unlink_file(staging_path);
             }
-            _ => {}
+            let _ = Self::unlink_file(&staging_path);
         }
     }
 
@@ -118,7 +114,7 @@ impl StorageResource {
                 service,
                 state,
             } => {
-                let remote_deleted = if *state == ObjectFileState::Uploaded {
+                let remote_deleted = if state.get() == ObjectFileState::Uploaded {
                     let (bucket, key) = (location.bucket(), location.key());
                     let deleted = match context {
                         CleanupContext::Statement => service.delete(bucket, key),
@@ -150,9 +146,9 @@ impl StorageResource {
     }
 
     fn unlink_file(path: &Path) -> bool {
-        match std::fs::remove_file(path) {
+        match fs::remove_file(path) {
             Ok(()) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
             Err(error) => {
                 report_warning(format_args!(
                     "failed to unlink '{}': {}",

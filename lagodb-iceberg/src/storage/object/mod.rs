@@ -1,32 +1,28 @@
-//! Managed tablespace object storage bound to one effective base URI.
+//! Managed tablespace object storage and shared object-bucket I/O.
+
+mod bucket;
+mod injection_points;
+mod reader;
+mod wait_event;
+mod writer;
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
 
 use iceberg_lite::io::{FileMetadata, FileWrite, OpenedFile, Storage};
 use iceberg_lite::{Error, ErrorKind, Result};
 use lagodb_core::object_cleanup::ObjectTarget;
 use lagodb_core::storage::service::BackendStorageService;
-use lagodb_core::storage::volume::StorageVolumeId;
-use lagodb_storage::{StagingPathResolver, StorageError, StorageErrorKind};
+use lagodb_core::storage::volume::{StorageVolumeId, StorageVolumeRoute};
+use lagodb_storage::StagingPathResolver;
 
-use super::object_bucket::ObjectBucket;
-use super::object_uri::resolve_object_uri;
-
-pub(crate) fn storage_err(e: StorageError) -> Error {
-    let kind = match e.kind() {
-        StorageErrorKind::NotFound => ErrorKind::DataInvalid,
-        StorageErrorKind::InvalidPath => ErrorKind::DataInvalid,
-        _ => ErrorKind::IoError,
-    };
-    Error::new(kind, format!("{e}")).with_source(e)
-}
+pub(crate) use self::bucket::ObjectBucket;
+use crate::error::storage_error_to_iceberg_lite;
 
 #[derive(Clone)]
 pub(crate) struct ObjectStorage {
-    effective_base_uri: Arc<str>,
+    route: StorageVolumeRoute,
     volume_id: StorageVolumeId,
     bucket: ObjectBucket,
 }
@@ -52,28 +48,41 @@ impl fmt::Debug for ObjectStorage {
 
 impl ObjectStorage {
     pub(crate) fn new(
-        effective_base_uri: impl Into<String>,
         volume_id: StorageVolumeId,
-        bucket: &str,
+        route: StorageVolumeRoute,
         service: BackendStorageService,
         staging_resolver: StagingPathResolver,
     ) -> Self {
-        let effective_base_uri = effective_base_uri.into();
+        let bucket =
+            ObjectBucket::new(route.object_namespace(), service, staging_resolver);
         Self {
-            effective_base_uri: Arc::from(effective_base_uri.into_boxed_str()),
+            route,
             volume_id,
-            bucket: ObjectBucket::new(bucket, service, staging_resolver),
+            bucket,
         }
+    }
+
+    fn resolve_key(&self, uri: &str) -> Result<usize> {
+        self.route.resolve_key_offset(uri).ok_or_else(|| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "object URI {:?} is outside storage root {:?}",
+                    uri,
+                    self.route.effective_base_uri(),
+                ),
+            )
+        })
     }
 
     pub(crate) fn maintenance_target_owned(
         &self,
         mut uri: String,
     ) -> Result<ObjectTarget> {
-        let relative_path_pos = resolve_object_uri(&self.effective_base_uri, &uri)?;
+        let relative_path_pos = self.resolve_key(&uri)?;
         let path = uri.split_off(relative_path_pos);
         ObjectTarget::new(self.volume_id, self.bucket.name(), path)
-            .map_err(storage_err)
+            .map_err(storage_error_to_iceberg_lite)
     }
 
     pub(crate) fn list_older_than(
@@ -81,14 +90,16 @@ impl ObjectStorage {
         table_location: &str,
         cutoff_ms: i64,
     ) -> Result<HashSet<String>> {
-        let relative = resolve_object_uri(&self.effective_base_uri, table_location)?;
+        let relative = self.resolve_key(table_location)?;
         let prefix = format!("{}/", table_location[relative..].trim_end_matches('/'));
         let uses_absolute_uris = table_location.contains("://");
         let scheme = self.scheme();
         let mut paths = HashSet::new();
         let mut listing = self.bucket.list(&prefix, 0)?;
         loop {
-            let Some(entries) = listing.next_page().map_err(storage_err)? else {
+            let Some(entries) =
+                listing.next_page().map_err(storage_error_to_iceberg_lite)?
+            else {
                 break;
             };
             for entry in entries {
@@ -116,11 +127,11 @@ impl ObjectStorage {
     }
 
     pub(crate) fn location_is_empty(&self, location: &str) -> Result<bool> {
-        let relative = resolve_object_uri(&self.effective_base_uri, location)?;
+        let relative = self.resolve_key(location)?;
         let prefix = format!("{}/", location[relative..].trim_end_matches('/'));
         let mut listing = self.bucket.list(&prefix, 1)?;
         loop {
-            match listing.next_page().map_err(storage_err)? {
+            match listing.next_page().map_err(storage_error_to_iceberg_lite)? {
                 Some(entries) if !entries.is_empty() => return Ok(false),
                 Some(_) if listing.is_exhausted() => return Ok(true),
                 Some(_) => {}
@@ -132,7 +143,7 @@ impl ObjectStorage {
 
 impl Storage for ObjectStorage {
     fn resolve_uri(&self, uri: &str) -> Result<usize> {
-        resolve_object_uri(&self.effective_base_uri, uri)
+        self.resolve_key(uri)
     }
 
     fn delete(&self, path: &str) -> Result<()> {
@@ -172,10 +183,7 @@ impl Storage for ObjectStorage {
     }
 
     fn scheme(&self) -> &str {
-        self.effective_base_uri
-            .split_once("://")
-            .expect("tablespace binding validated the effective base URI")
-            .0
+        self.route.scheme()
     }
 
     fn as_any(&self) -> &dyn Any {

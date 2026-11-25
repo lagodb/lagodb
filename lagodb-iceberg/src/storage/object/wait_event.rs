@@ -1,6 +1,6 @@
-use lagodb_core::backend::ExtensionWaitEvent;
-use pgrx::pg_sys;
 use std::sync::OnceLock;
+
+use lagodb_core::backend::{ExtensionWaitEvent, ExtensionWaitGuard};
 
 // Keep wait-event reporting in the PostgreSQL adapter layer. The storage client and
 // staging-file crate stay reusable outside a backend process.
@@ -10,16 +10,16 @@ static OBJECT_READ: OnceLock<ExtensionWaitEvent> = OnceLock::new();
 static OBJECT_UPLOAD: OnceLock<ExtensionWaitEvent> = OnceLock::new();
 
 #[derive(Clone, Copy)]
-pub(crate) enum StorageWaitEvent {
+pub(super) enum ObjectWaitEvent {
     StagingFileWrite,
     StagingFileSync,
     ObjectRead,
     ObjectUpload,
 }
 
-impl StorageWaitEvent {
-    fn info(self) -> u32 {
-        match self {
+impl ObjectWaitEvent {
+    pub(super) fn enter(self) -> ExtensionWaitGuard {
+        let event = match self {
             Self::StagingFileWrite => STAGING_FILE_WRITE.get_or_init(|| {
                 ExtensionWaitEvent::register(c"PgLagoDBStagingFileWrite")
             }),
@@ -31,26 +31,7 @@ impl StorageWaitEvent {
             Self::ObjectUpload => OBJECT_UPLOAD.get_or_init(|| {
                 ExtensionWaitEvent::register(c"PgLagoDBObjectUpload")
             }),
-        }
-        .info()
-    }
-}
-
-pub(crate) struct StorageWaitGuard;
-
-impl StorageWaitGuard {
-    pub(crate) fn start(event: StorageWaitEvent) -> Self {
-        unsafe {
-            pg_sys::pgstat_report_wait_start(event.info());
-        }
-        Self
-    }
-}
-
-impl Drop for StorageWaitGuard {
-    fn drop(&mut self) {
-        unsafe {
-            pg_sys::pgstat_report_wait_end();
-        }
+        };
+        event.enter()
     }
 }

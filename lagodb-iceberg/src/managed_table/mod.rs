@@ -27,7 +27,7 @@ pub(crate) use storage::StorageContext;
 pub(crate) use provider::IcebergTableProvider;
 pub use provider::{IcebergTableAm, get_iceberg_am_routine_ptr};
 
-use crate::storage::local_file_wal;
+use crate::storage::init_wal_rmgr;
 use lagodb_core::table_provider::register_provider;
 
 pub(crate) fn initialize_configuration_and_hooks() {
@@ -36,7 +36,7 @@ pub(crate) fn initialize_configuration_and_hooks() {
 }
 
 pub(crate) fn register_scan_provider() {
-    local_file_wal::init_wal_rmgr();
+    init_wal_rmgr();
     customscan::register();
 }
 

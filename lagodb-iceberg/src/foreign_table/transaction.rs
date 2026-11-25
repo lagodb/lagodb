@@ -23,7 +23,7 @@ use super::catalog::{
 use super::error::IcebergFdwError;
 use super::source_identity::PlanSourceIdentity;
 use crate::error::{IcebergError, IcebergResult};
-use crate::storage::transaction_resources::register_canceled_files_for_commit;
+use crate::storage::PostCommitFileDeleteBatch;
 use crate::write::{RelationRowRegistry, TableTransactionState, TxWriteBatch};
 
 mod catalog_state;
@@ -218,9 +218,7 @@ impl ForeignTransaction {
                 })?
         };
         for (file_io, paths) in canceled_files {
-            if !paths.is_empty() {
-                register_canceled_files_for_commit(file_io, paths);
-            }
+            PostCommitFileDeleteBatch::register_canceled_files(file_io, paths);
         }
         let groups = {
             let inner = self.inner.borrow();

@@ -1,6 +1,8 @@
 //! PostgreSQL wait events reported by extensions.
 
 use std::ffi::CStr;
+use std::marker::PhantomData;
+use std::rc::Rc;
 
 use pgrx::pg_sys;
 
@@ -31,5 +33,30 @@ impl ExtensionWaitEvent {
     #[inline]
     pub const fn info(self) -> u32 {
         self.0
+    }
+
+    /// Report this wait event until the returned guard is dropped.
+    #[inline]
+    pub fn enter(self) -> ExtensionWaitGuard {
+        // SAFETY: `ExtensionWaitGuard` is `!Send` and used on the owning
+        // PostgreSQL backend thread; `my_wait_event_info` is always valid.
+        unsafe {
+            pg_sys::pgstat_report_wait_start(self.0);
+        }
+        ExtensionWaitGuard(PhantomData)
+    }
+}
+
+/// Backend-thread-scoped guard that clears `my_wait_event_info` on drop.
+#[must_use = "if unused, the PostgreSQL wait event ends immediately"]
+pub struct ExtensionWaitGuard(PhantomData<Rc<()>>);
+
+impl Drop for ExtensionWaitGuard {
+    fn drop(&mut self) {
+        // SAFETY: paired with `pgstat_report_wait_start` on the same backend
+        // thread.
+        unsafe {
+            pg_sys::pgstat_report_wait_end();
+        }
     }
 }

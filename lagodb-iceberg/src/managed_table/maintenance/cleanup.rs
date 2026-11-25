@@ -28,14 +28,9 @@ use lagodb_core::object_cleanup::{
 use lagodb_core::table_maintenance::TableMaintenanceReport;
 use pgrx::pg_sys;
 
-use crate::error::IcebergError;
+use crate::managed_table::storage::ManagedFileIoBackend;
 use crate::managed_table::{ManagedResult, ManagedTableError};
-use crate::storage::local_file_wal::record::{
-    MAX_DELETE_FILES_PAYLOAD_BYTES, MAX_DELETE_FILES_PER_RECORD, delete_file_fits_wal,
-};
-use crate::storage::{
-    LocalStorage, ObjectStorage, PostCommitDeletePurpose, PostCommitFileDeleteBatch,
-};
+use crate::storage::PostCommitFileDeleteBatch;
 
 use super::error::IcebergVacuumError;
 use super::record_metric;
@@ -67,56 +62,6 @@ impl VacuumCleanupRegistration {
 pub(crate) struct VacuumCleanup;
 
 impl VacuumCleanup {
-    fn local_wal_batch_count(paths: &[String]) -> ManagedResult<u64> {
-        let mut batches = 0_u64;
-        let mut batch_paths = 0_usize;
-        let mut payload_bytes = 0_usize;
-        for path in paths.iter().filter(|path| delete_file_fits_wal(path)) {
-            let encoded = std::mem::size_of::<u32>()
-                .checked_add(path.len())
-                .ok_or_else(|| ManagedTableError::Vacuum {
-                    source: IcebergVacuumError::ResourceLimit(
-                        "DELETE_FILES WAL payload size overflow".to_owned(),
-                    ),
-                })?;
-            if batch_paths > 0
-                && (batch_paths >= MAX_DELETE_FILES_PER_RECORD
-                    || payload_bytes
-                        .checked_add(encoded)
-                        .is_none_or(|value| value > MAX_DELETE_FILES_PAYLOAD_BYTES))
-            {
-                batches = batches.checked_add(1).ok_or_else(|| {
-                    ManagedTableError::Vacuum {
-                        source: IcebergVacuumError::ResourceLimit(
-                            "DELETE_FILES WAL batch count overflow".to_owned(),
-                        ),
-                    }
-                })?;
-                batch_paths = 0;
-                payload_bytes = 0;
-            }
-            batch_paths += 1;
-            payload_bytes = payload_bytes.checked_add(encoded).ok_or_else(|| {
-                ManagedTableError::Vacuum {
-                    source: IcebergVacuumError::ResourceLimit(
-                        "DELETE_FILES WAL payload size overflow".to_owned(),
-                    ),
-                }
-            })?;
-        }
-        if batch_paths > 0 {
-            batches =
-                batches
-                    .checked_add(1)
-                    .ok_or_else(|| ManagedTableError::Vacuum {
-                        source: IcebergVacuumError::ResourceLimit(
-                            "DELETE_FILES WAL batch count overflow".to_owned(),
-                        ),
-                    })?;
-        }
-        Ok(batches)
-    }
-
     pub(crate) fn register(
         relid: pg_sys::Oid,
         file_io: &FileIO,
@@ -132,75 +77,65 @@ impl VacuumCleanup {
                 ),
             }
         })?;
-        if let Some(local) = file_io.storage().as_any().downcast_ref::<LocalStorage>()
-        {
-            let mut paths: Vec<String> = candidates.into_iter().collect();
-            paths.sort_unstable();
-            let local_wal_batches = if local.needs_wal() {
-                Self::local_wal_batch_count(&paths)?
-            } else {
-                0
-            };
-            PostCommitFileDeleteBatch::register(
-                file_io.clone(),
-                paths,
-                PostCommitDeletePurpose::Vacuum,
-            );
-            return Ok(VacuumCleanupRegistration {
-                objects: count,
-                local_pending_paths: count,
-                local_wal_batches,
-                remote_queue_rows: 0,
-            });
-        }
-        if let Some(object) =
-            file_io.storage().as_any().downcast_ref::<ObjectStorage>()
-        {
-            let batch_size = object_cleanup_batch_items();
-            let mut targets = Vec::with_capacity(batch_size);
-            for path in candidates {
-                targets.push(object.maintenance_target_owned(path)?);
-                if targets.len() < batch_size {
-                    continue;
+        match ManagedFileIoBackend::from_file_io(file_io)? {
+            ManagedFileIoBackend::Local(_) => {
+                let mut paths: Vec<String> = candidates.into_iter().collect();
+                paths.sort_unstable();
+                let local_wal_batches =
+                    PostCommitFileDeleteBatch::register_vacuum_files(
+                        file_io.clone(),
+                        paths,
+                    );
+                Ok(VacuumCleanupRegistration {
+                    objects: count,
+                    local_pending_paths: count,
+                    local_wal_batches,
+                    remote_queue_rows: 0,
+                })
+            }
+            ManagedFileIoBackend::Object(object) => {
+                let batch_size = object_cleanup_batch_items();
+                let mut targets = Vec::with_capacity(batch_size);
+                for path in candidates {
+                    targets.push(object.maintenance_target_owned(path)?);
+                    if targets.len() < batch_size {
+                        continue;
+                    }
+                    let items: Vec<ObjectCleanupItemRef<'_>> = targets
+                        .iter()
+                        .map(|target| ObjectCleanupItemRef::DeleteObject {
+                            target,
+                            context: ObjectCleanupContext {
+                                producer: "lagodb_iceberg.vacuum",
+                                source_relid: Some(relid),
+                                source_name: None,
+                            },
+                        })
+                        .collect();
+                    ObjectCleanupQueue::enqueue_batch(&items)?;
+                    targets.clear();
                 }
-                let items: Vec<ObjectCleanupItemRef<'_>> = targets
-                    .iter()
-                    .map(|target| ObjectCleanupItemRef::DeleteObject {
-                        target,
-                        context: ObjectCleanupContext {
-                            producer: "lagodb_iceberg.vacuum",
-                            source_relid: Some(relid),
-                            source_name: None,
-                        },
-                    })
-                    .collect();
-                ObjectCleanupQueue::enqueue_batch(&items)?;
-                targets.clear();
+                if !targets.is_empty() {
+                    let items: Vec<ObjectCleanupItemRef<'_>> = targets
+                        .iter()
+                        .map(|target| ObjectCleanupItemRef::DeleteObject {
+                            target,
+                            context: ObjectCleanupContext {
+                                producer: "lagodb_iceberg.vacuum",
+                                source_relid: Some(relid),
+                                source_name: None,
+                            },
+                        })
+                        .collect();
+                    ObjectCleanupQueue::enqueue_batch(&items)?;
+                }
+                Ok(VacuumCleanupRegistration {
+                    objects: count,
+                    local_pending_paths: 0,
+                    local_wal_batches: 0,
+                    remote_queue_rows: count,
+                })
             }
-            if !targets.is_empty() {
-                let items: Vec<ObjectCleanupItemRef<'_>> = targets
-                    .iter()
-                    .map(|target| ObjectCleanupItemRef::DeleteObject {
-                        target,
-                        context: ObjectCleanupContext {
-                            producer: "lagodb_iceberg.vacuum",
-                            source_relid: Some(relid),
-                            source_name: None,
-                        },
-                    })
-                    .collect();
-                ObjectCleanupQueue::enqueue_batch(&items)?;
-            }
-            return Ok(VacuumCleanupRegistration {
-                objects: count,
-                local_pending_paths: 0,
-                local_wal_batches: 0,
-                remote_queue_rows: count,
-            });
         }
-        Err(IcebergError::InvariantViolated(
-            "VACUUM FileIO uses an unknown storage implementation",
-        )
-        .into())
     }
 }

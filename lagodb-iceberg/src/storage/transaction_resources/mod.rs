@@ -11,26 +11,25 @@
 //! [`lagodb_core::transaction::TransactionResource`] the first time any
 //! storage resource is recorded.
 //!
-//! **Commit behaviour:**
+//! **Commit behaviour (deferred until `RESOURCE_RELEASE_AFTER_LOCKS`):**
 //! - `ObjectFile(Uploaded)` → unlink the staging file (best-effort).
 //! - `ObjectFile(Staged)` → warn, then unlink the staging file (best-effort).
 //! - unresolved metadata-materialization resources → abort-style cleanup instead
 //!   of preserving files that no successful catalog publication references.
-//! - final-action-canceled data/delete files → one aggregated post-commit
-//!   cleanup resource executed after transaction lock release; local WAL-enabled
-//!   storage flushes `DELETE_FILES` first.
 //! - Everything else → no-op.
+//!
+//! Final-action-canceled data/delete files and retired local generations have
+//! separate post-commit batch resources ([`super::PostCommitFileDeleteBatch`]
+//! and [`super::LocalTableRetirement`]) executed after transaction lock release.
+//!
+//! Pending resources reject `PREPARE TRANSACTION` unless savepoint rollback or
+//! attempt discard has already left the registry empty.
 //!
 //! **Abort behaviour:**
 //! - `CreatedLocalFile` → unlink the local data file.
 //! - `CreatedTableDir` → remove the table directory.
 //! - `ObjectFile(Staged)` → unlink the staging file.
 //! - `ObjectFile(Uploaded)` → delete the remote object, then unlink the staging file.
-//!
-//! Retired local generations belong to
-//! [`super::LocalTableRetirement`], whose savepoint-aware collection transfers
-//! one owned batch to core's committed cleanup at transaction commit, separate
-//! from this registry of created resources.
 //!
 //! This abort behaviour is what makes a mid-statement writer failure safe with
 //! respect to remote orphan files. A rolling writer can upload one batch before
@@ -44,6 +43,10 @@
 //! to PostgreSQL's core abort record, and a separate post-abort maintenance stream
 //! would still have a crash gap.
 
+mod registry;
+mod resource;
+
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -52,14 +55,9 @@ use lagodb_core::diag::report_warning;
 use lagodb_core::storage::service::BackendStorageService;
 use lagodb_storage::ObjectLocation;
 
-use super::{PostCommitDeletePurpose, PostCommitFileDeleteBatch};
-use crate::error::IcebergResult;
-
 use self::registry::{MetadataAttemptId, StorageTransactionResource};
 use self::resource::{ObjectFileState, StorageResource};
-
-mod registry;
-mod resource;
+use crate::error::IcebergResult;
 
 /// Owns every storage resource produced by one metadata materialization attempt.
 ///
@@ -114,24 +112,9 @@ impl Drop for MetadataMaterializationAttempt {
 }
 
 /// Register a local data file for abort cleanup.
-pub(crate) fn register_local_file_created(path: PathBuf) {
+pub(in crate::storage) fn register_local_file_created(path: PathBuf) {
     StorageTransactionResource::current()
         .track(StorageResource::CreatedLocalFile { path });
-}
-
-/// Delete transaction-created files that the final metadata commit does not
-/// reference. Registration during pre-commit is safe: the transaction
-/// framework includes newly registered resources in the later commit/abort
-/// callbacks even though they do not receive another pre-commit callback.
-pub(crate) fn register_canceled_files_for_commit(
-    file_io: FileIO,
-    paths: Vec<String>,
-) {
-    PostCommitFileDeleteBatch::register(
-        file_io,
-        paths,
-        PostCommitDeletePurpose::CanceledCreatedFiles,
-    );
 }
 
 /// Register a newly-created table directory for abort cleanup.
@@ -141,7 +124,7 @@ pub(crate) fn register_table_dir_created(location: String, file_io: FileIO) {
 }
 
 /// Register a staging file for an object-storage write.
-pub(crate) fn register_object_file_staged(
+pub(in crate::storage) fn register_object_file_staged(
     location: ObjectLocation,
     staging_path: PathBuf,
     service: BackendStorageService,
@@ -150,7 +133,7 @@ pub(crate) fn register_object_file_staged(
         location,
         staging_path,
         service,
-        state: ObjectFileState::Staged,
+        state: Rc::new(Cell::new(ObjectFileState::Staged)),
     });
 }
 
@@ -158,9 +141,9 @@ pub(crate) fn register_object_file_staged(
 ///
 /// This MUST be called before attempting an upload. Errors indicate
 /// lifecycle bugs (missing writer registration or duplicate finalize).
-pub(crate) fn ensure_object_file_staged(
+pub(in crate::storage) fn ensure_object_file_staged(
     location: &ObjectLocation,
-) -> std::result::Result<(), String> {
+) -> IcebergResult<()> {
     StorageTransactionResource::ensure_object_file_staged(location)
 }
 
@@ -168,8 +151,8 @@ pub(crate) fn ensure_object_file_staged(
 ///
 /// Only the `Staged → Uploaded` transition is valid. Any other state
 /// (not found, already uploaded) is an internal lifecycle error.
-pub(crate) fn mark_object_file_uploaded(
+pub(in crate::storage) fn mark_object_file_uploaded(
     location: &ObjectLocation,
-) -> std::result::Result<(), String> {
+) -> IcebergResult<()> {
     StorageTransactionResource::mark_object_file_uploaded(location)
 }

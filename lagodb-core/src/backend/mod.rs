@@ -19,5 +19,5 @@ pub use memory_context::OwnedBackendContext;
 pub use process::BackendProcess;
 pub use signal_wakeup::{SignalWakeup, SignalWakeupError};
 pub use temp_file::PgTempFile;
-pub use vfd::VfdHandle;
-pub use wait_event::ExtensionWaitEvent;
+pub use vfd::{ExternalFdReservation, OwnedVfd, VfdHandle};
+pub use wait_event::{ExtensionWaitEvent, ExtensionWaitGuard};

@@ -16,7 +16,7 @@ use crate::managed_table::options::ResolvedIcebergOptions;
 use crate::managed_table::storage::StorageContext;
 use crate::managed_table::transaction::ManagedTransaction;
 use crate::managed_table::{ManagedResult, ManagedTableError};
-use crate::storage::transaction_resources::register_table_dir_created;
+use crate::storage::register_table_dir_created;
 
 /// Owns the complete CREATE operation after PostgreSQL has created the
 /// relation: option persistence, storage identity, metadata bootstrap,

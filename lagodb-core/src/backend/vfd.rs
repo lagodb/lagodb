@@ -4,8 +4,11 @@
 //! `size_t` lengths, and PostgreSQL 17 widened their result from `int` to
 //! `ssize_t`. This handle keeps those differences out of VFD owners.
 
+use std::ffi::CStr;
 #[cfg(feature = "pg15")]
 use std::ffi::c_int;
+use std::marker::PhantomData;
+use std::rc::Rc;
 
 use pgrx::pg_sys;
 
@@ -96,5 +99,118 @@ impl VfdHandle {
             let written = written as isize;
             written
         }
+    }
+}
+
+/// Exclusive backend-local owner of a PostgreSQL virtual file descriptor
+/// opened with `PathNameOpenFile`.
+///
+/// Owns only the VFD lifecycle (`FileClose` on `Drop`) and thin positioned I/O
+/// operations; callers attach path diagnostics and WAL policy at their own
+/// layer. Unlike `OpenTemporaryFile`, `PathNameOpenFile` does not register the
+/// VFD with a `ResourceOwner`, so `Drop` always closes it.
+///
+/// `pg_sys::File` is a plain integer index into backend-local `VfdCache` state
+/// in `fd.c`, so `_backend_thread` intentionally makes `OwnedVfd` `!Send + !Sync`
+/// instead of letting the compiler auto-derive `Send + Sync` from the integer.
+#[derive(Debug)]
+pub struct OwnedVfd {
+    file: pg_sys::File,
+    _backend_thread: PhantomData<Rc<()>>,
+}
+
+impl OwnedVfd {
+    /// Open `c_path` with `flags` via PostgreSQL's `PathNameOpenFile`.
+    /// Returns `None` on failure with OS `errno` preserved.
+    pub fn open(c_path: &CStr, flags: i32) -> Option<Self> {
+        // SAFETY: `c_path` is a valid NUL-terminated path and `flags` are valid
+        // open flags accepted by PostgreSQL's VFD layer on the backend thread.
+        let file = unsafe { pg_sys::PathNameOpenFile(c_path.as_ptr(), flags) };
+        if file < 0 {
+            None
+        } else {
+            Some(Self {
+                file,
+                _backend_thread: PhantomData,
+            })
+        }
+    }
+
+    #[inline]
+    pub fn size(&self) -> pg_sys::off_t {
+        // SAFETY: `self.file` is a valid open VFD owned by `Self`.
+        unsafe { pg_sys::FileSize(self.file) }
+    }
+
+    #[inline]
+    pub fn read_at(
+        &self,
+        buf: &mut [u8],
+        offset: pg_sys::off_t,
+        wait_event: u32,
+    ) -> isize {
+        // SAFETY: `self` keeps the VFD open for the duration of the call.
+        unsafe { VfdHandle::from_raw(self.file) }.read_at(buf, offset, wait_event)
+    }
+
+    #[inline]
+    pub fn write_at(
+        &self,
+        buf: &[u8],
+        offset: pg_sys::off_t,
+        wait_event: u32,
+    ) -> isize {
+        // SAFETY: `self` keeps the VFD open for the duration of the call.
+        unsafe { VfdHandle::from_raw(self.file) }.write_at(buf, offset, wait_event)
+    }
+
+    #[inline]
+    pub fn sync(&self, wait_event: u32) -> i32 {
+        // SAFETY: `self.file` is a valid open VFD owned by `Self`.
+        unsafe { pg_sys::FileSync(self.file, wait_event) }
+    }
+}
+
+impl Drop for OwnedVfd {
+    fn drop(&mut self) {
+        // SAFETY: `OwnedVfd` is constructed only from a non-negative VFD
+        // returned by `PathNameOpenFile` on this backend thread and closes it
+        // at most once.
+        unsafe {
+            pg_sys::FileClose(self.file);
+        }
+    }
+}
+
+/// Backend-thread-scoped reservation for one non-VFD OS descriptor (such as a
+/// `std::fs::ReadDir` directory handle) accounted against PostgreSQL's
+/// `AcquireExternalFD` / `ReleaseExternalFD` budget.
+///
+/// `PhantomData<Rc<()>>` intentionally makes the guard `!Send + !Sync` so
+/// `AcquireExternalFD` and `ReleaseExternalFD` remain paired on the same
+/// backend thread.
+#[must_use = "if unused, the external FD reservation is released immediately"]
+#[derive(Debug)]
+pub struct ExternalFdReservation(PhantomData<Rc<()>>);
+
+impl ExternalFdReservation {
+    pub fn try_acquire() -> Option<Self> {
+        // SAFETY: `!Send` keeps construction and drop on the owning backend
+        // thread, matching `fd.c` backend-local accounting. Construct `Self`
+        // only in the `true` branch so a failed `AcquireExternalFD` never drops
+        // a guard or calls `ReleaseExternalFD`.
+        if unsafe { pg_sys::AcquireExternalFD() } {
+            Some(Self(PhantomData))
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for ExternalFdReservation {
+    fn drop(&mut self) {
+        // SAFETY: constructed only after `AcquireExternalFD` succeeded on this
+        // backend thread.
+        unsafe { pg_sys::ReleaseExternalFD() };
     }
 }

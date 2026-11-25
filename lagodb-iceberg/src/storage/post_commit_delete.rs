@@ -18,20 +18,20 @@ use lagodb_core::transaction::cleanup::{
 use lagodb_core::wal::flush_wal;
 
 use super::LocalStorage;
-use crate::storage::local_file_wal::record::{
-    delete_file_fits_wal, log_delete_files,
+use super::local_file_wal::{
+    count_delete_files_wal_batches, delete_file_fits_wal, log_delete_files,
 };
 
 const MAX_DELETE_FAILURE_WARNINGS: usize = 8;
 const MAX_DELETE_PATH_WARNING_CHARS: usize = 512;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum PostCommitDeletePurpose {
+enum DeletePurpose {
     Vacuum,
     CanceledCreatedFiles,
 }
 
-impl PostCommitDeletePurpose {
+impl DeletePurpose {
     fn description(self) -> &'static str {
         match self {
             Self::Vacuum => "Iceberg VACUUM cleanup",
@@ -44,7 +44,7 @@ pub(crate) struct PostCommitFileDeleteBatch {
     file_io: FileIO,
     paths: Box<[String]>,
     needs_wal: bool,
-    purpose: PostCommitDeletePurpose,
+    purpose: DeletePurpose,
 }
 
 impl fmt::Debug for PostCommitFileDeleteBatch {
@@ -58,25 +58,55 @@ impl fmt::Debug for PostCommitFileDeleteBatch {
 }
 
 impl PostCommitFileDeleteBatch {
-    pub(crate) fn register(
+    /// Register post-commit deletion of local files selected by VACUUM and
+    /// return the number of bounded `DELETE_FILES` WAL records that will be
+    /// emitted when the relation requires WAL.
+    pub(crate) fn register_vacuum_files(file_io: FileIO, paths: Vec<String>) -> u64 {
+        let Some(batch) = Self::new(file_io, paths, DeletePurpose::Vacuum) else {
+            return 0;
+        };
+        let wal_batches = if batch.needs_wal {
+            count_delete_files_wal_batches(batch.paths.iter().map(String::as_str))
+        } else {
+            0
+        };
+        register_pending_delete(Box::new(batch));
+        wal_batches
+    }
+
+    /// Register post-commit deletion of transaction-created data/delete files
+    /// that the final Iceberg metadata publication does not reference.
+    ///
+    /// Registration during pre-commit is safe: the transaction framework
+    /// includes newly registered resources in the later commit/abort callbacks
+    /// even though they do not receive another pre-commit callback.
+    pub(crate) fn register_canceled_files(file_io: FileIO, paths: Vec<String>) {
+        if let Some(batch) =
+            Self::new(file_io, paths, DeletePurpose::CanceledCreatedFiles)
+        {
+            register_pending_delete(Box::new(batch));
+        }
+    }
+
+    fn new(
         file_io: FileIO,
         paths: Vec<String>,
-        purpose: PostCommitDeletePurpose,
-    ) {
+        purpose: DeletePurpose,
+    ) -> Option<Self> {
         if paths.is_empty() {
-            return;
+            return None;
         }
         let needs_wal = file_io
             .storage()
             .as_any()
             .downcast_ref::<LocalStorage>()
             .is_some_and(LocalStorage::needs_wal);
-        register_pending_delete(Box::new(Self {
+        Some(Self {
             file_io,
             paths: paths.into_boxed_slice(),
             needs_wal,
             purpose,
-        }));
+        })
     }
 
     fn log_local_delete_wal(&self) {

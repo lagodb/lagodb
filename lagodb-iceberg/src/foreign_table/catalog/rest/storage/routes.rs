@@ -18,8 +18,9 @@ use pgrx::pg_sys;
 
 use super::binding::{RouteBinding, RouteContext};
 use super::cache::{ConfiguredStorageCache, ConfiguredStorageRouteId};
+use crate::error::storage_error_to_iceberg_lite;
 use crate::foreign_table::catalog::CatalogAccessIdentity;
-use crate::storage::{ObjectBucket, storage_err};
+use crate::storage::ObjectBucket;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum ObjectProvider {
@@ -79,7 +80,7 @@ impl CatalogRoute {
         .with_profile_server(profile_server_oid);
         let service =
             ConfiguredStorageCache::acquire(route_id, endpoint, store_config)
-                .map_err(storage_err)?;
+                .map_err(storage_error_to_iceberg_lite)?;
         Ok(Self {
             bucket: ObjectBucket::new(
                 object.bucket(),
@@ -236,6 +237,11 @@ impl Storage for CatalogStorage {
     fn delete_cleanup(&self, path: &str) -> Result<()> {
         let (route, key) = self.resolve(path)?;
         route.bucket().delete_cleanup(&key)
+    }
+
+    fn remove_dir_all_cleanup(&self, path: &str) -> Result<()> {
+        let (route, key) = self.resolve(path)?;
+        route.bucket().delete_prefix_cleanup(&key)
     }
 
     fn initialize(&mut self, _props: HashMap<String, String>) -> Result<()> {

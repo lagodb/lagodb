@@ -4,9 +4,8 @@ use iceberg_lite::spec::{ManifestContentType, Snapshot, TableMetadata};
 use iceberg_lite::table::Table;
 use pgrx::check_for_interrupts;
 
-use crate::error::IcebergError;
+use crate::managed_table::storage::ManagedFileIoBackend;
 use crate::managed_table::{ManagedResult, ManagedTableError};
-use crate::storage::{LocalStorage, ObjectStorage};
 
 use super::error::IcebergVacuumError;
 use super::types::ManagedTableRoot;
@@ -228,20 +227,13 @@ impl IcebergReachabilityPlanner {
         table: &Table,
         older_than_ms: i64,
     ) -> ManagedResult<HashSet<String>> {
-        let storage = table.file_io().storage();
-        let candidates = if let Some(local) =
-            storage.as_any().downcast_ref::<LocalStorage>()
-        {
-            local.list_older_than(table.metadata().location(), older_than_ms)?
-        } else if let Some(object) = storage.as_any().downcast_ref::<ObjectStorage>()
-        {
-            object.list_older_than(table.metadata().location(), older_than_ms)?
-        } else {
-            return Err(IcebergError::InvariantViolated(
-                "orphan cleanup requires a known local or object storage backend",
-            )
-            .into());
-        };
+        let candidates =
+            match ManagedFileIoBackend::from_file_io(table.file_io())? {
+                ManagedFileIoBackend::Local(local) => local
+                    .list_older_than(table.metadata().location(), older_than_ms)?,
+                ManagedFileIoBackend::Object(object) => object
+                    .list_older_than(table.metadata().location(), older_than_ms)?,
+            };
         Ok(candidates)
     }
 

@@ -54,12 +54,20 @@ impl TablespaceStorageBinding {
         self.volume_id
     }
 
+    pub const fn route(&self) -> &StorageVolumeRoute {
+        &self.route
+    }
+
     pub fn object_namespace(&self) -> &str {
         self.route.object_namespace()
     }
 
     pub fn effective_base_uri(&self) -> &str {
         self.route.effective_base_uri()
+    }
+
+    pub fn resolve_key_offset(&self, uri: &str) -> Option<usize> {
+        self.route.resolve_key_offset(uri)
     }
 
     pub fn rooted_object_key(&self, suffix: &str) -> String {
