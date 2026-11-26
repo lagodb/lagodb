@@ -443,6 +443,12 @@ impl<'a> QueryExplainPlan<'a> {
             "Data Files Selected",
             metrics.planned_files,
         ));
+        if let Some(pruned_files) = metrics.pruned_files {
+            properties.push(PlanExplainNode::uinteger_property(
+                "Data Files Pruned",
+                pruned_files,
+            ));
+        }
         properties.push(PlanExplainNode::uinteger_property(
             "Selected File Bytes",
             metrics.planned_bytes,

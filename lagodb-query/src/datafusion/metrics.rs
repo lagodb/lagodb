@@ -1,6 +1,6 @@
 //! Statement-cumulative metrics collected at scan batch boundaries.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use arrow_array::RecordBatch;
@@ -14,6 +14,9 @@ struct ScanExecutionMetrics {
     arrow_batch_bytes: AtomicU64,
     planned_tasks: AtomicU64,
     planned_files: AtomicU64,
+    pruned_files: AtomicU64,
+    has_pruned_files: AtomicBool,
+    missing_pruned_files: AtomicBool,
     planned_bytes: AtomicU64,
 }
 
@@ -118,6 +121,17 @@ impl ExecutionMetrics {
         metrics
             .planned_files
             .fetch_add(task_metrics.planned_files, Ordering::Relaxed);
+        match task_metrics.pruned_files() {
+            Some(pruned_files) => {
+                metrics.has_pruned_files.store(true, Ordering::Relaxed);
+                metrics
+                    .pruned_files
+                    .fetch_add(pruned_files, Ordering::Relaxed);
+            }
+            None => {
+                metrics.missing_pruned_files.store(true, Ordering::Relaxed);
+            }
+        }
         metrics
             .planned_bytes
             .fetch_add(task_metrics.planned_bytes, Ordering::Relaxed);
@@ -162,13 +176,21 @@ impl ExecutionMetrics {
         let scans = self
             .scans
             .iter()
-            .map(|metrics| ScanExecutionMetricsSnapshot {
-                input_batches: metrics.input_batches.load(Ordering::Relaxed),
-                input_rows: metrics.input_rows.load(Ordering::Relaxed),
-                arrow_batch_bytes: metrics.arrow_batch_bytes.load(Ordering::Relaxed),
-                planned_tasks: metrics.planned_tasks.load(Ordering::Relaxed),
-                planned_files: metrics.planned_files.load(Ordering::Relaxed),
-                planned_bytes: metrics.planned_bytes.load(Ordering::Relaxed),
+            .map(|metrics| {
+                let pruned_files = (metrics.has_pruned_files.load(Ordering::Relaxed)
+                    && !metrics.missing_pruned_files.load(Ordering::Relaxed))
+                .then(|| metrics.pruned_files.load(Ordering::Relaxed));
+                ScanExecutionMetricsSnapshot {
+                    input_batches: metrics.input_batches.load(Ordering::Relaxed),
+                    input_rows: metrics.input_rows.load(Ordering::Relaxed),
+                    arrow_batch_bytes: metrics
+                        .arrow_batch_bytes
+                        .load(Ordering::Relaxed),
+                    planned_tasks: metrics.planned_tasks.load(Ordering::Relaxed),
+                    planned_files: metrics.planned_files.load(Ordering::Relaxed),
+                    pruned_files,
+                    planned_bytes: metrics.planned_bytes.load(Ordering::Relaxed),
+                }
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
@@ -202,6 +224,7 @@ pub struct ScanExecutionMetricsSnapshot {
     pub arrow_batch_bytes: u64,
     pub planned_tasks: u64,
     pub planned_files: u64,
+    pub pruned_files: Option<u64>,
     pub planned_bytes: u64,
 }
 

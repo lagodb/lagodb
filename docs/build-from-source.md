@@ -6,8 +6,8 @@ build, test, and CI targets.
 
 ## Prerequisites
 
-- Rust 1.97.1, as pinned by `rust-toolchain.toml`
-- `cargo-pgrx` 0.19.2
+- Rust 1.99.1, as pinned by `rust-toolchain.toml`
+- `cargo-pgrx` 0.20.1
 - PostgreSQL 15, 16, 17 or 18 development files and `pg_config`
 - a C build toolchain, Clang/libclang, `pkg-config`, OpenSSL, ICU, Readline,
   zlib, Bison, and Flex
@@ -15,7 +15,7 @@ build, test, and CI targets.
 Install the matching cargo-pgrx release:
 
 ```bash
-cargo install --locked cargo-pgrx --version 0.19.2
+cargo install --locked cargo-pgrx --version 0.20.1
 ```
 
 ## Select PostgreSQL

@@ -114,8 +114,8 @@ GROUP BY group_key
 ORDER BY group_key;
 
 -- Parallel workers lock the relation, rebind the leader's listing and read
--- their split groups. Only the execution mode and worker count are stable
--- in ANALYZE output.
+-- their split groups. The execution mode, worker count, and connector file
+-- pruning count are stable in ANALYZE output.
 CREATE FUNCTION pg_temp.offload_parallelism(query text) RETURNS SETOF text
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -125,8 +125,8 @@ BEGIN
         EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) '
             || query
     LOOP
-        IF ln ~ 'Execution Mode|Launched Workers' THEN
-            RETURN NEXT ln;
+        IF ln ~ 'Execution Mode|Launched Workers|Data Files Pruned' THEN
+            RETURN NEXT btrim(ln);
         END IF;
     END LOOP;
 END;

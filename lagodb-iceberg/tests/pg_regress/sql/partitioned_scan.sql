@@ -231,7 +231,8 @@ CREATE TABLE partitioned_reads.composite (
 INSERT INTO partitioned_reads.composite VALUES
     (1, 'east', 'a'), (10, 'east', 'b'), (5, 'east', 'c'),
     (1, 'west', 'd'), (5, 'west', 'e');
-SELECT predicate, scan->>'Data Files Selected' AS files, ids
+SELECT predicate, scan->>'Data Files Selected' AS files,
+       scan->>'Data Files Pruned' AS pruned, ids
 FROM (VALUES (1, 'region = ''east'''), (2, 'id = 5'),
              (3, 'region = ''east'' AND id = 5'),
              (4, 'id IN (5, 6)'), (5, 'id = ANY (ARRAY[5, NULL])'),

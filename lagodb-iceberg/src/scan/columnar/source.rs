@@ -23,6 +23,7 @@ pub(crate) struct ScanSourceBinding {
 pub(crate) struct ScanTaskPlanner {
     table: Table,
     snapshot_id: Option<i64>,
+    total_data_files: Option<u64>,
     read_schema: SchemaRef,
     field_ids: Box<[i32]>,
     planning_filter: Option<Predicate>,
@@ -33,6 +34,7 @@ impl ScanTaskPlanner {
     pub(crate) fn new(
         table: Table,
         snapshot_id: Option<i64>,
+        total_data_files: Option<u64>,
         read_schema: SchemaRef,
         field_ids: Box<[i32]>,
         planning_filter: Option<Predicate>,
@@ -41,6 +43,7 @@ impl ScanTaskPlanner {
         Self {
             table,
             snapshot_id,
+            total_data_files,
             read_schema,
             field_ids,
             planning_filter,
@@ -50,6 +53,10 @@ impl ScanTaskPlanner {
 
     pub(crate) fn field_ids(&self) -> &[i32] {
         &self.field_ids
+    }
+
+    pub(crate) const fn total_data_files(&self) -> Option<u64> {
+        self.total_data_files
     }
 
     pub(crate) fn plan_files(

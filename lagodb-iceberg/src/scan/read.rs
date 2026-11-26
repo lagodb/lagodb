@@ -22,6 +22,8 @@ use super::batch::{ArrowBatches, InterruptibleArrowBatches};
 use super::columnar::{ScanSourceBinding, ScanTaskPlanner};
 use super::{IcebergTaskMetrics, PgRowCursor};
 
+const TOTAL_DATA_FILES: &str = "total-data-files";
+
 /// Iceberg transaction view captured once for a statement. Managed reads keep
 /// the PG-visible data version separate from the current definition's schema;
 /// foreign reads use the schema of their executor-bound remote Table.
@@ -56,6 +58,26 @@ impl IcebergReadSnapshot {
 
     pub(crate) fn schema(&self) -> &Arc<IcebergSchema> {
         &self.read_schema
+    }
+
+    /// Total data files in this read's committed baseline snapshot, or `None`
+    /// when transaction-local file changes are overlaid or the snapshot summary
+    /// lacks a valid count.
+    pub(crate) fn total_data_files(&self) -> Option<u64> {
+        if self.delta.is_some() {
+            return None;
+        }
+        let Some(snapshot_id) = self.snapshot_id else {
+            return Some(0);
+        };
+        self.table
+            .metadata()
+            .snapshot_by_id(snapshot_id)?
+            .summary()
+            .additional_properties
+            .get(TOTAL_DATA_FILES)?
+            .parse::<u64>()
+            .ok()
     }
 }
 
@@ -109,6 +131,7 @@ impl ScanPredicates {
 pub(crate) struct PreparedIcebergRead {
     table: Table,
     snapshot_id: Option<i64>,
+    total_data_files: Option<u64>,
     projection: StorageProjection,
     predicates: ScanPredicates,
     delta: Option<Arc<SnapshotDelta>>,
@@ -156,9 +179,11 @@ impl PreparedIcebergRead {
         projection: StorageProjection,
         predicates: ScanPredicates,
     ) -> Self {
+        let total_data_files = snapshot.total_data_files();
         Self {
             table: snapshot.table,
             snapshot_id: snapshot.snapshot_id,
+            total_data_files,
             projection,
             predicates,
             delta: snapshot.delta,
@@ -228,6 +253,7 @@ impl PreparedIcebergRead {
         let task_planner = ScanTaskPlanner::new(
             self.table,
             self.snapshot_id,
+            self.total_data_files,
             self.projection.schema_ref(),
             field_ids,
             self.predicates.stable_pruning.0,
@@ -381,7 +407,7 @@ impl PreparedRowScan {
         self.read
             .query_tasks
             .as_ref()
-            .map(|tasks| tasks.as_ref().task_metrics())
+            .map(|tasks| tasks.as_ref().task_metrics(self.read.total_data_files))
     }
 
     pub(crate) fn open_analyze_row_cursor(

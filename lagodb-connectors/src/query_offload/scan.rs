@@ -90,11 +90,8 @@ impl BoundScan {
         let input = self.input()?;
         let files = input.member_count() as u64;
         Ok(PlannedTasks {
-            metrics: TableScanTaskMetrics {
-                planned_tasks: files,
-                planned_files: files,
-                planned_bytes: input.total_bytes(),
-            },
+            metrics: TableScanTaskMetrics::new(files, files, input.total_bytes())
+                .with_pruned_files(Some(0)),
             input: BackendLocal::new(input),
             columns: self.columns.project(projection)?,
             filters,

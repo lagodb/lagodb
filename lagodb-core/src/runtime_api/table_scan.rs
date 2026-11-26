@@ -124,6 +124,12 @@ pub struct TableScanTaskMetrics {
     pub planned_files: u64,
     /// Sum of primary data-file byte ranges represented by those tasks.
     pub planned_bytes: u64,
+    /// Nonzero when `pruned_files` is known for this physical task plan. Zero
+    /// denotes an unavailable complete data-file inventory.
+    pub has_pruned_files: u8,
+    /// Number of primary data files pruned by this physical task plan relative
+    /// to its complete data-file inventory.
+    pub pruned_files: u64,
 }
 
 /// Output of run-local physical task planning.
@@ -358,6 +364,50 @@ pub struct TableScanDescriptor {
     release_predicate: Option<ReleaseTableScanPredicate>,
     release_planned: Option<ReleasePlannedTableScan>,
     release_bound: Option<ReleaseBoundTableScan>,
+}
+
+impl TableScanTaskMetrics {
+    #[inline]
+    #[must_use]
+    pub const fn new(
+        planned_tasks: u64,
+        planned_files: u64,
+        planned_bytes: u64,
+    ) -> Self {
+        Self {
+            planned_tasks,
+            planned_files,
+            planned_bytes,
+            has_pruned_files: 0,
+            pruned_files: 0,
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn with_pruned_files(mut self, pruned_files: Option<u64>) -> Self {
+        match pruned_files {
+            Some(pruned_files) => {
+                self.has_pruned_files = 1;
+                self.pruned_files = pruned_files;
+            }
+            None => {
+                self.has_pruned_files = 0;
+                self.pruned_files = 0;
+            }
+        }
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn pruned_files(&self) -> Option<u64> {
+        if self.has_pruned_files != 0 {
+            Some(self.pruned_files)
+        } else {
+            None
+        }
+    }
 }
 
 impl TableScanBindRequest {

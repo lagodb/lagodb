@@ -123,7 +123,10 @@ impl BoundScan {
                     .into_boxed_slice(),
             );
             return Ok(PlannedScan {
-                task_set: Arc::new(TaskSet::new(tasks)),
+                task_set: Arc::new(TaskSet::new(
+                    tasks,
+                    self.scan.task_planner.total_data_files(),
+                )),
                 row_filter: self.row_filter(additional_filter),
                 schema: projected_schema,
             });
@@ -149,7 +152,10 @@ impl BoundScan {
                         .plan_files(&projected_field_ids, static_filter.as_ref())?
                         .into_boxed_slice(),
                 );
-                let task_set = Arc::new(TaskSet::new(tasks));
+                let task_set = Arc::new(TaskSet::new(
+                    tasks,
+                    self.scan.task_planner.total_data_files(),
+                ));
                 *cached = Some(CachedTaskSet {
                     projection: projection.into(),
                     static_filter: static_filter.clone(),
@@ -229,8 +235,8 @@ struct TaskSet {
 }
 
 impl TaskSet {
-    fn new(tasks: Arc<[FileScanTask]>) -> Self {
-        let metrics = tasks.as_ref().task_metrics();
+    fn new(tasks: Arc<[FileScanTask]>, total_data_files: Option<u64>) -> Self {
+        let metrics = tasks.as_ref().task_metrics(total_data_files);
         Self { tasks, metrics }
     }
 }

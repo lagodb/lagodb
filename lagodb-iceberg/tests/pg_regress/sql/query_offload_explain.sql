@@ -263,6 +263,7 @@ SELECT (scan->>'Filter') LIKE '%id > 2%'
        = (SELECT sum((node->>'Data Files Selected')::int)
           FROM jsonb_path_query(plan,
               'strict $[0].Plan.** ? (@."Node Type" == "Table Scan")') AS node)
+       AND (scan->>'Data Files Pruned')::int = 0
            AS scan_metrics_match
 FROM query_offload_explain_json(
     'ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF',
@@ -291,6 +292,22 @@ RESET enable_hashjoin;
 RESET enable_mergejoin;
 RESET enable_material;
 DROP TABLE query_offload_explain_outer;
+
+-- An uncommitted data-file delta has no exact total, so the optional metric
+-- remains absent instead of presenting a misleading zero.
+BEGIN;
+INSERT INTO query_offload_explain_left VALUES (4, 3, 40);
+SELECT scan ? 'Data Files Selected'
+           AND NOT (scan ? 'Data Files Pruned')
+           AS delta_omits_pruned
+FROM query_offload_explain_json(
+    'ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF',
+    'SELECT count(*) FROM query_offload_explain_left WHERE id = 1'
+) AS document(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Node Type" == "Table Scan")')
+    AS selected(scan);
+ROLLBACK;
 
 DROP FUNCTION query_offload_explain_json(text, text);
 DROP FUNCTION pg_temp.explain_analyze_text(text, boolean, boolean, boolean);

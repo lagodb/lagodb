@@ -105,8 +105,9 @@ $$);
                Actual Input Rows: 1
                Scan Tasks: 1
                Data Files Selected: 1
+               Data Files Pruned: 0
                Selected File Bytes: 1265
-(14 rows)
+(15 rows)
 
 -- The planner-row threshold is an admission gate, not an execution fallback.
 SET lagodb.query_offload_parallel_min_scan_rows = 2147483647;
@@ -130,8 +131,9 @@ $$);
                Actual Input Rows: 33
                Scan Tasks: 33
                Data Files Selected: 33
+               Data Files Pruned: 0
                Selected File Bytes: 67119
-(14 rows)
+(15 rows)
 
 SET lagodb.query_offload_parallel_min_scan_rows = 0;
 -- PostgreSQL worker budget below two producers also negotiates serial mode.
@@ -156,8 +158,9 @@ $$);
                Actual Input Rows: 33
                Scan Tasks: 33
                Data Files Selected: 33
+               Data Files Pruned: 0
                Selected File Bytes: 67119
-(14 rows)
+(15 rows)
 
 SET max_parallel_workers_per_gather = 2;
 -- A filtered grouped aggregate consumes every source work group exactly
@@ -196,8 +199,9 @@ $$);
                      Actual Input Rows: 33
                      Scan Tasks: 33
                      Data Files Selected: 33
+                     Data Files Pruned: 0
                      Selected File Bytes: 67119
-(22 rows)
+(23 rows)
 
 -- With timing, a launched parallel run also reports its startup time.
 SELECT ln FROM pg_temp.explain_analyze_text($$
@@ -257,8 +261,9 @@ $$);
                      Actual Input Rows: 33
                      Scan Tasks: 33
                      Data Files Selected: 33
+                     Data Files Pruned: 0
                      Selected File Bytes: 67119
-(20 rows)
+(21 rows)
 
 SELECT key,
        string_agg(label, ',' ORDER BY id) AS labels_by_id,
@@ -342,6 +347,7 @@ $$, mask_local_memory => true);
                                        Actual Input Rows: 33
                                        Scan Tasks: 33
                                        Data Files Selected: 33
+                                       Data Files Pruned: 0
                                        Selected File Bytes: 67119
                                  ->  Table Scan on query_offload_parallel_right r
                                        Access Method: iceberg
@@ -349,8 +355,9 @@ $$, mask_local_memory => true);
                                        Actual Input Rows: 33
                                        Scan Tasks: 1
                                        Data Files Selected: 1
+                                       Data Files Pruned: 0
                                        Selected File Bytes: 1513
-(31 rows)
+(33 rows)
 
 SELECT l.id AS left_id, r.id AS right_id, l.key
 FROM query_offload_parallel_left AS l
@@ -427,6 +434,7 @@ $$);
                                  Actual Input Rows: 33
                                  Scan Tasks: 33
                                  Data Files Selected: 33
+                                 Data Files Pruned: 0
                                  Selected File Bytes: 67119
                            ->  Table Scan on query_offload_parallel_right r
                                  Access Method: iceberg
@@ -434,8 +442,9 @@ $$);
                                  Actual Input Rows: 33
                                  Scan Tasks: 1
                                  Data Files Selected: 1
+                                 Data Files Pruned: 0
                                  Selected File Bytes: 1513
-(32 rows)
+(34 rows)
 
 SELECT l.key,
        count(*) AS joined_rows,

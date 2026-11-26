@@ -281,6 +281,7 @@ $$);
                            Actual Input Rows: 3
                            Scan Tasks: 1
                            Data Files Selected: 1
+                           Data Files Pruned: 0
                            Selected File Bytes: 1293
                      ->  Table Scan on query_offload_explain_right r
                            Access Method: iceberg
@@ -288,8 +289,9 @@ $$);
                            Actual Input Rows: 2
                            Scan Tasks: 1
                            Data Files Selected: 1
+                           Data Files Pruned: 0
                            Selected File Bytes: 931
-(26 rows)
+(28 rows)
 
 -- Engine physical diagnostics are restricted to ANALYZE VERBOSE.
 SELECT pg_temp.explain_analyze_text($$
@@ -325,6 +327,7 @@ $$, verbose_plan => true);
                                  Actual Input Rows: 3
                                  Scan Tasks: 1
                                  Data Files Selected: 1
+                                 Data Files Pruned: 0
                                  Selected File Bytes: 1293
                                  Arrow Batch Bytes: 204
                            ->  Table Scan on public.query_offload_explain_right r
@@ -335,6 +338,7 @@ $$, verbose_plan => true);
                                  Actual Input Rows: 2
                                  Scan Tasks: 1
                                  Data Files Selected: 1
+                                 Data Files Pruned: 0
                                  Selected File Bytes: 931
                                  Arrow Batch Bytes: 104
    Engine Plan:
@@ -395,7 +399,7 @@ $$, verbose_plan => true);
                                                Metric: planned_bytes: 1293
                                                Metric: planned_files: 1
                                                Metric: planned_tasks: 1
-(94 rows)
+(96 rows)
 
 -- Like JIT timing, engine setup time appears only when EXPLAIN collects timing.
 SELECT ln FROM pg_temp.explain_analyze_text($$
@@ -616,6 +620,7 @@ SELECT (scan->>'Filter') LIKE '%id > 2%'
        = (SELECT sum((node->>'Data Files Selected')::int)
           FROM jsonb_path_query(plan,
               'strict $[0].Plan.** ? (@."Node Type" == "Table Scan")') AS node)
+       AND (scan->>'Data Files Pruned')::int = 0
            AS scan_metrics_match
 FROM query_offload_explain_json(
     'ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF',
@@ -655,6 +660,26 @@ RESET enable_hashjoin;
 RESET enable_mergejoin;
 RESET enable_material;
 DROP TABLE query_offload_explain_outer;
+-- An uncommitted data-file delta has no exact total, so the optional metric
+-- remains absent instead of presenting a misleading zero.
+BEGIN;
+INSERT INTO query_offload_explain_left VALUES (4, 3, 40);
+SELECT scan ? 'Data Files Selected'
+           AND NOT (scan ? 'Data Files Pruned')
+           AS delta_omits_pruned
+FROM query_offload_explain_json(
+    'ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF',
+    'SELECT count(*) FROM query_offload_explain_left WHERE id = 1'
+) AS document(plan)
+CROSS JOIN LATERAL jsonb_path_query_first(plan,
+    '$[0].Plan.** ? (@."Node Type" == "Table Scan")')
+    AS selected(scan);
+ delta_omits_pruned 
+--------------------
+ t
+(1 row)
+
+ROLLBACK;
 DROP FUNCTION query_offload_explain_json(text, text);
 DROP FUNCTION pg_temp.explain_analyze_text(text, boolean, boolean, boolean);
 DROP TABLE query_offload_explain_right;

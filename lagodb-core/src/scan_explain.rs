@@ -26,6 +26,14 @@ impl TableScanTaskMetrics {
                 self.planned_files,
                 es,
             );
+            if let Some(pruned_files) = self.pruned_files() {
+                pg_sys::ExplainPropertyUInteger(
+                    c"Data Files Pruned".as_ptr(),
+                    ptr::null(),
+                    pruned_files,
+                    es,
+                );
+            }
             pg_sys::ExplainPropertyUInteger(
                 c"Selected File Bytes".as_ptr(),
                 ptr::null(),
