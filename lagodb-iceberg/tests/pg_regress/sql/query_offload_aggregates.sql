@@ -235,6 +235,19 @@ FROM query_offload_aggregate_basic
 GROUP BY group_i4, group_i8
 ORDER BY group_i4, group_i8;
 
+-- Boolean and date keys share query DISTINCT's native grouping domain.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT value_bool, value_date, count(*) AS rows
+FROM query_offload_aggregate_basic
+GROUP BY value_bool, value_date
+ORDER BY value_bool, value_date;
+
+SELECT value_bool, value_date, count(*) AS rows
+FROM query_offload_aggregate_basic
+GROUP BY value_bool, value_date
+ORDER BY value_bool, value_date;
+
 -- ============================================================================
 -- Integer aggregates, aggregate FILTER, and HAVING.
 -- Cast AVG results to a fixed scale so the accepted native-Float64 transition

@@ -1,7 +1,9 @@
 //! Per-scan physical metrics exposed through DataFusion EXPLAIN.
 
+use std::time::Instant;
+
 use datafusion::physical_plan::metrics::{
-    Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
+    Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet, Time,
 };
 use lagodb_core::runtime_api::TableScanTaskMetrics;
 
@@ -13,6 +15,13 @@ pub(super) struct ScanExecMetrics {
     planned_bytes: Count,
     dynamic_filter_input_rows: Count,
     dynamic_filter_output_rows: Count,
+    // Opening the provider stream is timed apart from producing batches, as
+    // DataFusion's FileStream does. Batch time is this scan's own elapsed_compute
+    // and, unlike FileStream's time_elapsed_processing, includes the provider's
+    // synchronous I/O, decompression, decode and pushed filters plus the runtime
+    // filters applied here.
+    time_elapsed_opening: Time,
+    elapsed_compute: Time,
 }
 
 impl ScanExecMetrics {
@@ -25,6 +34,9 @@ impl ScanExecMetrics {
             MetricBuilder::new(&set).counter("dynamic_filter_input_rows", 0);
         let dynamic_filter_output_rows =
             MetricBuilder::new(&set).counter("dynamic_filter_output_rows", 0);
+        let time_elapsed_opening =
+            MetricBuilder::new(&set).subset_time("time_elapsed_opening", 0);
+        let elapsed_compute = MetricBuilder::new(&set).elapsed_compute(0);
         Self {
             set,
             planned_tasks,
@@ -32,7 +44,17 @@ impl ScanExecMetrics {
             planned_bytes,
             dynamic_filter_input_rows,
             dynamic_filter_output_rows,
+            time_elapsed_opening,
+            elapsed_compute,
         }
+    }
+
+    pub(super) fn record_opening(&self, started: Instant) {
+        self.time_elapsed_opening.add_elapsed(started);
+    }
+
+    pub(super) fn record_compute(&self, started: Instant) {
+        self.elapsed_compute.add_elapsed(started);
     }
 
     pub(super) fn record_task_plan(&self, metrics: TableScanTaskMetrics) {

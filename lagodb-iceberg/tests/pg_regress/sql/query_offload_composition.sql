@@ -52,7 +52,7 @@ INSERT INTO query_offload_comp_right VALUES
 
 INSERT INTO query_offload_comp_aux VALUES
     (1, 'shared', 'shared', 'shared', 'shared', 'shared', 'shared'),
-    (2, 'shared', 'shared', 'shared', 'shared', 'shared ', 'shared'),
+    (2, 'shared', 'shared', 'shared', 'shared', 'shared ', 'shared '),
     (4, 'four', 'four', 'four', 'four', 'four', 'four');
 
 -- Duplicate fanout, NULL aggregate input, FILTER, and HAVING in one fragment.
@@ -330,9 +330,7 @@ ORDER BY a.label_c, a.label_varchar_c;
 
 -- A declared character(n) column stores values padded to its width, so
 -- bpchar equality is byte equality: 'shared' and 'shared ' form one group,
--- and a constant is padded to the width before it is compared. NAME retains
--- PostgreSQL-specific equality semantics outside the hash-grouping contract;
--- PostgreSQL must keep its Aggregate node.
+-- and a constant is padded to the width before it is compared.
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT a.label_bpchar, count(*) AS rows
@@ -414,12 +412,21 @@ FROM query_offload_comp_bpchar;
 
 DROP TABLE query_offload_comp_bpchar;
 
+-- NAME equality and hashing (nameeq, hashname) see the bytes before the
+-- terminating NUL. Unlike character(n), trailing blanks stay significant.
 EXPLAIN (COSTS OFF)
 SELECT a.label_name, count(*) AS rows
 FROM query_offload_comp_left AS l
 JOIN query_offload_comp_right AS r USING (key)
 JOIN query_offload_comp_aux AS a USING (key)
 GROUP BY a.label_name;
+
+SELECT a.label_name, length(a.label_name) AS label_length, count(*) AS rows
+FROM query_offload_comp_left AS l
+JOIN query_offload_comp_right AS r USING (key)
+JOIN query_offload_comp_aux AS a USING (key)
+GROUP BY a.label_name
+ORDER BY rows;
 
 -- DISTINCT aggregate followed by ORDER BY and LIMIT/OFFSET.
 EXPLAIN (COSTS OFF)

@@ -222,44 +222,41 @@ impl ScalarSemantics {
             )
     }
 
-    /// Whether DataFusion's native hash grouping implements this PostgreSQL
-    /// scalar domain.
+    /// Whether DataFusion's native hash grouping implements PostgreSQL
+    /// equality for this scalar domain.
     ///
-    /// Deterministic PostgreSQL TEXT/VARCHAR equality uses the same UTF-8 bytes
-    /// stored in Arrow, independently of the collation's ordering. A positive
-    /// `character(n)` typmod proves the value is padded to its width, so
-    /// `bpchareq` is byte equality; unconstrained BPCHAR and NAME retain
-    /// PostgreSQL-specific value semantics that the provider-neutral query
-    /// contract does not prove. String ordering remains a separate, stricter
-    /// capability owned by Sort. Float group values fold -0 into +0 but keep
-    /// NaN payloads apart, the accepted engine difference shared with query
-    /// DISTINCT.
+    /// GROUP BY and query DISTINCT both lower to DataFusion grouping keys and
+    /// share this one domain. Fixed-width keys compare their Arrow values,
+    /// which is PostgreSQL's equality for these types. Float keys fold -0 into
+    /// one +0 group but keep distinct NaN payloads apart, where PostgreSQL
+    /// treats every NaN as equal; see docs/query-offload-semantics.md.
+    /// Text-family keys use Arrow byte equality
+    /// ([`Self::supports_text_distinct_key`]). Timestamp OIDs cover both Arrow
+    /// microseconds and nanoseconds; DataFusion admission declines a
+    /// nanosecond grouping key, which does not preserve PostgreSQL equality.
     pub fn supports_hash_group_key(self, value_type: ExprType) -> bool {
         if self != Self::Exact {
             return false;
         }
         match value_type.type_oid {
-            pg_sys::INT4OID
+            pg_sys::BOOLOID
+            | pg_sys::INT2OID
+            | pg_sys::INT4OID
             | pg_sys::INT8OID
             | pg_sys::FLOAT4OID
-            | pg_sys::FLOAT8OID => self.supports_type(value_type),
-            pg_sys::TEXTOID | pg_sys::VARCHAROID | pg_sys::BPCHAROID => {
-                let typmod_is_normalized = match value_type.type_oid {
-                    pg_sys::TEXTOID => value_type.typmod == -1,
-                    pg_sys::VARCHAROID => {
-                        value_type.typmod == -1
-                            || value_type.typmod >= pg_sys::VARHDRSZ
-                    }
-                    _ => PgBpcharSemantics::for_type(value_type).is_some(),
-                };
-                typmod_is_normalized
-                    && unsafe {
-                        PgTextComparisonSemantics::for_equality_collation(
-                            value_type.collation,
-                        )
-                    }
-                    .is_some()
+            | pg_sys::FLOAT8OID
+            | pg_sys::BYTEAOID
+            | pg_sys::UUIDOID
+            | pg_sys::DATEOID
+            | pg_sys::TIMEOID
+            | pg_sys::TIMESTAMPOID
+            | pg_sys::TIMESTAMPTZOID => {
+                value_type.typmod == -1 && value_type.collation == pg_sys::InvalidOid
             }
+            pg_sys::TEXTOID
+            | pg_sys::VARCHAROID
+            | pg_sys::BPCHAROID
+            | pg_sys::NAMEOID => Self::supports_text_distinct_key(value_type),
             pg_sys::NUMERICOID => Decimal128Semantics::for_type(value_type).is_some(),
             _ => false,
         }

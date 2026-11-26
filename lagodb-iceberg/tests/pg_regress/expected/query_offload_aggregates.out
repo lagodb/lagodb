@@ -382,6 +382,39 @@ ORDER BY group_i4, group_i8;
         3 |       30
 (4 rows)
 
+-- Boolean and date keys share query DISTINCT's native grouping domain.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT value_bool, value_date, count(*) AS rows
+FROM query_offload_aggregate_basic
+GROUP BY value_bool, value_date
+ORDER BY value_bool, value_date;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Sort
+   Sort Key: value_bool, value_date
+   ->  Custom Scan (LagoDB Query Offload)
+         Engine: DataFusion
+         ->  Aggregate
+               Group Key: value_bool, value_date
+               Aggregates: COUNT(*)
+               ->  Table Scan on query_offload_aggregate_basic
+                     Access Method: iceberg
+(9 rows)
+
+SELECT value_bool, value_date, count(*) AS rows
+FROM query_offload_aggregate_basic
+GROUP BY value_bool, value_date
+ORDER BY value_bool, value_date;
+ value_bool | value_date | rows 
+------------+------------+------
+ f          | 01-02-2024 |    1
+ f          | 01-03-2024 |    1
+ t          | 12-31-2023 |    1
+ t          | 01-01-2024 |    1
+            |            |    2
+(5 rows)
+
 -- ============================================================================
 -- Integer aggregates, aggregate FILTER, and HAVING.
 -- Cast AVG results to a fixed scale so the accepted native-Float64 transition

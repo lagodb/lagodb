@@ -2,12 +2,8 @@
 
 use lagodb_core::expr::ExprType;
 use lagodb_core::query_contract::OutputId;
-use pgrx::pg_sys;
 
-use super::{
-    Decimal128Semantics, ExecutionExpr, QueryNode, QueryPlanError, RowEstimate,
-    ScalarSemantics,
-};
+use super::{ExecutionExpr, QueryNode, QueryPlanError, RowEstimate, ScalarSemantics};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DistinctExpr {
@@ -27,7 +23,7 @@ impl DistinctExpr {
             .ok_or(QueryPlanError::UnsupportedDistinctKey)?;
         if !matches!(&expression, ExecutionExpr::Column(_))
             || expression_type != result_type
-            || !Self::supports_type(result_type)
+            || !ScalarSemantics::Exact.supports_hash_group_key(result_type)
         {
             return Err(QueryPlanError::UnsupportedDistinctKey);
         }
@@ -36,44 +32,6 @@ impl DistinctExpr {
             result_type,
             output,
         })
-    }
-
-    fn supports_type(value_type: ExprType) -> bool {
-        // Query DISTINCT deliberately inherits DataFusion's native grouping
-        // keys. DataFusion 55 folds -0 into one +0 group, but float keys
-        // otherwise use bit equality, so distinct NaN payloads stay separate
-        // where PostgreSQL treats every NaN as equal; see
-        // docs/query-offload-semantics.md. Text-family keys use Arrow byte
-        // equality; nondeterministic collations are rejected below, but this
-        // gate does not provide locale-aware equality normalization.
-        //
-        // Source precision is checked by DataFusion admission: timestamp OIDs
-        // cover both Arrow microseconds and nanoseconds, but only the former
-        // preserve PG equality for DISTINCT without normalization.
-        match value_type.type_oid {
-            pg_sys::BOOLOID
-            | pg_sys::INT2OID
-            | pg_sys::INT4OID
-            | pg_sys::INT8OID
-            | pg_sys::FLOAT4OID
-            | pg_sys::FLOAT8OID
-            | pg_sys::BYTEAOID
-            | pg_sys::UUIDOID
-            | pg_sys::DATEOID
-            | pg_sys::TIMEOID
-            | pg_sys::TIMESTAMPOID
-            | pg_sys::TIMESTAMPTZOID => {
-                value_type.typmod == -1 && value_type.collation == pg_sys::InvalidOid
-            }
-            pg_sys::TEXTOID
-            | pg_sys::VARCHAROID
-            | pg_sys::BPCHAROID
-            | pg_sys::NAMEOID => {
-                ScalarSemantics::supports_text_distinct_key(value_type)
-            }
-            pg_sys::NUMERICOID => Decimal128Semantics::for_type(value_type).is_some(),
-            _ => false,
-        }
     }
 
     #[inline]

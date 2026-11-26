@@ -3,6 +3,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use arrow_array::{RecordBatch, RecordBatchReader};
 use arrow_schema::{ArrowError, SchemaRef};
@@ -61,6 +62,7 @@ impl ExternalTableScanStream {
         if self.reader.is_some() {
             return Ok(());
         }
+        let started = self.scan_metrics.as_ref().map(|_| Instant::now());
         let filters = self
             .pending_filters
             .take()
@@ -80,8 +82,9 @@ impl ExternalTableScanStream {
         if let Some(metrics) = &self.metrics {
             metrics.record_task_plan(self.scan, task_metrics);
         }
-        if let Some(scan_metrics) = &self.scan_metrics {
+        if let (Some(scan_metrics), Some(started)) = (&self.scan_metrics, started) {
             scan_metrics.record_task_plan(task_metrics);
+            scan_metrics.record_opening(started);
         }
         if reader.schema() != self.schema {
             return Err(DataFusionError::Execution(
@@ -128,6 +131,7 @@ impl Stream for ExternalTableScanStream {
             self.finished = true;
             return Poll::Ready(Some(Err(error)));
         }
+        let started = self.scan_metrics.as_ref().map(|_| Instant::now());
         let filters = self
             .runtime_filters
             .as_mut()
@@ -171,6 +175,9 @@ impl Stream for ExternalTableScanStream {
                 None
             }
         };
+        if let (Some(scan_metrics), Some(started)) = (&self.scan_metrics, started) {
+            scan_metrics.record_compute(started);
+        }
         Poll::Ready(batch)
     }
 }
