@@ -883,8 +883,6 @@ INSERT INTO customscan_rescan_date_lake VALUES
     (DATE '2024-01-01', 1, 'finite_1'),
     (DATE '2024-01-02', 2, 'finite_2'),
     (DATE '2024-01-03', 3, 'finite_3');
--- Fix DateStyle for stable date::text output.
-SET DateStyle = 'ISO, MDY';
 SET lagodb.customscan_mode = 'force';
 SELECT outer_rel.marker AS outer_marker,
        outer_rel.d::text AS outer_d,
@@ -902,8 +900,8 @@ CROSS JOIN LATERAL (
 ORDER BY outer_marker, lake_marker, lake.payload;
  outer_marker |  outer_d   | lake_marker |   lake_d   | payload  
 --------------+------------+-------------+------------+----------
-            1 | 2024-01-01 |           1 | 2024-01-01 | finite_1
-            2 | infinity   |           2 | 2024-01-02 | finite_2
+            1 | 01-01-2024 |           1 | 01-01-2024 | finite_1
+            2 | infinity   |           2 | 01-02-2024 | finite_2
 (2 rows)
 
 SET lagodb.customscan_mode = 'off';
@@ -923,8 +921,8 @@ CROSS JOIN LATERAL (
 ORDER BY outer_marker, lake_marker, lake.payload;
  outer_marker |  outer_d   | lake_marker |   lake_d   | payload  
 --------------+------------+-------------+------------+----------
-            1 | 2024-01-01 |           1 | 2024-01-01 | finite_1
-            2 | infinity   |           2 | 2024-01-02 | finite_2
+            1 | 01-01-2024 |           1 | 01-01-2024 | finite_1
+            2 | infinity   |           2 | 01-02-2024 | finite_2
 (2 rows)
 
 DROP TABLE customscan_rescan_date_lake;

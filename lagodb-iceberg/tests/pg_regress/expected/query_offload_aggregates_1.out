@@ -7,7 +7,6 @@ CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 -- A small batch limit exercises multiple Arrow batches.
 -- Keep CustomScan off while comparing query offload with PostgreSQL.
 SET lagodb.query_batch_rows = 2;
-SET timezone = 'UTC';
 CREATE TABLE query_offload_aggregate_basic (
     id integer,
     group_i4 integer,
@@ -654,7 +653,7 @@ SELECT min(value_f4) AS min_f4,
 FROM query_offload_aggregate_basic;
  min_f4 | max_f4 | sum_f4 | avg_f4 | min_f8 | max_f8 | sum_f8  | avg_f8  |  min_date  |  max_date  | min_time | max_time |      min_timestamp       |      max_timestamp       |       min_timestamptz        |       max_timestamptz        | all_true | any_true |        ordered_i4        |      ordered_text      |  concatenated_text  
 --------+--------+--------+--------+--------+--------+---------+---------+------------+------------+----------+----------+--------------------------+--------------------------+------------------------------+------------------------------+----------+----------+--------------------------+------------------------+---------------------
-     -2 |      3 | 4.0000 | 1.0000 |    -20 |     30 | 40.0000 | 10.0000 | 12-31-2023 | 01-03-2024 | 09:00:00 | 12:00:00 | Sun Dec 31 09:00:00 2023 | Wed Jan 03 12:00:00 2024 | Sun Dec 31 09:00:00 2023 UTC | Wed Jan 03 12:00:00 2024 UTC | f        | t        | {10,20,NULL,-20,30,NULL} | alpha,beta,alpha,gamma | alphabetaalphagamma
+     -2 |      3 | 4.0000 | 1.0000 |    -20 |     30 | 40.0000 | 10.0000 | 12-31-2023 | 01-03-2024 | 09:00:00 | 12:00:00 | Sun Dec 31 09:00:00 2023 | Wed Jan 03 12:00:00 2024 | Sun Dec 31 01:00:00 2023 PST | Wed Jan 03 04:00:00 2024 PST | f        | t        | {10,20,NULL,-20,30,NULL} | alpha,beta,alpha,gamma | alphabetaalphagamma
 (1 row)
 
 -- PostgreSQL native result.
@@ -683,7 +682,7 @@ SELECT min(value_f4) AS min_f4,
 FROM query_offload_aggregate_basic;
  min_f4 | max_f4 | sum_f4 | avg_f4 | min_f8 | max_f8 | sum_f8  | avg_f8  |  min_date  |  max_date  | min_time | max_time |      min_timestamp       |      max_timestamp       |       min_timestamptz        |       max_timestamptz        | all_true | any_true |        ordered_i4        |      ordered_text      |  concatenated_text  
 --------+--------+--------+--------+--------+--------+---------+---------+------------+------------+----------+----------+--------------------------+--------------------------+------------------------------+------------------------------+----------+----------+--------------------------+------------------------+---------------------
-     -2 |      3 | 4.0000 | 1.0000 |    -20 |     30 | 40.0000 | 10.0000 | 12-31-2023 | 01-03-2024 | 09:00:00 | 12:00:00 | Sun Dec 31 09:00:00 2023 | Wed Jan 03 12:00:00 2024 | Sun Dec 31 09:00:00 2023 UTC | Wed Jan 03 12:00:00 2024 UTC | f        | t        | {10,20,NULL,-20,30,NULL} | alpha,beta,alpha,gamma | alphabetaalphagamma
+     -2 |      3 | 4.0000 | 1.0000 |    -20 |     30 | 40.0000 | 10.0000 | 12-31-2023 | 01-03-2024 | 09:00:00 | 12:00:00 | Sun Dec 31 09:00:00 2023 | Wed Jan 03 12:00:00 2024 | Sun Dec 31 01:00:00 2023 PST | Wed Jan 03 04:00:00 2024 PST | f        | t        | {10,20,NULL,-20,30,NULL} | alpha,beta,alpha,gamma | alphabetaalphagamma
 (1 row)
 
 -- ============================================================================
@@ -1275,7 +1274,6 @@ RESET plan_cache_mode;
 -- Cleanup
 -- ============================================================================
 DROP TABLE query_offload_aggregate_basic;
-RESET timezone;
 RESET lagodb.query_batch_rows;
 RESET lagodb.query_offload_mode;
 RESET lagodb.customscan_mode;

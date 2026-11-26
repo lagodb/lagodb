@@ -265,8 +265,6 @@ SELECT * FROM iceberg_fdw_read.fallback_main;
 SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SET max_parallel_workers_per_gather = 0;
-SET TimeZone = 'America/New_York';
-SET DateStyle = 'SQL, DMY';
 -- JSON float output must retain precision even when SQL float output rounds.
 SET extra_float_digits = 0;
 
@@ -388,8 +386,6 @@ SELECT count(*) AS rows_after_error
 FROM iceberg_fdw_read.batches
 WHERE value ->> 'id' = id::text;
 
-RESET TimeZone;
-RESET DateStyle;
 RESET extra_float_digits;
 RESET max_parallel_workers_per_gather;
 RESET lagodb.query_offload_mode;

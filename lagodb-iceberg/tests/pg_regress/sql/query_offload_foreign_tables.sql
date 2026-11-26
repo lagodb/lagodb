@@ -267,8 +267,6 @@ ORDER BY group_key;
 
 -- Nested Arrow outputs use the same JSONB conversion as direct FDW reads.
 SET max_parallel_workers_per_gather = 0;
-SET TimeZone = 'America/New_York';
-SET DateStyle = 'SQL, DMY';
 -- JSON float output must retain precision even when SQL float output rounds.
 SET extra_float_digits = 0;
 IMPORT FOREIGN SCHEMA fdw_nested LIMIT TO (rows_v2)
@@ -501,8 +499,6 @@ FROM query_offload_foreign.batches
 WHERE value IS NOT NULL;
 
 DROP FUNCTION pg_temp.foreign_analyze(text);
-RESET TimeZone;
-RESET DateStyle;
 RESET extra_float_digits;
 
 DROP TABLE query_offload_foreign_managed;

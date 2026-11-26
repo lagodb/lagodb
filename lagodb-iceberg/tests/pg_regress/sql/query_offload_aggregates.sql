@@ -9,7 +9,6 @@ CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 -- A small batch limit exercises multiple Arrow batches.
 -- Keep CustomScan off while comparing query offload with PostgreSQL.
 SET lagodb.query_batch_rows = 2;
-SET timezone = 'UTC';
 
 CREATE TABLE query_offload_aggregate_basic (
     id integer,
@@ -786,7 +785,6 @@ RESET plan_cache_mode;
 
 DROP TABLE query_offload_aggregate_basic;
 
-RESET timezone;
 RESET lagodb.query_batch_rows;
 RESET lagodb.query_offload_mode;
 RESET lagodb.customscan_mode;

@@ -4,7 +4,6 @@ DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 -- Keep CustomScan off while comparing query offload with PostgreSQL.
 SET lagodb.query_batch_rows = 2;
-SET timezone = 'UTC';
 CREATE TABLE query_offload_distinct_basic (
     id integer,
     value_bool boolean,
@@ -257,8 +256,8 @@ ORDER BY value_text NULLS LAST,
          value_bytea NULLS LAST;
  value_text | value_date | value_time |     value_timestamp      |      value_timestamptz       |              value_uuid              | value_bytea 
 ------------+------------+------------+--------------------------+------------------------------+--------------------------------------+-------------
- alpha      | 01-01-2024 | 10:00:00   | Mon Jan 01 10:00:00 2024 | Mon Jan 01 10:00:00 2024 UTC | 00000000-0000-0000-0000-000000000001 | \x01
- beta       | 01-02-2024 | 11:00:00   | Tue Jan 02 11:00:00 2024 | Tue Jan 02 11:00:00 2024 UTC | 00000000-0000-0000-0000-000000000002 | \x02
+ alpha      | 01-01-2024 | 10:00:00   | Mon Jan 01 10:00:00 2024 | Mon Jan 01 02:00:00 2024 PST | 00000000-0000-0000-0000-000000000001 | \x01
+ beta       | 01-02-2024 | 11:00:00   | Tue Jan 02 11:00:00 2024 | Tue Jan 02 03:00:00 2024 PST | 00000000-0000-0000-0000-000000000002 | \x02
             |            |            |                          |                              |                                      | 
 (3 rows)
 
@@ -281,8 +280,8 @@ ORDER BY value_text NULLS LAST,
          value_bytea NULLS LAST;
  value_text | value_date | value_time |     value_timestamp      |      value_timestamptz       |              value_uuid              | value_bytea 
 ------------+------------+------------+--------------------------+------------------------------+--------------------------------------+-------------
- alpha      | 01-01-2024 | 10:00:00   | Mon Jan 01 10:00:00 2024 | Mon Jan 01 10:00:00 2024 UTC | 00000000-0000-0000-0000-000000000001 | \x01
- beta       | 01-02-2024 | 11:00:00   | Tue Jan 02 11:00:00 2024 | Tue Jan 02 11:00:00 2024 UTC | 00000000-0000-0000-0000-000000000002 | \x02
+ alpha      | 01-01-2024 | 10:00:00   | Mon Jan 01 10:00:00 2024 | Mon Jan 01 02:00:00 2024 PST | 00000000-0000-0000-0000-000000000001 | \x01
+ beta       | 01-02-2024 | 11:00:00   | Tue Jan 02 11:00:00 2024 | Tue Jan 02 03:00:00 2024 PST | 00000000-0000-0000-0000-000000000002 | \x02
             |            |            |                          |                              |                                      | 
 (3 rows)
 
@@ -457,7 +456,6 @@ SELECT DISTINCT value_bpchar FROM query_offload_distinct_text_keys;
 -- ============================================================================
 DROP TABLE query_offload_distinct_text_keys;
 DROP TABLE query_offload_distinct_basic;
-RESET timezone;
 RESET lagodb.query_batch_rows;
 RESET lagodb.query_offload_mode;
 RESET lagodb.customscan_mode;

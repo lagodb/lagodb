@@ -1664,8 +1664,6 @@ ORDER BY id;
 RESET lagodb.customscan_mode;
 DROP TABLE customscan_explain_split_t;
 -- Result parity across operand types.
--- Fix the timezone for timestamptz comparisons.
-SET timezone = 'UTC';
 -- Numeric comparisons stay residual, including NaN and out-of-range literals.
 CREATE TABLE rq_numeric (
     id integer,
@@ -1870,23 +1868,23 @@ SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+
  Sort
    Sort Key: id
    ->  Custom Scan (lagodb-iceberg) on rq_temporal
-         Filter: (tstz >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone)
-         Pushed Filter: (tstz >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone)
+         Filter: (tstz >= 'Sun Dec 31 16:00:00 2023 PST'::timestamp with time zone)
+         Pushed Filter: (tstz >= 'Sun Dec 31 16:00:00 2023 PST'::timestamp with time zone)
 (5 rows)
 
 SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
  id |             tstz             
 ----+------------------------------
-  3 | Sat Jun 15 12:34:56 2024 UTC
-  4 | Fri Jan 10 23:59:59 2025 UTC
+  3 | Sat Jun 15 05:34:56 2024 PDT
+  4 | Fri Jan 10 15:59:59 2025 PST
 (2 rows)
 
 SET lagodb.customscan_mode = 'off';
 SELECT id, tstz FROM rq_temporal WHERE tstz >= TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
  id |             tstz             
 ----+------------------------------
-  3 | Sat Jun 15 12:34:56 2024 UTC
-  4 | Fri Jan 10 23:59:59 2025 UTC
+  3 | Sat Jun 15 05:34:56 2024 PDT
+  4 | Fri Jan 10 15:59:59 2025 PST
 (2 rows)
 
 -- A date column against a folded date + interval bound is pushed as the date
@@ -1943,7 +1941,7 @@ WHERE d < TIMESTAMPTZ '2024-01-01 00:00:00+00' ORDER BY id;
  Sort
    Sort Key: id
    ->  Custom Scan (lagodb-iceberg) on rq_temporal
-         Filter: (d < 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone)
+         Filter: (d < 'Sun Dec 31 16:00:00 2023 PST'::timestamp with time zone)
 (4 rows)
 
 -- Default deterministic-collation text equality and inequality.
@@ -2086,7 +2084,6 @@ SELECT id FROM rq_float WHERE f4 <= 0.1::float8 ORDER BY id;
 (2 rows)
 
 RESET lagodb.customscan_mode;
-RESET timezone;
 DROP TABLE rq_numeric;
 DROP TABLE rq_temporal;
 DROP TABLE rq_text;

@@ -596,8 +596,6 @@ INSERT INTO customscan_rescan_date_lake VALUES
     (DATE '2024-01-01', 1, 'finite_1'),
     (DATE '2024-01-02', 2, 'finite_2'),
     (DATE '2024-01-03', 3, 'finite_3');
--- Fix DateStyle for stable date::text output.
-SET DateStyle = 'ISO, MDY';
 
 SET lagodb.customscan_mode = 'force';
 SELECT outer_rel.marker AS outer_marker,

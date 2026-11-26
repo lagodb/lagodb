@@ -6,8 +6,6 @@ DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 SET client_min_messages = notice;
 
-SET timezone = 'UTC';
-
 -- ============================================================================
 -- 1. All Primitive Types Test
 -- ============================================================================
@@ -342,10 +340,9 @@ DROP TABLE iceberg_ts_round_trip;
 -- 8. Timestamptz Round Trip is Independent of Session Timezone
 -- ============================================================================
 -- The writer pins the Arrow column timezone to '+00:00' via
--- TimestampMicrosecondBuilder::with_timezone. With the session set to a
--- non-UTC zone, comparing against the same absolute instant (expressed
--- with `+00`) must still return true.
-SET timezone = 'America/Los_Angeles';
+-- TimestampMicrosecondBuilder::with_timezone. Under pg_regress's non-UTC
+-- session zone (America/Los_Angeles), comparing against the same absolute
+-- instant (expressed with `+00`) must still return true.
 CREATE TABLE iceberg_tstz_round_trip (
     label text,
     tstz  timestamptz
@@ -368,7 +365,6 @@ FROM iceberg_tstz_round_trip
 ORDER BY label;
 
 DROP TABLE iceberg_tstz_round_trip;
-SET timezone = 'UTC';
 
 -- ============================================================================
 -- 9. Binary Round Trip with LargeBinary Writer

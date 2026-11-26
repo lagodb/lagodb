@@ -8,7 +8,6 @@ DROP EXTENSION IF EXISTS lagodb_iceberg CASCADE;
 CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 
 SET lagodb.query_batch_rows = 2;
-SET timezone = 'UTC';
 
 CREATE TABLE query_offload_join_left (
     id integer,
@@ -671,7 +670,6 @@ DROP TABLE query_offload_join_aux;
 DROP TABLE query_offload_join_right;
 DROP TABLE query_offload_join_left;
 
-RESET timezone;
 RESET lagodb.query_batch_rows;
 RESET lagodb.query_offload_mode;
 RESET lagodb.customscan_mode;

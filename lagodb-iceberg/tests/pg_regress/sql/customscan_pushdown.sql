@@ -989,10 +989,6 @@ RESET lagodb.customscan_mode;
 DROP TABLE customscan_explain_split_t;
 -- Result parity across operand types.
 
-
--- Fix the timezone for timestamptz comparisons.
-SET timezone = 'UTC';
-
 -- Numeric comparisons stay residual, including NaN and out-of-range literals.
 CREATE TABLE rq_numeric (
     id integer,
@@ -1178,7 +1174,6 @@ SELECT id FROM rq_float WHERE f4 <= 0.1::float8 ORDER BY id;
 SELECT id FROM rq_float WHERE f4 <= 0.1::float8 ORDER BY id;
 
 RESET lagodb.customscan_mode;
-RESET timezone;
 DROP TABLE rq_numeric;
 DROP TABLE rq_temporal;
 DROP TABLE rq_text;

@@ -414,8 +414,6 @@ storage profile "iceberg_read_storage_ambiguous" is ambiguous with "iceberg_read
 SET lagodb.customscan_mode = 'off';
 SET lagodb.query_offload_mode = 'off';
 SET max_parallel_workers_per_gather = 0;
-SET TimeZone = 'America/New_York';
-SET DateStyle = 'SQL, DMY';
 -- JSON float output must retain precision even when SQL float output rounds.
 SET extra_float_digits = 0;
 IMPORT FOREIGN SCHEMA fdw_nested LIMIT TO (rows_v2)
@@ -587,8 +585,6 @@ WHERE value ->> 'id' = id::text;
              4097
 (1 row)
 
-RESET TimeZone;
-RESET DateStyle;
 RESET extra_float_digits;
 RESET max_parallel_workers_per_gather;
 RESET lagodb.query_offload_mode;

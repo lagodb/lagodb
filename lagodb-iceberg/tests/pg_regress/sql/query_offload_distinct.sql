@@ -6,7 +6,6 @@ CREATE EXTENSION IF NOT EXISTS lagodb_iceberg;
 
 -- Keep CustomScan off while comparing query offload with PostgreSQL.
 SET lagodb.query_batch_rows = 2;
-SET timezone = 'UTC';
 
 CREATE TABLE query_offload_distinct_basic (
     id integer,
@@ -315,7 +314,6 @@ SELECT DISTINCT value_bpchar FROM query_offload_distinct_text_keys;
 DROP TABLE query_offload_distinct_text_keys;
 DROP TABLE query_offload_distinct_basic;
 
-RESET timezone;
 RESET lagodb.query_batch_rows;
 RESET lagodb.query_offload_mode;
 RESET lagodb.customscan_mode;

@@ -132,8 +132,6 @@ OPTIONS (
     table 'fdw_nanos.rows_v3'
 );
 
-SET TimeZone = 'UTC';
-SET DateStyle = 'ISO, MDY';
 CREATE TEMP TABLE nanos_pg AS SELECT id, ts, tz FROM iceberg_fdw_pruning.nanos;
 
 -- These three distinct Arrow nanoseconds decode to the same PG microsecond.
@@ -144,8 +142,8 @@ SELECT id, ts, tz FROM iceberg_fdw_pruning.nanos WHERE id >= 5 AND id <= 7 ORDER
 -- residual proves that storage filtering ran, not just that planning accepted it.
 CREATE TEMP TABLE nanos_cases AS
 SELECT col, op, ordinal,
-       format('%I %s %s %L', col, op, typ, instant) AS predicate
-FROM (VALUES ('ts', 'TIMESTAMP'), ('tz', 'TIMESTAMPTZ')) AS types(col, typ)
+       format('%I %s %s %L', col, op, typ, instant || zone) AS predicate
+FROM (VALUES ('ts', 'TIMESTAMP', ''), ('tz', 'TIMESTAMPTZ', '+00')) AS types(col, typ, zone)
 CROSS JOIN (VALUES (1, '='), (2, '<'), (3, '<='), (4, '>'), (5, '>='), (6, '<>')) AS ops(ordinal, op)
 CROSS JOIN (VALUES ('1970-01-01 00:00:00'),
                    ('1969-12-31 23:59:59.999999')) AS instants(instant);
@@ -323,8 +321,6 @@ DROP TABLE iceberg_fdw_pruning.scalar_managed;
 DROP FOREIGN TABLE iceberg_fdw_pruning.scalars;
 
 DROP TABLE nanos_cases, nanos_pg;
-RESET TimeZone;
-RESET DateStyle;
 
 DROP FUNCTION pg_temp.partition_query_json(text);
 SET client_min_messages = warning;
