@@ -3,10 +3,12 @@
 //! Table access methods and tablespaces define their own option schemas, while
 //! this module owns the PostgreSQL list-walking and value-normalization logic.
 
+use std::ffi::{CStr, c_void};
+use std::ptr;
+
 use crate::diag::SqlStateError;
 use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
-use std::ffi::CStr;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -49,7 +51,6 @@ pub enum OptionSchemaError {
     #[error("table option '{option}' is managed by the table access method")]
     AccessMethodManaged { option: String },
 }
-
 impl SqlStateError for OptionSchemaError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE
@@ -92,6 +93,33 @@ pub struct OptionDef {
     pub description: &'static str,
 }
 
+impl OptionDef {
+    /// Whether `def_elem` names this unqualified option (`defnamespace == NULL`).
+    ///
+    /// # Safety
+    ///
+    /// `def_elem` must reference a live PostgreSQL `DefElem` parse-tree node.
+    pub(crate) unsafe fn matches_def_elem(&self, def_elem: &pg_sys::DefElem) -> bool {
+        def_elem.defnamespace.is_null()
+            && unsafe { CStr::from_ptr(def_elem.defname) }.to_bytes()
+                == self.name.as_bytes()
+    }
+
+    /// Find the definition matching `def_elem` in `options`.
+    ///
+    /// # Safety
+    ///
+    /// `def_elem` must reference a live PostgreSQL `DefElem` parse-tree node.
+    pub(crate) unsafe fn find_matching<'a>(
+        options: &'a [Self],
+        def_elem: &pg_sys::DefElem,
+    ) -> Option<&'a Self> {
+        options
+            .iter()
+            .find(|option| unsafe { option.matches_def_elem(def_elem) })
+    }
+}
+
 /// Try to match a single `DefElem` against the valid option definitions.
 ///
 /// Returns `Ok(true)` if the option matched, `Ok(false)` if not.
@@ -101,47 +129,40 @@ pub struct OptionDef {
 /// `def_elem_ptr` must point at a valid PostgreSQL `DefElem` node.
 unsafe fn try_extract_single_option(
     def_elem_ptr: *mut pg_sys::DefElem,
-    def_name: &str,
     valid_options: &[OptionDef],
     custom_opts: &mut Vec<(String, Option<String>)>,
 ) -> Result<bool, OptionSchemaError> {
-    let Some(def) = valid_options.iter().find(|opt| opt.name == def_name) else {
+    let def_elem = unsafe { &*def_elem_ptr };
+    let Some(def) = (unsafe { OptionDef::find_matching(valid_options, def_elem) })
+    else {
         return Ok(false);
     };
 
     if def.access == OptionAccess::AccessMethodManaged {
         return Err(OptionSchemaError::AccessMethodManaged {
-            option: def_name.to_owned(),
+            option: def.name.to_owned(),
         });
     }
 
-    // SAFETY: defGetString reads from a valid DefElem node.
+    // SAFETY: defGetString reads from a valid DefElem node with non-null arg.
     let raw_val = unsafe {
-        if (*def_elem_ptr).arg.is_null() {
+        if def_elem.arg.is_null() {
             None
         } else {
             let val_ptr = pg_sys::defGetString(def_elem_ptr);
-            (!val_ptr.is_null())
-                .then(|| CStr::from_ptr(val_ptr).to_string_lossy().into_owned())
+            Some(CStr::from_ptr(val_ptr).to_string_lossy().into_owned())
         }
     };
 
-    if custom_opts
-        .iter()
-        .any(|(k, _): &(String, _)| *k == def_name)
-    {
+    if custom_opts.iter().any(|(k, _)| k == def.name) {
         return Err(OptionSchemaError::Duplicate {
-            option: def_name.to_owned(),
+            option: def.name.to_owned(),
         });
     }
 
-    match validate_option_value(def, def_name, raw_val) {
-        Ok(validated_val) => {
-            custom_opts.push((def_name.to_owned(), validated_val));
-            Ok(true)
-        }
-        Err(err) => Err(err),
-    }
+    let validated_val = validate_option_value(def, def.name, raw_val)?;
+    custom_opts.push((def.name.to_owned(), validated_val));
+    Ok(true)
 }
 
 /// Extract and remove custom options from a generic list of DefElem.
@@ -162,7 +183,7 @@ pub unsafe fn extract_and_remove_options(
     valid_options: &[OptionDef],
 ) -> Result<Vec<(String, Option<String>)>, OptionSchemaError> {
     let mut custom_opts = Vec::new();
-    let mut new_pg_opts: *mut pg_sys::List = std::ptr::null_mut();
+    let mut new_pg_opts: *mut pg_sys::List = ptr::null_mut();
 
     // SAFETY: caller guarantees `options_list_ptr` is valid.
     if unsafe { (*options_list_ptr).is_null() } {
@@ -178,23 +199,16 @@ pub unsafe fn extract_and_remove_options(
     for i in 0..length {
         // SAFETY: i < length, so cell.add(i) is within the list allocation.
         let def_elem_ptr =
-            unsafe { (*cell.add(i as usize)).ptr_value as *mut pg_sys::DefElem };
-        let def_name_cstr = unsafe { CStr::from_ptr((*def_elem_ptr).defname) };
-        let def_name = def_name_cstr.to_string_lossy();
+            unsafe { (*cell.add(i as usize)).ptr_value.cast::<pg_sys::DefElem>() };
 
         let matched = unsafe {
-            try_extract_single_option(
-                def_elem_ptr,
-                &def_name,
-                valid_options,
-                &mut custom_opts,
-            )?
+            try_extract_single_option(def_elem_ptr, valid_options, &mut custom_opts)?
         };
 
         if !matched {
             // SAFETY: lappend is safe for a valid (or null) list and node.
             new_pg_opts = unsafe {
-                pg_sys::lappend(new_pg_opts, def_elem_ptr as *mut std::ffi::c_void)
+                pg_sys::lappend(new_pg_opts, def_elem_ptr.cast::<c_void>())
             };
         }
     }
@@ -227,17 +241,10 @@ pub unsafe fn extract_options(
     for i in 0..length {
         // SAFETY: i < length, so cell.add(i) is within the list allocation.
         let def_elem_ptr =
-            unsafe { (*cell.add(i as usize)).ptr_value as *mut pg_sys::DefElem };
-        let def_name_cstr = unsafe { CStr::from_ptr((*def_elem_ptr).defname) };
-        let def_name = def_name_cstr.to_string_lossy();
+            unsafe { (*cell.add(i as usize)).ptr_value.cast::<pg_sys::DefElem>() };
 
         unsafe {
-            try_extract_single_option(
-                def_elem_ptr,
-                &def_name,
-                valid_options,
-                &mut custom_opts,
-            )?;
+            try_extract_single_option(def_elem_ptr, valid_options, &mut custom_opts)?;
         }
     }
 
@@ -257,7 +264,7 @@ pub unsafe fn extract_and_remove_option_names(
     valid_options: &[OptionDef],
 ) -> Result<Vec<String>, OptionSchemaError> {
     let mut custom_names = Vec::new();
-    let mut new_pg_opts: *mut pg_sys::List = std::ptr::null_mut();
+    let mut new_pg_opts: *mut pg_sys::List = ptr::null_mut();
 
     if unsafe { (*options_list_ptr).is_null() } {
         return Ok(custom_names);
@@ -270,20 +277,21 @@ pub unsafe fn extract_and_remove_option_names(
 
     for i in 0..length {
         let def_elem_ptr =
-            unsafe { (*cell.add(i as usize)).ptr_value as *mut pg_sys::DefElem };
-        let def_name =
-            unsafe { CStr::from_ptr((*def_elem_ptr).defname) }.to_string_lossy();
+            unsafe { (*cell.add(i as usize)).ptr_value.cast::<pg_sys::DefElem>() };
+        let def_elem = unsafe { &*def_elem_ptr };
 
-        if valid_options.iter().any(|option| option.name == def_name) {
-            if custom_names.iter().any(|name| name == def_name.as_ref()) {
+        if let Some(def) =
+            unsafe { OptionDef::find_matching(valid_options, def_elem) }
+        {
+            if custom_names.iter().any(|name| name == def.name) {
                 return Err(OptionSchemaError::Duplicate {
-                    option: def_name.into_owned(),
+                    option: def.name.to_owned(),
                 });
             }
-            custom_names.push(def_name.into_owned());
+            custom_names.push(def.name.to_owned());
         } else {
             new_pg_opts = unsafe {
-                pg_sys::lappend(new_pg_opts, def_elem_ptr as *mut std::ffi::c_void)
+                pg_sys::lappend(new_pg_opts, def_elem_ptr.cast::<c_void>())
             };
         }
     }
@@ -315,7 +323,7 @@ pub(crate) fn validate_option_value(
                 v.parse::<i32>()
                     .map_err(|_| OptionSchemaError::InvalidInteger {
                         option: option.to_owned(),
-                        value: v.clone(),
+                        value: v,
                     })?;
 
             if let Some(min_val) = min
@@ -338,12 +346,16 @@ pub(crate) fn validate_option_value(
             }
             Ok(Some(int_val.to_string()))
         }
-        OptionKind::String { default } => match raw_val {
-            Some(val) => Ok(Some(val)),
-            None => Ok(default.map(|s| s.to_string())),
-        },
-        OptionKind::Enum { default, values } => {
-            let val = raw_val.unwrap_or_else(|| (*default).to_string());
+        OptionKind::String { .. } => {
+            let val = raw_val.ok_or_else(|| OptionSchemaError::MissingValue {
+                option: option.to_owned(),
+            })?;
+            Ok(Some(val))
+        }
+        OptionKind::Enum { values, .. } => {
+            let val = raw_val.ok_or_else(|| OptionSchemaError::MissingValue {
+                option: option.to_owned(),
+            })?;
             if !values.contains(&val.as_str()) {
                 return Err(OptionSchemaError::InvalidEnum {
                     option: option.to_owned(),

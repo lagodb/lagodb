@@ -9,6 +9,8 @@ use pgrx::prelude::PgSqlErrorCode;
 
 use crate::error::IcebergError;
 
+use super::parallel::TaskGroupingError;
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ScanError {
     #[error("failed to bind or plan Iceberg table scan: {0}")]
@@ -16,7 +18,7 @@ pub(crate) enum ScanError {
     #[error("invalid runtime pruning predicate: {0}")]
     RuntimePredicate(#[from] RuntimePredicateCodecError),
     #[error("invalid Iceberg parallel scan configuration: {0}")]
-    ParallelScanConfiguration(String),
+    ParallelScanConfiguration(#[from] TaskGroupingError),
     #[error("invalid Iceberg worker source payload: {0}")]
     WorkerPayload(String),
     #[error("invalid PostgreSQL parallel scan state: {0}")]

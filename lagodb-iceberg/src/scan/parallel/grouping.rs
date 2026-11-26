@@ -10,14 +10,19 @@ use serde::{Deserialize, Serialize};
 
 use super::super::ScanError;
 
-const TARGET_SIZE_PROPERTY: &str = "read.split.target-size";
-const LOOKBACK_PROPERTY: &str = "read.split.planning-lookback";
-const OPEN_FILE_COST_PROPERTY: &str = "read.split.open-file-cost";
-const DEFAULT_TARGET_SIZE: u64 = 128 * 1024 * 1024;
-const DEFAULT_LOOKBACK: usize = 10;
-const DEFAULT_OPEN_FILE_COST: u64 = 4 * 1024 * 1024;
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum TaskGroupingError {
+    #[error("{property}={value:?} is not an unsigned integer")]
+    InvalidUnsignedInteger {
+        property: &'static str,
+        value: String,
+    },
+    #[error("{property} must be greater than zero")]
+    MustBePositive { property: &'static str },
+    #[error("{property}={value} exceeds this platform")]
+    ExceedsPlatform { property: &'static str, value: u64 },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TaskGrouping {
     target_size: NonZeroU64,
     lookback: NonZeroUsize,
@@ -35,70 +40,93 @@ impl TaskGroupingConfig {
     pub(crate) fn from_properties(properties: &HashMap<String, String>) -> Self {
         Self {
             target_size: properties
-                .get(TARGET_SIZE_PROPERTY)
+                .get(TaskGrouping::PROPERTY_TARGET_SIZE)
                 .map(|value| value.as_str().into()),
             lookback: properties
-                .get(LOOKBACK_PROPERTY)
+                .get(TaskGrouping::PROPERTY_PLANNING_LOOKBACK)
                 .map(|value| value.as_str().into()),
             open_file_cost: properties
-                .get(OPEN_FILE_COST_PROPERTY)
+                .get(TaskGrouping::PROPERTY_OPEN_FILE_COST)
                 .map(|value| value.as_str().into()),
         }
     }
 
     pub(crate) fn resolve(&self) -> Result<TaskGrouping, ScanError> {
-        TaskGrouping::from_values(
+        Ok(TaskGrouping::from_values(
             self.target_size.as_deref(),
             self.lookback.as_deref(),
             self.open_file_cost.as_deref(),
-        )
+        )?)
     }
 }
 
 impl TaskGrouping {
+    pub(crate) const PROPERTY_TARGET_SIZE: &'static str = "read.split.target-size";
+    pub(crate) const PROPERTY_PLANNING_LOOKBACK: &'static str =
+        "read.split.planning-lookback";
+    pub(crate) const PROPERTY_OPEN_FILE_COST: &'static str =
+        "read.split.open-file-cost";
+
+    pub(crate) const DEFAULT_TARGET_SIZE: u64 = 128 * 1024 * 1024;
+    pub(crate) const DEFAULT_TARGET_SIZE_STR: &'static str = "134217728";
+
+    pub(crate) const DEFAULT_PLANNING_LOOKBACK: usize = 10;
+    pub(crate) const DEFAULT_PLANNING_LOOKBACK_STR: &'static str = "10";
+
+    pub(crate) const DEFAULT_OPEN_FILE_COST: u64 = 4 * 1024 * 1024;
+    pub(crate) const DEFAULT_OPEN_FILE_COST_STR: &'static str = "4194304";
+
     pub(crate) fn from_properties(
         properties: &HashMap<String, String>,
-    ) -> Result<Self, ScanError> {
+    ) -> Result<Self, TaskGroupingError> {
         Self::from_values(
-            properties.get(TARGET_SIZE_PROPERTY).map(String::as_str),
-            properties.get(LOOKBACK_PROPERTY).map(String::as_str),
-            properties.get(OPEN_FILE_COST_PROPERTY).map(String::as_str),
+            properties
+                .get(Self::PROPERTY_TARGET_SIZE)
+                .map(String::as_str),
+            properties
+                .get(Self::PROPERTY_PLANNING_LOOKBACK)
+                .map(String::as_str),
+            properties
+                .get(Self::PROPERTY_OPEN_FILE_COST)
+                .map(String::as_str),
         )
     }
 
-    fn from_values(
+    pub(crate) fn from_values(
         target_size: Option<&str>,
         lookback: Option<&str>,
         open_file_cost: Option<&str>,
-    ) -> Result<Self, ScanError> {
+    ) -> Result<Self, TaskGroupingError> {
         let target_size = Self::parse_property(
             target_size,
-            TARGET_SIZE_PROPERTY,
-            DEFAULT_TARGET_SIZE,
+            Self::PROPERTY_TARGET_SIZE,
+            Self::DEFAULT_TARGET_SIZE,
+        )?;
+        let target_size = NonZeroU64::new(target_size).ok_or(
+            TaskGroupingError::MustBePositive {
+                property: Self::PROPERTY_TARGET_SIZE,
+            },
         )?;
         let lookback_u64 = Self::parse_property(
             lookback,
-            LOOKBACK_PROPERTY,
-            DEFAULT_LOOKBACK as u64,
-        )?;
-        let open_file_cost = Self::parse_property(
-            open_file_cost,
-            OPEN_FILE_COST_PROPERTY,
-            DEFAULT_OPEN_FILE_COST,
+            Self::PROPERTY_PLANNING_LOOKBACK,
+            Self::DEFAULT_PLANNING_LOOKBACK as u64,
         )?;
         let lookback = usize::try_from(lookback_u64).map_err(|_| {
-            ScanError::ParallelScanConfiguration(format!(
-                "{LOOKBACK_PROPERTY}={lookback_u64} exceeds this platform"
-            ))
+            TaskGroupingError::ExceedsPlatform {
+                property: Self::PROPERTY_PLANNING_LOOKBACK,
+                value: lookback_u64,
+            }
         })?;
-        let (Some(target_size), Some(lookback)) =
-            (NonZeroU64::new(target_size), NonZeroUsize::new(lookback))
-        else {
-            return Err(ScanError::ParallelScanConfiguration(
-                "split target size and planning lookback must be greater than zero"
-                    .to_owned(),
-            ));
-        };
+        let lookback =
+            NonZeroUsize::new(lookback).ok_or(TaskGroupingError::MustBePositive {
+                property: Self::PROPERTY_PLANNING_LOOKBACK,
+            })?;
+        let open_file_cost = Self::parse_property(
+            open_file_cost,
+            Self::PROPERTY_OPEN_FILE_COST,
+            Self::DEFAULT_OPEN_FILE_COST,
+        )?;
         Ok(Self {
             target_size,
             lookback,
@@ -106,16 +134,32 @@ impl TaskGrouping {
         })
     }
 
+    pub(crate) fn insert_properties(self, properties: &mut HashMap<String, String>) {
+        properties.insert(
+            Self::PROPERTY_TARGET_SIZE.to_owned(),
+            self.target_size.get().to_string(),
+        );
+        properties.insert(
+            Self::PROPERTY_PLANNING_LOOKBACK.to_owned(),
+            self.lookback.get().to_string(),
+        );
+        properties.insert(
+            Self::PROPERTY_OPEN_FILE_COST.to_owned(),
+            self.open_file_cost.to_string(),
+        );
+    }
+
     fn parse_property(
         value: Option<&str>,
         name: &'static str,
         default: u64,
-    ) -> Result<u64, ScanError> {
+    ) -> Result<u64, TaskGroupingError> {
         value.map_or(Ok(default), |value| {
             value.parse::<u64>().map_err(|_| {
-                ScanError::ParallelScanConfiguration(format!(
-                    "{name}={value:?} is not an unsigned integer"
-                ))
+                TaskGroupingError::InvalidUnsignedInteger {
+                    property: name,
+                    value: value.to_owned(),
+                }
             })
         })
     }
@@ -178,6 +222,17 @@ impl TaskGrouping {
                 )?;
                 continue;
             }
+            // TODO(parquet-split-offsets): `plan_files()` discards
+            // `DataFile::split_offsets`, so large Parquet files are sliced into
+            // uniform `target_size` byte windows here and `iceberg-lite` assigns
+            // each row group by its compressed byte midpoint. When a single file
+            // barely exceeds `target_size`, the trailing window can own far fewer
+            // row groups than the leading window. `iceberg-lite` already exposes
+            // `TableScan::plan_files_with_data_files()` and `TaskRange` already
+            // encodes arbitrary `(start, length)` spans; thread `split_offsets`
+            // through native and columnar task planning so Parquet files with
+            // recorded offsets emit row-group-aligned ranges before bin packing,
+            // keeping fixed-size slicing as the fallback when offsets are absent.
             let end = task.start.checked_add(effective_length).ok_or_else(|| {
                 ScanError::WorkerPayload(
                     "file task byte range overflows u64".to_owned(),

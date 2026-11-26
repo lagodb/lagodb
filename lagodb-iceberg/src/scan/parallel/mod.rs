@@ -16,7 +16,7 @@ use lagodb_core::runtime_api::SourceWorkId;
 
 use super::ScanError;
 pub(crate) use execution::PostgresParallelExecution;
-pub(crate) use grouping::{TaskGrouping, TaskGroupingConfig};
+pub(crate) use grouping::{TaskGrouping, TaskGroupingConfig, TaskGroupingError};
 use payload::WorkerSourcePayload;
 
 pub(crate) struct WorkerSource {

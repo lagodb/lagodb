@@ -68,7 +68,10 @@ current_table_metadata
 Executor reads use `table_metadata_at`, which chooses the committed metadata
 pointer visible to the executor's PostgreSQL snapshot and attaches only the
 batches whose CID that snapshot can see (`TxTableActionLog::visible_delta`). The
-read schema always follows the current definition.
+read schema always follows the current definition. Table properties on executor
+reads continue to come from that committed data baseline, so `ALTER TABLE ...
+SET/RESET` changes to scan properties (such as `read.split.*`) take effect on
+scans after the top-level transaction commits.
 
 The scan path then plans files from the committed metadata plus the attached
 overlay. Because the committed metadata is read fresh for each statement, a

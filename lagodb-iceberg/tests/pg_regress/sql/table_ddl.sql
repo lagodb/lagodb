@@ -258,6 +258,67 @@ USING iceberg WITH (location = 'user-owned-location');
 \set VERBOSITY default
 
 -- ============================================================================
+-- Test 8b: read.split.* DDL lifecycle
+-- ============================================================================
+CREATE TABLE iceberg_split_opts_test (
+    id integer
+) USING iceberg WITH (
+    "read.split.target-size" = 28311552,
+    "read.split.planning-lookback" = 16,
+    "read.split.open-file-cost" = 0
+);
+
+SELECT props->>'read.split.target-size' = '28311552' AS target_ok,
+       props->>'read.split.planning-lookback' = '16' AS lookback_ok,
+       props->>'read.split.open-file-cost' = '0' AS open_cost_ok
+FROM (
+    SELECT pg_read_file(metadata_location)::jsonb->'properties' AS props
+    FROM iceberg.iceberg_metadata
+    WHERE relid = 'iceberg_split_opts_test'::regclass
+) AS metadata;
+
+ALTER TABLE iceberg_split_opts_test SET (
+    "read.split.target-size" = '33554432',
+    "read.split.planning-lookback" = 8
+);
+
+SELECT props->>'read.split.target-size' = '33554432' AS target_updated,
+       props->>'read.split.planning-lookback' = '8' AS lookback_updated,
+       props->>'read.split.open-file-cost' = '0' AS open_cost_kept
+FROM (
+    SELECT pg_read_file(metadata_location)::jsonb->'properties' AS props
+    FROM iceberg.iceberg_metadata
+    WHERE relid = 'iceberg_split_opts_test'::regclass
+) AS metadata;
+
+ALTER TABLE iceberg_split_opts_test RESET (
+    "read.split.target-size",
+    "read.split.planning-lookback",
+    "read.split.open-file-cost"
+);
+
+SELECT NOT EXISTS (
+           SELECT FROM lagodb.table_option_values
+           WHERE relid = 'iceberg_split_opts_test'::regclass
+       ) AS overrides_cleared,
+       props->>'read.split.target-size' = '134217728' AS target_default,
+       props->>'read.split.planning-lookback' = '10' AS lookback_default,
+       props->>'read.split.open-file-cost' = '4194304' AS open_cost_default
+FROM (
+    SELECT pg_read_file(metadata_location)::jsonb->'properties' AS props
+    FROM iceberg.iceberg_metadata
+    WHERE relid = 'iceberg_split_opts_test'::regclass
+) AS metadata;
+
+ALTER TABLE iceberg_split_opts_test SET ("read.split.target-size" = 0);
+ALTER TABLE iceberg_split_opts_test SET ("read.split.target-size");
+ALTER TABLE iceberg_split_opts_test SET (other."read.split.target-size" = 1024);
+
+CREATE TABLE heap_split_opts_test (id integer);
+ALTER TABLE heap_split_opts_test RESET ("read.split.target-size");
+DROP TABLE heap_split_opts_test, iceberg_split_opts_test;
+
+-- ============================================================================
 -- Test 9: rename preserves the physical root and name reuse gets a new root
 -- ============================================================================
 CREATE TABLE iceberg_identity_test (id integer) USING iceberg;

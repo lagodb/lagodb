@@ -3,8 +3,11 @@
 //! Options are extracted from `CREATE TABLE`, validated against the table AM's
 //! schema, and persisted in `lagodb.table_options` for later rd_amcache load.
 
+use std::ptr;
+
 use crate::catalog::{self, CatalogRelation, CatalogScanKey, CatalogSnapshot};
 use crate::diag::{PgError, PgReportError, SqlStateError, domain_error_report};
+use crate::handles::HeapTupleGuard;
 use crate::options::schema::{self, OptionAccess, OptionDef, OptionSchemaError};
 use pgrx::pg_sys;
 use pgrx::pg_sys::panic::ErrorReport;
@@ -227,7 +230,7 @@ impl TableOptions {
             // SAFETY: `heap_form_tuple` returns a heap tuple owned by the
             // caller, and PostgreSQL expects it to be released with
             // `heap_freetuple` when we are done.
-            let tuple_guard = crate::handles::HeapTupleGuard::new(tuple);
+            let tuple_guard = HeapTupleGuard::new(tuple);
 
             rel_guard
                 .catalog_insert(&tuple_guard)
@@ -295,7 +298,7 @@ impl TableOptions {
                     replacements.as_mut_ptr(),
                 )
             };
-            let new_tuple = unsafe { crate::handles::HeapTupleGuard::new(new_tuple) };
+            let new_tuple = unsafe { HeapTupleGuard::new(new_tuple) };
             rel_guard
                 .catalog_update(old_tuple, &new_tuple)
                 .map_err(TableOptionError::PersistFailed)?;
@@ -412,13 +415,8 @@ impl TableOptionAlterations {
         for index in 0..count {
             let element =
                 unsafe { pg_sys::list_nth(options, index).cast::<pg_sys::DefElem>() };
-            if element.is_null() {
-                continue;
-            }
-            let name = unsafe { std::ffi::CStr::from_ptr((*element).defname) };
-            if let Some(definition) = valid_options
-                .iter()
-                .find(|definition| name.to_bytes() == definition.name.as_bytes())
+            if let Some(definition) =
+                unsafe { OptionDef::find_matching(valid_options, &*element) }
             {
                 match definition.access {
                     OptionAccess::UserMutable => {}
@@ -457,13 +455,11 @@ impl TableOptionAlterations {
             let command = unsafe {
                 pg_sys::list_nth(cmds, idx) as *const pg_sys::AlterTableCmd
             };
-            if command.is_null()
-                || !matches!(
-                    unsafe { (*command).subtype },
-                    pg_sys::AlterTableType::AT_SetRelOptions
-                        | pg_sys::AlterTableType::AT_ResetRelOptions
-                )
-            {
+            if !matches!(
+                unsafe { (*command).subtype },
+                pg_sys::AlterTableType::AT_SetRelOptions
+                    | pg_sys::AlterTableType::AT_ResetRelOptions
+            ) {
                 continue;
             }
 
@@ -476,14 +472,9 @@ impl TableOptionAlterations {
                 let element = unsafe {
                     pg_sys::list_nth(options, option_idx) as *const pg_sys::DefElem
                 };
-                if element.is_null() {
-                    continue;
-                }
-                let name = unsafe { std::ffi::CStr::from_ptr((*element).defname) };
-                if valid_options
-                    .iter()
-                    .any(|option| name.to_bytes() == option.name.as_bytes())
-                {
+                if unsafe {
+                    OptionDef::find_matching(valid_options, &*element).is_some()
+                } {
                     return true;
                 }
             }
@@ -510,9 +501,6 @@ impl TableOptionAlterations {
         for idx in 0..len {
             let command =
                 unsafe { pg_sys::list_nth(cmds, idx) as *mut pg_sys::AlterTableCmd };
-            if command.is_null() {
-                continue;
-            }
 
             match unsafe { (*command).subtype } {
                 pg_sys::AlterTableType::AT_SetRelOptions => {
@@ -523,8 +511,7 @@ impl TableOptionAlterations {
                         )?;
                     }
                     let options_ptr = unsafe {
-                        std::ptr::addr_of_mut!((*command).def)
-                            .cast::<*mut pg_sys::List>()
+                        ptr::addr_of_mut!((*command).def).cast::<*mut pg_sys::List>()
                     };
                     let options = unsafe {
                         schema::extract_and_remove_options(
@@ -545,8 +532,7 @@ impl TableOptionAlterations {
                         )?;
                     }
                     let options_ptr = unsafe {
-                        std::ptr::addr_of_mut!((*command).def)
-                            .cast::<*mut pg_sys::List>()
+                        ptr::addr_of_mut!((*command).def).cast::<*mut pg_sys::List>()
                     };
                     let names = unsafe {
                         schema::extract_and_remove_option_names(

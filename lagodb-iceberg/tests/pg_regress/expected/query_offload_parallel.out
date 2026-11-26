@@ -546,6 +546,48 @@ WHERE id * 2 >= 2 GROUP BY key ORDER BY key;
    3 |     2413
 (4 rows)
 
+-- A smaller split target turns the one-file scan into multiple scan tasks.
+SET lagodb.query_offload_mode = 'force';
+ALTER TABLE query_offload_parallel_small SET (
+    "read.split.target-size" = 512,
+    "read.split.open-file-cost" = 0
+);
+SELECT pg_temp.explain_analyze_text($$
+SELECT key, count(*)
+FROM query_offload_parallel_small
+GROUP BY key
+$$, mask_local_memory => true);
+                    explain_analyze_text                    
+------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload) (actual rows=N loops=N)
+   Engine: DataFusion
+   Execution Mode: Parallel
+   Maximum Launched Workers: 2
+   Parallel Runs: 1
+   Maximum Worker Fragment Peak Memory Bytes: N
+   Maximum Worker Participant Peak Memory Bytes: N
+   Local Engine Peak Memory Bytes: N
+   ->  Aggregate
+         Group Key: key
+         Aggregates: COUNT(*)
+         ->  Table Scan on query_offload_parallel_small
+               Access Method: iceberg
+               Actual Input Batches: 1
+               Actual Input Rows: 1
+               Scan Tasks: 3
+               Data Files Selected: 1
+               Data Files Pruned: 0
+               Selected File Bytes: 1265
+(19 rows)
+
+SELECT key, count(*) AS rows, sum(value) AS total
+FROM query_offload_parallel_small
+GROUP BY key;
+ key | rows | total 
+-----+------+-------
+   1 |    1 |    10
+(1 row)
+
 DROP TABLE query_offload_parallel_small;
 DROP TABLE query_offload_parallel_right;
 DROP TABLE query_offload_parallel_left;

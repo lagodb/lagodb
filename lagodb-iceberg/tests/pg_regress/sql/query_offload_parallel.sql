@@ -251,6 +251,22 @@ SELECT key, sum(value * 2 - id % 3) AS adjusted
 FROM query_offload_parallel_left
 WHERE id * 2 >= 2 GROUP BY key ORDER BY key;
 
+-- A smaller split target turns the one-file scan into multiple scan tasks.
+SET lagodb.query_offload_mode = 'force';
+ALTER TABLE query_offload_parallel_small SET (
+    "read.split.target-size" = 512,
+    "read.split.open-file-cost" = 0
+);
+SELECT pg_temp.explain_analyze_text($$
+SELECT key, count(*)
+FROM query_offload_parallel_small
+GROUP BY key
+$$, mask_local_memory => true);
+
+SELECT key, count(*) AS rows, sum(value) AS total
+FROM query_offload_parallel_small
+GROUP BY key;
+
 DROP TABLE query_offload_parallel_small;
 DROP TABLE query_offload_parallel_right;
 DROP TABLE query_offload_parallel_left;

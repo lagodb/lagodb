@@ -289,6 +289,9 @@ impl UtilityHook for IcebergAlterTableGuard {
         let guard =
             RelationGuard::open_table(oid, pg_sys::NoLock as pg_sys::LOCKMODE)?;
         let rel = guard.as_handle();
+        if !rel.is_iceberg() {
+            return Ok(());
+        }
         if ops.alters_table_options {
             let options = TableOptions::load_from_catalog(oid)?;
             let resolved =
