@@ -66,6 +66,10 @@ pub(crate) fn run(pg: &PgInstallation, specs: &[OsString]) -> Result<(), String>
         // PostgreSQL 15 does not accept.
         .arg("--inputdir=.")
         .arg(format!("--outputdir={}", output_dir.display()))
+        // Semantic text/JSON codecs require PG_UTF8; pin UTF-8 and C locale so
+        // --temp-instance does not inherit SQL_ASCII or host collation from env.
+        .arg("--encoding=UTF8")
+        .arg("--no-locale")
         .arg(format!("--temp-instance={}", temp_instance_dir.display()))
         .arg(format!("--temp-config={}", temp_config.display()))
         .arg(format!("--load-extension={runtime}"))
