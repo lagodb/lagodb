@@ -97,12 +97,7 @@ impl ObjectBucket {
         let metadata = FileMetadata { size: file.size() };
         Ok(OpenedFile {
             metadata,
-            reader: Box::new(ObjectReader::new(
-                self.service.clone(),
-                Arc::clone(&self.name),
-                Arc::from(key),
-                file,
-            )),
+            reader: Box::new(ObjectReader::new(key, file)),
         })
     }
 

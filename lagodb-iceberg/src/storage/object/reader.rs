@@ -1,17 +1,12 @@
 //! Chunked object-storage reader backed by `BackendStorageService`.
 
 use std::cmp;
-use std::io::{self, Read, Seek, SeekFrom};
 use std::ops::Range;
-use std::sync::Arc;
 
 use bytes::Bytes;
 use iceberg_lite::io::FileRead;
 use iceberg_lite::{Error, ErrorKind, Result};
-use lagodb_core::storage::service::BackendStorageService;
-use lagodb_storage::{
-    DEFAULT_MAX_READ_SIZE, SeekFrom as StorageSeekFrom, StorageFile,
-};
+use lagodb_storage::{DEFAULT_MAX_READ_SIZE, StorageFile};
 
 use super::injection_points::ObjectInjectionPoints;
 use super::wait_event::ObjectWaitEvent;
@@ -24,31 +19,23 @@ use crate::error::storage_error_to_iceberg_lite;
 const OBJECT_READ_CHUNK_LEN: u32 = DEFAULT_MAX_READ_SIZE;
 
 pub(super) struct ObjectReader {
-    service: BackendStorageService,
-    bucket: Arc<str>,
-    key: Arc<str>,
+    /// Object key, for diagnostics.
+    key: Box<str>,
     file: StorageFile,
 }
 
 // SAFETY: `ObjectReader` is the private adapter for
-// `iceberg_lite::io::FileRead`. PostgreSQL constructs, uses, clones, and drops
-// every reader on one backend thread; the serial iterator never transfers or
+// `iceberg_lite::io::FileRead`. PostgreSQL constructs, uses, and drops every
+// reader on one backend thread; the serial iterator never transfers or
 // concurrently invokes it. The contained `StorageFile` remains naturally
 // `!Send + !Sync`.
 unsafe impl Send for ObjectReader {}
 unsafe impl Sync for ObjectReader {}
 
 impl ObjectReader {
-    pub(super) fn new(
-        service: BackendStorageService,
-        bucket: Arc<str>,
-        key: Arc<str>,
-        file: StorageFile,
-    ) -> Self {
+    pub(super) fn new(key: &str, file: StorageFile) -> Self {
         Self {
-            service,
-            bucket,
-            key,
+            key: key.into(),
             file,
         }
     }
@@ -155,24 +142,6 @@ impl Drop for ObjectReader {
     }
 }
 
-impl Read for ObjectReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let _wait = ObjectWaitEvent::ObjectRead.enter();
-        self.file.read_into(buf).map_err(io::Error::other)
-    }
-}
-
-impl Seek for ObjectReader {
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let seek_pos = match pos {
-            SeekFrom::Start(offset) => StorageSeekFrom::Start(offset),
-            SeekFrom::End(offset) => StorageSeekFrom::End(offset),
-            SeekFrom::Current(offset) => StorageSeekFrom::Current(offset),
-        };
-        Ok(self.file.seek(seek_pos))
-    }
-}
-
 impl FileRead for ObjectReader {
     fn read_range(&self, range: Range<u64>) -> Result<Bytes> {
         self.read_range_chunked(range)
@@ -180,20 +149,5 @@ impl FileRead for ObjectReader {
 
     fn read_all(&self) -> Result<Bytes> {
         self.read_range_chunked(0..self.file.size())
-    }
-
-    fn try_clone(&self) -> io::Result<Box<dyn FileRead>> {
-        let pos = self.file.position();
-        let mut new_file = self
-            .service
-            .open(self.bucket.as_ref(), self.key.as_ref())
-            .map_err(io::Error::other)?;
-        new_file.seek(StorageSeekFrom::Start(pos));
-        Ok(Box::new(ObjectReader::new(
-            self.service.clone(),
-            Arc::clone(&self.bucket),
-            Arc::clone(&self.key),
-            new_file,
-        )))
     }
 }

@@ -16,6 +16,7 @@ pub(in crate::datafusion) use indexed::{
 };
 
 use std::io::{self, Write};
+use std::mem::MaybeUninit;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -100,28 +101,56 @@ impl BackendTempFile {
     /// Read the next chunk at `offset`, or `None` at the written end.
     fn read_chunk(&self, offset: u64) -> Result<Option<Bytes>> {
         Self::check_interrupts()?;
-        let mut chunk = vec![0; SPILL_CHUNK_BYTES];
+        // `with_capacity` may leave more than the requested capacity, so the
+        // read is bounded by the chunk size rather than by the spare capacity.
+        let mut chunk = Vec::with_capacity(SPILL_CHUNK_BYTES);
         let read = self
             .file
-            .read_at(&mut chunk, offset)
+            .read_at_uninit(
+                &mut chunk.spare_capacity_mut()[..SPILL_CHUNK_BYTES],
+                offset,
+            )
             .map_err(Self::external)?;
         if read == 0 {
             return Ok(None);
         }
-        chunk.truncate(read);
+        // SAFETY: the read initialized the first `read` bytes of the empty
+        // vector's spare capacity, and `read <= SPILL_CHUNK_BYTES <= capacity`.
+        unsafe { chunk.set_len(read) };
         Ok(Some(Bytes::from(chunk)))
     }
 
     /// Fill `buffer` from `offset`, which with its length lies within the
     /// written bytes.
     fn read_exact_at(&self, buffer: &mut [u8], offset: u64) -> Result<()> {
+        Self::fill_exact(buffer.len(), offset, |filled, at| {
+            self.file.read_at(&mut buffer[filled..], at)
+        })
+    }
+
+    /// [`Self::read_exact_at`] into storage that need not be initialized.
+    /// `Ok` means all of `buffer` is initialized.
+    fn read_exact_at_uninit(
+        &self,
+        buffer: &mut [MaybeUninit<u8>],
+        offset: u64,
+    ) -> Result<()> {
+        Self::fill_exact(buffer.len(), offset, |filled, at| {
+            self.file.read_at_uninit(&mut buffer[filled..], at)
+        })
+    }
+
+    /// Repeat `read(filled, offset + filled)` until `len` bytes are read.
+    fn fill_exact(
+        len: usize,
+        offset: u64,
+        mut read: impl FnMut(usize, u64) -> Result<usize, PgReportError>,
+    ) -> Result<()> {
         Self::check_interrupts()?;
         let mut filled = 0;
-        while filled < buffer.len() {
-            let read = self
-                .file
-                .read_at(&mut buffer[filled..], offset + filled as u64)
-                .map_err(Self::external)?;
+        while filled < len {
+            let read =
+                read(filled, offset + filled as u64).map_err(Self::external)?;
             if read == 0 {
                 return Err(DataFusionError::Internal(
                     "spill file ended inside a written range".to_owned(),

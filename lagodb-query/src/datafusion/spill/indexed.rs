@@ -11,7 +11,9 @@
 //! A range is read whole, its batches sharing one buffer of exactly its
 //! bytes, or chunk by chunk, as DataFusion reads its own spill files.
 
+use std::mem::MaybeUninit;
 use std::ops::Range;
+use std::slice;
 use std::sync::Arc;
 
 use arrow_array::cast::AsArray;
@@ -257,9 +259,19 @@ impl BucketRun {
     /// so the decoded arrays keep their body buffers in place instead of
     /// realigning them.
     fn read_at(file: &BackendTempFile, range: Range<u64>) -> Result<Buffer> {
-        let mut data =
-            MutableBuffer::from_len_zeroed((range.end - range.start) as usize);
-        file.read_exact_at(data.as_slice_mut(), range.start)?;
+        let len = (range.end - range.start) as usize;
+        let mut data = MutableBuffer::with_capacity(len);
+        // SAFETY: `with_capacity` allocated at least `len` bytes, and nothing
+        // else touches `data` while the slice is in use.
+        let spare = unsafe {
+            slice::from_raw_parts_mut(
+                data.as_mut_ptr().cast::<MaybeUninit<u8>>(),
+                len,
+            )
+        };
+        file.read_exact_at_uninit(spare, range.start)?;
+        // SAFETY: the read initialized all `len` bytes, within the capacity.
+        unsafe { data.set_len(len) };
         Ok(data.into())
     }
 

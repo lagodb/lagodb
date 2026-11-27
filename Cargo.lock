@@ -3335,7 +3335,7 @@ dependencies = [
 [[package]]
 name = "iceberg-lite"
 version = "0.1.0"
-source = "git+https://github.com/lagodb/iceberg-lite.git?rev=41bf5a9f2ff8039680a88909422d0a6599ebee5d#41bf5a9f2ff8039680a88909422d0a6599ebee5d"
+source = "git+https://github.com/lagodb/iceberg-lite.git?rev=3830ea68b77a379b3b96808717bcd78286174f20#3830ea68b77a379b3b96808717bcd78286174f20"
 dependencies = [
  "aes-gcm",
  "anyhow",

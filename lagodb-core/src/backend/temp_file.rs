@@ -11,6 +11,7 @@
 use std::ffi::c_long;
 use std::io::{self, ErrorKind};
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -52,13 +53,40 @@ impl PgTempFile {
         buffer: &mut [u8],
         offset: u64,
     ) -> Result<usize, PgReportError> {
-        PgReportError::capture(|| {
-            let started = Self::io_timer();
-            let read = self.vfd().read_at(
+        self.read_with(|vfd| {
+            vfd.read_at(
                 buffer,
                 offset as pg_sys::off_t,
                 pg_sys::WaitEventIO::WAIT_EVENT_BUFFILE_READ,
-            );
+            )
+        })
+    }
+
+    /// [`Self::read_at`] into storage that need not be initialized, such as a
+    /// buffer's spare capacity. `Ok(n)` means the first `n` elements of
+    /// `buffer` are initialized.
+    pub fn read_at_uninit(
+        &self,
+        buffer: &mut [MaybeUninit<u8>],
+        offset: u64,
+    ) -> Result<usize, PgReportError> {
+        self.read_with(|vfd| {
+            vfd.read_at_uninit(
+                buffer,
+                offset as pg_sys::off_t,
+                pg_sys::WaitEventIO::WAIT_EVENT_BUFFILE_READ,
+            )
+        })
+    }
+
+    /// Run one `FileRead` and account it the way `buffile.c` does.
+    fn read_with(
+        &self,
+        file_read: impl FnOnce(VfdHandle) -> isize,
+    ) -> Result<usize, PgReportError> {
+        PgReportError::capture(|| {
+            let started = Self::io_timer();
+            let read = file_read(self.vfd());
             if read < 0 {
                 return Err(Self::io_error("read from", io::Error::last_os_error()));
             }

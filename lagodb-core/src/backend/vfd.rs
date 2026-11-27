@@ -8,6 +8,8 @@ use std::ffi::CStr;
 #[cfg(feature = "pg15")]
 use std::ffi::c_int;
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
+use std::ptr;
 use std::rc::Rc;
 
 use pgrx::pg_sys;
@@ -40,8 +42,26 @@ impl VfdHandle {
         offset: pg_sys::off_t,
         wait_event: u32,
     ) -> isize {
-        // SAFETY: `buffer` is writable for the requested length, and the
-        // caller of `from_raw` keeps the VFD open.
+        // SAFETY: `read_at_uninit` only stores bytes into the buffer, so
+        // viewing initialized bytes as possibly uninitialized never lets an
+        // uninitialized byte into `buffer`.
+        let buffer =
+            unsafe { &mut *(ptr::from_mut(buffer) as *mut [MaybeUninit<u8>]) };
+        self.read_at_uninit(buffer, offset, wait_event)
+    }
+
+    /// [`Self::read_at`] into storage that need not be initialized, so a
+    /// caller can read straight into a buffer's spare capacity instead of
+    /// zeroing it first. A non-negative result `n` means `FileRead` has
+    /// initialized the first `n` elements of `buffer`.
+    pub fn read_at_uninit(
+        self,
+        buffer: &mut [MaybeUninit<u8>],
+        offset: pg_sys::off_t,
+        wait_event: u32,
+    ) -> isize {
+        // SAFETY: `buffer` is writable for the requested length; `FileRead`
+        // only stores into it. The caller of `from_raw` keeps the VFD open.
         unsafe {
             #[cfg(feature = "pg15")]
             let read = pg_sys::FileRead(
@@ -142,15 +162,17 @@ impl OwnedVfd {
         unsafe { pg_sys::FileSize(self.file) }
     }
 
+    /// See [`VfdHandle::read_at_uninit`].
     #[inline]
-    pub fn read_at(
+    pub fn read_at_uninit(
         &self,
-        buf: &mut [u8],
+        buf: &mut [MaybeUninit<u8>],
         offset: pg_sys::off_t,
         wait_event: u32,
     ) -> isize {
         // SAFETY: `self` keeps the VFD open for the duration of the call.
-        unsafe { VfdHandle::from_raw(self.file) }.read_at(buf, offset, wait_event)
+        unsafe { VfdHandle::from_raw(self.file) }
+            .read_at_uninit(buf, offset, wait_event)
     }
 
     #[inline]
