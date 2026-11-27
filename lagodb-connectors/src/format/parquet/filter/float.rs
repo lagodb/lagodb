@@ -3,7 +3,7 @@
 //! Arrow compares floats by IEEE totalOrder (`-NaN < -Infinity < … < -0 < 0 <
 //! … < NaN`, equality by bits). Each comparison is rewritten to accept, row by
 //! row, exactly the rows PostgreSQL accepts, as `lagodb-iceberg`'s
-//! `predicate::float` does for Iceberg predicates:
+//! `predicate::semantics::float` does for Iceberg predicates:
 //!
 //! - PostgreSQL treats -0 and 0 as equal. A zero constant is given the sign
 //!   that puts both zeros on the correct side, `= 0` tests both zeros and

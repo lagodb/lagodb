@@ -21,19 +21,19 @@
 //! breaks it for every promoted type, not only floats, and is not worked
 //! around here: a column promoted from real to double is filtered on older
 //! files with the double literal rounded to real (see
-//! `BoundIcebergPredicate::conjoin_row_filter`). The reader's missing-column
+//! `IcebergBoundPredicate::conjoin_row_filter`). The reader's missing-column
 //! `<` / `<=` defect does not reach these predicates: the not-NaN test they
 //! carry includes a NotNull guard, false for a missing column (see
-//! `PredicatePushdownPolicy::comparison_capability`).
+//! `PredicateCapabilities::comparison_capability`).
 
 use iceberg_lite::expr::{Predicate, PredicateOperator};
 use iceberg_lite::spec::Datum;
+use lagodb_core::expr::PgComparisonKind;
 
-use super::builder::IcebergPredicateBuilder;
-use super::plan::PlannedComparisonOperator;
+use super::column::IcebergColumnRef;
 
 /// A float value compared with a float column.
-pub(crate) enum FloatComparison {
+pub(in crate::predicate) enum FloatComparison {
     /// A value at the Iceberg column's own width.
     Native(FloatValue),
     /// A double compared with a real column. PostgreSQL's float48 operators
@@ -44,7 +44,7 @@ pub(crate) enum FloatComparison {
 
 /// A float literal at the Iceberg column's width.
 #[derive(Clone, Copy)]
-pub(crate) enum FloatValue {
+pub(in crate::predicate) enum FloatValue {
     Float(f32),
     Double(f64),
 }
@@ -52,27 +52,27 @@ pub(crate) enum FloatValue {
 impl FloatComparison {
     /// Whether binding a non-NaN value with `operator`, after mirroring and
     /// negation, adds an `OR isnan` branch to the comparison.
-    pub(crate) const fn may_add_nan_disjunction(
-        operator: PlannedComparisonOperator,
+    pub(in crate::predicate) const fn may_add_nan_disjunction(
+        operator: PgComparisonKind,
     ) -> bool {
         matches!(
             operator,
-            PlannedComparisonOperator::Gt | PlannedComparisonOperator::Ge
+            PgComparisonKind::Greater | PgComparisonKind::GreaterEqual
         )
     }
 
     /// NULL is handled by the caller, and mirroring and negation are already
     /// applied to `operator`: PostgreSQL's float order is total, so its
     /// negated operator keeps the same truth set.
-    pub(crate) fn bind(
+    pub(in crate::predicate) fn bind(
         self,
-        column: IcebergPredicateBuilder,
-        operator: PlannedComparisonOperator,
+        column: IcebergColumnRef<'_>,
+        operator: PgComparisonKind,
     ) -> Predicate {
         match self {
             Self::Native(value) => value.bind(column, operator),
             Self::DoubleOnFloat(value) if value.is_nan() => {
-                column.nan_comparison(operator.kind().with_nan_on(false))
+                column.nan_comparison(operator.with_nan_on(false))
             }
             Self::DoubleOnFloat(value) => {
                 let nearest = value as f32;
@@ -86,23 +86,21 @@ impl FloatComparison {
                 } else {
                     match operator {
                         // No real equals `value`, and neither does NaN.
-                        PlannedComparisonOperator::Eq => {
+                        PgComparisonKind::Equal => {
                             return Predicate::AlwaysFalse;
                         }
                         // Every non-NULL real, NaN included, differs from it.
-                        PlannedComparisonOperator::NotEq => {
+                        PgComparisonKind::NotEqual => {
                             return column.null_test(true);
                         }
-                        PlannedComparisonOperator::Lt
-                        | PlannedComparisonOperator::Ge => {
+                        PgComparisonKind::Less | PgComparisonKind::GreaterEqual => {
                             if widened < value {
                                 nearest.next_up()
                             } else {
                                 nearest
                             }
                         }
-                        PlannedComparisonOperator::Le
-                        | PlannedComparisonOperator::Gt => {
+                        PgComparisonKind::LessEqual | PgComparisonKind::Greater => {
                             if widened > value {
                                 nearest.next_down()
                             } else {
@@ -120,44 +118,38 @@ impl FloatComparison {
 impl FloatValue {
     fn bind(
         self,
-        column: IcebergPredicateBuilder,
-        operator: PlannedComparisonOperator,
+        column: IcebergColumnRef<'_>,
+        operator: PgComparisonKind,
     ) -> Predicate {
         if self.is_nan() {
-            return column.nan_comparison(operator.kind().with_nan_on(false));
+            return column.nan_comparison(operator.with_nan_on(false));
         }
         let compare = |operator: PredicateOperator, negative_zero: bool| {
-            column
-                .clone()
-                .comparison(operator, self.datum(negative_zero))
+            column.binary_predicate(operator, self.datum(negative_zero))
         };
-        let or_nan =
-            |predicate: Predicate| predicate.or(column.clone().nan_test(false));
-        let and_not_nan =
-            |predicate: Predicate| predicate.and(column.clone().nan_test(true));
+        let or_nan = |predicate: Predicate| predicate.or(column.nan_test(false));
+        let and_not_nan = |predicate: Predicate| predicate.and(column.nan_test(true));
         match operator {
-            PlannedComparisonOperator::Eq if self.is_zero() => {
+            PgComparisonKind::Equal if self.is_zero() => {
                 compare(PredicateOperator::Eq, true)
                     .or(compare(PredicateOperator::Eq, false))
             }
-            PlannedComparisonOperator::Eq => compare(PredicateOperator::Eq, false),
-            PlannedComparisonOperator::NotEq if self.is_zero() => {
+            PgComparisonKind::Equal => compare(PredicateOperator::Eq, false),
+            PgComparisonKind::NotEqual if self.is_zero() => {
                 compare(PredicateOperator::NotEq, true)
                     .and(compare(PredicateOperator::NotEq, false))
             }
-            PlannedComparisonOperator::NotEq => {
-                compare(PredicateOperator::NotEq, false)
-            }
-            PlannedComparisonOperator::Lt => {
+            PgComparisonKind::NotEqual => compare(PredicateOperator::NotEq, false),
+            PgComparisonKind::Less => {
                 and_not_nan(compare(PredicateOperator::LessThan, true))
             }
-            PlannedComparisonOperator::Le => {
+            PgComparisonKind::LessEqual => {
                 and_not_nan(compare(PredicateOperator::LessThanOrEq, false))
             }
-            PlannedComparisonOperator::Gt => {
+            PgComparisonKind::Greater => {
                 or_nan(compare(PredicateOperator::GreaterThan, false))
             }
-            PlannedComparisonOperator::Ge => {
+            PgComparisonKind::GreaterEqual => {
                 or_nan(compare(PredicateOperator::GreaterThanOrEq, true))
             }
         }

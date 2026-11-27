@@ -12,7 +12,7 @@ use crate::managed_table::access::mutation::{
     PreparedManagedMutationScan,
 };
 use crate::managed_table::{ManagedResult, ManagedTableReadView};
-use crate::predicate::BoundIcebergPredicate;
+use crate::predicate::IcebergBoundPredicate;
 use crate::scan::{
     PreparedRowScan, ReaderPredicate, ScanPredicates, StablePruningPredicate,
 };
@@ -33,7 +33,7 @@ impl PreparedModifySeqScan {
     pub(crate) fn prepare(
         relation: &RelationHandle<'_>,
         snapshot: &SnapshotHandle<'_>,
-        filters: BoundFilterSet<'_, BoundIcebergPredicate>,
+        filters: BoundFilterSet<'_, IcebergBoundPredicate>,
         needed_columns: NeededColumns<'_>,
     ) -> ManagedResult<Self> {
         let relation = ScanRelation::from_relation(relation)?;
@@ -50,10 +50,10 @@ impl PreparedModifySeqScan {
         // qualification; repeated evaluation on surviving rows alone is not
         // evidence that disabling reader filtering would improve performance.
         let predicates = ScanPredicates::new(
-            StablePruningPredicate::new(BoundIcebergPredicate::conjoin(
+            StablePruningPredicate::new(IcebergBoundPredicate::conjoin_pruning(
                 filters.rescan_stable(),
             )),
-            ReaderPredicate::new(BoundIcebergPredicate::conjoin_row_filter(
+            ReaderPredicate::new(IcebergBoundPredicate::conjoin_row_filter(
                 filters.rescan_stable(),
             )),
         );
@@ -83,11 +83,12 @@ impl PreparedModifySeqScan {
         };
         // Validate after binding the read plan so column-binding errors keep
         // their own SQLSTATE ahead of a planned-predicate schema mismatch.
-        BoundIcebergPredicate::validate_schema(filters.iter(), schema_id)?;
+        IcebergBoundPredicate::validate_schema(filters.iter(), schema_id)?;
         // Match CustomScan's conflict policy: external parameters may narrow
         // the scan, but only static predicates narrow conflict validation.
-        let conflict_filter = BoundIcebergPredicate::conjoin(filters.static_values())
-            .unwrap_or(Predicate::AlwaysTrue);
+        let conflict_filter =
+            IcebergBoundPredicate::conjoin_pruning(filters.static_values())
+                .unwrap_or(Predicate::AlwaysTrue);
         Ok(Self {
             relation_oid: relation.oid,
             prepared: PreparedManagedMutationScan::prepare(

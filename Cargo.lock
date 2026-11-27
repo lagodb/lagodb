@@ -3815,7 +3815,6 @@ dependencies = [
  "percent-encoding",
  "pgrx",
  "pgrx-tests",
- "proptest",
  "rand 0.9.4",
  "roaring",
  "rustls",

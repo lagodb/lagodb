@@ -143,7 +143,6 @@ impl SqlStateError for ManagedTableError {
     fn try_into_pg_report(self) -> Result<PgReportError, Self> {
         match self {
             Self::Iceberg(error) => error.try_into_pg_report().map_err(Self::Iceberg),
-            Self::Filter(error) => error.try_into_pg_report().map_err(Self::Filter),
             Self::MetadataCatalog(error) => {
                 error.try_into_pg_report().map_err(Self::MetadataCatalog)
             }

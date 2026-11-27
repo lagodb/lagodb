@@ -8,7 +8,7 @@ use crate::managed_table::access::mutation::{
     IcebergModifyQueryState, IcebergModifyScanContext, ManagedMutationScan,
     PreparedManagedMutationScan,
 };
-use crate::predicate::BoundIcebergPredicate;
+use crate::predicate::IcebergBoundPredicate;
 use crate::scan::{
     PreparedRowScan, ReaderPredicate, ScanPredicates, StablePruningPredicate,
 };
@@ -72,7 +72,7 @@ impl IcebergScanState {
                 .into_read_snapshot()?;
         let schema_id = snapshot.schema().schema_id();
         let predicates = ScanPredicates::new(
-            StablePruningPredicate::new(BoundIcebergPredicate::conjoin(
+            StablePruningPredicate::new(IcebergBoundPredicate::conjoin_pruning(
                 ctx.filters.rescan_stable(),
             )),
             // Start installs the complete row predicate before opening readers.
@@ -91,12 +91,12 @@ impl IcebergScanState {
         };
         // Validate after binding the read plan so column-binding errors keep
         // their own SQLSTATE ahead of a planned-predicate schema mismatch.
-        BoundIcebergPredicate::validate_schema(ctx.filters.iter(), schema_id)
+        IcebergBoundPredicate::validate_schema(ctx.filters.iter(), schema_id)
             .map_err(CustomScanError::provider)?;
 
         let execution = if ctx.purpose.is_modify_target() {
             let conflict_filter =
-                BoundIcebergPredicate::conjoin(ctx.filters.static_values())
+                IcebergBoundPredicate::conjoin_pruning(ctx.filters.static_values())
                     .unwrap_or(Predicate::AlwaysTrue);
             ScanExecutionState::MutationAwaitingBinding(
                 PreparedManagedMutationScan::prepare(prepared, conflict_filter)?,
@@ -116,7 +116,7 @@ impl IcebergScanState {
         ctx: StartContext<'_, IcebergCustomScanProvider>,
     ) -> Result<Self, CustomScanError> {
         let predicate = ReaderPredicate::new(
-            BoundIcebergPredicate::conjoin_row_filter(ctx.filters.iter()),
+            IcebergBoundPredicate::conjoin_row_filter(ctx.filters.iter()),
         );
         let execution = match self.execution {
             ScanExecutionState::SerialAwaitingStart(prepared) => {
@@ -216,7 +216,7 @@ impl IcebergScanState {
     ) -> Result<(), CustomScanError> {
         let replacement = ctx
             .filters_changed
-            .then(|| BoundIcebergPredicate::conjoin_row_filter(ctx.filters.iter()))
+            .then(|| IcebergBoundPredicate::conjoin_row_filter(ctx.filters.iter()))
             .map(ReaderPredicate::new);
 
         match &mut ctx.state.execution {

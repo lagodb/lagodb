@@ -13,7 +13,7 @@ use crate::foreign_table::{
     ForeignSchemaBinding, ForeignTransaction, LagodbIceberg,
     ResolvedForeignTableBinding,
 };
-use crate::predicate::BoundIcebergPredicate;
+use crate::predicate::IcebergBoundPredicate;
 use crate::scan::{
     IcebergReadSnapshot, PreparedRowScan, ReaderPredicate, ScanPredicates,
     StablePruningPredicate,
@@ -135,10 +135,10 @@ impl IcebergFdwScanState {
                 .collect(),
         );
         let predicates = ScanPredicates::new(
-            StablePruningPredicate::new(BoundIcebergPredicate::conjoin(
+            StablePruningPredicate::new(IcebergBoundPredicate::conjoin_pruning(
                 context.filters.rescan_stable(),
             )),
-            ReaderPredicate::new(BoundIcebergPredicate::conjoin_row_filter(
+            ReaderPredicate::new(IcebergBoundPredicate::conjoin_row_filter(
                 context.filters.rescan_stable(),
             )),
         );

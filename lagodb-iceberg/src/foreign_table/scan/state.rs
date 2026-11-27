@@ -15,7 +15,7 @@ use pgrx::pg_sys;
 
 use super::super::provider::LagodbIceberg;
 use super::ForeignMutationScan;
-use crate::predicate::BoundIcebergPredicate;
+use crate::predicate::IcebergBoundPredicate;
 use crate::scan::{PreparedRowScan, ReaderPredicate};
 
 use execution::{PostgresParallelScan, SerialScan};
@@ -54,7 +54,7 @@ impl IcebergFdwScanState {
         context: StartForeignScanContext<'_, LagodbIceberg>,
     ) -> Result<Self, ForeignScanError> {
         let predicate = ReaderPredicate::new(
-            BoundIcebergPredicate::conjoin_row_filter(context.filters.iter()),
+            IcebergBoundPredicate::conjoin_row_filter(context.filters.iter()),
         );
         let execution = match self.execution {
             ScanExecutionState::SerialAwaitingStart(prepared) => {
@@ -110,7 +110,7 @@ impl IcebergFdwScanState {
         let replacement = context
             .filters_changed
             .then(|| {
-                BoundIcebergPredicate::conjoin_row_filter(context.filters.iter())
+                IcebergBoundPredicate::conjoin_row_filter(context.filters.iter())
             })
             .map(ReaderPredicate::new);
         match &mut self.execution {

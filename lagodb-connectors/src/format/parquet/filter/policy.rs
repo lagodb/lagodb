@@ -1,6 +1,6 @@
 //! PostgreSQL operator and type admission for Parquet predicates.
 //!
-//! The admitted pairs follow `lagodb-iceberg`'s `PgPredicatePushdownPolicy`,
+//! The admitted pairs follow `lagodb-iceberg`'s `PgPredicateAdmission`,
 //! mapped to the Parquet declared contract: each PostgreSQL column type has
 //! one logical Arrow family, and binding decodes the value into it. Temporal
 //! comparisons are Conservative because infinite values have no file

@@ -12,7 +12,8 @@ use crate::error::IcebergError;
 use crate::foreign_table::ForeignPlanningSource;
 use crate::managed_table::ManagedTableReadView;
 use crate::predicate::{
-    BoundIcebergPredicate, IcebergFilterPlanner, PlannedIcebergPredicate,
+    IcebergBoundPredicate, IcebergFilterPlanner, IcebergPlannedPredicate,
+    PredicateStorageContract,
 };
 
 use super::error::Error;
@@ -28,7 +29,9 @@ impl FilterPlanner {
             context,
             view.schema(),
             view.metadata(),
-            Some(view.pruning_units()?),
+            PredicateStorageContract::Managed {
+                pruning_units: view.pruning_units()?,
+            },
         )?))
     }
 
@@ -37,19 +40,17 @@ impl FilterPlanner {
         source: &ForeignPlanningSource,
     ) -> Result<Self, Error> {
         let metadata = source.table()?.metadata();
-        // Foreign scans price layout pruning alone (`ScanVolume::foreign`),
-        // which needs no unit count.
         Ok(Self(IcebergFilterPlanner::new(
             context,
             metadata.current_schema(),
             metadata,
-            None,
+            PredicateStorageContract::Foreign,
         )?))
     }
 }
 
 impl FilterPushdownPlanner for FilterPlanner {
-    type PlannedPredicate = PlannedIcebergPredicate;
+    type PlannedPredicate = IcebergPlannedPredicate;
     type Error = Error;
 
     fn try_plan_filter(
@@ -66,8 +67,8 @@ impl FilterPushdownPlanner for FilterPlanner {
 
 impl FilterPushdown for Filter {
     type Planner = FilterPlanner;
-    type PlannedPredicate = PlannedIcebergPredicate;
-    type BoundPredicate = BoundIcebergPredicate;
+    type PlannedPredicate = IcebergPlannedPredicate;
+    type BoundPredicate = IcebergBoundPredicate;
     type Error = Error;
 
     fn begin_filter_planning(
@@ -101,13 +102,13 @@ impl FilterPushdown for Filter {
         reader: &mut PlanDataReader<'_>,
         binding_count: usize,
     ) -> Result<Self::PlannedPredicate, Self::Error> {
-        Ok(PlannedIcebergPredicate::decode(reader, binding_count)?)
+        Ok(IcebergPlannedPredicate::decode(reader, binding_count)?)
     }
 
     fn bind_filter(
         predicate: &Self::PlannedPredicate,
         values: RuntimeValueBindings<'_>,
     ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
-        Ok(predicate.bind(values)?)
+        Ok(IcebergBoundPredicate::bind(predicate, values)?)
     }
 }

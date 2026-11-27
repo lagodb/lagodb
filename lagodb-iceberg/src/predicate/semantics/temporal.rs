@@ -3,24 +3,24 @@
 use iceberg_lite::expr::{Predicate, PredicateOperator};
 use iceberg_lite::spec::Datum;
 use lagodb_arrow::pg_epoch_micros_to_unix_micros;
+use lagodb_core::expr::PgComparisonKind;
 
-use super::builder::IcebergPredicateBuilder;
-use super::plan::PlannedComparisonOperator;
+use super::column::IcebergColumnRef;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TimestampPrecision {
+pub(in crate::predicate) enum TimestampPrecision {
     Microseconds,
     Nanoseconds,
 }
 
-pub(crate) struct TimestampComparison {
+pub(in crate::predicate) struct TimestampComparison {
     unix_micros: i64,
     precision: TimestampPrecision,
     with_timezone: bool,
 }
 
 impl TimestampComparison {
-    pub(crate) fn from_pg_micros(
+    pub(in crate::predicate) fn from_pg_micros(
         pg_micros: i64,
         precision: TimestampPrecision,
         with_timezone: bool,
@@ -37,10 +37,10 @@ impl TimestampComparison {
 
     /// NULL and operator mirroring/negation are handled by the caller. An
     /// unrepresentable boundary abandons pruning; the PG residual stays active.
-    pub(crate) fn bind(
+    pub(in crate::predicate) fn bind(
         self,
-        column: IcebergPredicateBuilder,
-        operator: PlannedComparisonOperator,
+        column: IcebergColumnRef<'_>,
+        operator: PgComparisonKind,
     ) -> Option<Predicate> {
         if self.precision == TimestampPrecision::Microseconds {
             let datum = if self.with_timezone {
@@ -48,38 +48,45 @@ impl TimestampComparison {
             } else {
                 Datum::timestamp_micros(self.unix_micros)
             };
-            return Some(column.comparison(operator.into(), datum));
+            return Some(column.pg_comparison(operator, datum));
         }
 
         // A PG value u represents the entire half-open nanosecond interval
         // [u*1000, (u+1)*1000), including for negative epochs. Comparing only
         // against u*1000 would change the truth sets of =, <= and >.
         Some(match operator {
-            PlannedComparisonOperator::Eq | PlannedComparisonOperator::NotEq => {
+            PgComparisonKind::Equal | PgComparisonKind::NotEqual => {
                 let lower = self.nanos_boundary(false)?;
                 let upper = self.nanos_boundary(true)?;
-                if matches!(operator, PlannedComparisonOperator::Eq) {
+                if matches!(operator, PgComparisonKind::Equal) {
                     column
-                        .clone()
-                        .comparison(PredicateOperator::GreaterThanOrEq, lower)
-                        .and(column.comparison(PredicateOperator::LessThan, upper))
+                        .binary_predicate(PredicateOperator::GreaterThanOrEq, lower)
+                        .and(
+                            column
+                                .binary_predicate(PredicateOperator::LessThan, upper),
+                        )
                 } else {
                     column
-                        .clone()
-                        .comparison(PredicateOperator::LessThan, lower)
-                        .or(column
-                            .comparison(PredicateOperator::GreaterThanOrEq, upper))
+                        .binary_predicate(PredicateOperator::LessThan, lower)
+                        .or(column.binary_predicate(
+                            PredicateOperator::GreaterThanOrEq,
+                            upper,
+                        ))
                 }
             }
-            PlannedComparisonOperator::Lt => column
-                .comparison(PredicateOperator::LessThan, self.nanos_boundary(false)?),
-            PlannedComparisonOperator::Le => column
-                .comparison(PredicateOperator::LessThan, self.nanos_boundary(true)?),
-            PlannedComparisonOperator::Gt => column.comparison(
+            PgComparisonKind::Less => column.binary_predicate(
+                PredicateOperator::LessThan,
+                self.nanos_boundary(false)?,
+            ),
+            PgComparisonKind::LessEqual => column.binary_predicate(
+                PredicateOperator::LessThan,
+                self.nanos_boundary(true)?,
+            ),
+            PgComparisonKind::Greater => column.binary_predicate(
                 PredicateOperator::GreaterThanOrEq,
                 self.nanos_boundary(true)?,
             ),
-            PlannedComparisonOperator::Ge => column.comparison(
+            PgComparisonKind::GreaterEqual => column.binary_predicate(
                 PredicateOperator::GreaterThanOrEq,
                 self.nanos_boundary(false)?,
             ),

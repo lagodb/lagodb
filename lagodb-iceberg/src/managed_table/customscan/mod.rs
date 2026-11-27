@@ -41,7 +41,8 @@ use crate::managed_table::catalog::IcebergAccessMethod;
 use crate::managed_table::transaction::ManagedTransaction;
 use crate::managed_table::{ManagedResult, ManagedTableError};
 use crate::predicate::{
-    BoundIcebergPredicate, IcebergFilterPlanner, PlannedIcebergPredicate,
+    IcebergBoundPredicate, IcebergFilterPlanner, IcebergPlannedPredicate,
+    PredicateStorageContract,
 };
 use crate::scan::{ReaderScanCost, ScanVolume};
 
@@ -63,13 +64,15 @@ impl ManagedFilterPlanner {
             context,
             view.schema(),
             view.metadata(),
-            Some(view.pruning_units()?),
+            PredicateStorageContract::Managed {
+                pruning_units: view.pruning_units()?,
+            },
         )?))
     }
 }
 
 impl FilterPushdownPlanner for ManagedFilterPlanner {
-    type PlannedPredicate = PlannedIcebergPredicate;
+    type PlannedPredicate = IcebergPlannedPredicate;
     type Error = ManagedTableError;
 
     fn try_plan_filter(
@@ -86,8 +89,8 @@ impl FilterPushdownPlanner for ManagedFilterPlanner {
 
 impl FilterPushdown for IcebergCustomScanProvider {
     type Planner = ManagedFilterPlanner;
-    type PlannedPredicate = PlannedIcebergPredicate;
-    type BoundPredicate = BoundIcebergPredicate;
+    type PlannedPredicate = IcebergPlannedPredicate;
+    type BoundPredicate = IcebergBoundPredicate;
     type Error = ManagedTableError;
 
     fn begin_filter_planning(
@@ -108,14 +111,14 @@ impl FilterPushdown for IcebergCustomScanProvider {
         reader: &mut PlanDataReader<'_>,
         binding_count: usize,
     ) -> Result<Self::PlannedPredicate, Self::Error> {
-        Ok(PlannedIcebergPredicate::decode(reader, binding_count)?)
+        Ok(IcebergPlannedPredicate::decode(reader, binding_count)?)
     }
 
     fn bind_filter(
         predicate: &Self::PlannedPredicate,
         values: RuntimeValueBindings<'_>,
     ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
-        Ok(predicate.bind(values)?)
+        Ok(IcebergBoundPredicate::bind(predicate, values)?)
     }
 }
 
@@ -253,7 +256,7 @@ impl LagodbCustomModifyProvider for IcebergCustomScanProvider {
     fn prepare_modify_seq_scan(
         relation: &RelationHandle<'_>,
         snapshot: &SnapshotHandle<'_>,
-        filters: BoundFilterSet<'_, BoundIcebergPredicate>,
+        filters: BoundFilterSet<'_, IcebergBoundPredicate>,
         needed_columns: NeededColumns<'_>,
     ) -> Result<PreparedModifyScan<Self>, CustomScanError> {
         let scan = PreparedModifySeqScan::prepare(

@@ -1,19 +1,15 @@
-//! Errors owned by the Iceberg planned-filter facet.
+//! Errors owned by Iceberg planned-filter serialization and runtime binding.
 
 use lagodb_core::datum::DecimalCodecError;
-use lagodb_core::diag::{PgReportError, SqlStateError};
+use lagodb_core::diag::SqlStateError;
 use lagodb_core::plan_data::PlanDataError;
-use pgrx::pg_sys;
 use pgrx::prelude::PgSqlErrorCode;
+use thiserror::Error;
 
-use crate::error::IcebergError;
-
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub(crate) enum IcebergFilterError {
     #[error("Iceberg planned filter contains unknown boolean test tag {0}")]
     UnknownBooleanTest(i32),
-    #[error(transparent)]
-    Iceberg(#[from] IcebergError),
 
     #[error("Iceberg planned-filter codec failed: {0}")]
     PlanData(#[from] PlanDataError),
@@ -46,9 +42,6 @@ pub(crate) enum IcebergFilterError {
     )]
     SchemaMismatch { planned: i32, execution: i32 },
 
-    #[error("failed to decode PostgreSQL Datum with type OID {}", u32::from(*type_oid))]
-    DatumDecode { type_oid: pg_sys::Oid },
-
     #[error("Iceberg Decimal128 predicate binding failed: {0}")]
     DecimalCodec(#[from] DecimalCodecError),
 }
@@ -56,7 +49,6 @@ pub(crate) enum IcebergFilterError {
 impl SqlStateError for IcebergFilterError {
     fn sql_error_code(&self) -> PgSqlErrorCode {
         match self {
-            Self::Iceberg(error) => error.sql_error_code(),
             Self::UnknownBooleanTest(_)
             | Self::PlanData(_)
             | Self::UnknownNodeTag(_)
@@ -67,15 +59,7 @@ impl SqlStateError for IcebergFilterError {
             | Self::EmptyLogicalNode { .. }
             | Self::BindingSlotOutOfBounds { .. }
             | Self::SchemaMismatch { .. }
-            | Self::DatumDecode { .. }
             | Self::DecimalCodec(_) => PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-        }
-    }
-
-    fn try_into_pg_report(self) -> Result<PgReportError, Self> {
-        match self {
-            Self::Iceberg(error) => error.try_into_pg_report().map_err(Self::Iceberg),
-            error => Err(error),
         }
     }
 }

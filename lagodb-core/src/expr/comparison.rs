@@ -30,6 +30,7 @@ pub enum PgNanComparison {
 
 impl PgComparisonKind {
     /// Return the equivalent comparison after exchanging its operands.
+    #[inline]
     pub const fn commuted(self) -> Self {
         match self {
             Self::Equal | Self::NotEqual => self,
@@ -37,6 +38,33 @@ impl PgComparisonKind {
             Self::LessEqual => Self::GreaterEqual,
             Self::Greater => Self::Less,
             Self::GreaterEqual => Self::LessEqual,
+        }
+    }
+
+    /// Return the comparison whose truth set complements `self` on non-NULL
+    /// totally ordered operands.
+    #[inline]
+    pub const fn negated(self) -> Self {
+        match self {
+            Self::Equal => Self::NotEqual,
+            Self::NotEqual => Self::Equal,
+            Self::Less => Self::GreaterEqual,
+            Self::LessEqual => Self::Greater,
+            Self::Greater => Self::LessEqual,
+            Self::GreaterEqual => Self::Less,
+        }
+    }
+
+    /// Display symbol used by EXPLAIN output.
+    #[inline]
+    pub const fn explain_symbol(self) -> &'static str {
+        match self {
+            Self::Equal => "=",
+            Self::NotEqual => "!=",
+            Self::Less => "<",
+            Self::LessEqual => "<=",
+            Self::Greater => ">",
+            Self::GreaterEqual => ">=",
         }
     }
 

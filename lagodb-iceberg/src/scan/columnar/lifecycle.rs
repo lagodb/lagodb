@@ -10,8 +10,9 @@ use lagodb_arrow::scan::ScanStreamOptions;
 use lagodb_core::expr::pushdown::PredicatePlan;
 use lagodb_core::runtime_api::{RuntimePruningPredicate, TableScanTaskMetrics};
 
-use super::{ArrowStream, runtime_predicate::IcebergPredicatePlanner};
+use super::ArrowStream;
 use crate::error::{IcebergError, IcebergResult};
+use crate::predicate::IcebergRuntimePlanner;
 use crate::scan::parallel::{TaskGrouping, TaskGroupingConfig};
 use crate::scan::{
     IcebergTaskMetrics, ScanError, ScanSourceBinding, ScanTaskPlanner,
@@ -45,7 +46,7 @@ impl StatementScan {
         &self,
         predicate: &RuntimePruningPredicate<'_>,
     ) -> IcebergResult<PredicatePlan<Predicate>> {
-        IcebergPredicatePlanner::new(
+        IcebergRuntimePlanner::new(
             self.arrow_schema.as_ref(),
             self.task_planner.field_ids(),
         )

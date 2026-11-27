@@ -207,4 +207,12 @@ impl Iterator for ArrayDatumIter {
         self.remaining -= 1;
         Some((!is_null).then_some(value))
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.remaining as usize;
+        (len, Some(len))
+    }
 }
+
+impl ExactSizeIterator for ArrayDatumIter {}

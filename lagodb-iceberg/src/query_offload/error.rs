@@ -108,15 +108,6 @@ impl SqlStateError for Error {
                     )
                 })
                 .map_err(|error| Self::Foreign(Box::new(error))),
-            Self::Filter(error) => error
-                .try_into_pg_report()
-                .map(|report| {
-                    report.contextualize(
-                        "failed to plan or bind Iceberg pruning predicate",
-                        None,
-                    )
-                })
-                .map_err(Self::Filter),
             Self::Scan(error) => error
                 .try_into_pg_report()
                 .map(|report| {

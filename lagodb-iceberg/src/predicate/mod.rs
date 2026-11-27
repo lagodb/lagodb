@@ -1,16 +1,15 @@
-//! Iceberg predicate domain shared by scans and write-conflict filtering.
+//! Iceberg predicate domain shared by relation scans, runtime pruning, and
+//! write-conflict filtering.
 
 mod binding;
-mod builder;
 mod error;
-mod float;
-mod plan;
-mod planner;
-pub(crate) mod policy;
-mod temporal;
+mod ir;
+mod planning;
+mod runtime;
+mod semantics;
 
-pub(crate) use binding::BoundIcebergPredicate;
-pub(crate) use builder::IcebergPredicateBuilder;
+pub(crate) use binding::IcebergBoundPredicate;
 pub(crate) use error::IcebergFilterError;
-pub(crate) use plan::{PlannedIcebergNode, PlannedIcebergPredicate};
-pub(crate) use planner::IcebergFilterPlanner;
+pub(crate) use ir::IcebergPlannedPredicate;
+pub(crate) use planning::{IcebergFilterPlanner, PredicateStorageContract};
+pub(crate) use runtime::IcebergRuntimePlanner;

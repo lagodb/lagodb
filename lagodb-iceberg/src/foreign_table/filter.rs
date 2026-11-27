@@ -15,13 +15,13 @@ use super::planning_source::ForeignPlanningSource;
 use super::provider::LagodbIceberg;
 use super::source_identity::PlanSourceIdentity;
 use crate::predicate::{
-    BoundIcebergPredicate, IcebergFilterPlanner, PlannedIcebergNode,
-    PlannedIcebergPredicate,
+    IcebergBoundPredicate, IcebergFilterPlanner, IcebergPlannedPredicate,
+    PredicateStorageContract,
 };
 
 pub(crate) struct FdwPlannedPredicate {
     source: PlanSourceIdentity,
-    predicate: PlannedIcebergPredicate,
+    predicate: IcebergPlannedPredicate,
 }
 
 impl FdwPlannedPredicate {
@@ -30,72 +30,7 @@ impl FdwPlannedPredicate {
     }
 
     pub(crate) fn explain(&self, values: ForeignFilterExplainValues<'_>) -> String {
-        Self::explain_node(self.predicate.root(), values)
-    }
-
-    fn explain_node(
-        node: &PlannedIcebergNode,
-        values: ForeignFilterExplainValues<'_>,
-    ) -> String {
-        match node {
-            PlannedIcebergNode::AlwaysTrue => "TRUE".to_owned(),
-            PlannedIcebergNode::AlwaysFalse => "FALSE".to_owned(),
-            PlannedIcebergNode::Comparison {
-                operator,
-                column,
-                value,
-                ..
-            } => format!(
-                "{} {} {}",
-                column.debug_name,
-                operator.explain_symbol(),
-                values.value(*value)
-            ),
-            PlannedIcebergNode::BooleanTest { kind, column } => {
-                format!("{} IS {}", column.debug_name, kind)
-            }
-            PlannedIcebergNode::IsNull(column) => {
-                format!("{} IS NULL", column.debug_name)
-            }
-            PlannedIcebergNode::IsNotNull(column) => {
-                format!("{} IS NOT NULL", column.debug_name)
-            }
-            PlannedIcebergNode::IsNan(column) => {
-                format!("{} IS NAN", column.debug_name)
-            }
-            PlannedIcebergNode::IsNotNan(column) => {
-                format!("{} IS NOT NAN", column.debug_name)
-            }
-            PlannedIcebergNode::StartsWith { column, prefix } => format!(
-                "{} STARTS WITH {}",
-                column.debug_name,
-                values.value(*prefix)
-            ),
-            PlannedIcebergNode::InSet { column, set, .. } => {
-                format!("{} = ANY ({})", column.debug_name, values.value(*set))
-            }
-            PlannedIcebergNode::And(children) => {
-                Self::explain_logical(children, values, " AND ")
-            }
-            PlannedIcebergNode::Or(children) => {
-                Self::explain_logical(children, values, " OR ")
-            }
-            PlannedIcebergNode::Not(child) => {
-                format!("NOT ({})", Self::explain_node(child, values))
-            }
-        }
-    }
-
-    fn explain_logical(
-        children: &[PlannedIcebergNode],
-        values: ForeignFilterExplainValues<'_>,
-        operator: &str,
-    ) -> String {
-        let predicates = children
-            .iter()
-            .map(|child| Self::explain_node(child, values))
-            .collect::<Vec<_>>();
-        format!("({})", predicates.join(operator))
+        self.predicate.explain_with(|id| values.value(id))
     }
 }
 
@@ -140,13 +75,11 @@ impl IcebergFdwFilterPlanner {
         if let Some((context, planning_source)) = pending {
             let table = planning_source.table()?;
             let source = PlanSourceIdentity::from_metadata(table.metadata());
-            // Foreign scans price layout pruning alone
-            // (`ScanVolume::foreign`), which needs no unit count.
             let planner = IcebergFilterPlanner::new(
                 &context,
                 table.metadata().current_schema(),
                 table.metadata(),
-                None,
+                PredicateStorageContract::Foreign,
             )?;
             self.state = IcebergFdwFilterPlannerState::Ready { source, planner };
         }
@@ -182,7 +115,7 @@ impl FilterPushdownPlanner for IcebergFdwFilterPlanner {
 impl FilterPushdown for LagodbIceberg {
     type Planner = IcebergFdwFilterPlanner;
     type PlannedPredicate = FdwPlannedPredicate;
-    type BoundPredicate = BoundIcebergPredicate;
+    type BoundPredicate = IcebergBoundPredicate;
     type Error = IcebergFdwError;
 
     fn begin_filter_planning(
@@ -210,7 +143,7 @@ impl FilterPushdown for LagodbIceberg {
     ) -> Result<Self::PlannedPredicate, Self::Error> {
         Ok(FdwPlannedPredicate {
             source: PlanSourceIdentity::decode(reader)?,
-            predicate: PlannedIcebergPredicate::decode(reader, binding_count)?,
+            predicate: IcebergPlannedPredicate::decode(reader, binding_count)?,
         })
     }
 
@@ -218,6 +151,6 @@ impl FilterPushdown for LagodbIceberg {
         predicate: &Self::PlannedPredicate,
         values: RuntimeValueBindings<'_>,
     ) -> Result<FilterBindResult<Self::BoundPredicate>, Self::Error> {
-        predicate.predicate.bind(values).map_err(Into::into)
+        IcebergBoundPredicate::bind(&predicate.predicate, values).map_err(Into::into)
     }
 }

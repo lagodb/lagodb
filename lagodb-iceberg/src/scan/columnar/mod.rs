@@ -1,7 +1,6 @@
 //! Statement-bound and run-local Iceberg columnar scan data plane.
 
 mod lifecycle;
-mod runtime_predicate;
 mod source;
 mod stream;
 

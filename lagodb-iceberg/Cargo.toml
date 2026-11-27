@@ -59,4 +59,3 @@ arrow-buffer = { workspace = true }
 
 [dev-dependencies]
 pgrx-tests = { workspace = true }
-proptest = "1.5"
