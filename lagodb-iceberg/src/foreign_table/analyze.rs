@@ -50,11 +50,7 @@ impl FdwAnalyze for LagodbIceberg {
         binding.validate_read(
             source.table.metadata(),
             &source.identity,
-            binding
-                .layout()
-                .live_columns()
-                .iter()
-                .map(|column| column.attno),
+            binding.layout().live_columns().map(|column| column.attno()),
         )?;
         let layout = binding.into_relation_layout();
         let mut prepared = PreparedRowScan::full(

@@ -9,7 +9,7 @@ use super::super::catalog::RemoteTableKey;
 use super::super::options::ForeignTableIdentity;
 use crate::error::IcebergResult;
 use crate::scan::{PreparedRowScan, RowLocationScanInput};
-use crate::schema::relation::RelationLayout;
+use crate::schema::RelationLayout;
 use crate::write::PlannedMutationTasks;
 
 #[derive(Debug, Clone)]

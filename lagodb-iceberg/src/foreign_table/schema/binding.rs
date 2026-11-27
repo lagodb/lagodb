@@ -1,7 +1,6 @@
 use iceberg_lite::spec::{
     NestedFieldRef, PrimitiveType, Schema as IcebergSchema, TableMetadata, Type,
 };
-use lagodb_core::datum::PgType;
 use lagodb_core::handles::RelationHandle;
 use pgrx::pg_sys;
 
@@ -9,7 +8,7 @@ use super::super::error::IcebergFdwError;
 use super::super::options::ForeignTableIdentity;
 use super::super::type_mapping::ForeignType;
 use crate::error::IcebergError;
-use crate::schema::relation::{LiveColumn, RelationLayout};
+use crate::schema::{LiveColumn, RelationLayout};
 
 /// PostgreSQL columns admitted for the foreign definition and current scan.
 pub(crate) struct ForeignSchemaBinding {
@@ -38,7 +37,7 @@ impl ForeignSchemaBinding {
         let current = metadata.current_schema();
         for local in self.layout.live_columns() {
             self.validate_column(local, definition, false)?;
-            if local.required && definition.schema_id() != current.schema_id() {
+            if local.is_required() && definition.schema_id() != current.schema_id() {
                 let remote = Self::remote_field(local, current)?;
                 Self::validate_required(local, remote)?;
             }
@@ -89,7 +88,7 @@ impl ForeignSchemaBinding {
         let definition = identity.definition_schema(metadata)?;
         let current = metadata.current_schema();
         for attno in columns {
-            let local = self.layout.column(attno)?;
+            let local = self.layout.live_column(attno)?;
             self.validate_column(local, definition, false)?;
             if definition.schema_id() != current.schema_id() {
                 self.validate_column(local, current, false)?;
@@ -126,13 +125,18 @@ impl ForeignSchemaBinding {
         columns: &[pg_sys::AttrNumber],
     ) -> Result<bool, IcebergFdwError> {
         for &attno in columns {
-            let local = self.layout.column(attno)?;
-            let remote = schema
-                .as_struct()
-                .field_by_name(&local.name)
-                .ok_or_else(|| IcebergError::ColumnNotFound(local.name.clone()))?;
-            let (oid, typmod) = self.layout.attr_types()[(attno - 1) as usize];
-            if !ForeignType::new(&remote.field_type).accepts(oid, typmod) {
+            let local = self.layout.live_column(attno)?;
+            let remote =
+                schema
+                    .as_struct()
+                    .field_by_name(local.name())
+                    .ok_or_else(|| {
+                        IcebergError::ColumnNotFound(local.name().to_owned())
+                    })?;
+            let local_type = local.pg_type();
+            if !ForeignType::new(&remote.field_type)
+                .accepts(local_type.oid, local_type.typmod)
+            {
                 return Ok(false);
             }
         }
@@ -146,10 +150,9 @@ impl ForeignSchemaBinding {
         writable: bool,
     ) -> Result<(), IcebergFdwError> {
         let remote = Self::remote_field(local, schema)?;
-        let local_type = self.layout.attr_types()[(local.attno - 1) as usize];
         ForeignType::new(&remote.field_type).validate(
-            &local.name,
-            PgType::new(local_type.0, local_type.1),
+            local.name(),
+            local.pg_type(),
             writable,
         )?;
         if writable {
@@ -165,11 +168,11 @@ impl ForeignSchemaBinding {
     ) -> Result<&'a NestedFieldRef, IcebergFdwError> {
         schema
             .as_struct()
-            .field_by_name(&local.name)
+            .field_by_name(local.name())
             .ok_or_else(|| IcebergFdwError::SchemaContractMismatch {
                 detail: format!(
                     "local column {:?} is absent from Iceberg schema {}",
-                    local.name,
+                    local.name(),
                     schema.schema_id()
                 ),
             })
@@ -180,7 +183,7 @@ impl ForeignSchemaBinding {
         local: &LiveColumn,
         remote: &NestedFieldRef,
     ) -> Result<(), IcebergFdwError> {
-        if local.required {
+        if local.is_required() {
             Self::validate_nullability(local, remote)?;
         }
         Ok(())
@@ -190,11 +193,13 @@ impl ForeignSchemaBinding {
         local: &LiveColumn,
         remote: &NestedFieldRef,
     ) -> Result<(), IcebergFdwError> {
-        if local.required != remote.required {
+        if local.is_required() != remote.required {
             return Err(IcebergFdwError::SchemaContractMismatch {
                 detail: format!(
                     "column {:?} has local NOT NULL={} but Iceberg required={}",
-                    local.name, local.required, remote.required,
+                    local.name(),
+                    local.is_required(),
+                    remote.required,
                 ),
             });
         }

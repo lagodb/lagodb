@@ -28,7 +28,7 @@ use crate::managed_table::{ICEBERG_AM_NAME, ManagedTableReadView};
 use crate::scan::columnar::PlannedScan as PlannedQueryScan;
 use crate::scan::parallel::WorkerSource;
 use crate::scan::{ScanError, ScanVolume};
-use crate::schema::projection::StorageProjection;
+use crate::schema::StorageProjection;
 
 use super::error::Error;
 use super::filter::{Filter, FilterPlanner};
@@ -160,13 +160,11 @@ impl TableScanProvider for Provider {
                         if !binding.supports_columnar_read(schema, attnos)? {
                             return Ok(ScanSupport::Unsupported);
                         }
-                        let field_ids = binding
-                            .layout()
-                            .project_field_ids(schema, attnos.iter().copied())?;
-                        let schema = StorageProjection::from_field_ids(
+                        let schema = StorageProjection::bind_relation_fields(
                             Arc::clone(schema),
-                            field_ids,
-                        )
+                            binding.layout(),
+                            attnos.iter().copied(),
+                        )?
                         .to_arrow_schema()?;
                         (
                             Arc::new(schema),

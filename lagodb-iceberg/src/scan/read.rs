@@ -14,9 +14,7 @@ use lagodb_core::runtime_api::TableScanTaskMetrics;
 use pgrx::pg_sys;
 
 use crate::error::{IcebergError, IcebergResult};
-use crate::schema::column_plan::PgReadPlan;
-use crate::schema::projection::{SlotProjection, StorageProjection};
-use crate::schema::relation::RelationLayout;
+use crate::schema::{PgReadPlan, RelationLayout, SlotProjection, StorageProjection};
 
 use super::batch::{ArrowBatches, InterruptibleArrowBatches};
 use super::columnar::{ScanSourceBinding, ScanTaskPlanner};
@@ -155,26 +153,14 @@ impl PreparedIcebergRead {
     /// PostgreSQL datum materialization are omitted.
     pub(crate) fn count_rows(snapshot: IcebergReadSnapshot) -> CountRowsRead {
         let projection = StorageProjection::empty(snapshot.schema().clone());
-        CountRowsRead(Self::from_parts(
+        CountRowsRead(Self::from_projection(
             snapshot,
             projection,
             ScanPredicates::unfiltered(),
         ))
     }
 
-    pub(crate) fn projected_fields(
-        snapshot: IcebergReadSnapshot,
-        project_field_ids: Box<[i32]>,
-        predicates: ScanPredicates,
-    ) -> Self {
-        let projection = StorageProjection::from_field_ids(
-            snapshot.schema().clone(),
-            project_field_ids,
-        );
-        Self::from_parts(snapshot, projection, predicates)
-    }
-
-    fn from_parts(
+    pub(crate) fn from_projection(
         snapshot: IcebergReadSnapshot,
         projection: StorageProjection,
         predicates: ScanPredicates,
@@ -254,7 +240,7 @@ impl PreparedIcebergRead {
             self.table,
             self.snapshot_id,
             self.total_data_files,
-            self.projection.schema_ref(),
+            self.projection.shared_schema(),
             field_ids,
             self.predicates.stable_pruning.0,
             self.delta,
@@ -275,7 +261,7 @@ impl PreparedIcebergRead {
         let mut builder = self
             .table
             .scan()
-            .with_read_schema(self.projection.schema_ref());
+            .with_read_schema(self.projection.shared_schema());
         builder = match self.snapshot_id {
             Some(snapshot_id) => builder.snapshot_id(snapshot_id),
             None => builder.without_snapshot(),
@@ -357,6 +343,20 @@ impl PreparedRowScan {
         Ok(Self::from_plan(snapshot, plan, predicates))
     }
 
+    pub(crate) fn projected_relation(
+        snapshot: IcebergReadSnapshot,
+        attnos: &[pg_sys::AttrNumber],
+        predicates: ScanPredicates,
+        layout: &RelationLayout,
+    ) -> IcebergResult<Self> {
+        let plan = PgReadPlan::bind_relation_projection(
+            snapshot.schema().clone(),
+            layout,
+            attnos,
+        )?;
+        Ok(Self::from_plan(snapshot, plan, predicates))
+    }
+
     pub(crate) fn projected(
         snapshot: IcebergReadSnapshot,
         projection: SlotProjection,
@@ -368,7 +368,6 @@ impl PreparedRowScan {
             snapshot.schema().clone(),
             layout,
             &projection,
-            scan_attr_types.len(),
             scan_attr_types,
         )?;
         Ok(Self::from_plan(snapshot, plan, predicates))
@@ -381,7 +380,9 @@ impl PreparedRowScan {
     ) -> Self {
         let (projection, decoder) = plan.into_parts();
         Self {
-            read: PreparedIcebergRead::from_parts(snapshot, projection, predicates),
+            read: PreparedIcebergRead::from_projection(
+                snapshot, projection, predicates,
+            ),
             decoder,
         }
     }

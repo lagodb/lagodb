@@ -6,7 +6,7 @@ use pgrx::pg_sys;
 
 use super::error::IcebergFdwError;
 use crate::error::IcebergError;
-use crate::schema::arrow_type::SemanticArrowType;
+use crate::schema::IcebergTypeExt;
 
 pub(super) struct ForeignType<'a>(&'a Type);
 
@@ -110,7 +110,7 @@ impl<'a> ForeignType<'a> {
         local: PgType,
         writable: bool,
     ) -> Result<(), IcebergFdwError> {
-        SemanticArrowType::new(self.0).validate_supported()?;
+        self.0.validate_supported()?;
         let canonical = self
             .canonical()
             .ok_or_else(|| IcebergError::UnsupportedColumnType(self.0.to_string()))?;

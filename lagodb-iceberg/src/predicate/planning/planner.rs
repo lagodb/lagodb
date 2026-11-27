@@ -22,7 +22,7 @@ use crate::predicate::ir::{
     IcebergPlannedPredicate, PlannedColumn, PlannedNode, PlannedValueType,
 };
 use crate::predicate::semantics::PredicateCapability;
-use crate::schema::relation::{LiveColumn, RelationLayout};
+use crate::schema::{LiveColumn, RelationLayout};
 
 use super::PredicateStorageContract;
 use super::admission::{PgPredicateAdmission, SupportedComparison};
@@ -39,7 +39,7 @@ impl ResolvedColumn<'_> {
     fn to_planned(self) -> PlannedColumn {
         PlannedColumn {
             field_id: self.field.id,
-            display_name: self.live.name.clone(),
+            display_name: self.live.name().to_owned(),
         }
     }
 }
@@ -301,21 +301,20 @@ impl IcebergFilterPlanner {
         &self,
         attno: pg_sys::AttrNumber,
     ) -> IcebergResult<Option<ResolvedColumn<'_>>> {
-        let live = self.layout.column(attno)?;
+        let live = self.layout.live_column(attno)?;
         let field = match (
             self.contract,
-            self.schema.as_struct().field_by_name(&live.name),
+            self.schema.as_struct().field_by_name(live.name()),
         ) {
             (_, Some(field)) => field.as_ref(),
             (PredicateStorageContract::Managed { .. }, None) => {
-                return Err(IcebergError::ColumnNotFound(live.name.clone()));
+                return Err(IcebergError::ColumnNotFound(live.name().to_owned()));
             }
             (PredicateStorageContract::Foreign, None) => return Ok(None),
         };
         if let Type::Primitive(PrimitiveType::Decimal { precision, scale }) =
             field.field_type.as_ref()
-            && self.layout.attr_types()[(attno - 1) as usize].1
-                != numeric_typmod(*precision, *scale as i32)
+            && live.pg_type().typmod != numeric_typmod(*precision, *scale as i32)
         {
             // Decimal predicate pushdown deliberately requires an exact typmod
             // match. Users are responsible for matching the local declaration

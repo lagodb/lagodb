@@ -12,8 +12,7 @@ use crate::scan::{
     CountRowsRead, IcebergReadSnapshot, PreparedIcebergRead, ScanPredicates,
     ScanSourceBinding,
 };
-use crate::schema::projection::StorageProjection;
-use crate::schema::relation::RelationLayout;
+use crate::schema::{RelationLayout, StorageProjection};
 
 use super::error::Error;
 use super::plan::PlanError;
@@ -42,10 +41,12 @@ impl PlanProjection {
             pg_sys::NoLock as pg_sys::LOCKMODE,
         )?;
         let layout = RelationLayout::from_relation(&relation.as_handle())?;
-        let field_ids = layout.project_field_ids(&schema, attnos.iter().copied())?;
-        Ok(Arc::new(
-            StorageProjection::from_field_ids(schema, field_ids).to_arrow_schema()?,
-        ))
+        let projection = StorageProjection::bind_relation_fields(
+            schema,
+            &layout,
+            attnos.iter().copied(),
+        )?;
+        Ok(Arc::new(projection.to_arrow_schema()?))
     }
 
     const fn plan_kind(&self) -> i32 {
@@ -92,11 +93,14 @@ impl PlanProjection {
         snapshot: IcebergReadSnapshot,
         layout: &RelationLayout,
     ) -> Result<ScanSourceBinding, Error> {
-        let project_field_ids =
-            layout.project_field_ids(snapshot.schema(), attnos.iter().copied())?;
-        Ok(PreparedIcebergRead::projected_fields(
+        let projection = StorageProjection::bind_relation_fields(
+            snapshot.schema().clone(),
+            layout,
+            attnos.iter().copied(),
+        )?;
+        Ok(PreparedIcebergRead::from_projection(
             snapshot,
-            project_field_ids,
+            projection,
             ScanPredicates::unfiltered(),
         )
         .bind_scan_source()?)

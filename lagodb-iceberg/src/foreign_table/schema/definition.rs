@@ -9,7 +9,7 @@ use pgrx::pg_sys;
 use super::super::error::IcebergFdwError;
 use super::super::type_mapping::ForeignType;
 use crate::error::IcebergError;
-use crate::schema::arrow_type::SemanticArrowType;
+use crate::schema::IcebergTypeExt;
 
 pub(crate) struct ForeignTableSchema {
     schema_id: i32,
@@ -35,17 +35,15 @@ impl ForeignTableSchema {
     ) -> Result<Self, IcebergFdwError> {
         let mut columns = Vec::with_capacity(schema.as_struct().fields().len());
         for field in schema.as_struct().fields() {
-            let mapping = SemanticArrowType::new(&field.field_type)
-                .validate_supported()
-                .and_then(|()| {
-                    ForeignType::new(&field.field_type)
-                        .canonical()
-                        .ok_or_else(|| {
-                            IcebergError::UnsupportedColumnType(
-                                field.field_type.to_string(),
-                            )
-                        })
-                });
+            let mapping = field.field_type.validate_supported().and_then(|()| {
+                ForeignType::new(&field.field_type)
+                    .canonical()
+                    .ok_or_else(|| {
+                        IcebergError::UnsupportedColumnType(
+                            field.field_type.to_string(),
+                        )
+                    })
+            });
             let postgres = match mapping {
                 Ok(postgres) => postgres,
                 Err(IcebergError::UnsupportedColumnType(_)) if !strict => continue,

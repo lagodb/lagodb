@@ -1,9 +1,13 @@
 //! Shared PostgreSQL/Iceberg schema binding and conversion plans.
 
-pub(crate) mod arrow_type;
-pub(crate) mod column_plan;
-#[cfg(feature = "pg_test")]
-mod pg_test;
-pub(crate) mod projection;
-pub(crate) mod relation;
-mod write_mapping;
+mod iceberg;
+mod projection;
+mod read_plan;
+mod relation;
+mod write_plan;
+
+pub(crate) use iceberg::IcebergTypeExt;
+pub(crate) use projection::{ProjectedAttribute, SlotProjection, StorageProjection};
+pub(crate) use read_plan::PgReadPlan;
+pub(crate) use relation::{LiveColumn, RelationLayout};
+pub(crate) use write_plan::PgWritePlan;

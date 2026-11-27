@@ -18,8 +18,7 @@ use crate::scan::{
     IcebergReadSnapshot, PreparedRowScan, ReaderPredicate, ScanPredicates,
     StablePruningPredicate,
 };
-use crate::schema::projection::{ProjectedAttribute, SlotProjection};
-use crate::schema::relation::RelationLayout;
+use crate::schema::{ProjectedAttribute, RelationLayout, SlotProjection};
 
 impl IcebergFdwScanState {
     pub(crate) fn begin(
@@ -57,11 +56,7 @@ impl IcebergFdwScanState {
             binding.validate_read(
                 read.metadata(),
                 context.private_data.identity(),
-                binding
-                    .layout()
-                    .live_columns()
-                    .iter()
-                    .map(|column| column.attno),
+                binding.layout().live_columns().map(|column| column.attno()),
             )?;
         } else {
             binding.validate_read(

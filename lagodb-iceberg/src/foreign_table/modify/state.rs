@@ -19,7 +19,7 @@ use super::super::schema::ForeignSchemaBinding;
 use super::super::transaction::ForeignTransaction;
 use crate::config::mutation_buffer_flush_bytes;
 use crate::error::IcebergError;
-use crate::schema::relation::RelationLayout;
+use crate::schema::RelationLayout;
 use crate::write::{
     DataFileSink, IcebergRowIdentity, MutationSinks, PgTransactionIsolation,
     RowDeleteClaim, RowDeleteState, TxWriteBatch,

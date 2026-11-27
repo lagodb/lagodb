@@ -25,7 +25,7 @@ use crate::error::IcebergError;
 use crate::managed_table::access::analyze::{AnalyzePreparation, AnalyzeScanState};
 use crate::managed_table::{IcebergTableAm, ManagedTableReadView};
 use crate::scan::{PgRowCursor, PreparedRowScan, ScanPredicates};
-use crate::schema::relation::RelationLayout;
+use crate::schema::RelationLayout;
 
 use super::mutation::ManagedMutationScan;
 

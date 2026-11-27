@@ -49,8 +49,7 @@ use lagodb_core::prelude::TupleSlotRow;
 use parquet::file::properties::WriterProperties;
 
 use crate::error::{IcebergError, IcebergResult};
-use crate::schema::column_plan::WriteColumnPlan;
-use crate::schema::relation::RelationLayout;
+use crate::schema::{PgWritePlan, RelationLayout};
 use crate::write::table_data_writer::TableDataWriter;
 
 /// Buffers PostgreSQL tuple slots into Arrow columns and turns them into
@@ -84,7 +83,7 @@ impl DataFileSink {
         flush_threshold_bytes: usize,
     ) -> IcebergResult<Self> {
         let (arrow_schema, column_plans) =
-            WriteColumnPlan::bind(iceberg_schema, relation_layout)?.into_parts();
+            PgWritePlan::bind(iceberg_schema, relation_layout)?.into_parts();
         let columns = BoundWriteBuffer::new(arrow_schema, column_plans)?;
         let writer = TableDataWriter::new(
             file_io,
@@ -112,7 +111,7 @@ impl DataFileSink {
         row: TupleSlotRow<'_>,
     ) -> IcebergResult<()> {
         // SAFETY: the caller's relation-local callback supplies the layout
-        // captured by `WriteColumnPlan::bind` during sink construction.
+        // captured by `PgWritePlan::bind` during sink construction.
         unsafe { self.columns.append_slot_row(row)? };
         self.flush_if_needed()
     }

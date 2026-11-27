@@ -17,7 +17,7 @@ use crate::managed_table::ManagedResult;
 use crate::managed_table::options::IcebergTableOptions;
 use crate::managed_table::storage::StorageContext;
 use crate::managed_table::transaction::ManagedTransaction;
-use crate::schema::relation::RelationLayout;
+use crate::schema::RelationLayout;
 use crate::write::PgTransactionIsolation;
 use crate::write::{
     DataFileSink, IcebergRowIdentity, MutationSinks, RowDeleteClaim, RowDeleteOutput,

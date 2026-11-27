@@ -1,11 +1,14 @@
-//! Relation-layout and Iceberg field-id bindings shared by scans and predicates.
+//! PostgreSQL relation layout indexed by `attno - 1`.
 //!
-//! PostgreSQL attribute names are resolved against an Iceberg schema once at
-//! the catalog boundary. Ordered consumers use the compact bindings directly;
-//! local attributes use a direct `attno - 1` index; remote fields are resolved
-//! only when a projection or predicate actually needs them.
+//! `RelationLayout` captures the UTF-8 column names, declared PostgreSQL types,
+//! and nullability flags from an open relation's `TupleDesc` in a single pass,
+//! without retaining any borrow of relcache memory or depending on Iceberg
+//! metadata types.
 
-use iceberg_lite::spec::Schema as IcebergSchema;
+use std::ffi::{CStr, c_char};
+use std::slice;
+
+use lagodb_core::datum::PgType;
 use lagodb_core::handles::RelationHandle;
 use pgrx::pg_sys;
 
@@ -14,226 +17,176 @@ use crate::error::{IcebergError, IcebergResult};
 /// One live (non-dropped) PostgreSQL relation column.
 #[derive(Debug)]
 pub(crate) struct LiveColumn {
-    /// One-based PostgreSQL attribute number.
-    pub(crate) attno: pg_sys::AttrNumber,
-    /// Column name used only to resolve the catalog-boundary Iceberg field id.
-    pub(crate) name: String,
-    /// PostgreSQL's declared nullability contract.
-    pub(crate) required: bool,
+    /// One-based PostgreSQL attribute number (`1..=natts`).
+    attno: pg_sys::AttrNumber,
+    /// UTF-8 validated PostgreSQL column name.
+    name: Box<str>,
+    /// Declared PostgreSQL OID and typmod.
+    pg_type: PgType,
+    /// PostgreSQL's declared `NOT NULL` contract.
+    required: bool,
 }
 
 impl LiveColumn {
-    pub(crate) fn new(
+    const fn new(
         attno: pg_sys::AttrNumber,
-        name: String,
+        name: Box<str>,
+        pg_type: PgType,
         required: bool,
     ) -> Self {
         Self {
             attno,
             name,
+            pg_type,
             required,
         }
     }
+
+    #[inline]
+    pub(crate) const fn attno(&self) -> pg_sys::AttrNumber {
+        self.attno
+    }
+
+    /// Zero-based position in a relation-shaped tuple slot (`attno - 1`).
+    #[inline]
+    pub(super) const fn slot_index(&self) -> usize {
+        (self.attno - 1) as usize
+    }
+
+    #[inline]
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[inline]
+    pub(crate) const fn pg_type(&self) -> PgType {
+        self.pg_type
+    }
+
+    #[inline]
+    pub(crate) const fn is_required(&self) -> bool {
+        self.required
+    }
 }
 
-/// Descriptor-derived relation layout shared by read and write paths.
+/// Descriptor-derived relation layout shared by scans, predicates, and writes.
 #[derive(Debug)]
 pub(crate) struct RelationLayout {
-    live_columns: Vec<LiveColumn>,
-    by_attno: Box<[Option<usize>]>,
-    slot_width: usize,
-    attr_types: Vec<(pg_sys::Oid, i32)>,
+    /// Mirrors `TupleDesc->attrs`: indexed by `attno - 1`, `None` when dropped.
+    attributes: Box<[Option<LiveColumn>]>,
+    live_count: usize,
 }
 
 impl RelationLayout {
-    /// Construct a synthetic layout for backend binding tests.
-    #[cfg(feature = "pg_test")]
-    pub(crate) fn for_test(
-        live_columns: Vec<LiveColumn>,
-        slot_width: usize,
-        attr_types: Vec<(pg_sys::Oid, i32)>,
-    ) -> Self {
-        Self::new(live_columns, slot_width, attr_types)
-    }
-
     pub(crate) fn from_relation(rel: &RelationHandle) -> IcebergResult<Self> {
-        let live_columns = rel
-            .live_columns()
-            .iter()
-            .map(|column| {
-                let name = column.name().to_str().map_err(|_| {
-                    IcebergError::SchemaBuildError(
-                        "PostgreSQL column names must be valid UTF-8 for Iceberg"
-                            .to_owned(),
-                    )
-                })?;
-                Ok(LiveColumn::new(
-                    column.attno(),
-                    name.to_owned(),
-                    column.is_not_null(),
-                ))
-            })
-            .collect::<IcebergResult<Vec<_>>>()?;
-
-        Ok(Self::new(live_columns, rel.natts(), rel.attr_types()))
+        let descriptor = rel.tuple_desc_handle();
+        let raw_attrs = descriptor.attributes();
+        let mut attributes = Vec::with_capacity(raw_attrs.len());
+        let mut live_count = 0;
+        for attribute in raw_attrs {
+            if attribute.attisdropped {
+                attributes.push(None);
+                continue;
+            }
+            // SAFETY: PostgreSQL stores `attname` as a NUL-terminated `NameData`
+            // within the open relation's `TupleDesc`, valid for `raw_attrs`.
+            let raw_name = unsafe {
+                CStr::from_ptr(attribute.attname.data.as_ptr().cast::<c_char>())
+            };
+            let name = raw_name.to_str().map_err(|_| {
+                IcebergError::SchemaBuildError(
+                    "PostgreSQL column names must be valid UTF-8 for Iceberg"
+                        .to_owned(),
+                )
+            })?;
+            debug_assert_eq!(
+                (attribute.attnum - 1) as usize,
+                attributes.len(),
+                "PostgreSQL TupleDesc attribute position must match attnum - 1",
+            );
+            attributes.push(Some(LiveColumn::new(
+                attribute.attnum,
+                name.into(),
+                PgType::new(attribute.atttypid, attribute.atttypmod),
+                attribute.attnotnull,
+            )));
+            live_count += 1;
+        }
+        Ok(Self {
+            attributes: attributes.into_boxed_slice(),
+            live_count,
+        })
     }
 
-    fn new(
-        live_columns: Vec<LiveColumn>,
-        slot_width: usize,
-        attr_types: Vec<(pg_sys::Oid, i32)>,
-    ) -> Self {
-        let mut by_attno = vec![None; slot_width];
-        for (index, column) in live_columns.iter().enumerate() {
-            by_attno[(column.attno - 1) as usize] = Some(index);
-        }
-        Self {
-            live_columns,
-            by_attno: by_attno.into_boxed_slice(),
-            slot_width,
-            attr_types,
-        }
-    }
-
-    pub(crate) fn column(
+    #[inline]
+    pub(crate) fn live_column(
         &self,
         attno: pg_sys::AttrNumber,
     ) -> IcebergResult<&LiveColumn> {
-        let offset = RelationFieldMap::attribute_offset(attno, self.slot_width)?;
-        self.by_attno[offset]
-            .map(|index| &self.live_columns[index])
+        let offset = usize::try_from(attno)
+            .ok()
+            .and_then(|attno| attno.checked_sub(1))
+            .filter(|&offset| offset < self.attributes.len())
+            .ok_or(IcebergError::InvariantViolated(
+                "RelationLayout: attribute number is outside the relation descriptor",
+            ))?;
+        self.attributes[offset]
+            .as_ref()
             .ok_or_else(|| IcebergError::ColumnNotFound(format!("attno {attno}")))
     }
 
-    pub(crate) fn live_columns(&self) -> &[LiveColumn] {
-        &self.live_columns
-    }
-
-    pub(crate) fn slot_width(&self) -> usize {
-        self.slot_width
-    }
-
-    pub(crate) fn attr_types(&self) -> &[(pg_sys::Oid, i32)] {
-        &self.attr_types
-    }
-
-    /// Resolve a PostgreSQL attribute projection directly to Iceberg field
-    /// ids without constructing slot destinations or datum-type bindings.
-    pub(crate) fn project_field_ids(
-        &self,
-        schema: &IcebergSchema,
-        projected: impl ExactSizeIterator<Item = pg_sys::AttrNumber>,
-    ) -> IcebergResult<Box<[i32]>> {
-        let mut field_ids = Vec::with_capacity(projected.len());
-        for attno in projected {
-            let column = self.column(attno)?;
-            let field = schema
-                .as_struct()
-                .field_by_name(&column.name)
-                .ok_or_else(|| IcebergError::ColumnNotFound(column.name.clone()))?;
-            field_ids.push(field.id);
+    #[inline]
+    pub(crate) fn live_columns(&self) -> LiveColumns<'_> {
+        LiveColumns {
+            inner: self.attributes.iter(),
+            remaining: self.live_count,
         }
-        Ok(field_ids.into_boxed_slice())
+    }
+
+    #[inline]
+    pub(super) const fn live_count(&self) -> usize {
+        self.live_count
+    }
+
+    #[inline]
+    pub(super) const fn slot_width(&self) -> usize {
+        self.attributes.len()
     }
 }
 
-/// One live relation field bound to an Iceberg field id.
-#[derive(Debug)]
-pub(crate) struct RelationFieldBinding {
-    pub(crate) attno: pg_sys::AttrNumber,
-    pub(crate) destination: usize,
-    /// Iceberg field id; this is the execution identity.
-    pub(crate) field_id: i32,
-    /// Current name retained for bound-term display and diagnostics only.
-    pub(crate) debug_name: String,
+/// Exact-size iterator over the non-dropped columns of a [`RelationLayout`].
+#[derive(Clone)]
+pub(crate) struct LiveColumns<'a> {
+    inner: slice::Iter<'a, Option<LiveColumn>>,
+    remaining: usize,
 }
 
-/// Compact ordered field bindings shared by read and write planning.
-#[derive(Debug)]
-pub(crate) struct RelationFieldMap {
-    fields: Vec<RelationFieldBinding>,
+impl<'a> Iterator for LiveColumns<'a> {
+    type Item = &'a LiveColumn;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        for slot in self.inner.by_ref() {
+            if let Some(column) = slot.as_ref() {
+                self.remaining -= 1;
+                return Some(column);
+            }
+        }
+        unreachable!("live_count tracks non-dropped relation attributes")
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
 }
 
-impl RelationFieldMap {
-    /// Resolve every live relation column against the current Iceberg schema.
-    pub(crate) fn bind(
-        schema: &IcebergSchema,
-        layout: &RelationLayout,
-    ) -> IcebergResult<Self> {
-        let mut fields = Vec::with_capacity(layout.live_columns().len());
-        for col in layout.live_columns() {
-            let field = schema
-                .as_struct()
-                .field_by_name(&col.name)
-                .ok_or_else(|| IcebergError::ColumnNotFound(col.name.clone()))?;
-            fields.push(RelationFieldBinding {
-                attno: col.attno,
-                destination: Self::attribute_offset(col.attno, layout.slot_width())?,
-                field_id: field.id,
-                debug_name: col.name.clone(),
-            });
-        }
-        Ok(Self { fields })
-    }
-
-    /// Resolve only projected attributes, in storage order, to slot destinations.
-    pub(crate) fn bind_projection(
-        schema: &IcebergSchema,
-        layout: &RelationLayout,
-        projected: impl ExactSizeIterator<Item = (pg_sys::AttrNumber, usize)>,
-    ) -> IcebergResult<Self> {
-        let mut fields = Vec::with_capacity(projected.len());
-        for (attno, destination) in projected {
-            let column = layout.column(attno)?;
-            let remote = schema
-                .as_struct()
-                .field_by_name(&column.name)
-                .ok_or_else(|| IcebergError::ColumnNotFound(column.name.clone()))?;
-            fields.push(RelationFieldBinding {
-                attno,
-                destination,
-                field_id: remote.id,
-                debug_name: column.name.clone(),
-            });
-        }
-        Ok(Self { fields })
-    }
-
-    pub(crate) fn bindings(&self) -> &[RelationFieldBinding] {
-        &self.fields
-    }
-
-    pub(crate) fn field_ids(&self) -> Vec<i32> {
-        self.fields.iter().map(|field| field.field_id).collect()
-    }
-
-    pub(crate) fn validate_destination(
-        destination: usize,
-        slot_width: usize,
-    ) -> IcebergResult<usize> {
-        if destination >= slot_width {
-            return Err(IcebergError::InvariantViolated(
-                "ColumnMapping: projected destination is outside the slot width",
-            ));
-        }
-        Ok(destination)
-    }
-
-    fn attribute_offset(
-        attno: pg_sys::AttrNumber,
-        slot_width: usize,
-    ) -> IcebergResult<usize> {
-        if attno < 1 {
-            return Err(IcebergError::InvariantViolated(
-                "ColumnMapping: projected column attno must be >= 1",
-            ));
-        }
-        let offset = (attno as usize) - 1;
-        if offset >= slot_width {
-            return Err(IcebergError::InvariantViolated(
-                "ColumnMapping: computed dest is outside the slot width",
-            ));
-        }
-        Ok(offset)
+impl ExactSizeIterator for LiveColumns<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.remaining
     }
 }

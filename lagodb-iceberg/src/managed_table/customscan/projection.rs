@@ -5,7 +5,7 @@ use lagodb_core::customscan::provider::{
 };
 use pgrx::pg_sys;
 
-use crate::schema::projection::{ProjectedAttribute, SlotProjection};
+use crate::schema::{ProjectedAttribute, SlotProjection};
 
 /// Resolves core's referenced-column set into the Iceberg scan projection.
 pub(super) struct ProjectionResolver;
@@ -84,7 +84,7 @@ mod tests {
     fn pairs(proj: &SlotProjection) -> Vec<(pg_sys::AttrNumber, usize)> {
         proj.columns()
             .iter()
-            .map(|c| (c.attno, c.destination))
+            .map(|c| (c.attno(), c.destination()))
             .collect()
     }
 

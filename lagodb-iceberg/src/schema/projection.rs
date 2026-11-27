@@ -6,21 +6,33 @@ use arrow_schema::Schema as ArrowSchema;
 use iceberg_lite::spec::Schema as IcebergSchema;
 use pgrx::pg_sys;
 
-use super::arrow_type::SemanticArrowType;
-use crate::error::{IcebergError, IcebergResult};
+use super::iceberg::{IcebergFieldExt, IcebergSchemaExt};
+use super::relation::RelationLayout;
+use crate::error::IcebergResult;
 
 /// One source PostgreSQL attribute and its destination in the scan tuple.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ProjectedAttribute {
     /// 1-based PG attribute number of a live (non-dropped) user column.
-    pub(crate) attno: pg_sys::AttrNumber,
+    attno: pg_sys::AttrNumber,
     /// Zero-based destination in the actual executor scan slot.
-    pub(crate) destination: usize,
+    destination: usize,
 }
 
 impl ProjectedAttribute {
-    pub(crate) fn new(attno: pg_sys::AttrNumber, destination: usize) -> Self {
+    #[inline]
+    pub(crate) const fn new(attno: pg_sys::AttrNumber, destination: usize) -> Self {
         Self { attno, destination }
+    }
+
+    #[inline]
+    pub(crate) const fn attno(self) -> pg_sys::AttrNumber {
+        self.attno
+    }
+
+    #[inline]
+    pub(crate) const fn destination(self) -> usize {
+        self.destination
     }
 }
 
@@ -40,7 +52,7 @@ impl SlotProjection {
     /// Destinations remain attached to their source fields, so compact scan
     /// tuple order is preserved independently of storage order.
     pub(crate) fn from_outputs(mut columns: Vec<ProjectedAttribute>) -> Self {
-        columns.sort_unstable_by_key(|column| column.attno);
+        columns.sort_unstable_by_key(|column| column.attno());
         Self { columns }
     }
 
@@ -66,11 +78,30 @@ impl StorageProjection {
         }
     }
 
-    pub(crate) fn from_field_ids(
+    pub(super) fn from_field_ids(
         schema: Arc<IcebergSchema>,
         field_ids: Box<[i32]>,
     ) -> Self {
         Self { schema, field_ids }
+    }
+
+    /// Resolve a PostgreSQL attribute projection directly to Iceberg storage
+    /// field IDs without constructing slot destinations or datum decoders.
+    pub(crate) fn bind_relation_fields(
+        schema: Arc<IcebergSchema>,
+        layout: &RelationLayout,
+        projected: impl ExactSizeIterator<Item = pg_sys::AttrNumber>,
+    ) -> IcebergResult<Self> {
+        let mut field_ids = Vec::with_capacity(projected.len());
+        for attno in projected {
+            let column = layout.live_column(attno)?;
+            let field = schema.require_field_by_name(column.name())?;
+            field_ids.push(field.id);
+        }
+        Ok(Self {
+            schema,
+            field_ids: field_ids.into_boxed_slice(),
+        })
     }
 
     pub(crate) fn to_arrow_schema(&self) -> IcebergResult<ArrowSchema> {
@@ -78,21 +109,15 @@ impl StorageProjection {
             .field_ids
             .iter()
             .map(|field_id| {
-                let field = self
-                    .schema
-                    .as_struct()
-                    .field_by_id(*field_id)
-                    .ok_or_else(|| {
-                        IcebergError::ColumnNotFound(format!("field id {field_id}"))
-                    })?;
-                SemanticArrowType::new(&field.field_type)
-                    .field(&field.name, !field.required)
+                self.schema
+                    .require_field_by_id(*field_id)?
+                    .to_projection_field()
             })
             .collect::<IcebergResult<Vec<_>>>()?;
         Ok(ArrowSchema::new(fields))
     }
 
-    pub(crate) fn schema_ref(&self) -> Arc<IcebergSchema> {
+    pub(crate) fn shared_schema(&self) -> Arc<IcebergSchema> {
         Arc::clone(&self.schema)
     }
 

@@ -12,7 +12,7 @@ use crate::predicate::IcebergBoundPredicate;
 use crate::scan::{
     PreparedRowScan, ReaderPredicate, ScanPredicates, StablePruningPredicate,
 };
-use crate::schema::relation::RelationLayout;
+use crate::schema::RelationLayout;
 use iceberg_lite::expr::Predicate;
 use lagodb_core::customscan::modify::ModifyBindContext;
 use lagodb_core::customscan::provider::{

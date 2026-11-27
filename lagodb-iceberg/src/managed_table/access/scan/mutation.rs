@@ -16,7 +16,6 @@ use crate::predicate::IcebergBoundPredicate;
 use crate::scan::{
     PreparedRowScan, ReaderPredicate, ScanPredicates, StablePruningPredicate,
 };
-use crate::schema::projection::{ProjectedAttribute, SlotProjection};
 
 use super::{IcebergScan, IcebergScanState, ScanRelation};
 
@@ -64,20 +63,11 @@ impl PreparedModifySeqScan {
             NeededColumns::Subset(attnos) => {
                 // Native SeqScan keeps the full relation descriptor. Prune
                 // storage columns without compacting their slot destinations.
-                let projection = SlotProjection::from_outputs(
-                    attnos
-                        .iter()
-                        .map(|&attno| {
-                            ProjectedAttribute::new(attno, (attno - 1) as usize)
-                        })
-                        .collect(),
-                );
-                PreparedRowScan::projected(
+                PreparedRowScan::projected_relation(
                     snapshot,
-                    projection,
+                    attnos,
                     predicates,
                     &relation.layout,
-                    relation.layout.attr_types(),
                 )?
             }
         };

@@ -11,7 +11,7 @@ use crate::foreign_table::{
 use crate::managed_table::ManagedTableReadView;
 use crate::scan::columnar::BoundScan as BoundQueryScan;
 use crate::scan::parallel::TaskGroupingConfig;
-use crate::schema::relation::RelationLayout;
+use crate::schema::RelationLayout;
 
 use super::error::Error;
 use super::projection::PlanProjection;
