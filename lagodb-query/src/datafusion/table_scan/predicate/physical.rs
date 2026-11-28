@@ -160,10 +160,6 @@ impl<'a> PhysicalPredicateAdapter<'a> {
         let function = expression.downcast_ref::<ScalarFunctionExpr>()?;
         if function.fun().inner().is::<IsNanFunc>() {
             self.nan_test(function.args(), true)
-        } else if function.fun().inner().is::<StartsWithFunc>() {
-            Some(RuntimePruningPredicate::Not(Box::new(
-                self.starts_with(function.args())?,
-            )))
         } else {
             None
         }

@@ -6,9 +6,8 @@ use std::slice;
 use std::str;
 
 use apache_avro::Schema;
-use lagodb_core::datum::{
-    PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF, PackedDetoastedVarlena,
-};
+use lagodb_arrow::{pg_epoch_days_to_unix_days, pg_epoch_micros_to_unix_micros};
+use lagodb_core::datum::PackedDetoastedVarlena;
 use pgrx::datum::USECS_PER_DAY;
 use pgrx::pg_sys;
 
@@ -203,12 +202,7 @@ impl AvroValueKind {
                 output.write_bytes(value.as_bytes());
             }
             Self::Date => {
-                let pg_days = datum.value() as i32;
-                if pg_days == i32::MIN || pg_days == i32::MAX {
-                    return Err(self.value_out_of_range());
-                }
-                let unix_days = pg_days
-                    .checked_add(PG_EPOCH_DAYS_DIFF)
+                let unix_days = pg_epoch_days_to_unix_days(datum.value() as i32)
                     .ok_or_else(|| self.value_out_of_range())?;
                 output.write_int(unix_days);
             }
@@ -220,23 +214,15 @@ impl AvroValueKind {
                 output.write_long(micros);
             }
             Self::TimestampMicros => {
-                let pg_micros = datum.value() as i64;
-                if pg_micros == i64::MIN || pg_micros == i64::MAX {
-                    return Err(self.value_out_of_range());
-                }
-                let unix_micros = pg_micros
-                    .checked_add(PG_EPOCH_USECS_DIFF)
-                    .ok_or_else(|| self.value_out_of_range())?;
+                let unix_micros =
+                    pg_epoch_micros_to_unix_micros(datum.value() as i64)
+                        .ok_or_else(|| self.value_out_of_range())?;
                 output.write_long(unix_micros);
             }
             Self::LocalTimestampMicros => {
-                let pg_micros = datum.value() as i64;
-                if pg_micros == i64::MIN || pg_micros == i64::MAX {
-                    return Err(self.value_out_of_range());
-                }
-                let unix_micros = pg_micros
-                    .checked_add(PG_EPOCH_USECS_DIFF)
-                    .ok_or_else(|| self.value_out_of_range())?;
+                let unix_micros =
+                    pg_epoch_micros_to_unix_micros(datum.value() as i64)
+                        .ok_or_else(|| self.value_out_of_range())?;
                 output.write_long(unix_micros);
             }
             Self::Decimal(codec) => {

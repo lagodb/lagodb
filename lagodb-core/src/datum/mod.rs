@@ -37,7 +37,7 @@ pub use jsonb::{
 pub use numeric::{
     Decimal128ComparisonValue, Decimal128NumericCodec, DecimalCodecError,
     NumericRounding, NumericScaledDomain, NumericScaledValue, NumericTypmod,
-    PostgresNumericCodec, numeric_precision_scale, numeric_typmod,
+    numeric_precision_scale, numeric_typmod,
 };
 pub use pg_type::{PgCompositeField, PgType};
 pub use temporal::{PG_EPOCH_DAYS_DIFF, PG_EPOCH_USECS_DIFF};

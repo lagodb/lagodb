@@ -24,7 +24,7 @@ use lagodb_core::query_contract::OutputId;
 use pgrx::pg_sys;
 
 use super::decimal::{DecimalOperator, FixedDecimalType};
-use super::semantics::{ComparisonKind, Decimal128Semantics};
+use super::semantics::{ComparisonKind, Decimal128Semantics, NumericRepr};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaseWhen {
@@ -61,7 +61,7 @@ pub enum ExecutionExpr {
         value: RuntimeValueId,
         decimal_type: FixedDecimalType,
     },
-    /// PostgreSQL NUMERIC `+`, `-` or `*` over fixed decimal operands. The
+    /// PostgreSQL NUMERIC `+`, `-`, `*` or `/` over fixed decimal operands. The
     /// PostgreSQL value type is unconstrained `numeric`; `result_type` is the
     /// proven execution type.
     DecimalArithmetic {
@@ -182,6 +182,109 @@ impl ExecutionExpr {
         }
     }
 
+    /// The engine representation of this value as an operand of a built-in
+    /// NUMERIC operator. A fixed decimal value types itself
+    /// ([`Self::decimal_type`]); an output takes its engine type from
+    /// `leaf_type`, its execution type, and a NUMERIC runtime value is
+    /// [`NumericRepr::Float64Value`]. HAVING Float64 arithmetic and
+    /// conditionals derive theirs from their operands
+    /// ([`Self::common_float`]); any other value takes its execution type.
+    pub fn numeric_repr(
+        &self,
+        leaf_type: impl Fn(&Self) -> Option<ExprType>,
+    ) -> Option<NumericRepr> {
+        self.numeric_repr_with(&leaf_type)
+    }
+
+    fn numeric_repr_with(
+        &self,
+        leaf_type: &dyn Fn(&Self) -> Option<ExprType>,
+    ) -> Option<NumericRepr> {
+        if let Some(decimal) = self.decimal_type() {
+            return Some(NumericRepr::Decimal(decimal));
+        }
+        let execution_type = match self {
+            Self::Value(_) => {
+                let value_type = leaf_type(self)?;
+                if value_type.type_oid == pg_sys::NUMERICOID {
+                    return (value_type.typmod == -1)
+                        .then_some(NumericRepr::Float64Value);
+                }
+                value_type
+            }
+            Self::Output(_) => leaf_type(self)?,
+            Self::Function {
+                kind:
+                    ScalarFunctionKind::Add
+                    | ScalarFunctionKind::Subtract
+                    | ScalarFunctionKind::Multiply,
+                arguments,
+                result_type,
+                ..
+            } if result_type.type_oid == pg_sys::NUMERICOID => {
+                let [left, right] = &arguments[..] else {
+                    return None;
+                };
+                let reprs = [
+                    left.numeric_repr_with(leaf_type)?,
+                    right.numeric_repr_with(leaf_type)?,
+                ];
+                return reprs
+                    .contains(&NumericRepr::Float64)
+                    .then_some(NumericRepr::Float64);
+            }
+            Self::Function {
+                kind: ScalarFunctionKind::Coalesce,
+                arguments,
+                result_type,
+                ..
+            } if result_type.type_oid == pg_sys::NUMERICOID => {
+                return Self::common_float(arguments.iter(), leaf_type);
+            }
+            Self::Case {
+                when_then,
+                else_expr,
+                result_type,
+            } if result_type.type_oid == pg_sys::NUMERICOID => {
+                return Self::common_float(
+                    when_then
+                        .iter()
+                        .map(CaseWhen::then)
+                        .chain(else_expr.as_deref()),
+                    leaf_type,
+                );
+            }
+            _ => self.execution_type_hint()?,
+        };
+        match NumericRepr::for_execution_type(execution_type)? {
+            NumericRepr::Decimal(_) => None,
+            repr => Some(repr),
+        }
+    }
+
+    /// The representation of conditional branches without a common fixed
+    /// type: Float64 when every branch is Float64 or a runtime value and one
+    /// is Float64, a runtime value when all are. A branch in another
+    /// representation has no common one, so the conditional declines.
+    fn common_float<'a>(
+        branches: impl Iterator<Item = &'a ExecutionExpr>,
+        leaf_type: &dyn Fn(&Self) -> Option<ExprType>,
+    ) -> Option<NumericRepr> {
+        let mut common = None;
+        for branch in branches {
+            let repr = branch.numeric_repr_with(leaf_type)?;
+            if !matches!(repr, NumericRepr::Float64 | NumericRepr::Float64Value) {
+                return None;
+            }
+            common = Some(if common == Some(NumericRepr::Float64) {
+                NumericRepr::Float64
+            } else {
+                repr
+            });
+        }
+        common
+    }
+
     /// Common fixed type of conditional branches, all of which must have one.
     fn common_decimal<'a>(
         mut branches: impl Iterator<Item = &'a ExecutionExpr>,
@@ -192,9 +295,16 @@ impl ExecutionExpr {
         })
     }
 
-    /// The type that selects an aggregate's input semantics: the fixed
-    /// decimal execution type for NUMERIC, otherwise the PostgreSQL type.
+    /// The engine type of this value: the fixed decimal execution type for
+    /// NUMERIC, a native function's own result type
+    /// ([`ScalarFunctionKind::execution_result_type`]), otherwise the
+    /// PostgreSQL type.
     pub fn execution_type_hint(&self) -> Option<ExprType> {
+        if let Self::Function { kind, .. } = self
+            && let Some(execution_type) = kind.execution_result_type()
+        {
+            return Some(execution_type);
+        }
         self.decimal_type()
             .map(FixedDecimalType::value_type)
             .or_else(|| self.result_type_hint())

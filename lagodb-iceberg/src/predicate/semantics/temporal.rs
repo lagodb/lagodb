@@ -25,9 +25,6 @@ impl TimestampComparison {
         precision: TimestampPrecision,
         with_timezone: bool,
     ) -> Option<Self> {
-        if matches!(pg_micros, i64::MIN | i64::MAX) {
-            return None;
-        }
         Some(Self {
             unix_micros: pg_epoch_micros_to_unix_micros(pg_micros)?,
             precision,

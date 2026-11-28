@@ -50,14 +50,12 @@ impl ExecutionScalarRepr {
 
     /// Whether a non-NULL PG-epoch date has a finite Arrow Date32 value.
     pub fn supports_date_value(days: i32) -> bool {
-        !matches!(days, i32::MIN | i32::MAX)
-            && pg_epoch_days_to_unix_days(days).is_some()
+        pg_epoch_days_to_unix_days(days).is_some()
     }
 
     /// Whether a non-NULL PG-epoch timestamp has a finite Arrow microsecond value.
     pub fn supports_timestamp_value(micros: i64) -> bool {
-        !matches!(micros, i64::MIN | i64::MAX)
-            && pg_epoch_micros_to_unix_micros(micros).is_some()
+        pg_epoch_micros_to_unix_micros(micros).is_some()
     }
 
     /// Representation accepted at an ExecEvalExpr UDF input or result

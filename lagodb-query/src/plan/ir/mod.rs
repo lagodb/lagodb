@@ -31,7 +31,9 @@ pub use join::{
 pub use limit::{LimitEstimate, LimitNode};
 pub use ordering::SortDirection;
 pub use project::{ProjectExpr, ProjectNode};
-pub use semantics::{ComparisonKind, Decimal128Semantics, ScalarSemantics};
+pub use semantics::{
+    ComparisonKind, Decimal128Semantics, NumericRepr, ScalarSemantics,
+};
 pub use sort::{SortExpr, SortNode};
 
 use lagodb_core::expr::ColumnRef;

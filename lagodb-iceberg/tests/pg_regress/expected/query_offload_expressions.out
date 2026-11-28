@@ -74,6 +74,59 @@ WHERE (id >= 2 AND lower(value_text) = 'alpha')
     2
 (1 row)
 
+-- A pure-prefix LIKE becomes starts_with, which the scan prunes on; the NULL
+-- row fails it.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS rows
+FROM query_offload_expression_basic
+WHERE value_text LIKE 'al%';
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on query_offload_expression_basic
+               Access Method: iceberg
+               Filter: (value_text ~~ 'al%'::text)
+               Pushed Filter: (value_text ~~ 'al%'::text)
+(8 rows)
+
+SELECT count(*) AS rows
+FROM query_offload_expression_basic
+WHERE value_text LIKE 'al%';
+ rows 
+------
+    2
+(1 row)
+
+-- A pure-prefix NOT LIKE runs as one negated LIKE in the engine and does not
+-- prune the scan; the NULL row fails it.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS rows
+FROM query_offload_expression_basic
+WHERE value_text NOT LIKE 'al%';
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: COUNT(*)
+         ->  Table Scan on query_offload_expression_basic
+               Access Method: iceberg
+               Filter: (value_text !~~ 'al%'::text)
+(7 rows)
+
+SELECT count(*) AS rows
+FROM query_offload_expression_basic
+WHERE value_text NOT LIKE 'al%';
+ rows 
+------
+    2
+(1 row)
+
 -- A volatile subtree blocks pruning of the complete OR clause. Forced serial
 -- query offload still evaluates the complete expression through PostgreSQL.
 SET lagodb.query_offload_mode = 'force';
@@ -166,7 +219,7 @@ WHERE lower(value_text) = 'alpha';
 -- Representative native and PostgreSQL-fallback expression shapes.
 -- ============================================================================
 -- This compact matrix crosses BooleanTest, searched CASE, COALESCE, NULLIF,
--- native scalar-array comparison, text and numeric scalar functions.
+-- native scalar-array comparison, LIKE, text and numeric scalar functions.
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
@@ -179,16 +232,18 @@ SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
            WHERE id = ANY (ARRAY[1, 3, NULL]::integer[])
        ) AS any_rows,
        count(*) FILTER (WHERE starts_with(value_text, 'a')) AS prefix_rows,
+       count(*) FILTER (WHERE value_text LIKE '%ph%') AS like_rows,
+       count(*) FILTER (WHERE value_text NOT LIKE '_eta') AS not_like_rows,
        count(replace(value_text, 'a', 'A')) AS replaced_rows,
        sum(abs(value_i8)) AS abs_i8_sum,
        sum(abs(value_f8)) AS abs_f8_sum
 FROM query_offload_expression_basic;
-                                                                                                                                                                                                                                                            QUERY PLAN                                                                                                                                                                                                                                                            
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                      QUERY PLAN                                                                                                                                                                                                                                                                                                                      
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (LagoDB Query Offload)
    Engine: DataFusion
    ->  Aggregate
-         Aggregates: COUNT(*) FILTER (WHERE (value_bool IS NOT FALSE)), COUNT(*) FILTER (WHERE CASE WHEN (id <= runtime value) THEN runtime value ELSE runtime value END), SUM(coalesce(value_i4, runtime value)), COUNT(*) FILTER (WHERE (nullif(id, runtime value) IS NOT NULL)), COUNT(*) FILTER (WHERE id IN (runtime value, runtime value, runtime value)), COUNT(*) FILTER (WHERE starts_with(value_text, runtime value)), COUNT(replace(value_text, runtime value, runtime value)), SUM(abs(value_i8)), SUM(abs(value_f8))
+         Aggregates: COUNT(*) FILTER (WHERE (value_bool IS NOT FALSE)), COUNT(*) FILTER (WHERE CASE WHEN (id <= runtime value) THEN runtime value ELSE runtime value END), SUM(coalesce(value_i4, runtime value)), COUNT(*) FILTER (WHERE (nullif(id, runtime value) IS NOT NULL)), COUNT(*) FILTER (WHERE id IN (runtime value, runtime value, runtime value)), COUNT(*) FILTER (WHERE starts_with(value_text, runtime value)), COUNT(*) FILTER (WHERE (value_text ~~ runtime value)), COUNT(*) FILTER (WHERE NOT ((value_text ~~ runtime value))), COUNT(replace(value_text, runtime value, runtime value)), SUM(abs(value_i8)), SUM(abs(value_f8))
          ->  Table Scan on query_offload_expression_basic
                Access Method: iceberg
 (6 rows)
@@ -203,13 +258,15 @@ SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
            WHERE id = ANY (ARRAY[1, 3, NULL]::integer[])
        ) AS any_rows,
        count(*) FILTER (WHERE starts_with(value_text, 'a')) AS prefix_rows,
+       count(*) FILTER (WHERE value_text LIKE '%ph%') AS like_rows,
+       count(*) FILTER (WHERE value_text NOT LIKE '_eta') AS not_like_rows,
        count(replace(value_text, 'a', 'A')) AS replaced_rows,
        sum(abs(value_i8)) AS abs_i8_sum,
        sum(abs(value_f8)) AS abs_f8_sum
 FROM query_offload_expression_basic;
- boolean_test_rows | searched_case_rows | coalesce_sum | nullif_rows | any_rows | prefix_rows | replaced_rows | abs_i8_sum | abs_f8_sum 
--------------------+--------------------+--------------+-------------+----------+-------------+---------------+------------+------------
-                 3 |                  3 |           40 |           4 |        2 |           2 |             4 |        800 |         80
+ boolean_test_rows | searched_case_rows | coalesce_sum | nullif_rows | any_rows | prefix_rows | like_rows | not_like_rows | replaced_rows | abs_i8_sum | abs_f8_sum 
+-------------------+--------------------+--------------+-------------+----------+-------------+-----------+---------------+---------------+------------+------------
+                 3 |                  3 |           40 |           4 |        2 |           2 |         2 |             3 |             4 |        800 |         80
 (1 row)
 
 SET lagodb.query_offload_mode = 'off';
@@ -223,13 +280,15 @@ SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
            WHERE id = ANY (ARRAY[1, 3, NULL]::integer[])
        ) AS any_rows,
        count(*) FILTER (WHERE starts_with(value_text, 'a')) AS prefix_rows,
+       count(*) FILTER (WHERE value_text LIKE '%ph%') AS like_rows,
+       count(*) FILTER (WHERE value_text NOT LIKE '_eta') AS not_like_rows,
        count(replace(value_text, 'a', 'A')) AS replaced_rows,
        sum(abs(value_i8)) AS abs_i8_sum,
        sum(abs(value_f8)) AS abs_f8_sum
 FROM query_offload_expression_basic;
- boolean_test_rows | searched_case_rows | coalesce_sum | nullif_rows | any_rows | prefix_rows | replaced_rows | abs_i8_sum | abs_f8_sum 
--------------------+--------------------+--------------+-------------+----------+-------------+---------------+------------+------------
-                 3 |                  3 |           40 |           4 |        2 |           2 |             4 |        800 |         80
+ boolean_test_rows | searched_case_rows | coalesce_sum | nullif_rows | any_rows | prefix_rows | like_rows | not_like_rows | replaced_rows | abs_i8_sum | abs_f8_sum 
+-------------------+--------------------+--------------+-------------+----------+-------------+-----------+---------------+---------------+------------+------------
+                 3 |                  3 |           40 |           4 |        2 |           2 |         2 |             3 |             4 |        800 |         80
 (1 row)
 
 -- `> ANY` and simple CASE are complete PostgreSQL fallback expressions.
@@ -601,16 +660,16 @@ CREATE TABLE query_offload_expression_numeric (
     price numeric(15, 2),
     discount numeric(15, 2),
     tax numeric(15, 2),
-    wide numeric(38, 0)
+    wide numeric(20, 0)
 ) USING iceberg;
 INSERT INTO query_offload_expression_numeric VALUES
-    (1, 2, 1234.56, 0.05, 0.08, 1e37),
+    (1, 2, 1234.56, 0.05, 0.08, 1e19),
     (2, 3, 99.99, 0.10, 0.00, NULL),
     (3, NULL, NULL, NULL, NULL, NULL),
     (4, 1, -10.00, 0.00, 0.04, NULL);
--- +, - and * keep PostgreSQL's result scales. The three-factor product has
--- 47 digits and runs as Decimal256; CASE and COALESCE take the common type of
--- their branches.
+-- +, - and * keep PostgreSQL's result scales. The three-factor product's
+-- type is capped at 38 digits as in DataFusion; CASE and COALESCE take the
+-- common type of their branches.
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT sum(price * (1 - discount)) AS revenue,
@@ -640,14 +699,49 @@ FROM query_offload_expression_numeric;
  1252.8230 | 1346.249560 |        1330.55 |     1334.55
 (1 row)
 
--- A product that may exceed 76 digits stays in PostgreSQL.
-SELECT sum(wide * wide * wide) AS cubed
+-- Products compute in 128-bit integers under a type capped at 38 digits:
+-- 10^38 has 39 digits and stays exact, while 10^57 raises instead of
+-- wrapping.
+SELECT sum(wide * wide) AS squared
 FROM query_offload_expression_numeric;
-                                                      cubed                                                       
-------------------------------------------------------------------------------------------------------------------
- 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+                 squared                 
+-----------------------------------------
+ 100000000000000000000000000000000000000
 (1 row)
 
+SELECT sum(wide * wide * wide) AS cubed
+FROM query_offload_expression_numeric;
+ERROR:  value overflows numeric format
+-- Division keeps DataFusion's type, the dividend's scale plus 4, and
+-- truncates toward zero where PostgreSQL rounds to at least 16 significant
+-- digits; comparisons read the truncated quotient. Division by zero raises.
+EXPLAIN (COSTS OFF)
+SELECT sum(price / qty) AS unit_price,
+       sum(discount / 3) AS truncated,
+       count(*) FILTER (WHERE price / qty > 50) AS large_units
+FROM query_offload_expression_numeric;
+                                                                                             QUERY PLAN                                                                                              
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (LagoDB Query Offload)
+   Engine: DataFusion
+   ->  Aggregate
+         Aggregates: SUM((price / (qty)::decimal(10, 0))), SUM((discount / runtime value::decimal(1, 0))), COUNT(*) FILTER (WHERE ((price / (qty)::decimal(10, 0)) > runtime value::decimal(19, 6)))
+         ->  Table Scan on query_offload_expression_numeric
+               Access Method: iceberg
+(6 rows)
+
+SELECT sum(price / qty) AS unit_price,
+       sum(discount / 3) AS truncated,
+       count(*) FILTER (WHERE price / qty > 50) AS large_units
+FROM query_offload_expression_numeric;
+ unit_price | truncated | large_units 
+------------+-----------+-------------
+ 640.610000 |  0.049999 |           1
+(1 row)
+
+SELECT sum(price / (qty - qty)) AS divide_by_zero
+FROM query_offload_expression_numeric;
+ERROR:  division by zero
 -- Comparisons run in the engine: a constant is bound exactly in the other
 -- operand's fixed type, and operands of two fixed types compare in their
 -- lossless common type.

@@ -4,7 +4,6 @@
 use lagodb_arrow::ArrowConversionError;
 use lagodb_core::datum::{DatumConversionError, DecimalCodecError};
 use lagodb_core::diag::SqlStateError;
-use pgrx::datum::datetime_support::DateTimeConversionError;
 use pgrx::datum::numeric_support::error::Error as PgNumericError;
 use pgrx::prelude::PgSqlErrorCode;
 
@@ -67,11 +66,12 @@ fn numeric_error_is_data_exception() {
 }
 
 #[test]
-fn datetime_conversion_error_is_data_exception() {
-    let err = ArrowConversionError::DatetimeConversionError(
-        DateTimeConversionError::FieldOverflow,
+fn datetime_value_out_of_range_is_datetime_field_overflow() {
+    let err = ArrowConversionError::DatetimeValueOutOfRange("x".into());
+    assert_eq!(
+        err.sql_error_code(),
+        PgSqlErrorCode::ERRCODE_DATETIME_FIELD_OVERFLOW
     );
-    assert_eq!(err.sql_error_code(), PgSqlErrorCode::ERRCODE_DATA_EXCEPTION);
 }
 
 #[test]
@@ -128,8 +128,10 @@ fn every_conv_error_variant_has_a_classification() {
             ArrowConversionError::ValueOutOfRange(_) => {
                 PgSqlErrorCode::ERRCODE_DATA_EXCEPTION
             }
+            ArrowConversionError::DatetimeValueOutOfRange(_) => {
+                PgSqlErrorCode::ERRCODE_DATETIME_FIELD_OVERFLOW
+            }
             ArrowConversionError::NumericError(_)
-            | ArrowConversionError::DatetimeConversionError(_)
             | ArrowConversionError::UuidConversionError(_) => {
                 PgSqlErrorCode::ERRCODE_DATA_EXCEPTION
             }

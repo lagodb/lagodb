@@ -108,13 +108,9 @@ impl PlannedValueType {
             )),
             Self::Date => {
                 let days = unsafe { scalar_from_datum::<i32>(datum) };
-                if matches!(days, i32::MIN | i32::MAX) {
-                    None
-                } else {
-                    pg_epoch_days_to_unix_days(days)
-                        .map(Datum::date)
-                        .map(DecodedValue::Datum)
-                }
+                pg_epoch_days_to_unix_days(days)
+                    .map(Datum::date)
+                    .map(DecodedValue::Datum)
             }
             Self::Timestamp(precision) | Self::Timestamptz(precision) => {
                 let micros = unsafe { scalar_from_datum::<i64>(datum) };

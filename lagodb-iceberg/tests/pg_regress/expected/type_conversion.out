@@ -217,6 +217,21 @@ FROM iceberg_numeric_codec_extreme;
 (1 row)
 
 DROP TABLE iceberg_numeric_codec_extreme;
+-- 38 digits whose integer and fractional parts both end in a partial NBASE
+-- group: 10 integer groups and 1 fractional group.
+CREATE TABLE iceberg_numeric_codec_groups (
+    n numeric(38, 1)
+) USING iceberg;
+INSERT INTO iceberg_numeric_codec_groups VALUES
+    (-9999999999999999999999999999999999999.9);
+SELECT n::text = '-9999999999999999999999999999999999999.9' AS round_trip_ok
+FROM iceberg_numeric_codec_groups;
+ round_trip_ok 
+---------------
+ t
+(1 row)
+
+DROP TABLE iceberg_numeric_codec_groups;
 -- ============================================================================
 -- 4. Numeric Precision > 38 Uses Double
 -- ============================================================================
@@ -417,6 +432,17 @@ ORDER BY label;
 (6 rows)
 
 DROP TABLE iceberg_ts_round_trip;
+-- PostgreSQL's infinite dates and timestamps have no Arrow value. -infinity
+-- would otherwise be stored as a finite day or instant that other readers
+-- take for about 5.9 million or 290,000 years BC, so writes reject both.
+CREATE TABLE iceberg_infinity_write (d date, ts timestamp) USING iceberg;
+\set VERBOSITY terse
+INSERT INTO iceberg_infinity_write (d) VALUES ('-infinity');
+ERROR:  datetime value out of range: PostgreSQL date infinity has no Arrow date value
+INSERT INTO iceberg_infinity_write (ts) VALUES ('-infinity');
+ERROR:  datetime value out of range: PostgreSQL timestamp infinity has no Arrow timestamp value
+\set VERBOSITY default
+DROP TABLE iceberg_infinity_write;
 -- ============================================================================
 -- 8. Timestamptz Round Trip is Independent of Session Timezone
 -- ============================================================================
@@ -651,7 +677,7 @@ INSERT INTO storage_time_target SELECT * FROM storage_time_source;
 \set VERBOSITY terse
 INSERT INTO storage_time_target (id, entries)
 VALUES (5, ARRAY[ROW('24:00:00')::storage_time_record]);
-ERROR:  conversion value is out of range: PostgreSQL time 24:00:00 is outside the Arrow time range
+ERROR:  datetime value out of range: PostgreSQL time 24:00:00 is outside the Arrow time range
 \set VERBOSITY default
 SELECT coalesce(a.id, b.id) AS id,
        to_jsonb(a) IS NOT DISTINCT FROM to_jsonb(b) AS roundtrip

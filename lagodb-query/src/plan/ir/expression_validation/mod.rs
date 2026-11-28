@@ -13,7 +13,7 @@ use pgrx::pg_sys;
 
 use super::{
     CaseWhen, Decimal128Semantics, ExecutionExpr, ExecutionScalarRepr,
-    FixedDecimalType, QueryNode, QueryPlanError, RelationValueRef,
+    FixedDecimalType, NumericRepr, QueryNode, QueryPlanError, RelationValueRef,
     ScalarFunctionKind, ScalarSemantics,
 };
 
@@ -34,9 +34,10 @@ struct OutputFact {
 }
 
 impl OutputFact {
-    /// HAVING normally follows PostgreSQL's declared aggregate type. Decimal
-    /// MIN/MAX, SUM and AVG(numeric) are the exceptions: PostgreSQL erases
-    /// their typmod, while DataFusion emits a fixed decimal representation.
+    /// HAVING normally follows PostgreSQL's declared output type. NUMERIC
+    /// group keys and decimal MIN/MAX, SUM and AVG(numeric) are the
+    /// exceptions: PostgreSQL erases their typmod, while DataFusion emits a
+    /// fixed decimal representation.
     fn predicate_type(self) -> ExprType {
         if FixedDecimalType::for_type(self.execution_type).is_some() {
             self.execution_type
@@ -113,7 +114,7 @@ impl<'a> PlanExpressionValidator<'a> {
                     }
                     outputs[group.output().index()] = Some(OutputFact {
                         value_type: group.result_type(),
-                        execution_type: group.result_type(),
+                        execution_type: group.execution_type(),
                         predicate_readable: true,
                         nullable: true,
                     });
@@ -468,14 +469,20 @@ impl<'a> PlanExpressionValidator<'a> {
                 left: left_expression,
                 right: right_expression,
             } => {
-                let left = Self::comparison_type(
-                    left_expression,
-                    self.expression_type(left_expression, facts, domain)?,
-                );
-                let right = Self::comparison_type(
-                    right_expression,
-                    self.expression_type(right_expression, facts, domain)?,
-                );
+                let left = self.expression_type(left_expression, facts, domain)?;
+                let right = self.expression_type(right_expression, facts, domain)?;
+                // A built-in NUMERIC operator compares the operands' engine
+                // representations, which PostgreSQL's value types leave
+                // unbounded.
+                if domain.numeric_comparison(*operator).is_some() {
+                    self.numeric_repr(left_expression, facts)
+                        .zip(self.numeric_repr(right_expression, facts))
+                        .and_then(|(left, right)| {
+                            domain.numeric_repr_comparison(*operator, left, right)
+                        })
+                        .ok_or(QueryPlanError::UnsupportedPredicate)?;
+                    return Ok(Self::boolean_type());
+                }
                 if left.type_oid == pg_sys::BPCHAROID {
                     Self::validate_bpchar_comparison(
                         domain,
@@ -488,13 +495,6 @@ impl<'a> PlanExpressionValidator<'a> {
                 domain
                     .comparison(*operator, left, right)
                     .ok_or(QueryPlanError::UnsupportedPredicate)?;
-                if let Some((_, left, right)) =
-                    domain.decimal_comparison(*operator, left, right)
-                    && (left_expression.decimal_type() != Some(left)
-                        || right_expression.decimal_type() != Some(right))
-                {
-                    return Err(QueryPlanError::UnsupportedPredicate);
-                }
                 Ok(Self::boolean_type())
             }
             ExecutionExpr::IsNull(value) | ExecutionExpr::IsNotNull(value) => {
@@ -636,6 +636,20 @@ impl<'a> PlanExpressionValidator<'a> {
                     Self::validate_bpchar_in_list((value, value_type), list)?;
                     return Ok(Self::boolean_type());
                 }
+                // An integer NUMERIC value matches integers: int4 values bound
+                // from the NUMERIC list, or the integers under its casts.
+                let is_integer = |repr| matches!(repr, Some(NumericRepr::Integer(_)));
+                if value_type.type_oid == pg_sys::NUMERICOID
+                    && is_integer(self.numeric_repr(value, facts))
+                {
+                    for item in list {
+                        self.expression_type(item, facts, domain)?;
+                        if !is_integer(self.numeric_repr(item, facts)) {
+                            return Err(QueryPlanError::UnsupportedPredicate);
+                        }
+                    }
+                    return Ok(Self::boolean_type());
+                }
                 if !ScalarSemantics::Exact.supports_type(value_type) {
                     return Err(QueryPlanError::UnsupportedPredicate);
                 }
@@ -669,6 +683,23 @@ impl<'a> PlanExpressionValidator<'a> {
                 input_collation,
                 result_type,
             } => {
+                if matches!(
+                    kind,
+                    ScalarFunctionKind::Add
+                        | ScalarFunctionKind::Subtract
+                        | ScalarFunctionKind::Multiply
+                        | ScalarFunctionKind::Divide
+                ) && result_type.type_oid == pg_sys::NUMERICOID
+                {
+                    return self.validate_float_numeric_arithmetic(
+                        *kind,
+                        arguments,
+                        *input_collation,
+                        *result_type,
+                        facts,
+                        domain,
+                    );
+                }
                 if *kind == ScalarFunctionKind::Coalesce
                     && let Some(common) = expression.decimal_type()
                 {

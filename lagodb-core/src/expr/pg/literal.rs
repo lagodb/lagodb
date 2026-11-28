@@ -7,7 +7,9 @@ use pgrx::datum::Timestamp;
 use pgrx::{FromDatum, pg_sys};
 
 use super::{PgConst, PgExprRef};
-use crate::datum::ArrayDatumLayout;
+use crate::datum::{
+    ArrayDatumLayout, NumericRounding, NumericScaledDomain, NumericScaledValue,
+};
 
 impl<'a> PgConst<'a> {
     /// Return whether this is a non-NULL built-in floating-point NaN.
@@ -70,6 +72,50 @@ impl<'a> PgConst<'a> {
         unsafe { PgExprRef::from_raw(constant.cast()) }
     }
 
+    /// Materialize the int4 Const equal to this NUMERIC constant. Only a
+    /// finite integral value within int4's range has one: NULL, NaN, an
+    /// infinity, a fraction or a larger value does not.
+    ///
+    /// # Safety
+    ///
+    /// The Const and its Datum must remain live in the current PostgreSQL
+    /// memory context. The returned Const is allocated in that context.
+    pub unsafe fn exact_int4(self) -> Option<PgExprRef<'a>> {
+        let (type_oid, _, datum, is_null) = self.parts();
+        if type_oid != pg_sys::NUMERICOID || is_null {
+            return None;
+        }
+        // Ten integer digits hold every int4 value.
+        let domain = NumericScaledDomain::new(10, 0)?;
+        // SAFETY: a non-NULL NUMERIC Const owns a live datum.
+        let NumericScaledValue::Finite {
+            coefficient,
+            exact: true,
+        } = unsafe { domain.bind_datum(datum, NumericRounding::Floor) }.ok()?
+        else {
+            return None;
+        };
+        // A ten-digit coefficient fits the low eight bytes of its two's
+        // complement.
+        let value =
+            i32::try_from(i64::from_be_bytes(*coefficient.last_chunk()?)).ok()?;
+        // SAFETY: INT4 is a pass-by-value, four-byte Datum; makeConst
+        // allocates the node in the current memory context.
+        let constant = unsafe {
+            pg_sys::makeConst(
+                pg_sys::INT4OID,
+                -1,
+                pg_sys::InvalidOid,
+                4,
+                pg_sys::Datum::from(value),
+                false,
+                true,
+            )
+        };
+        // SAFETY: makeConst returned a live expression in that context.
+        Some(unsafe { PgExprRef::from_raw(constant.cast()) })
+    }
+
     /// Materialize the elements of a non-NULL array constant as scalar Consts
     /// in physical order across every dimension, as PostgreSQL's partition
     /// pruning expands a `ScalarArrayOpExpr` array (`partprune.c`). Each
@@ -117,6 +163,24 @@ impl<'a> PgConst<'a> {
             })
             .collect();
         Some(elements)
+    }
+
+    /// Whether PostgreSQL accepts this as a LIKE pattern: non-NULL text in
+    /// which every escape character has a following character. `MatchText`
+    /// rejects a pattern that ends with its escape character, which Arrow
+    /// reads as a literal backslash. An `ESCAPE` clause has already been
+    /// folded into this canonical backslash form (`like_escape`).
+    pub fn is_complete_like_pattern(self) -> bool {
+        let Some(pattern) = self.text_bytes() else {
+            return false;
+        };
+        let mut bytes = pattern.iter();
+        while let Some(byte) = bytes.next() {
+            if *byte == b'\\' && bytes.next().is_none() {
+                return false;
+            }
+        }
+        true
     }
 
     /// Parse PostgreSQL's canonical LIKE pattern and materialize the literal

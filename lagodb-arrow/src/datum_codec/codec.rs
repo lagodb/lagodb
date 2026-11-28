@@ -23,6 +23,7 @@ pub(super) enum DatumCodecKind {
     Standard(BoundColumnDatumCodec),
     PrevalidatedJsonText,
     NumericFromFloat64,
+    NumericFromInt32,
 }
 
 impl DatumCodec {
@@ -57,6 +58,14 @@ impl DatumCodec {
         }
     }
 
+    /// Bind a native Int32 function result, such as `extract(year ...)`'s, to
+    /// PostgreSQL NUMERIC.
+    pub const fn numeric_from_int32() -> Self {
+        Self {
+            kind: DatumCodecKind::NumericFromInt32,
+        }
+    }
+
     pub(super) fn validate_target_oid(
         self,
         target_oid: pg_sys::Oid,
@@ -64,7 +73,9 @@ impl DatumCodec {
         let valid = match self.kind {
             DatumCodecKind::Standard(target) => target.oid() == target_oid,
             DatumCodecKind::PrevalidatedJsonText => target_oid == pg_sys::JSONOID,
-            DatumCodecKind::NumericFromFloat64 => target_oid == pg_sys::NUMERICOID,
+            DatumCodecKind::NumericFromFloat64 | DatumCodecKind::NumericFromInt32 => {
+                target_oid == pg_sys::NUMERICOID
+            }
         };
         if valid {
             Ok(())
@@ -101,10 +112,20 @@ impl DatumCodec {
     pub(super) fn numeric_datum_from_float64(
         value: f64,
     ) -> ArrowConversionResult<pg_sys::Datum> {
-        AnyNumeric::try_from(value)?.into_datum().ok_or(
-            ArrowConversionError::InvariantViolated(
-                "float to NUMERIC conversion returned SQL NULL",
-            ),
-        )
+        Self::numeric_datum(AnyNumeric::try_from(value)?)
+    }
+
+    pub(super) fn numeric_datum_from_int32(
+        value: i32,
+    ) -> ArrowConversionResult<pg_sys::Datum> {
+        Self::numeric_datum(AnyNumeric::from(value))
+    }
+
+    fn numeric_datum(value: AnyNumeric) -> ArrowConversionResult<pg_sys::Datum> {
+        value
+            .into_datum()
+            .ok_or(ArrowConversionError::InvariantViolated(
+                "conversion to NUMERIC returned SQL NULL",
+            ))
     }
 }

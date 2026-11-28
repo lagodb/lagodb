@@ -155,10 +155,6 @@ impl<'a> LogicalPredicateAdapter<'a> {
         };
         if function.func.inner().is::<IsNanFunc>() {
             self.nan_test(&function.args, true)
-        } else if function.func.inner().is::<StartsWithFunc>() {
-            Some(RuntimePruningPredicate::Not(Box::new(
-                self.starts_with(&function.args)?,
-            )))
         } else {
             None
         }

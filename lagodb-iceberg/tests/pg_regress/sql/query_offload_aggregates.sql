@@ -248,6 +248,105 @@ FROM query_offload_aggregate_basic
 GROUP BY value_bool, value_date
 ORDER BY value_bool, value_date;
 
+-- extract(year from date) groups on the engine's integer year; the output
+-- converts it to NUMERIC.
+EXPLAIN (COSTS OFF)
+SELECT extract(year from value_date) AS year, sum(value_numeric) AS total
+FROM query_offload_aggregate_basic
+GROUP BY extract(year from value_date)
+ORDER BY year;
+
+SELECT extract(year from value_date) AS year, sum(value_numeric) AS total
+FROM query_offload_aggregate_basic
+GROUP BY extract(year from value_date)
+ORDER BY year;
+
+-- The year compares as an integer with NUMERIC constants bound as exact
+-- int4, in WHERE IN lists and HAVING: the NULL years fail the list, and
+-- HAVING removes 2023.
+EXPLAIN (COSTS OFF)
+SELECT extract(year from value_date) AS year, count(*) AS rows
+FROM query_offload_aggregate_basic
+WHERE extract(year from value_date) IN (2023, 2024)
+GROUP BY extract(year from value_date)
+HAVING extract(year from value_date) > 2023
+ORDER BY year;
+
+SELECT extract(year from value_date) AS year, count(*) AS rows
+FROM query_offload_aggregate_basic
+WHERE extract(year from value_date) IN (2023, 2024)
+GROUP BY extract(year from value_date)
+HAVING extract(year from value_date) > 2023
+ORDER BY year;
+
+-- Integers PostgreSQL casts to NUMERIC compare with the year as integers, an
+-- int4 and an int8 alike; a fixed decimal compares in the common decimal
+-- type. The list matches only the 2024 rows.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FILTER (WHERE extract(year from value_date) = group_i4 + 2022)
+           AS int4_years,
+       count(*) FILTER (WHERE extract(year from value_date) = group_i8 + 2014)
+           AS int8_years,
+       count(*) FILTER (WHERE extract(year from value_date) > value_numeric * 1000)
+           AS decimal_years,
+       count(*) FILTER (WHERE extract(year from value_date) IN (2024, 2025))
+           AS listed_years
+FROM query_offload_aggregate_basic;
+
+SELECT count(*) FILTER (WHERE extract(year from value_date) = group_i4 + 2022)
+           AS int4_years,
+       count(*) FILTER (WHERE extract(year from value_date) = group_i8 + 2014)
+           AS int8_years,
+       count(*) FILTER (WHERE extract(year from value_date) > value_numeric * 1000)
+           AS decimal_years,
+       count(*) FILTER (WHERE extract(year from value_date) IN (2024, 2025))
+           AS listed_years
+FROM query_offload_aggregate_basic;
+
+-- A generic plan keeps integer parameters, which compare the same way.
+SET plan_cache_mode = force_generic_plan;
+PREPARE query_offload_year_rows(integer, bigint) AS
+SELECT count(*) FILTER (WHERE extract(year from value_date) = $1) AS single,
+       count(*) FILTER (WHERE extract(year from value_date) IN ($1, $2)) AS listed
+FROM query_offload_aggregate_basic;
+EXPLAIN (COSTS OFF) EXECUTE query_offload_year_rows(2023, 2024);
+EXECUTE query_offload_year_rows(2023, 2024);
+DEALLOCATE query_offload_year_rows;
+RESET plan_cache_mode;
+
+-- An integer AVG is Float64 in the engine: HAVING compares it with a fixed
+-- decimal and computes + - * over it in float8.
+EXPLAIN (COSTS OFF)
+SELECT group_i4, avg(value_i4) AS average
+FROM query_offload_aggregate_basic
+GROUP BY group_i4
+HAVING avg(value_i4) > max(value_numeric)
+   AND avg(value_i4) - avg(value_numeric) > 10
+   AND avg(value_i4) * 2 > 10
+ORDER BY group_i4;
+
+SELECT group_i4, avg(value_i4) AS average
+FROM query_offload_aggregate_basic
+GROUP BY group_i4
+HAVING avg(value_i4) > max(value_numeric)
+   AND avg(value_i4) - avg(value_numeric) > 10
+   AND avg(value_i4) * 2 > 10
+ORDER BY group_i4;
+
+-- A COALESCE mixing the integer year with a NUMERIC constant has no engine
+-- representation, so HAVING does not compare it in float8, where the
+-- constant would round to 2024: no group matches.
+EXPLAIN (COSTS OFF)
+SELECT extract(year from value_date) AS year, count(*) AS rows
+FROM query_offload_aggregate_basic
+GROUP BY extract(year from value_date)
+HAVING coalesce(extract(year from value_date), 0) = 2024.0000000000000001;
+
+SELECT extract(year from value_date) AS year, count(*) AS rows
+FROM query_offload_aggregate_basic
+GROUP BY extract(year from value_date)
+HAVING coalesce(extract(year from value_date), 0) = 2024.0000000000000001;
+
 -- ============================================================================
 -- Integer aggregates, aggregate FILTER, and HAVING.
 -- Cast AVG results to a fixed scale so the accepted native-Float64 transition
@@ -719,7 +818,7 @@ ORDER BY f4 DESC;
 
 DROP TABLE query_offload_float_keys;
 
--- SUM(int8) accumulates as NUMERIC(38,0): two int8 maxima exceed int8, and
+-- SUM(int8) accumulates in 128-bit integers: two int8 maxima exceed int8, and
 -- HAVING compares the exact sum with an integral constant.
 CREATE TABLE query_offload_int8_sum (group_id integer, value bigint) USING iceberg;
 INSERT INTO query_offload_int8_sum VALUES
@@ -739,6 +838,18 @@ HAVING sum(value) > 9223372036854775807
 ORDER BY group_id;
 
 DROP TABLE query_offload_int8_sum;
+
+-- sum(numeric) over more than 18 digits accumulates in 128-bit integers and
+-- raises when the sum leaves them, where PostgreSQL returns 39 digits. The
+-- native avg keeps 4 more fractional digits, so a 38-digit average leaves
+-- its 38-digit result type and raises the same error.
+CREATE TABLE query_offload_wide_sum (value numeric(38, 0)) USING iceberg;
+INSERT INTO query_offload_wide_sum VALUES
+    (99999999999999999999999999999999999999),
+    (99999999999999999999999999999999999999);
+SELECT sum(value) AS total FROM query_offload_wide_sum;
+SELECT avg(value) AS average FROM query_offload_wide_sum;
+DROP TABLE query_offload_wide_sum;
 
 -- avg(numeric) keeps the input scale plus 4 digits and truncates: group 1
 -- averages to 1.666666, where PostgreSQL returns 1.6666666666666667, so the

@@ -219,8 +219,9 @@ ORDER BY l.key;
 
 -- A pushed numeric comparison is bound into each planned task, so every
 -- worker decodes its decimal literal. All 33 files still qualify and keep
--- at least two work groups. The 47-digit product is summed as Decimal256
--- across the partial aggregates.
+-- at least two work groups. The product's type is capped at 38 digits, so
+-- its sum runs as LagoDB's checked SUM, which every worker decodes from the
+-- physical codec for the partial aggregates.
 SET lagodb.query_offload_mode = 'force';
 SELECT ln FROM pg_temp.explain_analyze_text($$
 SELECT key, count(*), sum(amount * amount * amount) AS cubed

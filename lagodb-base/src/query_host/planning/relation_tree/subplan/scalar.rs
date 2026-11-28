@@ -16,9 +16,9 @@
 use std::ffi::c_int;
 use std::ptr;
 
-use lagodb_core::expr::{ColumnRef, PgComparisonOp};
+use lagodb_core::expr::{ColumnRef, ExprType, PgComparisonOp};
 use lagodb_query::plan::{
-    AggCall, ExecutionExpr, JoinKey, JoinType, RelationValueRef,
+    AggCall, ExecutionExpr, JoinKey, JoinType, OutputId, RelationValueRef,
 };
 use pgrx::pg_sys;
 
@@ -69,6 +69,13 @@ impl OutputCatalog for ScalarSubqueryCatalog {
         // exact node.
         ptr::eq(expression.cast::<pg_sys::SubPlan>(), self.subplan)
             .then_some(&self.value)
+    }
+
+    /// The value is compared in the exact domain, where a NUMERIC aggregate
+    /// output compares only as a fixed decimal, whose `DecimalOutput` carries
+    /// its type; an output of any other representation declines there.
+    fn output_execution_type(&self, _output: OutputId) -> Option<ExprType> {
+        None
     }
 }
 

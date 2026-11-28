@@ -241,6 +241,13 @@ impl QueryExpressionPlanner {
         if value_type.type_oid == pg_sys::BPCHAROID {
             return unsafe { self.lower_bpchar_in_list(membership, scope, domain) };
         }
+        // A NUMERIC value without a fixed decimal type matches in its own
+        // engine representation.
+        if value_type.type_oid == pg_sys::NUMERICOID
+            && FixedDecimalType::for_type(value_type).is_none()
+        {
+            return unsafe { self.lower_numeric_in_list(membership, scope, domain) };
+        }
         // Prove the operator over the value and the array's element type
         // before materializing any element.
         if !domain.supports_type(value_type)

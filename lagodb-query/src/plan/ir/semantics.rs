@@ -16,10 +16,11 @@ use super::FixedDecimalType;
 ///
 /// Provider pruning keeps its separate, smaller IR. Exact query execution may
 /// additionally use PostgreSQL boolean operators, deterministic byte equality,
-/// and PostgreSQL-recognized C-equivalent text comparisons; HAVING also admits
-/// the unbounded-typmod NUMERIC values produced by integer AVG aggregates.
-/// Float comparisons and grouping inherit DataFusion's NaN semantics, an
-/// accepted engine difference listed in docs/query-offload-semantics.md.
+/// and PostgreSQL-recognized C-equivalent text comparisons; HAVING also
+/// compares the NUMERIC values the engine keeps in Float64
+/// ([`NumericRepr::Float64`]). Float comparisons and grouping inherit
+/// DataFusion's NaN semantics, an accepted engine difference listed in
+/// docs/query-offload-semantics.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarSemantics {
     Integer,
@@ -27,17 +28,60 @@ pub enum ScalarSemantics {
     Having,
 }
 
+/// The engine representation of a PostgreSQL NUMERIC value. PostgreSQL gives
+/// most NUMERIC results no typmod, while the engine computes each as a fixed
+/// decimal, an integer or a Float64; a comparison is proven over these
+/// ([`ScalarSemantics::numeric_repr_comparison`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumericRepr {
+    /// Decimal128 in a fixed precision and scale: bounded columns, constants,
+    /// decimal arithmetic, integer casts, conditionals over these, and the
+    /// decimal aggregates.
+    Decimal(FixedDecimalType),
+    /// An exact Int16, Int32 or Int64 value with its lossless decimal image
+    /// ([`FixedDecimalType::for_integer`]): `extract(year ...)`
+    /// ([`ScalarFunctionKind::ExtractYear`](super::ScalarFunctionKind::ExtractYear)),
+    /// an int4 constant bound from a NUMERIC one, or the integer under
+    /// PostgreSQL's integer-to-NUMERIC cast.
+    Integer(FixedDecimalType),
+    /// An approximate Float64 result: integer AVG, variance and standard
+    /// deviation (FLOAT8 execution type), HAVING arithmetic over them, and
+    /// conditionals whose branches are these or runtime values.
+    Float64,
+    /// A NUMERIC runtime value, which the engine reads as Float64.
+    Float64Value,
+}
+
+impl NumericRepr {
+    /// The representation of an engine value of `execution_type`: a fixed
+    /// decimal, an integer, or FLOAT8. An unbounded NUMERIC execution type
+    /// names no engine representation, so it has none.
+    pub fn for_execution_type(execution_type: ExprType) -> Option<Self> {
+        if let Some(decimal) = FixedDecimalType::for_type(execution_type) {
+            return Some(Self::Decimal(decimal));
+        }
+        if execution_type.typmod != -1
+            || execution_type.collation != pg_sys::InvalidOid
+        {
+            return None;
+        }
+        match execution_type.type_oid {
+            pg_sys::FLOAT8OID => Some(Self::Float64),
+            integer => FixedDecimalType::for_integer(integer).map(Self::Integer),
+        }
+    }
+}
+
 impl ScalarSemantics {
     #[inline]
     pub fn supports_type(self, value_type: ExprType) -> bool {
+        // A NUMERIC value without a typmod has no type of its own; its
+        // comparisons are proven over its engine representation
+        // ([`Self::numeric_repr_comparison`]).
         if value_type.type_oid == pg_sys::NUMERICOID {
             return value_type.collation == pg_sys::InvalidOid
-                && if value_type.typmod == -1 {
-                    matches!(self, Self::Having)
-                } else {
-                    !matches!(self, Self::Integer)
-                        && Decimal128Semantics::for_type(value_type).is_some()
-                };
+                && !matches!(self, Self::Integer)
+                && Decimal128Semantics::for_type(value_type).is_some();
         }
         if value_type.typmod != -1
             && !matches!(
@@ -94,12 +138,10 @@ impl ScalarSemantics {
     /// Resolve a PostgreSQL NUMERIC comparison to the fixed decimal types of
     /// its left and right operands. Two bounded operands may differ; they
     /// compare in their lossless common type ([`FixedDecimalType::common`]),
-    /// which must exist. One unbounded-typmod operand is admitted only so the
-    /// planner can prove that it is a direct Const exactly encodable in the
-    /// bounded operand's representation, which both sides then share. A
-    /// bounded type wider than Decimal128 is an aggregate's execution type or
-    /// a decimal expression's; storage columns remain limited to Decimal128
-    /// by their own type support.
+    /// which must exist within Decimal128. One unbounded-typmod operand is
+    /// admitted only so the planner can prove that it is a direct Const
+    /// exactly encodable in the bounded operand's representation, which both
+    /// sides then share.
     pub fn decimal_comparison(
         self,
         operator: PgComparisonOp,
@@ -113,19 +155,51 @@ impl ScalarSemantics {
         {
             return None;
         }
-        let kind = self.numeric_comparison(operator)?;
         let (left, right) = match (
             FixedDecimalType::for_type(left),
             FixedDecimalType::for_type(right),
         ) {
-            (Some(left), Some(right)) => {
-                left.common(right)?;
-                (left, right)
-            }
+            (Some(left), Some(right)) => (left, right),
             (Some(decimal), None) | (None, Some(decimal)) => (decimal, decimal),
             (None, None) => return None,
         };
+        let kind = self.numeric_repr_comparison(
+            operator,
+            NumericRepr::Decimal(left),
+            NumericRepr::Decimal(right),
+        )?;
         Some((kind, left, right))
+    }
+
+    /// Resolve a built-in NUMERIC comparison between operands in the given
+    /// engine representations. Two fixed decimals compare in their lossless
+    /// common type, and two integers compare exactly in the wider integer;
+    /// an integer compared with a fixed decimal is first converted to its
+    /// decimal image, so it reaches here as a decimal. HAVING also compares in
+    /// Float64 where an operand is an approximate Float64 result: integer
+    /// AVG, variance and standard deviation are approximate in the engine, as
+    /// docs/query-offload-semantics.md lists. Without such an operand a
+    /// runtime value, which the engine reads as Float64, would make an exact
+    /// PostgreSQL comparison approximate, so it declines, as does any other
+    /// pair.
+    pub fn numeric_repr_comparison(
+        self,
+        operator: PgComparisonOp,
+        left: NumericRepr,
+        right: NumericRepr,
+    ) -> Option<ComparisonKind> {
+        let kind = self.numeric_comparison(operator)?;
+        let admitted = match (left, right) {
+            (NumericRepr::Decimal(left), NumericRepr::Decimal(right)) => {
+                left.common(right).is_some()
+            }
+            (NumericRepr::Integer(_), NumericRepr::Integer(_)) => true,
+            (NumericRepr::Float64, _) | (_, NumericRepr::Float64) => {
+                self == Self::Having
+            }
+            _ => false,
+        };
+        admitted.then_some(kind)
     }
 
     /// The comparison a built-in `numeric` operator performs in this domain.
@@ -171,8 +245,13 @@ impl ScalarSemantics {
         left: ExprType,
         right: ExprType,
     ) -> Option<ComparisonKind> {
-        if let Some((kind, ..)) = self.decimal_comparison(operator, left, right) {
-            return Some(kind);
+        // A built-in NUMERIC operator compares only in a representation both
+        // operands share; two fixed decimals without a Decimal128 common type
+        // have none.
+        if self.numeric_comparison(operator).is_some() {
+            return self
+                .decimal_comparison(operator, left, right)
+                .map(|(kind, ..)| kind);
         }
         if !self.supports_type(left) || !self.supports_type(right) {
             return None;
@@ -286,10 +365,14 @@ impl ScalarSemantics {
             .is_some()
     }
 
-    /// Prove PostgreSQL GROUP BY equality against the engine's native hash
-    /// grouping. The optional GROUP BY sort operator is deliberately not part
-    /// of this proof: it describes ordering, which hash grouping does not use.
-    pub fn supports_grouping(
+    /// Prove that a GROUP BY key of `value_type` uses PostgreSQL's built-in
+    /// hashable equality for that type. The lowered key's execution type must
+    /// separately be a supported hash key
+    /// ([`GroupExpr::try_new`](super::GroupExpr::try_new)): a NUMERIC key may
+    /// execute as a fixed decimal or an integer. The optional GROUP BY sort
+    /// operator is deliberately not part of this proof: it describes
+    /// ordering, which hash grouping does not use.
+    pub fn supports_group_equality(
         self,
         value_type: ExprType,
         equality_operator: pg_sys::Oid,
@@ -303,7 +386,7 @@ impl ScalarSemantics {
             value_type.type_oid
         };
         hashable
-            && self.supports_hash_group_key(value_type)
+            && self == Self::Exact
             && PgComparisonSignature::for_types(
                 equality_type,
                 equality_type,

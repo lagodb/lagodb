@@ -1,11 +1,12 @@
 //! Fixed decimal lowering of PostgreSQL NUMERIC expressions.
 //!
-//! A NUMERIC engine value always has a fixed Arrow decimal execution type
+//! A NUMERIC expression lowered here has a fixed Arrow decimal execution type
 //! proven from its operands ([`FixedDecimalType`]): a bounded column, a
-//! constant in its own digits and display scale, an integer cast, `+ - *`
+//! constant in its own digits and display scale, an integer cast, `+ - * /`
 //! over such values, and CASE/COALESCE over them in their common type. A
-//! NUMERIC leaf outside a decimal expression keeps the scalar path, where an
-//! integer AVG compares in Float64.
+//! NUMERIC value the engine computes in another representation, such as
+//! `extract(year ...)` or an integer AVG, compares on the representation
+//! path (`numeric.rs`).
 
 use lagodb_core::datum::{NumericRounding, NumericScaledDomain, NumericScaledValue};
 use lagodb_core::expr::pg::PgExprRef;
@@ -167,8 +168,8 @@ impl QueryExpressionPlanner {
             _ => return None,
         };
         let operand = operand.as_ptr();
-        // An integer AVG output keeps its Float64 comparison on the scalar
-        // path.
+        // An output in another representation, such as an integer AVG,
+        // compares on the representation path.
         if let Some(value) = scope
             .outputs()
             .and_then(|catalog| unsafe { catalog.resolve_output(operand) })
@@ -202,8 +203,8 @@ impl QueryExpressionPlanner {
     /// is then bound exactly in the other operand's type, and the two types
     /// compare in their lossless common type, or the comparison declines.
     /// `None` leaves every other comparison to the typmod-driven paths,
-    /// including one whose proof fails: an operand over an integer AVG
-    /// compares in Float64 there.
+    /// including one whose proof fails, such as `extract(year ...)`, which
+    /// compares in its integer representation there.
     pub(super) unsafe fn lower_decimal_expression_comparison(
         &mut self,
         operator: PgComparisonOp,

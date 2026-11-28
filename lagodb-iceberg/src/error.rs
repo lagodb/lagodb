@@ -60,16 +60,8 @@ pub enum IcebergError {
     #[error("column '{0}' data type is not supported")]
     UnsupportedColumnType(String),
 
-    #[error("datetime conversion error: {0}")]
-    DatetimeConversionError(
-        #[from] pgrx::datum::datetime_support::DateTimeConversionError,
-    ),
-
     #[error("uuid error: {0}")]
     UuidConversionError(#[from] uuid::Error),
-
-    #[error("numeric error: {0}")]
-    NumericError(#[from] pgrx::datum::numeric_support::error::Error),
 
     #[error("iceberg error: {0}")]
     IcebergLiteError(#[from] IcebergLiteError),
@@ -135,9 +127,9 @@ impl SqlStateError for IcebergError {
                 PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH
             }
 
-            IcebergError::DatetimeConversionError(_)
-            | IcebergError::UuidConversionError(_)
-            | IcebergError::NumericError(_) => PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
+            IcebergError::UuidConversionError(_) => {
+                PgSqlErrorCode::ERRCODE_DATA_EXCEPTION
+            }
 
             IcebergError::IcebergLiteError(error) => {
                 iceberg_lite_sql_error_code(error)

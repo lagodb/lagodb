@@ -4,6 +4,7 @@
 //! PostgreSQL function OID plus an explicit argument/result type contract. A
 //! name lookup is never an execution identity.
 
+use lagodb_core::expr::pg::{PgConst, PgExprRef};
 use lagodb_query::plan::ScalarFunctionKind;
 use pgrx::pg_sys;
 
@@ -52,6 +53,9 @@ impl NativeScalarCall {
         if function.funcretset || function.funcvariadic {
             return None;
         }
+        if u32::from(function.funcid) == pg_sys::F_EXTRACT_TEXT_DATE {
+            return unsafe { Self::classify_extract(expression) };
+        }
         unsafe {
             Self::classify_call(
                 expression.cast(),
@@ -61,6 +65,47 @@ impl NativeScalarCall {
                 function.inputcollid,
             )
         }
+    }
+
+    /// `extract(field from date)` whose constant field PostgreSQL decodes as
+    /// the year, as `extract_date` does: `downcase_truncate_identifier`, then
+    /// `DecodeUnits`, so every spelling of the unit is accepted. The field
+    /// selects the native function, so only the date argument is lowered;
+    /// its collation applies to no lowered argument.
+    unsafe fn classify_extract(expression: *mut pg_sys::FuncExpr) -> Option<Self> {
+        let [field, date] = unsafe { Self::arguments((*expression).args) }[..] else {
+            return None;
+        };
+        let field = PgConst::try_from_expr(
+            unsafe { PgExprRef::from_raw(field.cast()) }.without_relabels(),
+        )?
+        .text_bytes()?;
+        let lowered = unsafe {
+            pg_sys::downcase_truncate_identifier(
+                field.as_ptr().cast(),
+                i32::try_from(field.len()).ok()?,
+                false,
+            )
+        };
+        let mut unit = 0;
+        let field_type = unsafe { pg_sys::DecodeUnits(0, lowered, &mut unit) };
+        unsafe { pg_sys::pfree(lowered.cast()) };
+        if field_type != pg_sys::UNITS as i32 || unit != pg_sys::DTK_YEAR as i32 {
+            return None;
+        }
+        let kind = ScalarFunctionKind::ExtractYear;
+        let result_type = QueryExpressionPlanner::expr_type(expression.cast());
+        (unsafe { pg_sys::exprTypmod(expression.cast()) } == -1
+            && kind.supports_signature(
+                &[QueryExpressionPlanner::expr_type(date.cast())],
+                pg_sys::InvalidOid,
+                result_type,
+            ))
+        .then(|| Self {
+            kind,
+            arguments: vec![date],
+            input_collation: pg_sys::InvalidOid,
+        })
     }
 
     /// PostgreSQL evaluates an operator as a call of its function

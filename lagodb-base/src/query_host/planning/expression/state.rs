@@ -7,7 +7,7 @@ use lagodb_core::expr::{
     ColumnRef, ExprType, RuntimeValueExpr, RuntimeValueId, RuntimeValueSource,
     RuntimeValueSpec,
 };
-use lagodb_core::query_contract::ScanId;
+use lagodb_core::query_contract::{OutputId, ScanId};
 use lagodb_query::plan::ExecutionExpr;
 use pgrx::pg_sys;
 
@@ -154,6 +154,12 @@ pub(in crate::query_host::planning) trait OutputCatalog {
         &self,
         expression: *mut pg_sys::Expr,
     ) -> Option<&ExecutionExpr>;
+
+    /// The engine type of an output a resolved value reads, from which the
+    /// representation of a NUMERIC output follows
+    /// ([`NumericRepr`](lagodb_query::plan::NumericRepr)). `None` leaves such
+    /// an output without one, and its comparisons decline.
+    fn output_execution_type(&self, output: OutputId) -> Option<ExprType>;
 }
 
 #[derive(Clone, Copy)]

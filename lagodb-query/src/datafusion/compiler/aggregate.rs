@@ -13,7 +13,7 @@ use datafusion::logical_expr::expr_fn::cast;
 use datafusion::logical_expr::{Expr, ScalarUDF, lit};
 use pgrx::pg_sys;
 
-use crate::datafusion::{postgres_string_agg, real_sum};
+use crate::datafusion::{decimal_sum, postgres_string_agg, real_sum};
 use crate::plan::{
     AggCall, AggregateKind, ExecutionExpr, FixedDecimalType, SortDirection,
 };
@@ -53,36 +53,36 @@ impl DataFusionLogicalPlanCompiler<'_> {
             // docs/query-offload-semantics.md.
             (AggregateKind::Min, Some(argument)) => min(argument),
             (AggregateKind::Max, Some(argument)) => max(argument),
-            // Keep integer-input SUM/AVG on DataFusion's optimized native
-            // AggregateExec path. SUM(int8) is widened to its exact decimal
-            // first because native Int64 SUM wraps; integer AVG returns
-            // Float64, an accepted difference recorded in
-            // docs/query-offload-semantics.md.
+            // Keep integer-input SUM/AVG on DataFusion's native AggregateExec
+            // path. Native Int64 SUM wraps, so SUM(int8) accumulates in
+            // checked i128 like PostgreSQL's int128 state; its DISTINCT state
+            // holds at most 2^64 distinct int8 values, whose native Decimal128
+            // sum cannot wrap. SUM(int2/int4) wraps in Int64 like PostgreSQL's
+            // unchecked int4_sum. Integer AVG returns Float64, an accepted
+            // difference recorded in docs/query-offload-semantics.md.
             (AggregateKind::Sum, Some(argument)) => {
                 match aggregate.int8_sum_decimal() {
-                    Some(decimal) => sum(cast(
+                    Some(decimal) if aggregate.uses_distinct_state() => sum(cast(
                         argument,
                         DataType::Decimal128(decimal.precision(), decimal.scale()),
                     )),
+                    Some(_) => decimal_sum::sum(argument),
                     None => sum(argument),
                 }
             }
             (AggregateKind::Average, Some(argument)) => avg(argument),
-            // NUMERIC SUM/AVG also stay native: widening the input gives the
-            // planned result type and a wrapping accumulator that holds it.
-            (AggregateKind::NumericSum, Some(argument)) => sum(cast(
-                argument,
-                Self::native_decimal_input(
-                    aggregate,
-                    FixedDecimalType::native_sum_input,
-                )?,
-            )),
+            // NUMERIC SUM stays native while its wrapping accumulator holds
+            // every sum (FixedDecimalType::sum), and otherwise accumulates in
+            // checked i128. NUMERIC AVG is native; its sum cannot wrap.
+            (AggregateKind::NumericSum, Some(argument)) => {
+                match Self::decimal_argument(aggregate)?.native_sum_input() {
+                    Some(input) => sum(cast(argument, input)),
+                    None => decimal_sum::sum(argument),
+                }
+            }
             (AggregateKind::NumericAverage, Some(argument)) => avg(cast(
                 argument,
-                Self::native_decimal_input(
-                    aggregate,
-                    FixedDecimalType::native_average_input,
-                )?,
+                Self::decimal_argument(aggregate)?.native_average_input(),
             )),
             // Native variance/stddev coerces integer input to Float64 before
             // accumulation, then the output codec constructs the declared PG
@@ -118,15 +118,13 @@ impl DataFusionLogicalPlanCompiler<'_> {
         )))
     }
 
-    /// The widened operand type of a native NUMERIC aggregate.
-    fn native_decimal_input(
+    /// The fixed decimal type of a NUMERIC aggregate's argument.
+    fn decimal_argument(
         aggregate: &AggCall,
-        input: fn(FixedDecimalType) -> Option<DataType>,
-    ) -> Result<DataType, DataFusionPlanError> {
+    ) -> Result<FixedDecimalType, DataFusionPlanError> {
         aggregate
             .argument()
             .and_then(ExecutionExpr::decimal_type)
-            .and_then(input)
             .ok_or(DataFusionPlanError::UntypedDecimalOperand)
     }
 

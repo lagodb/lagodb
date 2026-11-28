@@ -4,6 +4,7 @@ mod bpchar;
 mod decimal;
 mod fallback;
 mod native;
+mod numeric;
 mod predicate;
 mod runtime_value;
 mod shape;
@@ -131,6 +132,17 @@ impl QueryExpressionPlanner {
             })
         {
             return Ok(decimal);
+        }
+        // HAVING arithmetic over an approximate integer AVG, variance or
+        // standard deviation result executes in Float64.
+        if scope.scalar_domain() == PredicateDomain::Having
+            && unsafe { pg_sys::exprType(expression.cast()) } == pg_sys::NUMERICOID
+            && unsafe { (*expression).type_ } == pg_sys::NodeTag::T_OpExpr
+            && let Ok(float) = self.attempt(|planner| unsafe {
+                planner.lower_float_numeric_arithmetic(expression.cast(), scope)
+            })
+        {
+            return Ok(float);
         }
         if let Ok(native) = self.attempt(|planner| unsafe {
             planner.lower_native_shape(expression, scope, scope.scalar_domain())

@@ -89,7 +89,8 @@ pub(super) enum DecodedValue {
     OutsideInteger(IntegerOutOfRange),
     /// A `bpchar` value wider than its column, which no stored value equals.
     OutsideWidth,
-    /// An infinite temporal value. Only Conservative plans carry temporal
+    /// A temporal value with no Unix-epoch value: an infinity, or one whose
+    /// epoch shift overflows. Only Conservative plans carry temporal
     /// comparisons, so binding widens such a leaf to TRUE.
     Unrepresentable,
 }
@@ -260,9 +261,7 @@ impl ValueType {
             Self::Date => {
                 let days =
                     unsafe { i32::from_datum(datum, false) }.ok_or_else(invalid)?;
-                Some(days)
-                    .filter(|days| !matches!(*days, i32::MIN | i32::MAX))
-                    .and_then(pg_epoch_days_to_unix_days)
+                pg_epoch_days_to_unix_days(days)
                     .map_or(DecodedValue::Unrepresentable, |days| {
                         DecodedValue::Value(BoundValue::Date32(days))
                     })
@@ -270,9 +269,7 @@ impl ValueType {
             Self::Timestamp => {
                 let micros =
                     unsafe { i64::from_datum(datum, false) }.ok_or_else(invalid)?;
-                Some(micros)
-                    .filter(|micros| !matches!(*micros, i64::MIN | i64::MAX))
-                    .and_then(pg_epoch_micros_to_unix_micros)
+                pg_epoch_micros_to_unix_micros(micros)
                     .map_or(DecodedValue::Unrepresentable, |micros| {
                         DecodedValue::Value(BoundValue::Timestamp(micros))
                     })

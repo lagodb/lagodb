@@ -56,7 +56,7 @@ impl<'a> AggregateBlockBuilder<'a> {
         hashable: bool,
     ) -> Option<OutputId> {
         let result_type = QueryExpressionPlanner::expr_type(expression);
-        if !ScalarSemantics::Exact.supports_grouping(
+        if !ScalarSemantics::Exact.supports_group_equality(
             result_type,
             equality_operator,
             hashable,
@@ -170,7 +170,7 @@ impl<'a> AggregateBlockBuilder<'a> {
             .groups
             .iter()
             .map(|(expression, group)| {
-                (*expression, group.output(), group.result_type())
+                (*expression, group.output(), group.execution_type())
             })
             .chain(self.aggregates.iter().map(|(expression, aggregate)| {
                 (
@@ -187,7 +187,12 @@ impl<'a> AggregateBlockBuilder<'a> {
                     },
                     None => ExecutionExpr::Output(output),
                 };
-                (expression, value)
+                CatalogEntry {
+                    expression,
+                    output,
+                    execution_type,
+                    value,
+                }
             })
             .collect();
         AggregateOutputCatalog { entries }
@@ -370,7 +375,14 @@ impl<'a> AggregateBlockBuilder<'a> {
 /// The grouping expressions and Aggrefs of one aggregate block, read as its
 /// outputs.
 struct AggregateOutputCatalog {
-    entries: Vec<(*mut pg_sys::Expr, ExecutionExpr)>,
+    entries: Vec<CatalogEntry>,
+}
+
+struct CatalogEntry {
+    expression: *mut pg_sys::Expr,
+    output: OutputId,
+    execution_type: ExprType,
+    value: ExecutionExpr,
 }
 
 impl OutputCatalog for AggregateOutputCatalog {
@@ -378,11 +390,21 @@ impl OutputCatalog for AggregateOutputCatalog {
         &self,
         expression: *mut pg_sys::Expr,
     ) -> Option<&ExecutionExpr> {
-        self.entries.iter().find_map(|(candidate, value)| {
+        self.entries.iter().find_map(|entry| {
             unsafe {
-                pg_sys::equal(candidate.cast::<c_void>(), expression.cast::<c_void>())
+                pg_sys::equal(
+                    entry.expression.cast::<c_void>(),
+                    expression.cast::<c_void>(),
+                )
             }
-            .then_some(value)
+            .then_some(&entry.value)
         })
+    }
+
+    fn output_execution_type(&self, output: OutputId) -> Option<ExprType> {
+        self.entries
+            .iter()
+            .find(|entry| entry.output == output)
+            .map(|entry| entry.execution_type)
     }
 }

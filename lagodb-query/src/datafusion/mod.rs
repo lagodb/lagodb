@@ -6,6 +6,7 @@ use datafusion::logical_expr::AggregateUDF;
 
 mod admission;
 mod compiler;
+mod decimal_sum;
 mod error;
 mod execution;
 mod integer_abs;
@@ -26,6 +27,7 @@ mod table_scan;
 
 pub(in crate::datafusion) fn udaf_by_name(name: &str) -> Option<Arc<AggregateUDF>> {
     match name {
+        decimal_sum::NAME => Some(decimal_sum::udaf()),
         postgres_string_agg::NAME => Some(postgres_string_agg::udaf()),
         _ => None,
     }

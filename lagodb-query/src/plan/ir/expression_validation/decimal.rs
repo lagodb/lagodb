@@ -4,14 +4,17 @@
 //! arithmetic leaves unconstrained (`numeric`), and the fixed Arrow decimal
 //! execution type proven from its operands. These checks re-derive the
 //! execution type from the expression structure, so a decoded plan cannot
-//! claim a type whose values its operands could overflow.
+//! claim a type whose values its operands could overflow. A comparison
+//! operand may instead execute as an integer or Float64 ([`NumericRepr`]),
+//! and HAVING `+ - *` over an approximate Float64 result computes in Float64.
 
 use lagodb_core::expr::{ExprType, RuntimeValueId, RuntimeValueSource};
 use pgrx::pg_sys;
 
 use super::{NodeFacts, PlanExpressionValidator};
 use crate::plan::ir::{
-    DecimalOperator, ExecutionExpr, FixedDecimalType, QueryPlanError, ScalarSemantics,
+    DecimalOperator, ExecutionExpr, FixedDecimalType, NumericRepr, QueryPlanError,
+    ScalarFunctionKind, ScalarSemantics,
 };
 
 impl PlanExpressionValidator<'_> {
@@ -43,13 +46,60 @@ impl PlanExpressionValidator<'_> {
         domain: ScalarSemantics,
     ) -> Result<ExprType, QueryPlanError> {
         let input_type = self.expression_type(value, facts, domain)?;
-        if input_type.typmod != -1
-            || input_type.collation != pg_sys::InvalidOid
-            || FixedDecimalType::for_integer(input_type.type_oid) != Some(result_type)
+        // An integral NUMERIC the engine holds as an integer, such as
+        // `extract(year ...)`, converts as that integer.
+        let image = if input_type.type_oid == pg_sys::NUMERICOID {
+            match self.numeric_repr(value, facts) {
+                Some(NumericRepr::Integer(image)) => Some(image),
+                _ => None,
+            }
+        } else if input_type.typmod == -1
+            && input_type.collation == pg_sys::InvalidOid
         {
+            FixedDecimalType::for_integer(input_type.type_oid)
+        } else {
+            None
+        };
+        if image != Some(result_type) {
             return Err(QueryPlanError::TupleLayoutTypeMismatch);
         }
         Ok(Self::numeric_type())
+    }
+
+    /// HAVING `+ - *` computed in Float64 because an operand is an
+    /// approximate Float64 result ([`NumericRepr::Float64`]); the other
+    /// operand may be in any NUMERIC representation and is converted to
+    /// Float64. Division declines: PostgreSQL raises on a zero divisor, where
+    /// Float64 returns an infinity or NaN.
+    pub(super) fn validate_float_numeric_arithmetic(
+        &self,
+        kind: ScalarFunctionKind,
+        arguments: &[ExecutionExpr],
+        input_collation: pg_sys::Oid,
+        result_type: ExprType,
+        facts: &NodeFacts,
+        domain: ScalarSemantics,
+    ) -> Result<ExprType, QueryPlanError> {
+        let [left, right] = arguments else {
+            return Err(QueryPlanError::UnsupportedPredicate);
+        };
+        if domain != ScalarSemantics::Having
+            || kind == ScalarFunctionKind::Divide
+            || input_collation != pg_sys::InvalidOid
+            || result_type != Self::numeric_type()
+        {
+            return Err(QueryPlanError::UnsupportedPredicate);
+        }
+        self.expression_type(left, facts, domain)?;
+        self.expression_type(right, facts, domain)?;
+        let reprs = [
+            self.numeric_repr(left, facts),
+            self.numeric_repr(right, facts),
+        ];
+        if reprs.contains(&None) || !reprs.contains(&Some(NumericRepr::Float64)) {
+            return Err(QueryPlanError::UnsupportedPredicate);
+        }
+        Ok(result_type)
     }
 
     /// The bound is a NUMERIC PARAM_EXEC; the planner admits only those an
@@ -121,16 +171,27 @@ impl PlanExpressionValidator<'_> {
             .map_or(value_type, FixedDecimalType::value_type))
     }
 
-    /// The type a comparison operand compares in: a NUMERIC expression's
-    /// fixed execution type, which PostgreSQL's value type leaves unbounded
-    /// for arithmetic, otherwise the value type.
-    pub(super) fn comparison_type(
-        expression: &ExecutionExpr,
-        value_type: ExprType,
-    ) -> ExprType {
-        expression
-            .decimal_type()
-            .map_or(value_type, FixedDecimalType::value_type)
+    /// The engine representation in which a NUMERIC comparison operand
+    /// compares ([`ExecutionExpr::numeric_repr`]). The operand's validation
+    /// has already resolved the output or runtime value it reads.
+    pub(super) fn numeric_repr(
+        &self,
+        operand: &ExecutionExpr,
+        facts: &NodeFacts,
+    ) -> Option<NumericRepr> {
+        operand.numeric_repr(|leaf| match *leaf {
+            ExecutionExpr::Output(output) => facts
+                .outputs
+                .get(output.index())
+                .and_then(|fact| *fact)
+                .map(|fact| fact.execution_type),
+            ExecutionExpr::Value(value) => self
+                .runtime_values
+                .values()
+                .get(value.index())
+                .map(|spec| spec.value_type),
+            _ => None,
+        })
     }
 
     fn validate_numeric(

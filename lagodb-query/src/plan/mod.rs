@@ -21,7 +21,7 @@ pub use ir::{
     BooleanTestKind, CaseWhen, ComparisonKind, Decimal128Semantics, DecimalOperator,
     DistinctExpr, DistinctNode, ExecutionExpr, ExecutionScalarRepr, FilterNode,
     FixedDecimalType, GroupExpr, JoinKey, JoinNode, JoinType, LimitEstimate,
-    LimitNode, MarkFilter, NullSensitiveAntiMode, PostgresEvalExpr,
+    LimitNode, MarkFilter, NullSensitiveAntiMode, NumericRepr, PostgresEvalExpr,
     PostgresEvalInput, PostgresExprVolatility, ProjectExpr, ProjectNode,
     QueryFragment, QueryNode, QueryPlanError, RelationValueRef, ScalarFunctionKind,
     ScalarFunctionNotation, ScalarSemantics, ScanNode, SortDirection, SortExpr,

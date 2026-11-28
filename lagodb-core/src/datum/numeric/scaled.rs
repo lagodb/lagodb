@@ -2,8 +2,8 @@
 //!
 //! This is the PostgreSQL side of a fixed-width decimal engine value: the
 //! coefficient is exchanged as a signed big-endian 256-bit integer, so the
-//! core layer stays independent of Arrow while one codec serves both 128-bit
-//! and 256-bit engine representations.
+//! core layer stays independent of Arrow and a domain may exceed the engine's
+//! 128-bit coefficients, as the bound of a comparison over them does.
 
 use pgrx::{pg_sys, varlena_to_byte_slice};
 

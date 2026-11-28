@@ -1,14 +1,13 @@
 //! Fixed decimal expressions lowered with explicit Arrow types.
 //!
-//! Planning proved one Arrow decimal type for every NUMERIC engine value.
-//! Each operand is cast to its type in the result's width, so DataFusion's
-//! implicit decimal coercion never selects another width or scale, and each
-//! arithmetic result is fixed to its planned type: DataFusion's simplifier
-//! replaces a non-NULL `A * 0` with the bare zero literal and its narrower
-//! type. A cast to the type the expression already has is removed by physical
-//! planning.
+//! Planning proved one Decimal128 type for every NUMERIC engine value, equal
+//! to the type DataFusion derives for it. Each arithmetic result is still
+//! fixed to its planned type: DataFusion's simplifier replaces a non-NULL
+//! `A * 0` with the bare zero literal and its narrower type. A cast to the
+//! type the expression already has is removed by physical planning.
 
 use arrow_buffer::i256;
+use arrow_schema::DataType;
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::expr_fn::cast;
 use datafusion::logical_expr::{Expr, Operator, binary_expr};
@@ -51,12 +50,17 @@ impl DataFusionExpressionCompiler<'_> {
                 Ok(NumericScaledValue::Finite {
                     coefficient,
                     exact: true,
-                }) => Some(coefficient),
+                }) => Some(
+                    // A declared Decimal128 domain keeps coefficients in i128.
+                    i256::from_be_bytes(coefficient)
+                        .to_i128()
+                        .ok_or_else(&invalid)?,
+                ),
                 _ => return Err(invalid()),
             }
         };
         Ok(Expr::Literal(
-            Self::decimal_scalar(coefficient, decimal_type).ok_or_else(invalid)?,
+            Self::decimal_scalar(coefficient, decimal_type),
             None,
         ))
     }
@@ -68,12 +72,13 @@ impl DataFusionExpressionCompiler<'_> {
         right: &ExecutionExpr,
         result_type: FixedDecimalType,
     ) -> Result<Expr, DataFusionPlanError> {
-        let left = self.decimal_operand(left, result_type)?;
-        let right = self.decimal_operand(right, result_type)?;
+        let left = self.decimal_operand(left)?;
+        let right = self.decimal_operand(right)?;
         let operator = match operator {
             DecimalOperator::Add => Operator::Plus,
             DecimalOperator::Subtract => Operator::Minus,
             DecimalOperator::Multiply => Operator::Multiply,
+            DecimalOperator::Divide => Operator::Divide,
         };
         Ok(cast(
             binary_expr(left, operator, right),
@@ -108,33 +113,58 @@ impl DataFusionExpressionCompiler<'_> {
 
     /// Compile the operands of a comparison. Fixed decimal operands of two
     /// types compare in their lossless common type, so DataFusion's decimal
-    /// comparison coercion never chooses the width or scale.
+    /// comparison coercion never chooses the width or scale. A fixed decimal
+    /// compared with an operand of no fixed type compares in Float64:
+    /// validation admits that pair only in HAVING, against an approximate
+    /// Float64 result (`ScalarSemantics::numeric_repr_comparison`).
     pub(super) fn comparison_operands(
         &self,
         left: &ExecutionExpr,
         right: &ExecutionExpr,
     ) -> Result<(Expr, Expr), DataFusionPlanError> {
-        let (compiled_left, compiled_right) =
-            (self.compile(left)?, self.compile(right)?);
-        Ok(match (left.decimal_type(), right.decimal_type()) {
+        match (left.decimal_type(), right.decimal_type()) {
             (Some(left_type), Some(right_type)) if left_type != right_type => {
                 let common = left_type
                     .common(right_type)
-                    .expect("validated decimal comparison has a common type");
-                (
-                    cast(compiled_left, common.data_type()),
-                    cast(compiled_right, common.data_type()),
-                )
+                    .expect("validated decimal comparison has a common type")
+                    .data_type();
+                Ok((
+                    self.compile_cast(left, &common)?,
+                    self.compile_cast(right, &common)?,
+                ))
             }
-            _ => (compiled_left, compiled_right),
-        })
+            (Some(_), None) => Ok((
+                self.compile_cast(left, &DataType::Float64)?,
+                self.compile(right)?,
+            )),
+            (None, Some(_)) => Ok((
+                self.compile(left)?,
+                self.compile_cast(right, &DataType::Float64)?,
+            )),
+            _ => Ok((self.compile(left)?, self.compile(right)?)),
+        }
     }
 
-    /// Place an InitPlan's NUMERIC value in the operand's domain. A value
-    /// between two domain values is rounded in the direction that keeps the
-    /// ordering (`<` and `>=` up, `<=` and `>` down) and decides equality
-    /// outright; a value outside the domain decides the comparison for every
-    /// non-NULL operand.
+    /// Compile a fixed decimal value cast to `data_type`, a lossless wider
+    /// decimal or Float64. An integer in its decimal image is cast from the
+    /// integer itself, one cast as DataFusion's own coercion applies.
+    fn compile_cast(
+        &self,
+        value: &ExecutionExpr,
+        data_type: &DataType,
+    ) -> Result<Expr, DataFusionPlanError> {
+        let value = match value {
+            ExecutionExpr::IntegerToDecimal { value, .. } => &**value,
+            value => value,
+        };
+        Ok(cast(self.compile(value)?, data_type.clone()))
+    }
+
+    /// Place an InitPlan's NUMERIC value in the domain of the operand's values
+    /// ([`FixedDecimalType::value_domain`]). A value between two domain values
+    /// is rounded in the direction that keeps the ordering (`<` and `>=` up,
+    /// `<=` and `>` down) and decides equality outright; a value outside the
+    /// domain or i128 decides the comparison for every non-NULL operand.
     pub(super) fn decimal_bound_comparison(
         &self,
         kind: ComparisonKind,
@@ -155,12 +185,10 @@ impl DataFusionExpressionCompiler<'_> {
             return Err(invalid());
         }
         let literal = |coefficient| {
-            Self::decimal_scalar(coefficient, operand_type)
-                .map(|scalar| Expr::Literal(scalar, None))
-                .ok_or_else(&invalid)
+            Expr::Literal(Self::decimal_scalar(coefficient, operand_type), None)
         };
         if value.is_null() {
-            return Ok(Self::comparison(kind, operand, literal(None)?));
+            return Ok(Self::comparison(kind, operand, literal(None)));
         }
         let rounding = match kind {
             ComparisonKind::Less | ComparisonKind::GreaterEqual => {
@@ -173,37 +201,38 @@ impl DataFusionExpressionCompiler<'_> {
         };
         // SAFETY: RuntimeValueState evaluated this InitPlan parameter in the
         // current executor context and retains it for plan compilation.
-        let bound =
-            unsafe { operand_type.domain().bind_datum(value.datum(), rounding) }
-                .map_err(|_| invalid())?;
+        let bound = unsafe {
+            operand_type
+                .value_domain()
+                .bind_datum(value.datum(), rounding)
+        }
+        .map_err(|_| invalid())?;
         let matches = match bound {
-            NumericScaledValue::Finite { coefficient, exact }
-                if exact
-                    || !matches!(
-                        kind,
-                        ComparisonKind::Equal | ComparisonKind::NotEqual
-                    ) =>
-            {
-                return Ok(Self::comparison(
-                    kind,
-                    operand,
-                    literal(Some(coefficient))?,
-                ));
+            NumericScaledValue::Finite { coefficient, exact } => {
+                let coefficient = i256::from_be_bytes(coefficient);
+                match coefficient.to_i128() {
+                    Some(coefficient)
+                        if exact
+                            || !matches!(
+                                kind,
+                                ComparisonKind::Equal | ComparisonKind::NotEqual
+                            ) =>
+                    {
+                        return Ok(Self::comparison(
+                            kind,
+                            operand,
+                            literal(Some(coefficient)),
+                        ));
+                    }
+                    // No operand value equals a value between two domain values.
+                    Some(_) => kind == ComparisonKind::NotEqual,
+                    // A 39-digit coefficient beyond i128 lies outside every
+                    // operand value.
+                    None => Self::outside_matches(kind, !coefficient.is_negative()),
+                }
             }
-            // No operand value equals a value between two domain values.
-            NumericScaledValue::Finite { .. } => kind == ComparisonKind::NotEqual,
-            NumericScaledValue::Above => matches!(
-                kind,
-                ComparisonKind::NotEqual
-                    | ComparisonKind::Less
-                    | ComparisonKind::LessEqual
-            ),
-            NumericScaledValue::Below => matches!(
-                kind,
-                ComparisonKind::NotEqual
-                    | ComparisonKind::Greater
-                    | ComparisonKind::GreaterEqual
-            ),
+            NumericScaledValue::Above => Self::outside_matches(kind, true),
+            NumericScaledValue::Below => Self::outside_matches(kind, false),
         };
         // The same reflexive comparisons as StrictTrue/StrictFalse: a fixed
         // result for every non-NULL operand, UNKNOWN for NULL.
@@ -214,43 +243,46 @@ impl DataFusionExpressionCompiler<'_> {
         })
     }
 
-    /// Compile an operand in the Arrow width of the operation's result.
+    /// Whether every non-NULL operand satisfies `operand <kind> bound` for a
+    /// bound above (or below) every operand value.
+    fn outside_matches(kind: ComparisonKind, above: bool) -> bool {
+        if above {
+            matches!(
+                kind,
+                ComparisonKind::NotEqual
+                    | ComparisonKind::Less
+                    | ComparisonKind::LessEqual
+            )
+        } else {
+            matches!(
+                kind,
+                ComparisonKind::NotEqual
+                    | ComparisonKind::Greater
+                    | ComparisonKind::GreaterEqual
+            )
+        }
+    }
+
+    /// Compile an operand planning proved a fixed decimal.
     fn decimal_operand(
         &self,
         operand: &ExecutionExpr,
-        result_type: FixedDecimalType,
     ) -> Result<Expr, DataFusionPlanError> {
-        let operand_type = operand
+        operand
             .decimal_type()
             .ok_or(DataFusionPlanError::UntypedDecimalOperand)?;
-        let compiled = self.compile(operand)?;
-        Ok(
-            if operand_type.is_decimal128() == result_type.is_decimal128() {
-                compiled
-            } else {
-                cast(compiled, operand_type.data_type_in(result_type))
-            },
-        )
+        self.compile(operand)
     }
 
-    /// The scalar of a signed big-endian coefficient bound in `decimal_type`,
-    /// whose domain keeps a Decimal128 coefficient within i128.
     fn decimal_scalar(
-        coefficient: Option<[u8; 32]>,
+        coefficient: Option<i128>,
         decimal_type: FixedDecimalType,
-    ) -> Option<ScalarValue> {
-        let coefficient = coefficient.map(i256::from_be_bytes);
-        let (precision, scale) =
-            (decimal_type.precision(), decimal_type.arrow_scale());
-        Some(if decimal_type.is_decimal128() {
-            let coefficient = match coefficient {
-                Some(coefficient) => Some(coefficient.to_i128()?),
-                None => None,
-            };
-            ScalarValue::Decimal128(coefficient, precision, scale)
-        } else {
-            ScalarValue::Decimal256(coefficient, precision, scale)
-        })
+    ) -> ScalarValue {
+        ScalarValue::Decimal128(
+            coefficient,
+            decimal_type.precision(),
+            decimal_type.arrow_scale(),
+        )
     }
 
     fn invalid_numeric(value: RuntimeValue) -> impl Fn() -> DataFusionPlanError {

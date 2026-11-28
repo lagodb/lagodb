@@ -34,6 +34,13 @@ pub enum ScalarFunctionKind {
     /// operands or written explicitly. Some are rounding conversions
     /// (`int8 -> float8`), so this is not a widening.
     FloatCast,
+    /// `extract(year from date)`. PostgreSQL returns NUMERIC; the engine
+    /// computes the year as Int32 ([`Self::execution_result_type`]).
+    ExtractYear,
+    /// `text LIKE pattern` with a constant pattern PostgreSQL accepts.
+    /// Arrow's LIKE kernel reads `%`, `_` and backslash escapes as PostgreSQL
+    /// does under a deterministic collation.
+    Like,
 }
 
 /// How EXPLAIN writes a call of a scalar function.
@@ -72,6 +79,8 @@ impl ScalarFunctionKind {
             19 => Self::Divide,
             20 => Self::Modulo,
             21 => Self::FloatCast,
+            22 => Self::ExtractYear,
+            23 => Self::Like,
             _ => return None,
         })
     }
@@ -106,7 +115,7 @@ impl ScalarFunctionKind {
             Self::Repeat => {
                 has_oids(&[pg_sys::TEXTOID, pg_sys::INT4OID]) && text_result()
             }
-            Self::StartsWith => {
+            Self::StartsWith | Self::Like => {
                 has_oids(&[pg_sys::TEXTOID, pg_sys::TEXTOID])
                     && scalar_result(pg_sys::BOOLOID)
                     && Self::is_deterministic_collation(input_collation)
@@ -199,6 +208,24 @@ impl ScalarFunctionKind {
                         ) | (pg_sys::FLOAT4OID, pg_sys::FLOAT8OID)
                     ) && scalar_result(result.type_oid))
             }
+            Self::ExtractYear => {
+                has_oids(&[pg_sys::DATEOID]) && scalar_result(pg_sys::NUMERICOID)
+            }
+        }
+    }
+
+    /// The engine type of a result PostgreSQL types differently; the output
+    /// codec converts it to the PostgreSQL type. DataFusion's `date_part`
+    /// returns the year as Int32, an exact image of PostgreSQL's integral
+    /// NUMERIC result.
+    pub const fn execution_result_type(self) -> Option<ExprType> {
+        match self {
+            Self::ExtractYear => Some(ExprType {
+                type_oid: pg_sys::INT4OID,
+                typmod: -1,
+                collation: pg_sys::InvalidOid,
+            }),
+            _ => None,
         }
     }
 
@@ -211,6 +238,7 @@ impl ScalarFunctionKind {
             Self::Divide => ScalarFunctionNotation::Infix("/"),
             Self::Modulo => ScalarFunctionNotation::Infix("%"),
             Self::FloatCast => ScalarFunctionNotation::Cast,
+            Self::Like => ScalarFunctionNotation::Infix("~~"),
             _ => ScalarFunctionNotation::Call,
         }
     }
@@ -272,6 +300,8 @@ impl fmt::Display for ScalarFunctionKind {
             Self::Divide => "divide",
             Self::Modulo => "modulo",
             Self::FloatCast => "float_cast",
+            Self::ExtractYear => "extract_year",
+            Self::Like => "like",
         })
     }
 }

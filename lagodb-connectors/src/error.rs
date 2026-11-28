@@ -202,7 +202,7 @@ impl ConnectorError {
                 }
                 ArrowConversionError::InvalidInput(_)
                 | ArrowConversionError::ValueOutOfRange(_)
-                | ArrowConversionError::DatetimeConversionError(_)
+                | ArrowConversionError::DatetimeValueOutOfRange(_)
                 | ArrowConversionError::NumericError(_)
                 | ArrowConversionError::UuidConversionError(_)
                 | ArrowConversionError::DecimalCodec(

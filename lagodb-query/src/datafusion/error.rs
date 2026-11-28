@@ -3,6 +3,7 @@
 use std::error::Error;
 use std::io;
 
+use arrow_schema::ArrowError;
 use datafusion::common::DataFusionError;
 use lagodb_arrow::ArrowConversionError;
 use lagodb_core::diag::{PgReportError, SqlStateError};
@@ -13,6 +14,10 @@ use pgrx::prelude::PgSqlErrorCode;
 /// when PostgreSQL's estimate led to a plan that needs more memory.
 const MEMORY_BUDGET_HINT: &str =
     "Increase work_mem or hash_mem_multiplier for this query.";
+
+/// The message DataFusion's native decimal AVG raises when an average leaves
+/// its result type (`DecimalAverager::avg`).
+const NATIVE_AVERAGE_OVERFLOW: &str = "Arithmetic Overflow in AvgAccumulator";
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryExecutionError {
@@ -109,10 +114,55 @@ impl QueryExecutionError {
         if matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)) {
             return PgSqlErrorCode::ERRCODE_OUT_OF_MEMORY;
         }
-        Self::provider_error(error)
+        if let Some(provider) = Self::provider_error(error) {
+            return provider.sql_error_code();
+        }
+        Self::native_numeric_error(error)
             .map_or(PgSqlErrorCode::ERRCODE_INTERNAL_ERROR, |error| {
                 error.sql_error_code()
             })
+    }
+
+    /// PostgreSQL's error for a zero divisor (`numeric_div`, `int4div`).
+    pub(in crate::datafusion) fn division_by_zero() -> PgReportError {
+        PgReportError::from_message(
+            PgSqlErrorCode::ERRCODE_DIVISION_BY_ZERO,
+            "division by zero",
+        )
+    }
+
+    /// PostgreSQL's error for a NUMERIC result it cannot represent
+    /// (`numeric.c` `make_result_opt_error`). The engine raises it where a
+    /// fixed decimal value leaves its Arrow type.
+    pub(in crate::datafusion) fn numeric_overflow() -> PgReportError {
+        PgReportError::from_message(
+            PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+            "value overflows numeric format",
+        )
+    }
+
+    /// PostgreSQL's error for one raised by a native DataFusion operator over
+    /// fixed decimals: Arrow's checked decimal arithmetic, casts and division,
+    /// and native AVG, whose overflow is only an execution message
+    /// (`datafusion-functions-aggregate-common` `DecimalAverager`, pinned by
+    /// the wide `avg(numeric)` regress case). The mapping by error kind holds
+    /// because no other native operator that raises these is pushed down:
+    /// integer arithmetic and `abs` report their own errors, and DataFusion's
+    /// unary minus wraps (`neg_wrapping`).
+    fn native_numeric_error(error: &DataFusionError) -> Option<PgReportError> {
+        match error.find_root() {
+            DataFusionError::ArrowError(error, _) => match **error {
+                ArrowError::ArithmeticOverflow(_) => Some(Self::numeric_overflow()),
+                ArrowError::DivideByZero => Some(Self::division_by_zero()),
+                _ => None,
+            },
+            DataFusionError::Execution(message)
+                if message.starts_with(NATIVE_AVERAGE_OVERFLOW) =>
+            {
+                Some(Self::numeric_overflow())
+            }
+            _ => None,
+        }
     }
 
     fn datafusion_report(error: DataFusionError) -> PgReportError {
@@ -123,6 +173,9 @@ impl QueryExecutionError {
                 provider.detail().map(str::to_owned),
                 provider.hint().map(str::to_owned),
             );
+        }
+        if let Some(numeric) = Self::native_numeric_error(&error) {
+            return numeric;
         }
         let exhausted =
             matches!(error.find_root(), DataFusionError::ResourcesExhausted(_));

@@ -9,7 +9,6 @@ mod scaled;
 use pgrx::pg_sys;
 use pgrx::{AnyNumeric, IntoDatum, varlena_to_byte_slice};
 
-pub use coefficient::PostgresNumericCodec;
 pub use comparison::Decimal128ComparisonValue;
 pub use scaled::{NumericRounding, NumericScaledDomain, NumericScaledValue};
 
@@ -60,10 +59,15 @@ type NumericDigit = i16;
 const DEC_DIGITS: u32 = 4;
 const NBASE: i128 = 10_000;
 
-/// Decimal128 columns can hold up to 38 decimal digits. Adding one extra
-/// `NumericDigit` (4 decimal digits) covers any partial leading group.
+/// Decimal128 columns can hold up to 38 decimal digits.
 const MAX_DEC_DIGITS: usize = 38;
-const MAX_NDIGITS: usize = MAX_DEC_DIGITS / DEC_DIGITS as usize + 1;
+/// Decimal digits of the largest `i128` magnitude. Arrow never validates a
+/// Decimal128 precision, so an engine result may use all of them.
+const I128_DEC_DIGITS: usize = 39;
+/// NBASE digits of any `i128` coefficient. Groups align to the decimal point,
+/// so both the integer and the fractional part may end in a partial group:
+/// 38 digits at scale 1 need 10 integer groups and 1 fractional group.
+const MAX_NDIGITS: usize = I128_DEC_DIGITS / DEC_DIGITS as usize + 2;
 
 /// Wire-format constants from `numeric.h`.
 ///

@@ -245,7 +245,9 @@ impl AggCall {
     /// Physical type emitted by DataFusion before the PostgreSQL output codec.
     /// Decimal MIN/MAX preserve their input decimal type, and SUM(int8),
     /// SUM(numeric) and AVG(numeric) emit their fixed decimal result, even
-    /// though PostgreSQL's Aggref result typmod is -1.
+    /// though PostgreSQL's Aggref result typmod is -1. AVG, variance and
+    /// standard deviation with a NUMERIC result, over integers, compute in
+    /// FLOAT8.
     pub fn execution_result_type(&self) -> ExprType {
         if let Some(decimal) = self.int8_sum_decimal() {
             return decimal.value_type();
@@ -255,6 +257,21 @@ impl AggCall {
             .or_else(|| self.numeric_average_type())
         {
             return decimal.value_type();
+        }
+        if matches!(
+            self.kind,
+            AggregateKind::Average
+                | AggregateKind::VarianceSample
+                | AggregateKind::VariancePopulation
+                | AggregateKind::StddevSample
+                | AggregateKind::StddevPopulation
+        ) && self.result_type.type_oid == pg_sys::NUMERICOID
+        {
+            return ExprType {
+                type_oid: pg_sys::FLOAT8OID,
+                typmod: -1,
+                collation: pg_sys::InvalidOid,
+            };
         }
         if matches!(self.kind, AggregateKind::Min | AggregateKind::Max)
             && self.result_type.type_oid == pg_sys::NUMERICOID
@@ -267,10 +284,9 @@ impl AggCall {
         self.result_type
     }
 
-    /// Result type of SUM(numeric): the narrowest fixed decimal holding a sum
-    /// of up to `u64::MAX` input values. DataFusion's native SUM computes it
-    /// in that type's width ([`FixedDecimalType::native_sum_input`]), so its
-    /// wrapping accumulator cannot wrap.
+    /// Result type of SUM(numeric) ([`FixedDecimalType::sum`]): the exact
+    /// type of a native SUM whose wrapping accumulator holds every sum, or
+    /// `(38, s)` from the checked i128 SUM.
     pub fn numeric_sum_type(&self) -> Option<FixedDecimalType> {
         if self.kind != AggregateKind::NumericSum {
             return None;
@@ -289,11 +305,10 @@ impl AggCall {
         self.argument()?.decimal_type()?.average()
     }
 
-    /// Exact accumulation decimal for SUM(int8), whose PostgreSQL result is
-    /// NUMERIC. DataFusion's native Int64 SUM wraps on overflow, so the input
-    /// is widened to NUMERIC(38,0) and summed by the native Decimal128 SUM. Its
-    /// magnitude stays below 2^63 per input row and therefore below 10^38 for
-    /// fewer than 10^19 rows.
+    /// Result decimal of SUM(int8), whose PostgreSQL result is NUMERIC.
+    /// DataFusion's native Int64 SUM wraps on overflow, so the int8 values
+    /// accumulate in i128 like PostgreSQL's int128 state, which fewer than
+    /// 2^64 rows below 2^63 in magnitude never leave.
     pub fn int8_sum_decimal(&self) -> Option<Decimal128Semantics> {
         (u32::from(self.function_oid) == pg_sys::F_SUM_INT8).then(|| {
             Decimal128Semantics::new(38, 0)
@@ -330,16 +345,18 @@ pub struct GroupExpr {
 }
 
 impl GroupExpr {
+    /// A grouping key of PostgreSQL type `result_type` whose engine values
+    /// ([`Self::execution_type`]) DataFusion hash grouping compares exactly.
     pub fn try_new(
         expression: ExecutionExpr,
         result_type: ExprType,
         output: OutputId,
     ) -> Result<Self, QueryPlanError> {
-        let expression_type = expression
-            .result_type_hint()
+        let execution_type = expression
+            .execution_type_hint()
             .ok_or(QueryPlanError::UnsupportedGroupKey)?;
-        if expression_type != result_type
-            || !ScalarSemantics::Exact.supports_hash_group_key(result_type)
+        if expression.result_type_hint() != Some(result_type)
+            || !ScalarSemantics::Exact.supports_hash_group_key(execution_type)
         {
             return Err(QueryPlanError::UnsupportedGroupKey);
         }
@@ -358,6 +375,15 @@ impl GroupExpr {
     #[inline]
     pub const fn result_type(&self) -> ExprType {
         self.result_type
+    }
+
+    /// The key's engine type, as for [`AggCall::execution_result_type`]: a
+    /// NUMERIC key executes in its fixed decimal type, and
+    /// `extract(year ...)` as Int32, while PostgreSQL types both `numeric`.
+    pub fn execution_type(&self) -> ExprType {
+        self.expression
+            .execution_type_hint()
+            .expect("GroupExpr::try_new proved an execution type")
     }
 
     #[inline]

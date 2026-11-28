@@ -71,11 +71,11 @@ pub enum ArrowConversionError {
     #[error("decimal codec error: {0}")]
     DecimalCodec(#[source] DecimalCodecError),
 
-    /// A date/time value fell outside the range PostgreSQL can represent.
-    #[error("datetime conversion error: {0}")]
-    DatetimeConversionError(
-        #[from] pgrx::datum::datetime_support::DateTimeConversionError,
-    ),
+    /// A date/time value has no representation on the other side: outside
+    /// PostgreSQL's range, outside the Arrow range, or an infinity. Reported
+    /// with PostgreSQL's datetime out-of-range SQLSTATE.
+    #[error("datetime value out of range: {0}")]
+    DatetimeValueOutOfRange(String),
 
     /// A NUMERIC value could not be parsed or constructed.
     #[error("numeric error: {0}")]
@@ -105,8 +105,12 @@ impl SqlStateError for ArrowConversionError {
             ArrowConversionError::ValueOutOfRange(_) => {
                 PgSqlErrorCode::ERRCODE_DATA_EXCEPTION
             }
+            // 22008, which PostgreSQL also names
+            // ERRCODE_DATETIME_VALUE_OUT_OF_RANGE; pgrx keeps one name per code.
+            ArrowConversionError::DatetimeValueOutOfRange(_) => {
+                PgSqlErrorCode::ERRCODE_DATETIME_FIELD_OVERFLOW
+            }
             ArrowConversionError::NumericError(_)
-            | ArrowConversionError::DatetimeConversionError(_)
             | ArrowConversionError::UuidConversionError(_) => {
                 PgSqlErrorCode::ERRCODE_DATA_EXCEPTION
             }

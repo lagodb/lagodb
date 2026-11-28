@@ -5,7 +5,7 @@ use lagodb_core::expr::{
     ExprType, PgComparisonOp, PgDateComparisonOutcome, PgDateTimestampComparison,
     PgNanComparison, PgTextComparisonSemantics,
 };
-use lagodb_query::plan::{ExecutionExpr, ScalarFunctionKind};
+use lagodb_query::plan::{ExecutionExpr, FixedDecimalType, ScalarFunctionKind};
 use pgrx::pg_sys;
 
 use super::{
@@ -33,8 +33,11 @@ impl QueryExpressionPlanner {
                 })
             }
             PgPredicateLeafRef::Comparison { op, left, right } => {
-                if op.opno == pg_sys::Oid::from(pg_sys::OID_TEXT_LIKE_OP) {
-                    return unsafe { self.lower_like_prefix(op, left, right, scope) };
+                if matches!(
+                    u32::from(op.opfuncid),
+                    pg_sys::F_TEXTLIKE | pg_sys::F_TEXTNLIKE
+                ) {
+                    return unsafe { self.lower_like(op, left, right, scope) };
                 }
                 if let Some(result) = unsafe {
                     self.lower_bpchar_comparison(op, left, right, scope, domain)
@@ -78,6 +81,30 @@ impl QueryExpressionPlanner {
                 let decimal = domain
                     .decimal_comparison(op, left_type, right_type)
                     .map(|(_, left, right)| (left, right));
+                // The decimal path binds an operand of no fixed type only as a
+                // direct Const. Any other NUMERIC comparison without two fixed
+                // decimal operands compares in its operands' engine
+                // representations.
+                let binds_as_decimal =
+                    |expression: PgExprRef<'_>, value_type: ExprType| {
+                        FixedDecimalType::for_type(value_type).is_some()
+                            || unsafe { Self::is_direct_const(expression.as_ptr()) }
+                    };
+                if domain.numeric_comparison(op).is_some()
+                    && (decimal.is_none()
+                        || !binds_as_decimal(left, left_type)
+                        || !binds_as_decimal(right, right_type))
+                {
+                    return unsafe {
+                        self.lower_numeric_repr_comparison(
+                            op,
+                            left.as_ptr(),
+                            right.as_ptr(),
+                            scope,
+                            domain,
+                        )
+                    };
+                }
                 if decimal.is_none()
                     && domain.comparison(op, left_type, right_type).is_none()
                 {
@@ -127,7 +154,13 @@ impl QueryExpressionPlanner {
                 prefix,
                 input_collation,
             } => unsafe {
-                self.lower_starts_with(value, prefix, input_collation, scope)
+                self.lower_text_match(
+                    ScalarFunctionKind::StartsWith,
+                    value,
+                    prefix,
+                    input_collation,
+                    scope,
+                )
             },
         }
     }
@@ -188,10 +221,13 @@ impl QueryExpressionPlanner {
         })
     }
 
-    unsafe fn lower_starts_with(
+    /// A deterministic-collation text column matched against a constant:
+    /// `starts_with` or LIKE.
+    unsafe fn lower_text_match(
         &mut self,
+        kind: ScalarFunctionKind,
         value: PgExprRef<'_>,
-        prefix: PgExprRef<'_>,
+        pattern: PgExprRef<'_>,
         input_collation: pg_sys::Oid,
         scope: ExpressionScope<'_>,
     ) -> ExpressionPlanResult<ExecutionExpr> {
@@ -206,14 +242,14 @@ impl QueryExpressionPlanner {
         if !matches!(&value, ExecutionExpr::Column(_)) {
             return Err(ExpressionDecline::UnsupportedSemantics);
         }
-        let prefix =
-            unsafe { self.lower(prefix.as_ptr().cast(), scope.as_scalar()) }?;
-        if !matches!(&prefix, ExecutionExpr::Value(_)) {
+        let pattern =
+            unsafe { self.lower(pattern.as_ptr().cast(), scope.as_scalar()) }?;
+        if !matches!(&pattern, ExecutionExpr::Value(_)) {
             return Err(ExpressionDecline::UnsupportedSemantics);
         }
         Ok(ExecutionExpr::Function {
-            kind: ScalarFunctionKind::StartsWith,
-            arguments: vec![value, prefix].into_boxed_slice(),
+            kind,
+            arguments: vec![value, pattern].into_boxed_slice(),
             input_collation,
             result_type: ExprType {
                 type_oid: pg_sys::BOOLOID,
@@ -223,24 +259,59 @@ impl QueryExpressionPlanner {
         })
     }
 
-    unsafe fn lower_like_prefix(
+    /// Text LIKE and NOT LIKE over a constant pattern. A LIKE with a pure
+    /// `prefix%` pattern becomes `starts_with`, which scan pruning
+    /// understands; any other pattern PostgreSQL accepts runs in Arrow's LIKE
+    /// kernel. NOT LIKE is the negated match, which keeps a NULL operand NULL.
+    /// It always keeps the LIKE kernel, which folds the negation into its one
+    /// pass, and does not prune the scan.
+    unsafe fn lower_like(
         &mut self,
         op: PgComparisonOp,
         value: PgExprRef<'_>,
         pattern: PgExprRef<'_>,
         scope: ExpressionScope<'_>,
     ) -> ExpressionPlanResult<ExecutionExpr> {
-        if op.opfuncid != pg_sys::Oid::from(pg_sys::F_TEXTLIKE)
-            || op.opresulttype != pg_sys::BOOLOID
-            || op.opcollid != pg_sys::Oid::INVALID
-        {
+        if op.opresulttype != pg_sys::BOOLOID || op.opcollid != pg_sys::Oid::INVALID {
             return Err(ExpressionDecline::UnsupportedSemantics);
         }
-        let pattern = PgConst::try_from_expr(pattern.without_relabels())
+        let pattern = pattern.without_relabels();
+        let constant = PgConst::try_from_expr(pattern)
             .ok_or(ExpressionDecline::UnsupportedSemantics)?;
-        let prefix = unsafe { pattern.pure_like_prefix() }
-            .ok_or(ExpressionDecline::UnsupportedSemantics)?;
-        unsafe { self.lower_starts_with(value, prefix, op.inputcollid, scope) }
+        let negated = u32::from(op.opfuncid) == pg_sys::F_TEXTNLIKE;
+        let prefix = if negated {
+            None
+        } else {
+            unsafe { constant.pure_like_prefix() }
+        };
+        let matched = if let Some(prefix) = prefix {
+            unsafe {
+                self.lower_text_match(
+                    ScalarFunctionKind::StartsWith,
+                    value,
+                    prefix,
+                    op.inputcollid,
+                    scope,
+                )
+            }?
+        } else if constant.is_complete_like_pattern() {
+            unsafe {
+                self.lower_text_match(
+                    ScalarFunctionKind::Like,
+                    value,
+                    pattern,
+                    op.inputcollid,
+                    scope,
+                )
+            }?
+        } else {
+            return Err(ExpressionDecline::UnsupportedSemantics);
+        };
+        Ok(if negated {
+            ExecutionExpr::Not(Box::new(matched))
+        } else {
+            matched
+        })
     }
 
     unsafe fn lower_nan_comparison(

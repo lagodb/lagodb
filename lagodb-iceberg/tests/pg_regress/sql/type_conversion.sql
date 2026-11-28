@@ -196,6 +196,17 @@ SELECT n::text = '-99999999999999999999999999999999999999' AS round_trip_ok
 FROM iceberg_numeric_codec_extreme;
 DROP TABLE iceberg_numeric_codec_extreme;
 
+-- 38 digits whose integer and fractional parts both end in a partial NBASE
+-- group: 10 integer groups and 1 fractional group.
+CREATE TABLE iceberg_numeric_codec_groups (
+    n numeric(38, 1)
+) USING iceberg;
+INSERT INTO iceberg_numeric_codec_groups VALUES
+    (-9999999999999999999999999999999999999.9);
+SELECT n::text = '-9999999999999999999999999999999999999.9' AS round_trip_ok
+FROM iceberg_numeric_codec_groups;
+DROP TABLE iceberg_numeric_codec_groups;
+
 -- ============================================================================
 -- 4. Numeric Precision > 38 Uses Double
 -- ============================================================================
@@ -335,6 +346,16 @@ FROM iceberg_ts_round_trip
 ORDER BY label;
 
 DROP TABLE iceberg_ts_round_trip;
+
+-- PostgreSQL's infinite dates and timestamps have no Arrow value. -infinity
+-- would otherwise be stored as a finite day or instant that other readers
+-- take for about 5.9 million or 290,000 years BC, so writes reject both.
+CREATE TABLE iceberg_infinity_write (d date, ts timestamp) USING iceberg;
+\set VERBOSITY terse
+INSERT INTO iceberg_infinity_write (d) VALUES ('-infinity');
+INSERT INTO iceberg_infinity_write (ts) VALUES ('-infinity');
+\set VERBOSITY default
+DROP TABLE iceberg_infinity_write;
 
 -- ============================================================================
 -- 8. Timestamptz Round Trip is Independent of Session Timezone

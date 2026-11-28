@@ -54,6 +54,30 @@ FROM query_offload_expression_basic
 WHERE (id >= 2 AND lower(value_text) = 'alpha')
    OR (id <= 1 AND upper(value_text) = 'ALPHA');
 
+-- A pure-prefix LIKE becomes starts_with, which the scan prunes on; the NULL
+-- row fails it.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS rows
+FROM query_offload_expression_basic
+WHERE value_text LIKE 'al%';
+
+SELECT count(*) AS rows
+FROM query_offload_expression_basic
+WHERE value_text LIKE 'al%';
+
+-- A pure-prefix NOT LIKE runs as one negated LIKE in the engine and does not
+-- prune the scan; the NULL row fails it.
+SET lagodb.query_offload_mode = 'force';
+EXPLAIN (COSTS OFF)
+SELECT count(*) AS rows
+FROM query_offload_expression_basic
+WHERE value_text NOT LIKE 'al%';
+
+SELECT count(*) AS rows
+FROM query_offload_expression_basic
+WHERE value_text NOT LIKE 'al%';
+
 -- A volatile subtree blocks pruning of the complete OR clause. Forced serial
 -- query offload still evaluates the complete expression through PostgreSQL.
 SET lagodb.query_offload_mode = 'force';
@@ -103,7 +127,7 @@ WHERE lower(value_text) = 'alpha';
 -- ============================================================================
 
 -- This compact matrix crosses BooleanTest, searched CASE, COALESCE, NULLIF,
--- native scalar-array comparison, text and numeric scalar functions.
+-- native scalar-array comparison, LIKE, text and numeric scalar functions.
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
@@ -116,6 +140,8 @@ SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
            WHERE id = ANY (ARRAY[1, 3, NULL]::integer[])
        ) AS any_rows,
        count(*) FILTER (WHERE starts_with(value_text, 'a')) AS prefix_rows,
+       count(*) FILTER (WHERE value_text LIKE '%ph%') AS like_rows,
+       count(*) FILTER (WHERE value_text NOT LIKE '_eta') AS not_like_rows,
        count(replace(value_text, 'a', 'A')) AS replaced_rows,
        sum(abs(value_i8)) AS abs_i8_sum,
        sum(abs(value_f8)) AS abs_f8_sum
@@ -131,6 +157,8 @@ SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
            WHERE id = ANY (ARRAY[1, 3, NULL]::integer[])
        ) AS any_rows,
        count(*) FILTER (WHERE starts_with(value_text, 'a')) AS prefix_rows,
+       count(*) FILTER (WHERE value_text LIKE '%ph%') AS like_rows,
+       count(*) FILTER (WHERE value_text NOT LIKE '_eta') AS not_like_rows,
        count(replace(value_text, 'a', 'A')) AS replaced_rows,
        sum(abs(value_i8)) AS abs_i8_sum,
        sum(abs(value_f8)) AS abs_f8_sum
@@ -147,6 +175,8 @@ SELECT count(*) FILTER (WHERE value_bool IS NOT FALSE) AS boolean_test_rows,
            WHERE id = ANY (ARRAY[1, 3, NULL]::integer[])
        ) AS any_rows,
        count(*) FILTER (WHERE starts_with(value_text, 'a')) AS prefix_rows,
+       count(*) FILTER (WHERE value_text LIKE '%ph%') AS like_rows,
+       count(*) FILTER (WHERE value_text NOT LIKE '_eta') AS not_like_rows,
        count(replace(value_text, 'a', 'A')) AS replaced_rows,
        sum(abs(value_i8)) AS abs_i8_sum,
        sum(abs(value_f8)) AS abs_f8_sum
@@ -392,18 +422,18 @@ CREATE TABLE query_offload_expression_numeric (
     price numeric(15, 2),
     discount numeric(15, 2),
     tax numeric(15, 2),
-    wide numeric(38, 0)
+    wide numeric(20, 0)
 ) USING iceberg;
 
 INSERT INTO query_offload_expression_numeric VALUES
-    (1, 2, 1234.56, 0.05, 0.08, 1e37),
+    (1, 2, 1234.56, 0.05, 0.08, 1e19),
     (2, 3, 99.99, 0.10, 0.00, NULL),
     (3, NULL, NULL, NULL, NULL, NULL),
     (4, 1, -10.00, 0.00, 0.04, NULL);
 
--- +, - and * keep PostgreSQL's result scales. The three-factor product has
--- 47 digits and runs as Decimal256; CASE and COALESCE take the common type of
--- their branches.
+-- +, - and * keep PostgreSQL's result scales. The three-factor product's
+-- type is capped at 38 digits as in DataFusion; CASE and COALESCE take the
+-- common type of their branches.
 SET lagodb.query_offload_mode = 'force';
 EXPLAIN (COSTS OFF)
 SELECT sum(price * (1 - discount)) AS revenue,
@@ -420,8 +450,30 @@ SELECT sum(price * (1 - discount)) AS revenue,
            AS conditional
 FROM query_offload_expression_numeric;
 
--- A product that may exceed 76 digits stays in PostgreSQL.
+-- Products compute in 128-bit integers under a type capped at 38 digits:
+-- 10^38 has 39 digits and stays exact, while 10^57 raises instead of
+-- wrapping.
+SELECT sum(wide * wide) AS squared
+FROM query_offload_expression_numeric;
+
 SELECT sum(wide * wide * wide) AS cubed
+FROM query_offload_expression_numeric;
+
+-- Division keeps DataFusion's type, the dividend's scale plus 4, and
+-- truncates toward zero where PostgreSQL rounds to at least 16 significant
+-- digits; comparisons read the truncated quotient. Division by zero raises.
+EXPLAIN (COSTS OFF)
+SELECT sum(price / qty) AS unit_price,
+       sum(discount / 3) AS truncated,
+       count(*) FILTER (WHERE price / qty > 50) AS large_units
+FROM query_offload_expression_numeric;
+
+SELECT sum(price / qty) AS unit_price,
+       sum(discount / 3) AS truncated,
+       count(*) FILTER (WHERE price / qty > 50) AS large_units
+FROM query_offload_expression_numeric;
+
+SELECT sum(price / (qty - qty)) AS divide_by_zero
 FROM query_offload_expression_numeric;
 
 -- Comparisons run in the engine: a constant is bound exactly in the other

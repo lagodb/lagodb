@@ -9,6 +9,7 @@ use datafusion::functions::math::expr_fn::isnan;
 use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::expr::{Case, InList, Placeholder};
 use datafusion::logical_expr::expr_fn::cast;
+use datafusion::logical_expr::lit;
 use lagodb_core::expr::{
     ColumnRef, ExprType, RuntimeValue, RuntimeValueId, RuntimeValueLayout,
 };
@@ -297,6 +298,7 @@ impl<'a> DataFusionExpressionCompiler<'a> {
         use datafusion::functions::core::expr_fn::{
             coalesce, greatest, least, nullif,
         };
+        use datafusion::functions::datetime::expr_fn::date_part;
         use datafusion::functions::math::expr_fn::{abs, ceil, floor};
         use datafusion::functions::string::expr_fn::{
             ascii, repeat, replace, rtrim, starts_with,
@@ -328,6 +330,10 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                 arguments.next().ok_or_else(missing)?,
                 arguments.next().ok_or_else(missing)?,
             ),
+            ScalarFunctionKind::Like => arguments
+                .next()
+                .ok_or_else(missing)?
+                .like(arguments.next().ok_or_else(missing)?),
             ScalarFunctionKind::Replace => replace(
                 arguments.next().ok_or_else(missing)?,
                 arguments.next().ok_or_else(missing)?,
@@ -395,6 +401,11 @@ impl<'a> DataFusionExpressionCompiler<'a> {
                 arguments.next().ok_or_else(missing)?,
                 Self::scalar_data_type(result_type)?,
             ),
+            // Int32, the function's execution result type; the output codec
+            // builds PostgreSQL's NUMERIC.
+            ScalarFunctionKind::ExtractYear => {
+                date_part(lit("year"), arguments.next().ok_or_else(missing)?)
+            }
         })
     }
 
